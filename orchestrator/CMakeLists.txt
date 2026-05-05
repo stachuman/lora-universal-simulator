@@ -3,6 +3,7 @@ add_executable(lus
     main.cpp
     runtime/TimerWheel.cpp
     runtime/LuaHost.cpp
+    runtime/ScriptedNode.cpp
 )
 target_link_libraries(lus PRIVATE lus_core)
 target_include_directories(lus PRIVATE

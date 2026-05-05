@@ -1,6 +1,8 @@
 // orchestrator/runtime/LuaHost.cpp
 #include "orchestrator/runtime/LuaHost.h"
 
+#include "orchestrator/runtime/ScriptedNode.h"
+
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -22,12 +24,47 @@ LuaHost::LuaHost() {
     _node_registry = _lua["_LUS"]["nodes"];
 }
 
-void LuaHost::registerNode(int node_id, ScriptedNode* /*node*/) {
+void LuaHost::registerNode(int node_id, ScriptedNode* node) {
     sol::table node_tbl = _lua.create_table();
     node_tbl["self"]   = _lua.create_table();
     node_tbl["script"] = _lua.create_table();
-    node_tbl["timers"] = _lua.create_table();   // handle -> sol::function (T12)
+    node_tbl["timers"] = _lua.create_table();   // handle -> sol::function
     _node_registry[node_id] = node_tbl;
+
+    if (node != nullptr) {
+        // Bind id/name + the runtime-method lambdas onto self. Lambdas capture
+        // `node` by pointer; the orchestrator owns ScriptedNode lifetime and
+        // must keep it alive for as long as the Lua state references self.
+        sol::table self = node_tbl["self"];
+        self["id"]   = node->id();
+        self["name"] = node->name();
+        self.set_function("tx",
+            [node](std::string b, sol::optional<sol::table> o) {
+                node->api_tx(std::move(b), o);
+            });
+        self.set_function("after",
+            [node](uint64_t d, sol::function f) {
+                return node->api_after(d, f);
+            });
+        self.set_function("every",
+            [node](uint64_t p, sol::function f) {
+                return node->api_every(p, f);
+            });
+        self.set_function("cancel",
+            [node](uint64_t h) { node->api_cancel(h); });
+        self.set_function("now",
+            [node]() { return node->api_now(); });
+        self.set_function("rand",
+            [node](int lo, int hi) { return node->api_rand(lo, hi); });
+        self.set_function("log",
+            [node](sol::variadic_args va) { node->api_log(va); });
+        self.set_function("emit",
+            [node](std::string type, sol::optional<sol::table> data) {
+                node->api_emit(std::move(type), data);
+            });
+        self.set_function("peers",
+            [node]() { return node->api_peers(); });
+    }
 }
 
 void LuaHost::loadScript(int node_id, const std::string& path) {
