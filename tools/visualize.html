@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>lora-universal-simulator — NDJSON Visualizer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Consolas', 'Menlo', monospace; font-size: 12px; background: #1a1a2e; color: #e0e0e0; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+#toolbar { display: flex; align-items: center; gap: 12px; padding: 6px 12px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; z-index: 10; }
+#toolbar label { color: #8888aa; font-size: 11px; }
+#toolbar select, #toolbar input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; padding: 3px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+#toolbar .sep { width: 1px; height: 20px; background: #333; }
+#toolbar .info { color: #6a6aaa; font-size: 11px; }
+#toolbar button { background: #2a2a4e; color: #ccc; border: 1px solid #444; padding: 3px 10px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+#toolbar button:hover { background: #3a3a5e; }
+#toolbar button.active { background: #4a4a7e; border-color: #88f; color: #fff; }
+#main { display: flex; flex: 1; overflow: hidden; }
+#sidebar { width: 0; background: #16213e; border-left: 1px solid #333; overflow-y: auto; transition: width 0.2s; flex-shrink: 0; }
+#sidebar.open { width: 480px; }
+#sidebar-content { padding: 10px; width: 480px; }
+#sidebar h3 { color: #aaf; margin: 8px 0 4px; font-size: 12px; }
+#sidebar .field { margin: 2px 0; }
+#sidebar .field .key { color: #888; }
+#sidebar .field .val { color: #ddd; }
+#sidebar table { border-collapse: collapse; width: 100%; margin: 4px 0; }
+#sidebar td, #sidebar th { padding: 2px 6px; text-align: left; font-size: 11px; }
+#sidebar th { color: #888; border-bottom: 1px solid #333; }
+#sidebar td { border-bottom: 1px solid #222; }
+#canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+canvas { display: block; }
+#tooltip { position: absolute; display: none; background: #222244ee; border: 1px solid #555; padding: 6px 10px; border-radius: 4px; font-size: 11px; pointer-events: none; z-index: 20; max-width: 480px; white-space: pre-wrap; }
+#time-display { position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%); background: #222244cc; padding: 4px 12px; border-radius: 4px; font-size: 13px; color: #aaf; z-index: 5; pointer-events: none; }
+#loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #666; font-size: 16px; }
+#scrollbar { display: flex; align-items: center; gap: 6px; padding: 4px 12px; background: #16213e; border-top: 1px solid #333; flex-shrink: 0; }
+#scrollbar input[type=range] { flex: 1; height: 16px; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
+#scrollbar input[type=range]::-webkit-slider-runnable-track { height: 6px; background: #2a2a44; border-radius: 3px; }
+#scrollbar input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; background: #5566aa; border-radius: 50%; margin-top: -6px; border: 2px solid #7788cc; }
+#scrollbar input[type=range]::-moz-range-track { height: 6px; background: #2a2a44; border-radius: 3px; border: 0; }
+#scrollbar input[type=range]::-moz-range-thumb { width: 14px; height: 14px; background: #5566aa; border-radius: 50%; border: 2px solid #7788cc; }
+#scrollbar button { background: #2a2a4e; color: #ccc; border: 1px solid #444; padding: 2px 8px; font-size: 12px; font-family: inherit; border-radius: 3px; cursor: pointer; min-width: 28px; }
+#scrollbar button:hover { background: #3a3a5e; }
+#scrollbar .scroll-time { color: #6a6aaa; font-size: 11px; min-width: 80px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+    <label>Nodes:</label>
+    <select id="node-order">
+        <option value="appearance">By first appearance</option>
+        <option value="alpha">Alphabetical</option>
+        <option value="activity">By activity</option>
+    </select>
+    <div class="sep"></div>
+    <label>Filter:</label>
+    <input id="node-filter" type="text" placeholder="node name..." style="width:120px">
+    <div class="sep"></div>
+    <button id="btn-zoom-fit" title="Fit all">Fit</button>
+    <div class="sep"></div>
+    <span id="info-text" class="info"></span>
+    <span style="flex:1"></span>
+    <span id="viewport-info" class="info"></span>
+</div>
+
+<div id="main">
+    <div id="canvas-wrap">
+        <canvas id="canvas"></canvas>
+        <div id="tooltip"></div>
+        <div id="time-display"></div>
+        <div id="loading">Loading...</div>
+    </div>
+    <div id="sidebar">
+        <div id="sidebar-content"></div>
+    </div>
+</div>
+<div id="scrollbar">
+    <button id="btn-zoom-in" title="Zoom in">+</button>
+    <button id="btn-zoom-out" title="Zoom out">&minus;</button>
+    <span class="scroll-time" id="scroll-from"></span>
+    <input type="range" id="time-slider" min="0" max="1000" value="0">
+    <span class="scroll-time" id="scroll-to"></span>
+</div>
+
+<script>
+// ── Embedded events ────────────────────────────────────────────
+// The Python wrapper (tools/visualize.py) replaces this placeholder
+// with the full NDJSON contents serialised as a JSON array. When the
+// page is opened directly without preprocessing, RAW_EVENTS is null
+// and the viewer shows an empty timeline.
+const RAW_EVENTS = /*__EVENTS_JSON__*/null;
+
+// ── State ──────────────────────────────────────────────────────
+const S = {
+    events: [],          // all events, sorted by time_ms ascending
+    nodes: [],           // ordered display list: [{name, idx}]
+    nodeIndex: {},       // name → index into nodes[]
+    nodeNames: [],       // canonical id → name (id derived from order of first
+                         // appearance in tx/rx/cmd_reply events)
+    timeMin: 0,
+    timeMax: 0,
+
+    // Viewport (in simulation time ms)
+    viewFrom: 0,
+    viewTo: 10000,
+
+    // Canvas layout
+    laneH: 24,
+    labelW: 160,
+    headerH: 30,
+
+    // Vertical scroll (node lanes)
+    scrollY: 0,
+    maxScrollY: 0,
+
+    // Interaction
+    dragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragViewFrom: 0,
+    dragScrollY: 0,
+    hoveredEvent: null,
+
+    // Per-node activity counts (for sort)
+    nodeActivity: {},
+};
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+const timeDisplay = document.getElementById('time-display');
+const loading = document.getElementById('loading');
+const sidebar = document.getElementById('sidebar');
+const sidebarContent = document.getElementById('sidebar-content');
+
+const COLORS = {
+    tx: '#4488ff',          // blue per spec
+    rx: '#44cc66',          // green per spec
+    collision: '#ff4444',   // red per spec
+    drop_halfduplex: '#ddaa44', // amber
+    drop_loss: '#ddaa44',   // amber
+    tx_fail: '#ddaa44',     // amber
+    cmd_reply: '#88ccff',
+    script_log: '#8a8a8a',  // grey marker for script_log
+    script_emit: '#bb77dd', // purple marker for script_emit
+    lane_bg: '#1e1e36',
+    lane_bg_alt: '#1a1a30',
+    lane_border: '#2a2a44',
+    text: '#999',
+    time_grid: '#2a2a44',
+    time_text: '#666',
+};
+
+// ── Data loading ───────────────────────────────────────────────
+function init() {
+    const raw = Array.isArray(RAW_EVENTS) ? RAW_EVENTS : [];
+    indexEvents(raw);
+
+    document.getElementById('info-text').textContent =
+        `${S.nodes.length} nodes, ${S.events.length} events, ` +
+        `${((S.timeMax - S.timeMin) / 1000).toFixed(1)}s`;
+
+    // Initial viewport: first 30s, or the whole run if shorter
+    S.viewFrom = S.timeMin;
+    S.viewTo = Math.min(S.timeMin + 30000, S.timeMax);
+    if (S.viewTo <= S.viewFrom) S.viewTo = S.viewFrom + 1000;
+
+    sortNodes();
+    loading.style.display = 'none';
+    resize();
+    render();
+}
+
+// Build node table + id→name map.
+//
+// Node id reconciliation: tx / rx / cmd_reply events use string node names
+// (`node`, `from`, `to`); script_log / script_emit events use integer ids
+// (`node`). We build the canonical id list from the order of first appearance
+// of names in the named events, which mirrors the simulator's left-to-right
+// `nodes[]` ordering. If a script_* event references an id that hasn't yet
+// appeared by name (rare — only if a node never tx'd, rx'd, or replied), we
+// fall back to a synthetic `node#N` label.
+function indexEvents(raw) {
+    // Sort by time first so "first appearance" follows wall-clock order,
+    // not file order (which in practice is usually the same, but events
+    // can interleave).
+    const sorted = raw.slice().sort((a, b) => (a.time_ms || 0) - (b.time_ms || 0));
+
+    const byName = {};         // name → {idx, activity}
+    const order = [];          // ordered list of names (= canonical id list)
+
+    function seeName(name) {
+        if (name === undefined || name === null || name === '') return;
+        if (!(name in byName)) {
+            byName[name] = { idx: order.length, activity: 0 };
+            order.push(name);
+        }
+    }
+
+    // Pass 1: collect names from named events in time order. This fixes the
+    // canonical id↔name mapping. We also tally per-node activity for sorting.
+    for (const ev of sorted) {
+        const t = ev.type;
+        if (t === 'tx' || t === 'cmd_reply') {
+            seeName(ev.node);
+            if (typeof ev.node === 'string') byName[ev.node].activity += 1;
+        } else if (t === 'rx') {
+            seeName(ev.from);
+            seeName(ev.to);
+            if (typeof ev.to === 'string') byName[ev.to].activity += 1;
+        } else if (t === 'collision' || t === 'drop_loss' ||
+                   t === 'drop_halfduplex' || t === 'tx_fail') {
+            seeName(ev.from);
+            seeName(ev.to);
+            seeName(ev.node);
+        }
+    }
+
+    // Script events may reference ids beyond the named set (e.g. a node that
+    // only logs and never transmits). Allocate synthetic names so they show up.
+    let maxId = order.length - 1;
+    for (const ev of sorted) {
+        if ((ev.type === 'script_log' || ev.type === 'script_emit')
+                && typeof ev.node === 'number') {
+            if (ev.node > maxId) maxId = ev.node;
+        }
+    }
+    while (order.length <= maxId) {
+        const synth = `node#${order.length}`;
+        byName[synth] = { idx: order.length, activity: 0 };
+        order.push(synth);
+    }
+
+    S.nodeNames = order;
+    S.nodeActivity = {};
+    for (const n of order) S.nodeActivity[n] = byName[n].activity;
+    S.events = sorted;
+
+    if (sorted.length) {
+        S.timeMin = sorted[0].time_ms || 0;
+        S.timeMax = sorted[sorted.length - 1].time_ms || 0;
+        // Extend range by airtime of last tx/rx so trailing bars stay visible
+        for (const ev of sorted) {
+            if ((ev.type === 'tx' || ev.type === 'rx') && ev.airtime_ms) {
+                const end = (ev.time_ms || 0) + ev.airtime_ms;
+                if (end > S.timeMax) S.timeMax = end;
+            }
+        }
+    }
+}
+
+// Resolve an event's owning lane name. Returns null if the event has no
+// natural home on this swim lane (e.g. an unknown id).
+function laneNameForEvent(ev) {
+    if (ev.type === 'tx' || ev.type === 'cmd_reply') {
+        return typeof ev.node === 'string' ? ev.node : null;
+    }
+    if (ev.type === 'rx' || ev.type === 'collision'
+            || ev.type === 'drop_halfduplex' || ev.type === 'drop_loss') {
+        return typeof ev.to === 'string' ? ev.to
+            : (typeof ev.node === 'string' ? ev.node : null);
+    }
+    if (ev.type === 'tx_fail') {
+        return typeof ev.node === 'string' ? ev.node : null;
+    }
+    if (ev.type === 'script_log' || ev.type === 'script_emit') {
+        if (typeof ev.node === 'number'
+                && ev.node >= 0 && ev.node < S.nodeNames.length) {
+            return S.nodeNames[ev.node];
+        }
+        if (typeof ev.node === 'string') return ev.node;
+    }
+    return null;
+}
+
+function sortNodes() {
+    const order = document.getElementById('node-order').value;
+    const filter = document.getElementById('node-filter').value.toLowerCase();
+
+    let names = S.nodeNames.slice();
+    if (order === 'alpha') {
+        names.sort((a, b) => a.localeCompare(b));
+    } else if (order === 'activity') {
+        names.sort((a, b) => (S.nodeActivity[b] || 0) - (S.nodeActivity[a] || 0));
+    }
+    // 'appearance' = leave as-is (already in canonical id order)
+
+    if (filter) names = names.filter(n => n.toLowerCase().includes(filter));
+
+    S.nodes = names.map(n => ({ name: n }));
+    S.nodeIndex = {};
+    S.nodes.forEach((n, i) => { S.nodeIndex[n.name] = i; });
+}
+
+// ── Rendering ──────────────────────────────────────────────────
+function resize() {
+    const wrap = document.getElementById('canvas-wrap');
+    canvas.width = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+    updateMaxScrollY();
+}
+
+function msToX(ms) {
+    return S.labelW + (ms - S.viewFrom) / (S.viewTo - S.viewFrom) * (canvas.width - S.labelW);
+}
+
+function xToMs(x) {
+    return S.viewFrom + (x - S.labelW) / (canvas.width - S.labelW) * (S.viewTo - S.viewFrom);
+}
+
+function nodeToY(name) {
+    const idx = S.nodeIndex[name];
+    if (idx === undefined) return -1;
+    return S.headerH + idx * S.laneH - S.scrollY;
+}
+
+function updateMaxScrollY() {
+    const totalH = S.nodes.length * S.laneH;
+    const visibleH = canvas.height - S.headerH;
+    S.maxScrollY = Math.max(0, totalH - visibleH);
+    S.scrollY = Math.min(S.scrollY, S.maxScrollY);
+}
+
+function render() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, w, h);
+
+    updateMaxScrollY();
+
+    const nNodes = S.nodes.length;
+    const contentW = w - S.labelW;
+
+    // Lane backgrounds (clipped below header)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, S.headerH, w, h - S.headerH);
+    ctx.clip();
+
+    for (let i = 0; i < nNodes; i++) {
+        const y = S.headerH + i * S.laneH - S.scrollY;
+        if (y + S.laneH < S.headerH) continue;
+        if (y > h) break;
+        ctx.fillStyle = i % 2 === 0 ? COLORS.lane_bg : COLORS.lane_bg_alt;
+        ctx.fillRect(S.labelW, y, contentW, S.laneH);
+        ctx.strokeStyle = COLORS.lane_border;
+        ctx.beginPath();
+        ctx.moveTo(S.labelW, y + S.laneH);
+        ctx.lineTo(w, y + S.laneH);
+        ctx.stroke();
+    }
+
+    drawTimeGrid(contentW, h);
+    ctx.restore();
+
+    // Label column
+    ctx.fillStyle = '#16213e';
+    ctx.fillRect(0, S.headerH, S.labelW, h - S.headerH);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, S.headerH, S.labelW, h - S.headerH);
+    ctx.clip();
+    for (let i = 0; i < nNodes; i++) {
+        const y = S.headerH + i * S.laneH - S.scrollY;
+        if (y + S.laneH < S.headerH) continue;
+        if (y > h) break;
+        const node = S.nodes[i];
+        ctx.fillStyle = '#aac';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        const label = node.name.length > 20 ? node.name.slice(0, 19) + '…' : node.name;
+        ctx.fillText(label, S.labelW - 6, y + S.laneH / 2);
+    }
+    ctx.restore();
+
+    // Header background + time axis
+    ctx.fillStyle = '#16213e';
+    ctx.fillRect(0, 0, w, S.headerH);
+    drawTimeAxis(contentW);
+
+    // Events (clipped to content area)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(S.labelW, S.headerH, w - S.labelW, h - S.headerH);
+    ctx.clip();
+    drawEvents();
+    ctx.restore();
+
+    // Time display
+    const spanMs = S.viewTo - S.viewFrom;
+    timeDisplay.textContent = `${formatTime(S.viewFrom)} — ${formatTime(S.viewTo)} (${formatDuration(spanMs)})`;
+    document.getElementById('viewport-info').textContent =
+        `${S.events.length} events`;
+
+    // Vertical scrollbar indicator
+    if (S.maxScrollY > 0) {
+        const trackH = h - S.headerH;
+        const totalH = S.nodes.length * S.laneH;
+        const thumbH = Math.max(20, trackH * trackH / totalH);
+        const thumbY = S.headerH + (S.scrollY / S.maxScrollY) * (trackH - thumbH);
+        ctx.fillStyle = '#5566aa44';
+        ctx.fillRect(w - 6, S.headerH, 6, trackH);
+        ctx.fillStyle = '#5566aaaa';
+        ctx.fillRect(w - 6, thumbY, 6, thumbH);
+    }
+
+    syncScrollbar();
+}
+
+function timeTickInterval(contentW) {
+    const span = S.viewTo - S.viewFrom;
+    const targetTicks = contentW / 100;
+    const rawInterval = span / Math.max(1, targetTicks);
+    const niceIntervals = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000,
+                           10000, 20000, 30000, 60000, 120000, 300000, 600000, 1800000, 3600000];
+    return niceIntervals.find(n => n >= rawInterval) || rawInterval;
+}
+
+function drawTimeGrid(contentW, h) {
+    const interval = timeTickInterval(contentW);
+    const firstTick = Math.ceil(S.viewFrom / interval) * interval;
+    for (let t = firstTick; t <= S.viewTo; t += interval) {
+        const x = msToX(t);
+        if (x < S.labelW) continue;
+        ctx.strokeStyle = COLORS.time_grid;
+        ctx.beginPath();
+        ctx.moveTo(x, S.headerH);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+    }
+}
+
+function drawTimeAxis(contentW) {
+    const interval = timeTickInterval(contentW);
+    const firstTick = Math.ceil(S.viewFrom / interval) * interval;
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (let t = firstTick; t <= S.viewTo; t += interval) {
+        const x = msToX(t);
+        if (x < S.labelW) continue;
+        ctx.fillStyle = COLORS.time_text;
+        ctx.fillText(formatTime(t), x, 4);
+    }
+}
+
+function drawEvents() {
+    for (const ev of S.events) {
+        const t = ev.time_ms || 0;
+        const t_end = t + (ev.airtime_ms || 0);
+        if (t_end < S.viewFrom || t > S.viewTo) continue;
+
+        const etype = ev.type;
+        const x = msToX(t);
+        const laneName = laneNameForEvent(ev);
+        if (laneName === null) continue;
+        const y = nodeToY(laneName);
+        if (y < 0) continue;
+
+        if (etype === 'tx') {
+            const airtime = ev.airtime_ms || 1;
+            const x2 = msToX(t + airtime);
+            const boxW = Math.max(2, x2 - x);
+            const boxH = S.laneH / 2 - 2;
+            ctx.fillStyle = COLORS.tx;
+            ctx.globalAlpha = 0.75;
+            ctx.fillRect(x, y + 2, boxW, boxH);
+            ctx.globalAlpha = 1;
+        } else if (etype === 'rx') {
+            const airtime = ev.airtime_ms || 1;
+            const x2 = msToX(t + airtime);
+            const boxW = Math.max(2, x2 - x);
+            const boxH = S.laneH / 2 - 2;
+            const boxY = y + S.laneH / 2;
+            // Hollow stroked bar, light fill — keeps tx/rx distinguishable.
+            ctx.strokeStyle = COLORS.rx;
+            ctx.lineWidth = 1.5;
+            ctx.globalAlpha = 0.75;
+            ctx.strokeRect(x, boxY, boxW, boxH);
+            ctx.fillStyle = COLORS.rx;
+            ctx.globalAlpha = 0.12;
+            ctx.fillRect(x, boxY, boxW, boxH);
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1;
+        } else if (etype === 'collision') {
+            const sz = 5;
+            const cy = y + S.laneH / 2 + 2;
+            ctx.strokeStyle = COLORS.collision;
+            ctx.lineWidth = 1.5;
+            ctx.globalAlpha = 0.85;
+            ctx.beginPath();
+            ctx.moveTo(x - sz, cy - sz); ctx.lineTo(x + sz, cy + sz);
+            ctx.moveTo(x + sz, cy - sz); ctx.lineTo(x - sz, cy + sz);
+            ctx.stroke();
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 1;
+        } else if (etype === 'drop_halfduplex') {
+            const airtime = ev.airtime_ms || 1;
+            const x2 = msToX(t + airtime);
+            const boxW = Math.max(2, x2 - x);
+            const boxH = S.laneH / 2 - 2;
+            const boxY = y + S.laneH / 2;
+            ctx.fillStyle = COLORS.drop_halfduplex;
+            ctx.globalAlpha = 0.4;
+            ctx.fillRect(x, boxY, boxW, boxH);
+            // Diagonal hatch to mark "drop"
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x, boxY, boxW, boxH);
+            ctx.clip();
+            ctx.strokeStyle = COLORS.drop_halfduplex;
+            ctx.globalAlpha = 0.75;
+            const step = 6;
+            for (let lx = x - boxH; lx < x + boxW + boxH; lx += step) {
+                ctx.beginPath();
+                ctx.moveTo(lx, boxY + boxH);
+                ctx.lineTo(lx + boxH, boxY);
+                ctx.stroke();
+            }
+            ctx.restore();
+            ctx.globalAlpha = 1;
+        } else if (etype === 'drop_loss' || etype === 'tx_fail') {
+            ctx.fillStyle = COLORS[etype] || '#886644';
+            ctx.globalAlpha = 0.7;
+            ctx.fillRect(x - 2, y + S.laneH - 6, 4, 4);
+            ctx.globalAlpha = 1;
+        } else if (etype === 'cmd_reply') {
+            // Diamond marker
+            ctx.fillStyle = COLORS.cmd_reply;
+            ctx.globalAlpha = 0.85;
+            const sz = 3;
+            const cy = y + S.laneH / 2;
+            ctx.beginPath();
+            ctx.moveTo(x, cy - sz);
+            ctx.lineTo(x + sz, cy);
+            ctx.lineTo(x, cy + sz);
+            ctx.lineTo(x - sz, cy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        } else if (etype === 'script_log') {
+            // Small grey square above the lane mid-line
+            ctx.fillStyle = COLORS.script_log;
+            ctx.globalAlpha = 0.85;
+            ctx.fillRect(x - 2, y + 3, 4, 4);
+            ctx.globalAlpha = 1;
+        } else if (etype === 'script_emit') {
+            // Small purple triangle at the lane mid-line
+            ctx.fillStyle = COLORS.script_emit;
+            ctx.globalAlpha = 0.9;
+            const sz = 4;
+            const cy = y + S.laneH / 2;
+            ctx.beginPath();
+            ctx.moveTo(x, cy - sz);
+            ctx.lineTo(x + sz, cy + sz);
+            ctx.lineTo(x - sz, cy + sz);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        }
+    }
+}
+
+// ── Time formatting ────────────────────────────────────────────
+function formatTime(ms) {
+    const s = ms / 1000;
+    if (s < 60) return s.toFixed(s < 10 ? 2 : 1) + 's';
+    const m = Math.floor(s / 60);
+    const rem = s - m * 60;
+    return m + ':' + rem.toFixed(1).padStart(4, '0');
+}
+
+function formatDuration(ms) {
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    return (ms / 60000).toFixed(1) + 'min';
+}
+
+// ── Interaction ────────────────────────────────────────────────
+canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const span = S.viewTo - S.viewFrom;
+
+    if (e.ctrlKey || e.metaKey) {
+        const mouseMs = xToMs(e.offsetX);
+        const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
+        const newSpan = Math.max(50, Math.min(S.timeMax - S.timeMin, span * factor));
+        const ratio = (mouseMs - S.viewFrom) / span;
+        S.viewFrom = mouseMs - ratio * newSpan;
+        S.viewTo = mouseMs + (1 - ratio) * newSpan;
+        clampViewToData();
+    } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        const delta = (e.shiftKey ? e.deltaY : e.deltaX);
+        const dMs = delta / Math.max(1, canvas.width - S.labelW) * span * 2;
+        S.viewFrom += dMs;
+        S.viewTo += dMs;
+        clampViewToData();
+    } else {
+        S.scrollY += e.deltaY;
+        updateMaxScrollY();
+        S.scrollY = Math.max(0, Math.min(S.scrollY, S.maxScrollY));
+    }
+    render();
+}, { passive: false });
+
+function clampViewToData() {
+    const span = S.viewTo - S.viewFrom;
+    if (S.viewFrom < S.timeMin) { S.viewFrom = S.timeMin; S.viewTo = S.viewFrom + span; }
+    if (S.viewTo > S.timeMax) { S.viewTo = S.timeMax; S.viewFrom = S.viewTo - span; }
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    if (e.offsetX < S.labelW) return;
+    S.dragging = true;
+    S.dragStartX = e.offsetX;
+    S.dragStartY = e.offsetY;
+    S.dragViewFrom = S.viewFrom;
+    S.dragScrollY = S.scrollY;
+    canvas.style.cursor = 'grabbing';
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (S.dragging) {
+        const dx = e.offsetX - S.dragStartX;
+        const dy = e.offsetY - S.dragStartY;
+        const span = S.viewTo - S.viewFrom;
+        const dMs = -dx / Math.max(1, canvas.width - S.labelW) * span;
+        S.viewFrom = S.dragViewFrom + dMs;
+        S.viewTo = S.viewFrom + span;
+        clampViewToData();
+        S.scrollY = S.dragScrollY - dy;
+        updateMaxScrollY();
+        S.scrollY = Math.max(0, Math.min(S.scrollY, S.maxScrollY));
+        render();
+        return;
+    }
+    updateHover(e.offsetX, e.offsetY);
+});
+
+canvas.addEventListener('mouseup', () => {
+    S.dragging = false;
+    canvas.style.cursor = 'default';
+});
+
+canvas.addEventListener('mouseleave', () => {
+    S.dragging = false;
+    canvas.style.cursor = 'default';
+    tooltip.style.display = 'none';
+});
+
+canvas.addEventListener('click', (e) => {
+    if (e.offsetX < S.labelW) return;
+    const hit = findEventAt(e.offsetX, e.offsetY);
+    if (hit) showEventDetail(hit);
+});
+
+function findEventAt(mx, my) {
+    if (my < S.headerH) return null;
+    const ms = xToMs(mx);
+    const laneIdx = Math.floor((my - S.headerH + S.scrollY) / S.laneH);
+    if (laneIdx < 0 || laneIdx >= S.nodes.length) return null;
+    const targetNode = S.nodes[laneIdx].name;
+
+    let best = null;
+    let bestDist = Infinity;
+    const span = S.viewTo - S.viewFrom;
+    const tolerance = span * 0.008;
+
+    for (const ev of S.events) {
+        const owner = laneNameForEvent(ev);
+        if (owner !== targetNode) continue;
+        const t = ev.time_ms || 0;
+
+        let dist;
+        if (ev.type === 'tx' || ev.type === 'rx' || ev.type === 'drop_halfduplex') {
+            const end = t + (ev.airtime_ms || 1);
+            if (ms >= t - tolerance && ms <= end + tolerance) {
+                dist = (ms >= t && ms <= end) ? 0 : Math.min(Math.abs(ms - t), Math.abs(ms - end));
+            } else {
+                continue;
+            }
+        } else {
+            dist = Math.abs(t - ms);
+            if (dist > tolerance) continue;
+        }
+
+        if (dist < bestDist) { bestDist = dist; best = ev; }
+    }
+    return best;
+}
+
+function updateHover(mx, my) {
+    const hit = findEventAt(mx, my);
+    if (!hit) {
+        tooltip.style.display = 'none';
+        return;
+    }
+
+    let text = `${hit.type} @ ${formatTime(hit.time_ms || 0)}`;
+    const owner = laneNameForEvent(hit);
+    if (owner) text += `\nlane: ${owner}`;
+
+    if (hit.node !== undefined) text += `\nnode: ${hit.node}`;
+    if (hit.from !== undefined) text += `\nfrom: ${hit.from}`;
+    if (hit.to !== undefined) text += `\nto: ${hit.to}`;
+    if (hit.airtime_ms !== undefined) text += `\nairtime: ${hit.airtime_ms}ms`;
+    if (hit.snr !== undefined) text += `\nsnr: ${Number(hit.snr).toFixed(1)} dB`;
+    if (hit.rssi !== undefined) text += `\nrssi: ${Number(hit.rssi).toFixed(1)} dBm`;
+    if (hit.len !== undefined) text += `\nlen: ${hit.len}`;
+    if (hit.hex !== undefined) {
+        const hex = String(hit.hex);
+        const shown = hex.length > 64 ? hex.slice(0, 64) + '…' : hex;
+        text += `\nhex: ${shown}`;
+    }
+    if (hit.command !== undefined) text += `\ncmd: ${hit.command}`;
+    if (hit.reply !== undefined) {
+        const r = String(hit.reply);
+        text += `\nreply: ${r.length > 80 ? r.slice(0, 80) + '…' : r}`;
+    }
+    if (hit.type === 'script_log' && hit.msg !== undefined) {
+        text += `\nmsg: ${hit.msg}`;
+    }
+    if (hit.type === 'script_emit') {
+        if (hit.emit_type !== undefined) text += `\nemit_type: ${hit.emit_type}`;
+        if (hit.data !== undefined) {
+            let dataStr;
+            try { dataStr = JSON.stringify(hit.data); }
+            catch (e) { dataStr = String(hit.data); }
+            if (dataStr.length > 200) dataStr = dataStr.slice(0, 200) + '…';
+            text += `\ndata: ${dataStr}`;
+        }
+    }
+
+    tooltip.textContent = text;
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(mx + 12, canvas.width - 320) + 'px';
+    tooltip.style.top = (my + 12) + 'px';
+}
+
+// ── Sidebar ────────────────────────────────────────────────────
+function openSidebar() {
+    sidebar.classList.add('open');
+    setTimeout(() => { resize(); render(); }, 220);
+}
+
+function closeSidebar() {
+    sidebar.classList.remove('open');
+    setTimeout(() => { resize(); render(); }, 220);
+}
+
+function showEventDetail(ev) {
+    openSidebar();
+    let html = `<h3>${escHtml(ev.type)}</h3>`;
+    html += `<div class="field"><span class="key">time: </span><span class="val">${formatTime(ev.time_ms || 0)}</span></div>`;
+    const owner = laneNameForEvent(ev);
+    if (owner) {
+        html += `<div class="field"><span class="key">lane: </span><span class="val">${escHtml(owner)}</span></div>`;
+    }
+    for (const [k, v] of Object.entries(ev)) {
+        if (k === 'type' || k === 'time_ms') continue;
+        let val;
+        if (v === null || v === undefined) val = String(v);
+        else if (typeof v === 'object') {
+            try { val = JSON.stringify(v); } catch (e) { val = String(v); }
+        } else if (typeof v === 'number') {
+            val = Number.isInteger(v) ? String(v) : v.toFixed(2);
+        } else {
+            val = String(v);
+        }
+        if (val.length > 200) val = val.slice(0, 200) + '…';
+        html += `<div class="field"><span class="key">${escHtml(k)}: </span><span class="val">${escHtml(val)}</span></div>`;
+    }
+    sidebarContent.innerHTML = html;
+}
+
+function escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ── Controls ───────────────────────────────────────────────────
+document.getElementById('node-order').addEventListener('change', () => {
+    sortNodes();
+    render();
+});
+document.getElementById('node-filter').addEventListener('input', () => {
+    sortNodes();
+    render();
+});
+document.getElementById('btn-zoom-fit').addEventListener('click', () => {
+    S.viewFrom = S.timeMin;
+    S.viewTo = S.timeMax || (S.timeMin + 1000);
+    render();
+});
+window.addEventListener('resize', () => { resize(); render(); });
+
+// ── Scrollbar ──────────────────────────────────────────────────
+const timeSlider = document.getElementById('time-slider');
+const scrollFrom = document.getElementById('scroll-from');
+const scrollTo = document.getElementById('scroll-to');
+
+function syncScrollbar() {
+    const totalSpan = S.timeMax - S.timeMin;
+    if (totalSpan <= 0) return;
+    const center = (S.viewFrom + S.viewTo) / 2;
+    const fraction = (center - S.timeMin) / totalSpan;
+    timeSlider.value = Math.round(fraction * 1000);
+    scrollFrom.textContent = formatTime(S.viewFrom);
+    scrollTo.textContent = formatTime(S.viewTo);
+}
+
+timeSlider.addEventListener('input', () => {
+    const fraction = timeSlider.value / 1000;
+    const totalSpan = S.timeMax - S.timeMin;
+    const viewSpan = S.viewTo - S.viewFrom;
+    const center = S.timeMin + fraction * totalSpan;
+    S.viewFrom = center - viewSpan / 2;
+    S.viewTo = center + viewSpan / 2;
+    clampViewToData();
+    render();
+});
+
+document.getElementById('btn-zoom-in').addEventListener('click', () => {
+    const center = (S.viewFrom + S.viewTo) / 2;
+    const newSpan = Math.max(50, (S.viewTo - S.viewFrom) / 2);
+    S.viewFrom = center - newSpan / 2;
+    S.viewTo = center + newSpan / 2;
+    clampViewToData();
+    render();
+});
+
+document.getElementById('btn-zoom-out').addEventListener('click', () => {
+    const center = (S.viewFrom + S.viewTo) / 2;
+    const totalSpan = Math.max(1000, S.timeMax - S.timeMin);
+    const newSpan = Math.min(totalSpan, (S.viewTo - S.viewFrom) * 2);
+    S.viewFrom = center - newSpan / 2;
+    S.viewTo = center + newSpan / 2;
+    clampViewToData();
+    render();
+});
+
+// ── Keyboard ───────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+    const span = S.viewTo - S.viewFrom;
+    if (e.key === 'Escape') {
+        closeSidebar();
+    } else if (e.key === 'f') {
+        S.viewFrom = S.timeMin;
+        S.viewTo = S.timeMax || (S.timeMin + 1000);
+        render();
+    } else if (e.key === 'ArrowRight') {
+        S.viewFrom += span * 0.2;
+        S.viewTo += span * 0.2;
+        clampViewToData();
+        render();
+    } else if (e.key === 'ArrowLeft') {
+        S.viewFrom -= span * 0.2;
+        S.viewTo -= span * 0.2;
+        clampViewToData();
+        render();
+    }
+});
+
+// ── Init ───────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
