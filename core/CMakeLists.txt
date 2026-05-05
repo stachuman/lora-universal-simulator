@@ -1,6 +1,7 @@
 add_library(lus_core STATIC
     link/LinkModel.cpp
     events/EventLog.cpp
+    radio/SimRadio.cpp
 )
 target_include_directories(lus_core PUBLIC
     ${CMAKE_SOURCE_DIR}                # so includes look like "core/clock/..."

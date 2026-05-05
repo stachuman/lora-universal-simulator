@@ -19,5 +19,6 @@ run() {
 run test_clock    "$SCRIPT_DIR/test_clock.cpp"
 run test_link     "$SCRIPT_DIR/test_link.cpp"     "$REPO_ROOT/core/link/LinkModel.cpp"
 run test_eventlog "$SCRIPT_DIR/test_eventlog.cpp" "$REPO_ROOT/core/events/EventLog.cpp"
+run test_simradio "$SCRIPT_DIR/test_simradio.cpp" "$REPO_ROOT/core/radio/SimRadio.cpp"
 
 echo "[ok] all tests passed"
