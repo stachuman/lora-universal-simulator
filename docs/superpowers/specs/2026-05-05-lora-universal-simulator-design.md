@@ -209,6 +209,8 @@ The script may freely add fields (`self.seq = 0`, `self.routes = {}`, …). They
 
 ## 8. Configuration schema
 
+> **Reuse note.** The schema and its loader are inherited largely unchanged from `meshcore_real_sim`. The structure under `simulation`, `topology.links`, and the per-link physics fields (snr, rssi, bidir, snr_std_dev, snr_coherence_ms, loss, ...) are preserved verbatim — see `~/meshcore_real_sim/docs/CONFIG_FORMAT.md` for the full reference of those parts. We only strip MeshCore-specific fields (firmware/role/hot_start/_requires_plugins) and replace `firmware`+`role` on each node with `script`+`config`. The loader code in `core/topology/` is a port from `meshcore_real_sim/orchestrator/`.
+
 Top-level test JSON, derived from `meshcore_real_sim`'s pattern with the protocol-specific fields removed:
 
 ```json
@@ -334,7 +336,7 @@ Per-tx overrides via `self:tx(bytes, opts)`: `{sf, bw, cr, power_dbm}`.
 ## 13. Open questions (deferred decisions)
 
 1. **Per-node Lua VM isolation.** v1 uses a shared VM with `self`-isolation. If we hit a real bug from global-leak across nodes, switch to per-node VMs (cost: 5–10× memory; ~100 KB × 200 = 20 MB extra; acceptable). Decision deferred until a concrete failure case.
-2. **Hot-start / warm-up hook.** `meshcore_real_sim` triggers a built-in advert exchange via `hot_start: true`. There's no equivalent for scripted nodes (they don't have a built-in advert protocol). Scripts handle their own warm-up by emitting setup traffic during early simulated time. v1 ships without a runtime warm-up hook; revisit if a pattern emerges.
+2. **Hot-start equivalent.** v1 **entirely skips** the hot-start concept. Scripts handle their own setup by emitting traffic during early simulated time. As a possible future addition (not Y1): a global "collision-free warmup" mode — for the first `warmup_ms` of simulated time, suppress collision physics so setup traffic delivers cleanly. That's effectively what `meshcore_real_sim`'s hot-start does internally (plus the MeshCore-specific advert injection, which doesn't apply here). Move to a later phase; not necessary at Y1.
 3. **Default LoRa physics fixed.** Scripts override per-tx; they cannot redefine the underlying physics layer (e.g., custom SF tables). v1 keeps physics fixed.
 4. **Binary naming.** `lus` is short and clear. Open to alternatives (`lus-sim`, `lora-sim`) if the user prefers.
 5. **Random topology generators.** `meshcore_real_sim` has `tools/gen_grid_test.py`. Decide later whether to port; not blocking Y1.
