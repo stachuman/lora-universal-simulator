@@ -1,0 +1,29 @@
+{
+  "_name": "t01_flooder",
+  "_desc": "3-node chain alice → relay → bob. alice sends 'hello'. relay forwards. bob receives + emits 'recv'.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 11, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/flooder.lua", "config": { "role": "originator" } },
+    { "name": "relay", "script": "examples/flooder.lua", "config": { "role": "forwarder" } },
+    { "name": "bob",   "script": "examples/flooder.lua", "config": { "role": "forwarder" } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "relay", "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "relay", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 5000, "node": "alice", "command": "send hello" }
+  ],
+  "expect": [
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send hello", "value": "sent seq=1" },
+    { "type": "event_count_min",    "event_type": "tx", "min": 2 },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "recv", "value": "hello" }
+  ]
+}
