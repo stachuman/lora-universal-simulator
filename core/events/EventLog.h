@@ -1,0 +1,92 @@
+#pragma once
+
+#include <cstdio>
+#include <cstdint>
+#include <ostream>
+#include <string>
+#include <functional>
+
+// NDJSON event logger — writes one JSON object per line to the configured
+// output stream (defaults to stdout).
+//
+// Originally derived from meshcore_real_sim/orchestrator/EventLog. The
+// MeshCore-specific packet-header decoding (advert/req/ack/etc. payload
+// type labels, route-type labels) and the adversarial event helpers
+// have been stripped to keep the universal simulator protocol-agnostic.
+// Adapters can layer protocol-specific fields on top by emitting their
+// own NDJSON lines through setOutputStream().
+namespace EventLog {
+
+// Compute 8-char hex packet fingerprint (FNV-1a hash) — protocol-agnostic
+// helper, useful for correlating tx/rx of the same byte buffer.
+void packetHashHex(char out[9], const uint8_t* data, int len);
+uint32_t packetHash(const uint8_t* data, int len);
+
+// Output routing. Pass nullptr to revert to stdout (the default).
+// The stream is borrowed; the caller owns its lifetime.
+void setOutputStream(std::ostream* os);
+
+// Event hook: if set, called with the raw NDJSON line for every event.
+using EventHook = std::function<void(const std::string&)>;
+void setEventHook(EventHook hook);
+
+// --- core simulator lifecycle / link events ----------------------------
+
+void simStart(unsigned long time_ms, int n_nodes, int step_ms,
+              unsigned long warmup_ms = 0, bool hot_start = false);
+void simEnd(unsigned long time_ms);
+
+void nodeReady(unsigned long time_ms, const char* node, const char* role,
+               const uint8_t* pub_key, int key_len,
+               bool has_location = false, double lat = 0.0, double lon = 0.0,
+               const char* firmware = nullptr);
+
+// Generic radio events. `data` is the raw on-air bytes; the logger only
+// uses them for the FNV fingerprint and an optional hex dump (tx only).
+void tx(unsigned long time_ms, const char* node,
+        const uint8_t* data, int len, uint32_t airtime_ms);
+void rx(unsigned long time_ms, const char* from, const char* to,
+        float snr, float rssi,
+        const uint8_t* data, int len, uint32_t airtime_ms = 0);
+
+void collision(unsigned long time_ms, const char* from, const char* to,
+               float snr, float rssi,
+               const uint8_t* data, int len,
+               const char* interferer = nullptr,
+               float interferer_snr = 0.0f,
+               float snr_margin = 0.0f);
+void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
+                    const uint8_t* data, int len, uint32_t airtime_ms = 0);
+void dropWeak(unsigned long time_ms, const char* from, const char* to,
+              float snr, float threshold,
+              const uint8_t* data, int len);
+void dropLoss(unsigned long time_ms, const char* from, const char* to,
+              float loss_prob,
+              const uint8_t* data, int len);
+
+// TX failure events
+void txFail(unsigned long time_ms, const char* node, uint32_t count);
+
+// Command/reply round-trip (e.g. orchestrator → node CLI)
+void cmdReply(unsigned long time_ms, const char* node,
+              const char* command, const char* reply);
+
+// Per-node stats (post-simulation). `json_data` is already-serialized JSON
+// text and is spliced verbatim into the `data` field.
+void nodeStats(unsigned long time_ms, const char* node,
+               const char* stats_type, const char* json_data);
+
+// Lua callback event
+void luaCallback(unsigned long time_ms, const char* fn_name);
+
+// --- script-side events (new in lora-universal-simulator) --------------
+
+// Free-text log line emitted by a node-side script.
+void logScriptLog(int node_id, uint64_t sim_ms, const std::string& msg);
+
+// Custom script-emitted event. `json_data` is already-serialized JSON
+// text (object or value); it is spliced verbatim into the `data` field.
+void logScriptEmit(int node_id, uint64_t sim_ms,
+                   const std::string& type, const std::string& json_data);
+
+} // namespace EventLog

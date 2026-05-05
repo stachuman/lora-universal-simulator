@@ -16,7 +16,8 @@ run() {
     "$out"
 }
 
-run test_clock "$SCRIPT_DIR/test_clock.cpp"
-run test_link  "$SCRIPT_DIR/test_link.cpp" "$REPO_ROOT/core/link/LinkModel.cpp"
+run test_clock    "$SCRIPT_DIR/test_clock.cpp"
+run test_link     "$SCRIPT_DIR/test_link.cpp"     "$REPO_ROOT/core/link/LinkModel.cpp"
+run test_eventlog "$SCRIPT_DIR/test_eventlog.cpp" "$REPO_ROOT/core/events/EventLog.cpp"
 
 echo "[ok] all tests passed"
