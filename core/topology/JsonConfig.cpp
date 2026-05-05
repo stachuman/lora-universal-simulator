@@ -1,0 +1,339 @@
+// core/topology/JsonConfig.cpp
+//
+// See JsonConfig.h for the schema overview. This is the parser +
+// validator port from meshcore_real_sim/orchestrator/JsonConfig.cpp,
+// with MeshCore-firmware-specific bits surgically removed:
+//
+//   - simulation.firmware.{default,plugins}      (plugin selection)
+//   - simulation.hot_start                        (advert pre-seeding)
+//   - simulation.delay_tuning.*                   (delay-optimization tooling)
+//   - nodes[i].role                               (Repeater/Companion concept)
+//   - nodes[i].firmware                           (per-node plugin override)
+//   - nodes[i].adversarial.*                      (drop/corrupt/replay)
+//   - message_schedule / channel_schedule         (msg/msga/msgc generators)
+//   - @repeaters / @companions group expansion    (role-based)
+//   - firmware-name validation ("must start fw_") (plugin naming)
+//
+// Replaced by:
+//   - nodes[i].script (string)  + nodes[i].config (arbitrary JSON object)
+//
+// The remaining protocol-agnostic schema (simulation timing, global radio
+// defaults, capture / CAD / fading / hardware tuning, topology.links,
+// generic commands, expect[]) is preserved verbatim.
+
+#include "core/topology/JsonConfig.h"
+
+#include <fstream>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using json = nlohmann::json;
+
+// --- helpers --------------------------------------------------------------
+
+// Pull a required field from a JSON object, producing a human-readable error
+// if it's missing or the wrong type. `ctx` identifies the enclosing scope,
+// e.g. "nodes[3]" or "commands[7]", so the user knows where to look.
+template <typename T>
+static T require_field(const json& j, const char* field, const std::string& ctx) {
+    if (!j.contains(field)) {
+        throw std::runtime_error(
+            "config error at " + ctx + ": missing required field \"" + field + "\"");
+    }
+    try {
+        return j[field].get<T>();
+    } catch (const json::type_error& e) {
+        throw std::runtime_error(
+            "config error at " + ctx + ": field \"" + field
+            + "\" has wrong type (" + e.what() + ")");
+    }
+}
+
+// --- main parse -----------------------------------------------------------
+
+static SimConfig parseJson(const json& j) {
+    SimConfig cfg;
+
+    if (j.contains("_name") && j["_name"].is_string())
+        cfg.name = j["_name"].get<std::string>();
+
+    if (j.contains("simulation")) {
+        auto& sim = j["simulation"];
+        if (sim.contains("duration_ms")) cfg.simulation.duration_ms = sim["duration_ms"].get<unsigned long>();
+        if (sim.contains("step_ms"))     cfg.simulation.step_ms     = sim["step_ms"].get<int>();
+        if (sim.contains("epoch_start")) cfg.simulation.epoch_start = sim["epoch_start"].get<uint32_t>();
+        if (sim.contains("warmup_ms"))   cfg.simulation.warmup_ms   = sim["warmup_ms"].get<unsigned long>();
+        if (sim.contains("seed"))        cfg.simulation.seed        = sim["seed"].get<uint64_t>();
+        if (sim.contains("radio")) {
+            auto& r = sim["radio"];
+            if (r.contains("sf")) cfg.simulation.radio.sf = r["sf"].get<int>();
+            if (r.contains("bw")) cfg.simulation.radio.bw = r["bw"].get<int>();
+            if (r.contains("cr")) cfg.simulation.radio.cr = r["cr"].get<int>();
+            if (r.contains("capture_locked_db"))   cfg.simulation.radio.capture_locked_db   = r["capture_locked_db"].get<float>();
+            if (r.contains("capture_unlocked_db")) cfg.simulation.radio.capture_unlocked_db = r["capture_unlocked_db"].get<float>();
+            if (r.contains("cad_miss_prob"))       cfg.simulation.radio.cad_miss_prob       = r["cad_miss_prob"].get<float>();
+            if (r.contains("cad_reliable_snr"))    cfg.simulation.radio.cad_reliable_snr    = r["cad_reliable_snr"].get<float>();
+            if (r.contains("cad_marginal_snr"))    cfg.simulation.radio.cad_marginal_snr    = r["cad_marginal_snr"].get<float>();
+            if (r.contains("snr_coherence_ms"))    cfg.simulation.radio.snr_coherence_ms    = r["snr_coherence_ms"].get<float>();
+            if (r.contains("hardware")) {
+                auto& hw = r["hardware"];
+                if (hw.contains("rx_to_tx_delay_ms")) cfg.simulation.radio.rx_to_tx_delay_ms = hw["rx_to_tx_delay_ms"].get<float>();
+                if (hw.contains("tx_to_rx_delay_ms")) cfg.simulation.radio.tx_to_rx_delay_ms = hw["tx_to_rx_delay_ms"].get<float>();
+            }
+        }
+        // NOTE: simulation.firmware, simulation.hot_start, simulation.delay_tuning
+        // were intentionally stripped during the MeshCore -> universal port.
+    }
+
+    if (j.contains("nodes")) {
+        size_t node_idx = 0;
+        for (auto& nd : j["nodes"]) {
+            const std::string ctx = "nodes[" + std::to_string(node_idx++) + "]";
+            SimConfig::NodeDef def;
+            def.name = require_field<std::string>(nd, "name", ctx);
+
+            // New universal fields: script + config.
+            if (nd.contains("script"))
+                def.script_path = nd["script"].get<std::string>();
+            if (nd.contains("config")) {
+                if (!nd["config"].is_object()) {
+                    throw std::runtime_error(
+                        "config error at " + ctx + ": field \"config\" must be a JSON object");
+                }
+                def.config = nd["config"];
+            }
+
+            // Per-node radio overrides (nested or flat).
+            if (nd.contains("radio")) {
+                auto& r = nd["radio"];
+                if (r.contains("sf")) def.sf = r["sf"].get<int>();
+                if (r.contains("bw")) def.bw = r["bw"].get<int>();
+                if (r.contains("cr")) def.cr = r["cr"].get<int>();
+            }
+            if (nd.contains("sf")) def.sf = nd["sf"].get<int>();
+            if (nd.contains("bw")) def.bw = nd["bw"].get<int>();
+            if (nd.contains("cr")) def.cr = nd["cr"].get<int>();
+
+            if (nd.contains("lat") && nd.contains("lon")) {
+                def.lat = nd["lat"].get<double>();
+                def.lon = nd["lon"].get<double>();
+                def.has_location = true;
+            }
+
+            if (nd.contains("tx_fail_prob"))
+                def.tx_fail_prob = nd["tx_fail_prob"].get<float>();
+
+            // NOTE: role / firmware / adversarial were stripped (MeshCore-only).
+
+            cfg.nodes.push_back(std::move(def));
+        }
+    }
+
+    // Merge global radio defaults into nodes where not explicitly set.
+    for (auto& nd : cfg.nodes) {
+        if (nd.sf == -1) nd.sf = cfg.simulation.radio.sf;
+        if (nd.bw == -1) nd.bw = cfg.simulation.radio.bw;
+        if (nd.cr == -1) nd.cr = cfg.simulation.radio.cr;
+    }
+
+    if (j.contains("topology")) {
+        auto& topo = j["topology"];
+        if (topo.contains("links")) {
+            size_t link_idx = 0;
+            for (auto& lk : topo["links"]) {
+                const std::string ctx = "topology.links[" + std::to_string(link_idx++) + "]";
+                SimConfig::LinkDef def;
+                def.from = require_field<std::string>(lk, "from", ctx);
+                def.to   = require_field<std::string>(lk, "to",   ctx);
+                if (lk.contains("snr"))         def.snr         = lk["snr"].get<float>();
+                if (lk.contains("rssi"))        def.rssi        = lk["rssi"].get<float>();
+                if (lk.contains("snr_std_dev")) def.snr_std_dev = lk["snr_std_dev"].get<float>();
+                if (lk.contains("loss"))        def.loss        = lk["loss"].get<float>();
+                if (lk.contains("bidir"))       def.bidir       = lk["bidir"].get<bool>();
+                cfg.topology.links.push_back(std::move(def));
+            }
+        }
+    }
+
+    if (j.contains("commands")) {
+        size_t cmd_idx = 0;
+        for (auto& cd : j["commands"]) {
+            const std::string ctx = "commands[" + std::to_string(cmd_idx++) + "]";
+            unsigned long at_ms = require_field<unsigned long>(cd, "at_ms", ctx);
+
+            // Lua-only command: {"at_ms": N, "lua": "function_name"}
+            if (cd.contains("lua")) {
+                SimConfig::CmdDef def;
+                def.at_ms  = at_ms;
+                def.lua_fn = cd["lua"].get<std::string>();
+                cfg.commands.push_back(std::move(def));
+                continue;
+            }
+
+            std::string node    = require_field<std::string>(cd, "node",    ctx);
+            std::string command = require_field<std::string>(cd, "command", ctx);
+
+            if (!node.empty() && node[0] == '@') {
+                // The MeshCore source expanded @repeaters / @companions /
+                // @all using NodeRole. Roles were stripped in the universal
+                // port, so only @all remains. (Scripts can implement their
+                // own routing/role concepts and target by name.)
+                if (node == "@all") {
+                    for (const auto& nd : cfg.nodes) {
+                        SimConfig::CmdDef def;
+                        def.at_ms   = at_ms;
+                        def.node    = nd.name;
+                        def.command = command;
+                        cfg.commands.push_back(std::move(def));
+                    }
+                } else {
+                    throw std::runtime_error(
+                        "config error at " + ctx + ": unknown target group \""
+                        + node + "\" (only @all is supported in the universal simulator)");
+                }
+            } else {
+                SimConfig::CmdDef def;
+                def.at_ms   = at_ms;
+                def.node    = node;
+                def.command = command;
+                cfg.commands.push_back(std::move(def));
+            }
+        }
+    }
+
+    // NOTE: message_schedule and channel_schedule were stripped — they
+    // expanded into MeshCore CLI commands (msg/msga/msgc). Periodic
+    // generation can be done from a Lua script if needed.
+
+    if (j.contains("expect")) {
+        size_t ex_idx = 0;
+        for (auto& ex : j["expect"]) {
+            const std::string ctx = "expect[" + std::to_string(ex_idx++) + "]";
+            SimConfig::Assertion a;
+            a.type = require_field<std::string>(ex, "type", ctx);
+            if (ex.contains("node"))       a.node       = ex["node"].get<std::string>();
+            if (ex.contains("command"))    a.command    = ex["command"].get<std::string>();
+            if (ex.contains("value"))      a.value      = ex["value"].get<std::string>();
+            if (ex.contains("event_type")) a.event_type = ex["event_type"].get<std::string>();
+            if (ex.contains("count"))      a.count      = ex["count"].get<int>();
+            if (ex.contains("min"))        a.min        = ex["min"].get<int>();
+            if (ex.contains("max"))        a.max        = ex["max"].get<int>();
+            cfg.assertions.push_back(std::move(a));
+        }
+    }
+
+    return cfg;
+}
+
+// --- validation -----------------------------------------------------------
+
+static void validateConfig(const SimConfig& cfg) {
+    std::vector<std::string> errors;
+
+    // Simulation parameters
+    if (cfg.simulation.step_ms <= 0)
+        errors.push_back("simulation.step_ms must be > 0 (got "
+                         + std::to_string(cfg.simulation.step_ms) + ")");
+    if (cfg.simulation.duration_ms == 0)
+        errors.push_back("simulation.duration_ms must be > 0");
+    if (cfg.simulation.warmup_ms >= cfg.simulation.duration_ms && cfg.simulation.warmup_ms > 0)
+        errors.push_back("simulation.warmup_ms (" + std::to_string(cfg.simulation.warmup_ms)
+                         + ") must be < duration_ms ("
+                         + std::to_string(cfg.simulation.duration_ms) + ")");
+    if (cfg.simulation.radio.capture_locked_db < 0.0f)
+        errors.push_back("simulation.radio.capture_locked_db must be >= 0 (got "
+                         + std::to_string(cfg.simulation.radio.capture_locked_db) + ")");
+    if (cfg.simulation.radio.capture_unlocked_db < 0.0f)
+        errors.push_back("simulation.radio.capture_unlocked_db must be >= 0 (got "
+                         + std::to_string(cfg.simulation.radio.capture_unlocked_db) + ")");
+    if (cfg.simulation.radio.cad_miss_prob < 0.0f || cfg.simulation.radio.cad_miss_prob > 1.0f)
+        errors.push_back("simulation.radio.cad_miss_prob must be [0.0, 1.0] (got "
+                         + std::to_string(cfg.simulation.radio.cad_miss_prob) + ")");
+    if (cfg.simulation.radio.cad_reliable_snr < cfg.simulation.radio.cad_marginal_snr)
+        errors.push_back("simulation.radio.cad_reliable_snr ("
+                         + std::to_string(cfg.simulation.radio.cad_reliable_snr)
+                         + ") must be >= cad_marginal_snr ("
+                         + std::to_string(cfg.simulation.radio.cad_marginal_snr) + ")");
+    if (cfg.simulation.radio.snr_coherence_ms < 0.0f)
+        errors.push_back("simulation.radio.snr_coherence_ms must be >= 0 (got "
+                         + std::to_string(cfg.simulation.radio.snr_coherence_ms) + ")");
+
+    // Build node name set for cross-validation.
+    std::set<std::string> node_names;
+    for (const auto& nd : cfg.nodes) node_names.insert(nd.name);
+
+    // Per-node parameters.
+    //
+    // The MeshCore source enforced sf in [7,12], cr in [1,4] (its 4/(4+cr)
+    // CR-5 mapping), and bw > 0 in Hz. The universal simulator does not
+    // commit to MeshCore's CR encoding or the SF range of any one chipset,
+    // so we keep only the universal sanity check (positive values). Scripts
+    // / radio backends are responsible for rejecting unsupported values.
+    for (const auto& nd : cfg.nodes) {
+        const std::string pfx = "node \"" + nd.name + "\": ";
+        if (nd.sf <= 0)
+            errors.push_back(pfx + "sf must be > 0 (got " + std::to_string(nd.sf) + ")");
+        if (nd.bw <= 0)
+            errors.push_back(pfx + "bw must be > 0 (got " + std::to_string(nd.bw) + ")");
+        if (nd.cr <= 0)
+            errors.push_back(pfx + "cr must be > 0 (got " + std::to_string(nd.cr) + ")");
+        if (nd.tx_fail_prob < 0.0f || nd.tx_fail_prob > 1.0f)
+            errors.push_back(pfx + "tx_fail_prob must be [0.0, 1.0] (got "
+                             + std::to_string(nd.tx_fail_prob) + ")");
+    }
+
+    // NOTE: firmware-name validation was stripped (no fw_* convention here).
+
+    // Link cross-validation.
+    for (const auto& lk : cfg.topology.links) {
+        if (node_names.find(lk.from) == node_names.end())
+            errors.push_back("link from \"" + lk.from + "\" references unknown node");
+        if (node_names.find(lk.to) == node_names.end())
+            errors.push_back("link to \"" + lk.to + "\" references unknown node");
+        if (lk.loss < 0.0f || lk.loss > 1.0f)
+            errors.push_back("link " + lk.from + " -> " + lk.to
+                             + ": loss must be [0.0, 1.0] (got "
+                             + std::to_string(lk.loss) + ")");
+    }
+
+    // Command cross-validation (skip lua-only commands).
+    for (const auto& cd : cfg.commands) {
+        if (!cd.lua_fn.empty()) continue;  // lua commands don't reference nodes
+        if (node_names.find(cd.node) == node_names.end())
+            errors.push_back("command at " + std::to_string(cd.at_ms)
+                             + "ms references unknown node \"" + cd.node + "\"");
+    }
+
+    if (!errors.empty()) {
+        std::string msg = "Config validation failed (" + std::to_string(errors.size())
+                          + " error(s)):";
+        for (const auto& e : errors) msg += "\n  - " + e;
+        throw std::runtime_error(msg);
+    }
+}
+
+// --- public API -----------------------------------------------------------
+
+namespace JsonConfig {
+
+SimConfig loadFromFile(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        throw std::runtime_error("Cannot open config file: " + path);
+    }
+    json j = json::parse(f);
+    auto cfg = parseJson(j);
+    validateConfig(cfg);
+    return cfg;
+}
+
+SimConfig loadFromString(const std::string& json_str) {
+    json j = json::parse(json_str);
+    auto cfg = parseJson(j);
+    validateConfig(cfg);
+    return cfg;
+}
+
+}  // namespace JsonConfig

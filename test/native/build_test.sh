@@ -16,6 +16,18 @@ run() {
     "$out"
 }
 
+# Like run(), but passes a single positional argument to the test binary.
+# Useful for tests that take a config/data path.
+test_with_arg() {
+    local name="$1"; shift
+    local arg="$1"; shift
+    local out="$SCRIPT_DIR/$name.bin"
+    echo "[build] $name"
+    $CXX $CXXFLAGS $INCLUDES "$@" -o "$out"
+    echo "[run]   $name $arg"
+    "$out" "$arg"
+}
+
 run test_clock    "$SCRIPT_DIR/test_clock.cpp"
 run test_link     "$SCRIPT_DIR/test_link.cpp"     "$REPO_ROOT/core/link/LinkModel.cpp"
 run test_eventlog "$SCRIPT_DIR/test_eventlog.cpp" "$REPO_ROOT/core/events/EventLog.cpp"
@@ -24,5 +36,9 @@ run test_physics  "$SCRIPT_DIR/test_physics.cpp"  \
     "$REPO_ROOT/core/physics/CollisionModel.cpp" \
     "$REPO_ROOT/core/physics/LbtModel.cpp" \
     "$REPO_ROOT/core/link/LinkFadingState.cpp"
+
+test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
+    "$SCRIPT_DIR/test_jsonconfig.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp"
 
 echo "[ok] all tests passed"
