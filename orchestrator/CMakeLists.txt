@@ -4,6 +4,8 @@ add_executable(lus
     runtime/TimerWheel.cpp
     runtime/LuaHost.cpp
     runtime/ScriptedNode.cpp
+    runtime/Loop.cpp
+    test_runner/ExpectRunner.cpp
 )
 target_link_libraries(lus PRIVATE lus_core)
 target_include_directories(lus PRIVATE
