@@ -1,0 +1,8 @@
+build/
+*.o
+*.so
+.obsidian/
+events.ndjson
+.cache/
+compile_commands.json
+.vscode/
