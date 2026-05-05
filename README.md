@@ -27,3 +27,16 @@ python3 tools/visualize.py events.ndjson
 bash test/run_tests.sh test/t01_flooder.json   # JSON regression test
 bash test/native/build_test.sh                 # C++ unit tests
 ```
+
+## Performance benchmark
+
+200-node x 1 h smoke test (no script work, just runtime overhead):
+
+```bash
+python3 tools/gen_grid.py > test/t99_perf_smoke.json
+time ./build/orchestrator/lus test/t99_perf_smoke.json /dev/null
+```
+
+Last measured: real 0m5.9s (user 5.9s / sys 0.0s) on AMD EPYC 7402P
+24-Core (Linux 6.8, Release build, vanilla Lua 5.4). Comfortably
+under the 5-minute Y1 target.
