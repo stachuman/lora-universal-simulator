@@ -14,6 +14,9 @@ endif()
 # Strict warnings
 add_compile_options(-Wall -Wextra -Wpedantic)
 
+find_package(Lua 5.4 REQUIRED)
+find_package(Threads REQUIRED)
+
 # Subdirectories (added incrementally as Tasks 4..N populate them)
 add_subdirectory(core)
 add_subdirectory(orchestrator)
