@@ -1,8 +1,9 @@
-# Populated by Tasks 4..9.
-add_library(lus_core INTERFACE)
-target_include_directories(lus_core INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}
+add_library(lus_core STATIC
+    link/LinkModel.cpp
+)
+target_include_directories(lus_core PUBLIC
+    ${CMAKE_SOURCE_DIR}                # so includes look like "core/clock/..."
     ${CMAKE_SOURCE_DIR}/third_party
     ${LUA_INCLUDE_DIR}
 )
-target_link_libraries(lus_core INTERFACE ${LUA_LIBRARIES} Threads::Threads)
+target_link_libraries(lus_core PUBLIC ${LUA_LIBRARIES} Threads::Threads)

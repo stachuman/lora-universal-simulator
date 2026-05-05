@@ -6,3 +6,4 @@ events.ndjson
 .cache/
 compile_commands.json
 .vscode/
+test/native/*.bin
