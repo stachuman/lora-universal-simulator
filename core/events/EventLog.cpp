@@ -1,8 +1,11 @@
 #include "core/events/EventLog.h"
 
+#include "json/json.hpp"
+
 #include <cstring>
 #include <cstdio>
 #include <ostream>
+#include <vector>
 
 static const char HEX[] = "0123456789abcdef";
 
@@ -49,12 +52,38 @@ namespace EventLog {
 static EventHook s_event_hook;
 static std::ostream* s_out_stream = nullptr;  // nullptr == stdout
 
+// In-memory buffer of parsed events (for ExpectRunner / test harnesses).
+static bool s_buffer_enabled = false;
+static std::vector<nlohmann::json> s_buffer;
+
 void setOutputStream(std::ostream* os) {
     s_out_stream = os;
 }
 
 void setEventHook(EventHook hook) {
     s_event_hook = std::move(hook);
+}
+
+void enableBuffer()  { s_buffer_enabled = true; }
+void disableBuffer() { s_buffer_enabled = false; }
+void clearBuffer()   { s_buffer.clear(); }
+const std::vector<nlohmann::json>& events() { return s_buffer; }
+
+// Parse `line` (one NDJSON record, with or without trailing newline) and
+// push the result onto the buffer. Silent on parse error to avoid coupling
+// the emitter to malformed input — but in practice all our emitters produce
+// well-formed JSON, so failures here would indicate a logger bug.
+static void bufferLine(const char* line, size_t len) {
+    if (!s_buffer_enabled) return;
+    // Strip a trailing newline if present (nlohmann::json::parse handles it,
+    // but being explicit is cheap and easier to debug).
+    if (len > 0 && line[len - 1] == '\n') --len;
+    try {
+        s_buffer.push_back(nlohmann::json::parse(line, line + len));
+    } catch (const nlohmann::json::parse_error&) {
+        // Drop on the floor; malformed JSON is a logger bug, not a runtime
+        // failure mode for tests.
+    }
 }
 
 static void emitLine(const char* line) {
@@ -66,6 +95,7 @@ static void emitLine(const char* line) {
     if (s_event_hook) {
         s_event_hook(std::string(line));
     }
+    bufferLine(line, std::strlen(line));
 }
 
 uint32_t packetHash(const uint8_t* data, int len) {
@@ -289,34 +319,30 @@ void logScriptEmit(int node_id, uint64_t sim_ms,
     char esc_type[512];
     json_escape(esc_type, sizeof(esc_type), type.c_str());
 
-    // We stream rather than snprintf so we don't need a fixed-size buffer
-    // big enough for an arbitrarily large json_data payload.
+    // Build the full line as a std::string so we can feed it through a
+    // single emit path (stream + hook + buffer) without keeping three
+    // parallel implementations in sync.
+    std::string line;
+    line.reserve(64 + json_data.size());
+    line.append("{\"type\":\"script_emit\",\"node\":");
+    line.append(std::to_string(node_id));
+    line.append(",\"time_ms\":");
+    line.append(std::to_string((unsigned long long)sim_ms));
+    line.append(",\"emit_type\":\"");
+    line.append(esc_type);
+    line.append("\",\"data\":");
+    line.append(json_data);
+    line.append("}\n");
+
     if (s_out_stream) {
-        (*s_out_stream)
-            << "{\"type\":\"script_emit\",\"node\":" << node_id
-            << ",\"time_ms\":" << (unsigned long long)sim_ms
-            << ",\"emit_type\":\"" << esc_type << "\""
-            << ",\"data\":" << json_data << "}\n";
+        (*s_out_stream) << line;
     } else {
-        std::fprintf(stdout,
-            "{\"type\":\"script_emit\",\"node\":%d,\"time_ms\":%llu,"
-            "\"emit_type\":\"%s\",\"data\":%s}\n",
-            node_id, (unsigned long long)sim_ms, esc_type, json_data.c_str());
+        std::fputs(line.c_str(), stdout);
     }
     if (s_event_hook) {
-        std::string line;
-        line.reserve(64 + json_data.size());
-        line.append("{\"type\":\"script_emit\",\"node\":");
-        line.append(std::to_string(node_id));
-        line.append(",\"time_ms\":");
-        line.append(std::to_string((unsigned long long)sim_ms));
-        line.append(",\"emit_type\":\"");
-        line.append(esc_type);
-        line.append("\",\"data\":");
-        line.append(json_data);
-        line.append("}\n");
         s_event_hook(line);
     }
+    bufferLine(line.data(), line.size());
 }
 
 } // namespace EventLog

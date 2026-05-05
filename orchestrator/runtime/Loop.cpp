@@ -73,6 +73,10 @@ CapturedSignal toCaptured(const InFlight& f, float snr_db_at_rcv) {
 
 LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
     EventLog::setOutputStream(&events_out);
+    // Capture every emitted event into the in-memory buffer so the
+    // ExpectRunner can read them at the end of the run.
+    EventLog::clearBuffer();
+    EventLog::enableBuffer();
 
     LuaHost       host;
     VirtualClock  global_clock(cfg.simulation.epoch_start);
@@ -155,7 +159,9 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
     coll_cfg.capture_unlocked_db = cfg.simulation.radio.capture_unlocked_db;
     // preamble_lock_symbols stays at upstream's default (6).
 
-    int events_emitted = 0;
+    // The authoritative event count is the size of EventLog's buffer at
+    // the end of the run; stripping the per-emit counter avoids the
+    // undercount T14 noted (script_log/script_emit weren't tallied).
 
     const uint64_t step_ms = static_cast<uint64_t>(cfg.simulation.step_ms);
     const uint64_t end_ms  = static_cast<uint64_t>(cfg.simulation.duration_ms);
@@ -188,7 +194,6 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                                nodes[target]->name().c_str(),
                                cmd.command.c_str(),
                                reply.c_str());
-            ++events_emitted;
             command_fired[k] = true;
         }
 
@@ -224,7 +229,6 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                             lp.loss,
                             reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                             static_cast<int>(tx.bytes.size()));
-                        ++events_emitted;
                         continue;
                     }
                 }
@@ -265,7 +269,6 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                         worst_interferer >= 0 ? nodes[worst_interferer]->name().c_str() : nullptr,
                         worst_interferer_snr,
                         snr_margin);
-                    ++events_emitted;
                     continue;
                 }
 
@@ -284,7 +287,6 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                              reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                              static_cast<int>(tx.bytes.size()),
                              static_cast<uint32_t>(tx.end_ms - tx.start_ms));
-                ++events_emitted;
             }
         }
 
@@ -330,7 +332,6 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                              reinterpret_cast<const uint8_t*>(f.bytes.data()),
                              static_cast<int>(f.bytes.size()),
                              airtime);
-                ++events_emitted;
 
                 in_flight.push_back(std::move(f));
             }
@@ -341,8 +342,8 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
     }
 
     LoopResult result;
-    result.events_emitted    = events_emitted;
-    result.assertion_failures = ExpectRunner::evaluate(cfg.assertions, events_out);
+    result.events_emitted     = static_cast<int>(EventLog::events().size());
+    result.assertion_failures = ExpectRunner::evaluate(cfg, EventLog::events());
     result.ok = (result.assertion_failures == 0);
     return result;
 }

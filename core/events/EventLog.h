@@ -1,10 +1,13 @@
 #pragma once
 
+#include "json/json.hpp"
+
 #include <cstdio>
 #include <cstdint>
 #include <ostream>
 #include <string>
 #include <functional>
+#include <vector>
 
 // NDJSON event logger — writes one JSON object per line to the configured
 // output stream (defaults to stdout).
@@ -88,5 +91,20 @@ void logScriptLog(int node_id, uint64_t sim_ms, const std::string& msg);
 // text (object or value); it is spliced verbatim into the `data` field.
 void logScriptEmit(int node_id, uint64_t sim_ms,
                    const std::string& type, const std::string& json_data);
+
+// --- in-memory buffer (for ExpectRunner / test harnesses) --------------
+//
+// When the buffer is enabled, every emitted event is also captured (parsed
+// back into an `nlohmann::json` value) into an internal vector accessible
+// via events(). The runtime simulator (Loop.cpp) calls enableBuffer() +
+// clearBuffer() at the start of each run and feeds the resulting buffer
+// into ExpectRunner at the end.
+//
+// The buffer is independent of setOutputStream(); you can have both, or
+// either alone. Disabled by default to avoid any cost in non-test usage.
+void enableBuffer();
+void disableBuffer();
+void clearBuffer();
+const std::vector<nlohmann::json>& events();
 
 } // namespace EventLog

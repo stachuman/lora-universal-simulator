@@ -116,17 +116,31 @@ struct SimConfig {
     };
     std::vector<CmdDef> commands;
 
-    // End-of-run assertions. The actual evaluation engine is wired up in T15;
-    // here we only parse and surface the shape.
+    // End-of-run assertions. The evaluation engine lives in
+    // orchestrator/test_runner/ExpectRunner. The fields below are the
+    // union of everything the six supported assertion types may need;
+    // each type uses only the subset that applies to it.
+    //
+    // Supported `type` values (see ExpectRunner::evaluate):
+    //   - cmd_reply_contains       (node, command, value)
+    //   - cmd_reply_not_contains   (node, command, value)
+    //   - event_count              (event_type, [node], count   OR min..max)
+    //   - event_count_min          (event_type, [node], min)
+    //   - tx_airtime_between       (time_ms_min, time_ms_max, min, [max])
+    //   - script_emit_contains     (node, emit_type, value)
     struct Assertion {
         std::string type;
         std::string node;
         std::string command;
         std::string value;
         std::string event_type;
+        std::string emit_type;
         int count = 0;
         int min   = -1;
         int max   = -1;
+        // tx_airtime_between window (millisecond-of-sim).
+        long time_ms_min = -1;
+        long time_ms_max = -1;
     };
     std::vector<Assertion> assertions;
 };

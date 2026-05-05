@@ -7,3 +7,4 @@ events.ndjson
 compile_commands.json
 .vscode/
 test/native/*.bin
+test/*_events.ndjson

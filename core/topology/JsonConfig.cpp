@@ -213,13 +213,16 @@ static SimConfig parseJson(const json& j) {
             const std::string ctx = "expect[" + std::to_string(ex_idx++) + "]";
             SimConfig::Assertion a;
             a.type = require_field<std::string>(ex, "type", ctx);
-            if (ex.contains("node"))       a.node       = ex["node"].get<std::string>();
-            if (ex.contains("command"))    a.command    = ex["command"].get<std::string>();
-            if (ex.contains("value"))      a.value      = ex["value"].get<std::string>();
-            if (ex.contains("event_type")) a.event_type = ex["event_type"].get<std::string>();
-            if (ex.contains("count"))      a.count      = ex["count"].get<int>();
-            if (ex.contains("min"))        a.min        = ex["min"].get<int>();
-            if (ex.contains("max"))        a.max        = ex["max"].get<int>();
+            if (ex.contains("node"))        a.node        = ex["node"].get<std::string>();
+            if (ex.contains("command"))     a.command     = ex["command"].get<std::string>();
+            if (ex.contains("value"))       a.value       = ex["value"].get<std::string>();
+            if (ex.contains("event_type"))  a.event_type  = ex["event_type"].get<std::string>();
+            if (ex.contains("emit_type"))   a.emit_type   = ex["emit_type"].get<std::string>();
+            if (ex.contains("count"))       a.count       = ex["count"].get<int>();
+            if (ex.contains("min"))         a.min         = ex["min"].get<int>();
+            if (ex.contains("max"))         a.max         = ex["max"].get<int>();
+            if (ex.contains("time_ms_min")) a.time_ms_min = ex["time_ms_min"].get<long>();
+            if (ex.contains("time_ms_max")) a.time_ms_max = ex["time_ms_max"].get<long>();
             cfg.assertions.push_back(std::move(a));
         }
     }
