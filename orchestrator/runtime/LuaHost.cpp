@@ -38,32 +38,36 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node) {
         sol::table self = node_tbl["self"];
         self["id"]   = node->id();
         self["name"] = node->name();
+        // NOTE: Each lambda takes a leading sol::object parameter that we
+        // discard. Lua's colon syntax (`self:method(...)`) desugars to
+        // `method(self, ...)`, so the bound function must accept that first
+        // argument. We don't need it — `node` is already captured by pointer.
         self.set_function("tx",
-            [node](std::string b, sol::optional<sol::table> o) {
+            [node](sol::object /*self*/, std::string b, sol::optional<sol::table> o) {
                 node->api_tx(std::move(b), o);
             });
         self.set_function("after",
-            [node](uint64_t d, sol::function f) {
+            [node](sol::object /*self*/, uint64_t d, sol::function f) {
                 return node->api_after(d, f);
             });
         self.set_function("every",
-            [node](uint64_t p, sol::function f) {
+            [node](sol::object /*self*/, uint64_t p, sol::function f) {
                 return node->api_every(p, f);
             });
         self.set_function("cancel",
-            [node](uint64_t h) { node->api_cancel(h); });
+            [node](sol::object /*self*/, uint64_t h) { node->api_cancel(h); });
         self.set_function("now",
-            [node]() { return node->api_now(); });
+            [node](sol::object /*self*/) { return node->api_now(); });
         self.set_function("rand",
-            [node](int lo, int hi) { return node->api_rand(lo, hi); });
+            [node](sol::object /*self*/, int lo, int hi) { return node->api_rand(lo, hi); });
         self.set_function("log",
-            [node](sol::variadic_args va) { node->api_log(va); });
+            [node](sol::object /*self*/, sol::variadic_args va) { node->api_log(va); });
         self.set_function("emit",
-            [node](std::string type, sol::optional<sol::table> data) {
+            [node](sol::object /*self*/, std::string type, sol::optional<sol::table> data) {
                 node->api_emit(std::move(type), data);
             });
         self.set_function("peers",
-            [node]() { return node->api_peers(); });
+            [node](sol::object /*self*/) { return node->api_peers(); });
     }
 }
 
