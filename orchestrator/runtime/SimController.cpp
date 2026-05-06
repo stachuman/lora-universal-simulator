@@ -108,6 +108,7 @@ CapturedSignal toCaptured(const InFlightT& f, float snr_db_at_rcv) {
     s.pre_sym        = f.pre_sym;
     s.t_sym_ms       = f.t_sym_ms;
     s.t_preamble_ms  = f.t_preamble_ms;
+    s.sf             = f.sf;
     return s;
 }
 

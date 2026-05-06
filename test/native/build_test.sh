@@ -37,6 +37,9 @@ run test_physics  "$SCRIPT_DIR/test_physics.cpp"  \
     "$REPO_ROOT/core/physics/LbtModel.cpp" \
     "$REPO_ROOT/core/link/LinkFadingState.cpp"
 
+run test_cross_sf_orthogonality "$SCRIPT_DIR/test_cross_sf_orthogonality.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp"
+
 test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
     "$SCRIPT_DIR/test_jsonconfig.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"

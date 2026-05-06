@@ -27,6 +27,15 @@ inline int fecSymbolsForCr(uint8_t cr_denom) {
 CollisionDecision evaluateCollision(const CollisionConfig& cfg,
                                     const CapturedSignal& primary,
                                     const CapturedSignal& interferer) {
+    // Cross-SF quasi-orthogonality: LoRa transmissions on the same channel
+    // using different spreading factors can be demodulated independently
+    // by their respective receivers, so they don't collide.  v1 models
+    // perfect orthogonality; the imperfect-orthogonality SIR penalty from
+    // Croce et al. 2018 is a future refinement.
+    if (primary.sf != interferer.sf) {
+        return {true, 0};  // clean: different SF, no collision
+    }
+
     // No temporal overlap → no interference (upstream line 242-244).
     if (interferer.end_ms <= primary.start_ms ||
         primary.end_ms   <= interferer.start_ms) {

@@ -53,6 +53,13 @@ struct CapturedSignal {
     uint16_t pre_sym;      // configured preamble symbols (typ. 16)
     float    t_sym_ms;     // symbol period in ms (= (1<<sf) / (bw_hz/1000))
     float    t_preamble_ms;// total preamble time in ms (pre_sym + 4.25)*t_sym
+    int      sf = 0;       // LoRa spreading factor (7..12). Used for cross-SF
+                           // quasi-orthogonality: TXes with different SFs on
+                           // the same channel can be demodulated independently
+                           // by their respective receivers.  Default 0 keeps
+                           // pre-existing aggregate-init call sites
+                           // backward-compatible — same-default-SF means the
+                           // 3-stage decision still runs as before.
 };
 
 // `reason_code` semantics (lifted from upstream's branch ordering):
