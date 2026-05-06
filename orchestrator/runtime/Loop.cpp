@@ -174,10 +174,13 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
     // the end of the run; stripping the per-emit counter avoids the
     // undercount T14 noted (script_log/script_emit weren't tallied).
 
-    const uint64_t step_ms = static_cast<uint64_t>(cfg.simulation.step_ms);
-    const uint64_t end_ms  = static_cast<uint64_t>(cfg.simulation.duration_ms);
+    const uint64_t step_ms   = static_cast<uint64_t>(cfg.simulation.step_ms);
+    const uint64_t end_ms    = static_cast<uint64_t>(cfg.simulation.duration_ms);
+    const uint64_t warmup_ms = static_cast<uint64_t>(cfg.simulation.warmup_ms);
 
     for (uint64_t now = 0; now < end_ms; now += step_ms) {
+        const bool in_warmup = (now < warmup_ms);
+
         // ---- 1. processCommands -------------------------------------------
         for (size_t k = 0; k < cfg.commands.size(); ++k) {
             if (command_fired[k]) continue;
@@ -209,11 +212,19 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
         }
 
         // ---- 2. deliverReceptions -----------------------------------------
-        // Indices of in_flight entries whose airtime has elapsed by `now`.
+        // During warmup we skip the in-flight pipeline entirely (matching
+        // upstream Orchestrator::executeStep — see lines ~1095-1126: the
+        // `if (!in_warmup) deliverReceptions(...)` guard, and the
+        // `if (in_warmup) routePackets(...) else registerTransmissions(...)`
+        // branch). routePackets is the instant-delivery handler; we
+        // implement its equivalent below in section 4.
         std::vector<size_t> ended;
-        ended.reserve(in_flight.size());
-        for (size_t i = 0; i < in_flight.size(); ++i) {
-            if (in_flight[i].end_ms <= now) ended.push_back(i);
+        if (!in_warmup) {
+            // Indices of in_flight entries whose airtime has elapsed by `now`.
+            ended.reserve(in_flight.size());
+            for (size_t i = 0; i < in_flight.size(); ++i) {
+                if (in_flight[i].end_ms <= now) ended.push_back(i);
+            }
         }
 
         for (size_t idx : ended) {
@@ -296,6 +307,53 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
         }
 
         // ---- 4. registerTransmissions -------------------------------------
+        // During warmup, route every drained TX instantly to all reachable
+        // receivers — no airtime delay, no collision check, no link loss
+        // (mirrors upstream routePackets at lines ~198-228). tx + rx events
+        // are still emitted with the computed airtime so downstream
+        // visualisers see the wire activity; only the physics path is
+        // bypassed. The intent is to let scripts establish steady state
+        // (route caches, advert exchanges, etc.) before the stress-test
+        // physics phase starts.
+        if (in_warmup) {
+            for (int i = 0; i < n; ++i) {
+                for (auto& p : nodes[i]->drainPendingTxs()) {
+                    const int sf    = (p.sf    >= 0) ? p.sf    : radios[i]->getSF();
+                    const int bw_hz = (p.bw_hz >= 0) ? p.bw_hz : radios[i]->getBwHz();
+                    const int cr    = (p.cr    >= 0) ? p.cr    : radios[i]->getCR();
+                    radios[i]->setRadioParams(sf, bw_hz, cr);
+
+                    const uint32_t airtime =
+                        radios[i]->getEstAirtimeFor(static_cast<int>(p.bytes.size()));
+
+                    EventLog::tx(static_cast<unsigned long>(now),
+                                 nodes[i]->name().c_str(),
+                                 reinterpret_cast<const uint8_t*>(p.bytes.data()),
+                                 static_cast<int>(p.bytes.size()),
+                                 airtime);
+
+                    for (int r = 0; r < n; ++r) {
+                        if (r == i) continue;
+                        LinkParams lp;
+                        if (!links.getLink(i, r, lp)) continue;
+                        nodes[r]->onRecv(p.bytes, lp.snr, lp.rssi,
+                                         /*link_id=*/0,
+                                         /*sim_ms=*/now);
+                        EventLog::rx(static_cast<unsigned long>(now),
+                                     nodes[i]->name().c_str(),
+                                     nodes[r]->name().c_str(),
+                                     lp.snr, lp.rssi,
+                                     reinterpret_cast<const uint8_t*>(p.bytes.data()),
+                                     static_cast<int>(p.bytes.size()),
+                                     airtime);
+                    }
+                }
+            }
+            // Skip the post-warmup physics path for this step.
+            global_clock.advanceMillis(step_ms);
+            continue;
+        }
+
         for (int i = 0; i < n; ++i) {
             for (auto& p : nodes[i]->drainPendingTxs()) {
                 const int sf    = (p.sf    >= 0) ? p.sf    : radios[i]->getSF();
