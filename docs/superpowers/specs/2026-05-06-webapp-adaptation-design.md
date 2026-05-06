@@ -18,8 +18,12 @@ generator's link engine to use lus's `PathLossModel`.
 **Primary purpose**: live tracking of a running simulation in a browser
 (node positions, packet animation, event timeline, script logs).
 
-**Secondary purpose**: author lat/lon-based topologies with live path-loss
-SNR preview, save them as scenario JSON for re-use.
+**Phase scope**: this spec covers the tracking/replay/REPL phase only.
+Topology creation (placing nodes on a map, computing path-loss preview,
+saving topology files) is **deferred to a separate next-phase spec**.
+For now, scenario JSON files are authored in a text editor and either
+uploaded via the simulation runner page or read from `scenarios/` on
+disk.
 
 ## 2. Non-goals
 
@@ -79,26 +83,30 @@ launches it via `ORCHESTRATOR_PATH` env var (default
 
 ## 4. Pages
 
-### 4.1 Pages we port
+### 4.1 Pages we port (this phase)
 
 | Page | Source line count | Adaptation effort | Purpose |
 |---|---|---|---|
 | `index.html` | 241 | trivial | landing, links to other pages |
 | `simulations.html` | 502 | small | list past runs, filter by status |
-| `simulation.html` | 789 | medium | launch a sim, see status, link to viz |
+| `simulation.html` | 789 | medium | launch a sim (paste/upload scenario JSON), see status, link to viz |
 | `visualize.html` | 2170 | medium | swim-lane replay (supersedes `tools/visualize.html`) |
 | `map_live.html` | 1885 | medium | live SSE-streamed map view |
-| `topology_creator.html` | 930 | **large** (rewrite link engine) | place nodes, save topology |
-| `topologies.html` | 322 | small | list saved topologies |
-| `topology_editor.html` | 1443 | small | edit existing topology coords/metadata |
 | `interactive.html` | 1417 | small | WebSocket-driven REPL session |
 
-### 4.2 Pages we drop
+### 4.2 Pages we drop (this phase)
 
 `scenarios.html`, `scenario_editor.html`, `configs.html`, `sweep.html`,
 `map_view.html` (duplicates map_live's renderer), `editor.html` (stub).
 
-### 4.3 Adaptation rules common to all pages
+### 4.3 Pages deferred to next phase
+
+`topology_creator.html`, `topologies.html`, `topology_editor.html` — all
+topology-authoring UI. Will be addressed in a separate spec; the
+backend services they depend on (`topo_generator`, `topo_tools`,
+`topologies` router) are also deferred to that phase.
+
+### 4.4 Adaptation rules common to all pages
 
 - Replace MeshCore-specific text (titles, labels) with simulator-agnostic
   wording. Title format: `"<Page name> — lora-universal-simulator"`.
@@ -109,27 +117,27 @@ launches it via `ORCHESTRATOR_PATH` env var (default
 
 ## 5. Backend
 
-### 5.1 Routers
+### 5.1 Routers (this phase)
 
 | Router | Status | Endpoints (selected) |
 |---|---|---|
 | `simulations` | port + adapt | `POST /api/sims`, `GET /api/sims`, `GET /api/sims/{id}`, `GET /api/sims/{id}/events?from=&to=`, `GET /api/sims/{id}/stream` (SSE) |
-| `topologies` | port + adapt | `GET /api/topologies`, `POST /api/topologies`, `GET /api/topologies/{id}`, `PUT /api/topologies/{id}`, `DELETE /api/topologies/{id}` |
-| `topo_creator` | port + adapt | `POST /api/topo-creator/preview-snr` (lus path-loss matrix), `POST /api/topo-creator/save` |
 | `interactive` | port + adapt | `POST /api/interactive/`, `GET /api/interactive/{id}`, `WS /api/interactive/{id}/ws` |
 
 **Dropped**: `firmware`, `sweeps`, `configs`.
 
-### 5.2 Services
+**Deferred to next phase**: `topologies`, `topo_creator`.
+
+### 5.2 Services (this phase)
 
 | Service | Status | Notes |
 |---|---|---|
 | `sim_manager` | port + adapt | Spawns `lus <config> <events>` subprocess. Streams stdout via asyncio.subprocess. Strips MeshCore-specific progress parsing. |
 | `event_index` | port verbatim | Already protocol-agnostic — indexes NDJSON for fast `from..to` slicing. |
 | `interactive_manager` | port + adapt | Spawns `lus -i <config>`. Same WebSocket relay shape, same session lifecycle. |
-| `topo_generator` | **rewrite** | Drop ITM/MeshCore map API. Replace with pure-Python log-distance + haversine helper that matches `core/link/PathLossModel.cpp` formulas. |
-| `topo_tools` | port + adapt | Drop firmware/role-aware conversion. Keep grid/random helpers from `tools/gen_grid.py`. |
 | `config_validator` | **rewrite** | New schema: `simulation` (with `path_loss` block), `nodes[i]` with `script` + `config` + optional `lat`/`lon`/`sf_rx_set`, `topology.links` (optional). Reject MeshCore-only fields with clear error messages. |
+
+**Deferred to next phase**: `topo_generator`, `topo_tools`.
 
 ### 5.3 Config schema (lus-flavored)
 
@@ -195,59 +203,25 @@ visualize and map_live pages must render or filter on each.
 Events not on this list pass through to the side panel as raw JSON
 (future-proof — protocols may emit new types).
 
-## 7. Topology creator — lus-specific behavior
+## 7. Topology creator — deferred to next phase
 
-This is the page with the most adaptation work.
+The topology creator page (Leaflet-based node placement, lus path-loss SNR
+preview, save-as-scenario flow) is deferred to a separate next-phase
+spec. Until then, scenario JSON files are authored in a text editor and
+either uploaded directly via `simulation.html` (paste box / file
+upload) or read from `scenarios/` on disk.
 
-### 7.1 Inputs (form fields)
-
-- **Region** (Leaflet bounding box select; preset list of cities/regions
-  reused from meshcore_real_sim)
-- **Node placement mode**: manual (click on map), grid, random uniform
-- **Node count** (for grid/random)
-- **Path-loss preset**: dropdown of `{alpha, sigma_db, ref_loss_db,
-  tx_power_dbm}` triples — "Suburban", "Urban", "Rural", "Custom"
-- **SF set per node**: dropdown — "Single SF (matches hardware)", "All
-  SFs 7..12 (paper-style multi-SF)"
-
-### 7.2 Live SNR preview
-
-When the user clicks "Preview SNR", the page POSTs `{nodes: [{lat, lon}],
-path_loss: {...}}` to `/api/topo-creator/preview-snr`. The backend
-computes the SNR matrix using the same log-distance formula the C++ side
-uses, returns `{matrix: [[snr]]}` as a JSON payload. The page colors
-edges between every pair: green ≥ +5 dB, yellow −7.5..+5 (SF7 boundary),
-amber −20..−7.5 (SF12-only), red < −20 (no link).
-
-The preview is computed in pure Python (no shell-out to lus) for snappy
-response. The formula must exactly match `core/link/PathLossModel.cpp`;
-acceptance criterion is a unit test that compares Python vs C++ output
-for a fixed set of distances.
-
-### 7.3 Save flow
-
-User clicks "Save scenario". The page composes a complete scenario JSON:
-
-```
-{
-  "simulation": { duration_ms: ..., path_loss: {chosen preset} },
-  "nodes": [{name: "n01", script: "<picked>", config: {}, lat, lon}, ...],
-  "topology": { "links": [] },   // empty — let path_loss drive
-  "commands": [],
-  "expect": []
-}
-```
-
-POSTs to `/api/topologies` which writes both `topology.json` (just nodes)
-and a starter scenario in the simulations directory. The user can then
-download the scenario, drop it into `scenarios/`, run via CLI; or launch
-it directly from the simulations page in the browser.
+When the next-phase spec lands, it will cover: Leaflet UI, region
+presets, node-placement modes (manual/grid/random), path-loss preset
+picker, live SNR preview backed by a pure-Python log-distance + haversine
+that exactly matches `core/link/PathLossModel.cpp`, and the save-as-
+scenario flow that emits a complete scenario JSON with `topology.links`
+empty (path-loss drives).
 
 ## 8. Live tracking flow (the primary use case)
 
 1. User opens `simulations.html`, clicks "New Simulation"
-2. Form: pick saved topology (or upload scenario JSON), set duration,
-   click Start
+2. Form: paste a scenario JSON (or upload a `.json` file), click Start
 3. Backend POSTs to `/api/sims`, spawns `lus <config> <events_path>`
 4. User is redirected to `simulation.html?id={id}` which auto-redirects
    to `map_live.html?id={id}` if a topology with lat/lon is in the config
@@ -264,7 +238,7 @@ it directly from the simulations page in the browser.
 
 `interactive.html` is a thin browser layer on top of `lus -i`:
 
-1. User picks a saved topology or uploads a config
+1. User pastes a scenario JSON or uploads a config file
 2. Page POSTs to `/api/interactive/`, receives a session id
 3. Page opens a WebSocket on `/api/interactive/{id}/ws`
 4. User types REPL commands; backend writes to lus's stdin
@@ -280,7 +254,7 @@ Same UX as meshcore_real_sim's interactive page; the only adaptation is
 the command-set documentation panel — replace MeshCore commands with
 lus's REPL commands (`step`, `run`, `cmd <node> <text>`, etc.).
 
-## 10. Project structure
+## 10. Project structure (this phase)
 
 ```
 lora-universal-simulator/
@@ -296,15 +270,11 @@ lora-universal-simulator/
 │   │   ├── config.py             (~50 lines, settings)
 │   │   ├── routers/
 │   │   │   ├── simulations.py
-│   │   │   ├── topologies.py
-│   │   │   ├── topo_creator.py
 │   │   │   └── interactive.py
 │   │   ├── services/
 │   │   │   ├── sim_manager.py
 │   │   │   ├── event_index.py
 │   │   │   ├── interactive_manager.py
-│   │   │   ├── topo_generator.py     (rewritten)
-│   │   │   ├── topo_tools.py
 │   │   │   └── config_validator.py   (rewritten)
 │   │   └── models/
 │   │       └── schemas.py            (pydantic models for lus schema)
@@ -316,19 +286,21 @@ lora-universal-simulator/
 │       ├── simulation.html
 │       ├── visualize.html
 │       ├── map_live.html
-│       ├── topology_creator.html
-│       ├── topologies.html
-│       ├── topology_editor.html
 │       └── interactive.html
 └── ... (existing dirs)
 ```
 
+Topology-related files (`topologies.html`, `topology_editor.html`,
+`topology_creator.html`, `routers/topologies.py`,
+`routers/topo_creator.py`, `services/topo_generator.py`,
+`services/topo_tools.py`) are not present in this phase. Their slots are
+reserved by the next-phase spec.
+
 ## 11. Testing strategy
 
 - **Backend unit tests** (Python pytest): config_validator (accepts lus
-  schema, rejects MeshCore fields with clear messages), topo_generator
-  (Python path-loss matches C++ output for fixed distance set), sim_manager
-  (spawn → SSE → reap)
+  schema, rejects MeshCore fields with clear messages), sim_manager
+  (spawn → SSE → reap), event_index (slice by time range)
 - **Integration test**: spawn the FastAPI app via httpx test client, POST
   a config, GET status until completed, fetch events, verify shape
 - **Smoke test**: run the existing scenario `s01_dv_dual_sf.json` through
