@@ -71,6 +71,18 @@ public:
 
     uint32_t getEstAirtimeFor(int len_bytes);
     float    getSnrThreshold() const;
+    // Multi-SF reception: a single-channel LoRa receiver dynamically tunes
+    // its SF on each incoming preamble. The receiver's _sf only constrains
+    // what it transmits, not what it can receive. Therefore the SNR
+    // threshold lookup at delivery time must use the PACKET's SF, not the
+    // receiver's — call this static overload from the loop's
+    // deliverReceptionsForStep so receivability is gated against the
+    // packet's SF rather than the radio's currently-configured SF.
+    //
+    // Out-of-range SF (sf < 7 || sf > 12) returns a very-tolerant fallback
+    // (-100 dB) so callers never spuriously drop packets when the data is
+    // malformed; a real config-time validation lives in setRadioParams.
+    static float getSnrThreshold(int sf);
     float    packetScore(float snr, int packet_len);
 
     // ---- Half-duplex / LBT bookkeeping ----------------------------------

@@ -134,12 +134,30 @@ uint32_t SimRadio::getEstAirtimeFor(int len_bytes) {
     return (uint32_t)(t_pre + pay_sym * t_sym);
 }
 
-float SimRadio::getSnrThreshold() const {
+// Multi-SF reception: a single-channel LoRa receiver dynamically tunes its
+// SF on each incoming preamble. The receiver's _sf only constrains what it
+// transmits, not what it can receive. Therefore the SNR threshold lookup
+// at delivery time uses the PACKET's SF, not the receiver's — call this
+// overload from the loop's deliverReceptionsForStep.
+//
+// Values are the standard SX1276/SX1262 demodulator SNR floors per SF for
+// CR4/5 (Semtech AN1200.22, Table 13): higher SF → lower threshold (more
+// tolerant of noise) at the cost of longer airtime. SF12 lands at -20 dB
+// which matches the paper's value (Centelles et al. 2024).
+//
+// Out-of-range SF returns a very-tolerant fallback (-100 dB) so callers
+// never spuriously drop packets on malformed metadata. Real input
+// validation lives in setRadioParams.
+float SimRadio::getSnrThreshold(int sf) {
     static const float snr_threshold[] = {
-        -7.5f, -10.0f, -12.5f, -15.0f, -17.5f, -20.0f
+        -7.5f, -10.0f, -12.5f, -15.0f, -17.5f, -20.0f  // SF7..SF12
     };
-    if (_sf < 7 || _sf > 12) return -7.5f;
-    return snr_threshold[_sf - 7];
+    if (sf < 7 || sf > 12) return -100.0f;
+    return snr_threshold[sf - 7];
+}
+
+float SimRadio::getSnrThreshold() const {
+    return getSnrThreshold(_sf);
 }
 
 float SimRadio::packetScore(float snr, int packet_len) {
