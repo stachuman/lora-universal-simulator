@@ -1,6 +1,7 @@
 add_library(lus_core STATIC
     link/LinkModel.cpp
     link/LinkFadingState.cpp
+    link/PathLossModel.cpp
     events/EventLog.cpp
     radio/SimRadio.cpp
     physics/CollisionModel.cpp

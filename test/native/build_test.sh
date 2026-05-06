@@ -59,6 +59,9 @@ run test_sf_rx_set_parsing "$SCRIPT_DIR/test_sf_rx_set_parsing.cpp" \
 run test_timerwheel "$SCRIPT_DIR/test_timerwheel.cpp" \
     "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp"
 
+run test_path_loss "$SCRIPT_DIR/test_path_loss.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp"
+
 LUA_CFLAGS="$(pkg-config --cflags lua5.4)"
 LUA_LIBS="$(pkg-config --libs lua5.4)"
 
