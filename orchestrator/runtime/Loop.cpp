@@ -147,9 +147,38 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
         host.loadScript(i, cfg.nodes[i].script_path);
     }
 
-    // on_init pass.
+    // sim_start lifecycle event — emitted before per-node onInit so
+    // downstream tooling (visualisers, log analyzers) sees a clear
+    // bookend marker at the start of the NDJSON stream. Matches upstream
+    // Orchestrator::initSimulation (line ~1002).
+    EventLog::simStart(0,
+                       n,
+                       cfg.simulation.step_ms,
+                       cfg.simulation.warmup_ms,
+                       /*hot_start=*/false);
+
+    // on_init pass; emit node_ready after each on_init returns. Universal
+    // sim has no firmware/pub_key concept, so we pass an empty key and
+    // use the script-side `role` config field (or "script" as a generic
+    // fallback) for the role label.
     for (int i = 0; i < n; ++i) {
         nodes[i]->onInit(cfg.nodes[i].config);
+        std::string role = "script";
+        const auto& nc = cfg.nodes[i].config;
+        if (nc.is_object()) {
+            auto it = nc.find("role");
+            if (it != nc.end() && it->is_string()) {
+                role = it->get<std::string>();
+            }
+        }
+        EventLog::nodeReady(0,
+                            cfg.nodes[i].name.c_str(),
+                            role.c_str(),
+                            /*pub_key=*/nullptr, /*key_len=*/0,
+                            cfg.nodes[i].has_location,
+                            cfg.nodes[i].lat,
+                            cfg.nodes[i].lon,
+                            /*firmware=*/nullptr);
     }
 
     // ---- Main loop state ----------------------------------------------------
@@ -440,6 +469,11 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
         // ---- 5. advance ---------------------------------------------------
         global_clock.advanceMillis(step_ms);
     }
+
+    // sim_end lifecycle event — bookend marker at the close of the
+    // NDJSON stream, before assertion evaluation. Matches upstream
+    // Orchestrator::emitSummary (line ~1236).
+    EventLog::simEnd(static_cast<unsigned long>(end_ms));
 
     LoopResult result;
     result.events_emitted     = static_cast<int>(EventLog::events().size());
