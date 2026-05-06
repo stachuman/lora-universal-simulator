@@ -8,4 +8,5 @@ compile_commands.json
 .vscode/
 test/native/*.bin
 test/*_events.ndjson
+scenarios/*_events.ndjson
 docs/superpoweras/
