@@ -265,6 +265,8 @@
   <span class="sep">|</span>
   <span id="event-count">0 events</span>
   <span class="spacer"></span>
+  <a id="link-timeline" href="#" style="margin-right:8px">Timeline</a>
+  <a id="link-details" href="#">Details</a>
 </div>
 
 <div id="map"></div>
@@ -1069,6 +1071,11 @@ async function loadSim() {
     statusEl.textContent = 'No ?id= in URL — load as /static/map_live.html?id=<sim_id>';
     return;
   }
+  // Wire navigation links to the same sim's other views.
+  const lt = document.getElementById('link-timeline');
+  const ld = document.getElementById('link-details');
+  if (lt) lt.href = '/static/visualize.html?id=' + encodeURIComponent(SIM_ID);
+  if (ld) ld.href = '/static/simulation.html?id=' + encodeURIComponent(SIM_ID);
   statusEl.textContent = 'Loading meta…';
 
   let meta;
