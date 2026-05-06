@@ -17,6 +17,7 @@
 #pragma once
 
 #include "core/clock/VirtualClock.h"
+#include "core/link/LinkFadingState.h"
 #include "core/link/LinkModel.h"
 #include "core/physics/CollisionModel.h"
 #include "core/physics/LbtModel.h"
@@ -129,6 +130,14 @@ private:
     std::unordered_map<std::string, int> _name_to_id;
     std::vector<bool>                    _command_fired;
     std::vector<InFlight>                _in_flight;
+
+    // Per-link fading state. Indexed `sender * n + receiver` (directed:
+    // n*n entries, not symmetric n*(n-1)/2). Directed lets the forward
+    // and reverse links of a pair fade independently — typical of real-
+    // world link models. Upstream FLoRa uses reciprocal/symmetric fading;
+    // matching that would be a future refinement.
+    std::vector<LinkFadingState> _fading;
+    std::vector<uint64_t>        _fading_last_update_ms;
 
     uint64_t _now_ms      = 0;
     bool     _initialized = false;

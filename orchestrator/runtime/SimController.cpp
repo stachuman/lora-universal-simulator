@@ -253,6 +253,14 @@ void SimController::initialize() {
     _command_fired.assign(_cfg.commands.size(), false);
     _in_flight.clear();
 
+    // Per-link fading state (directed n*n; see SimController.h note).
+    // Zero-init: first delivery on a link sees last_update_ms == 0 so dt
+    // equals `now`, which in OU mode collapses alpha to ~0 → effectively
+    // i.i.d. for the first sample. That's correct: there's no prior
+    // history to correlate against.
+    _fading.assign(static_cast<size_t>(n) * static_cast<size_t>(n), LinkFadingState{});
+    _fading_last_update_ms.assign(static_cast<size_t>(n) * static_cast<size_t>(n), 0ULL);
+
     // LBT model is constructed but enforcement is deferred (Y2 TODO below).
     _lbt = std::make_unique<LbtModel>(
         n,
@@ -334,9 +342,25 @@ void SimController::deliverReceptionsForStep() {
             LinkParams lp;
             if (!_links->getLink(tx.sender_id, rcv, lp)) continue;  // no link
 
-            // TODO(Y2): apply advanceFading() per-link. Skipped in v1 to
-            // keep the loop deterministic-ish without per-link state.
-            const float snr_at_rcv = lp.snr;
+            // Per-link fading. advanceFading() is a no-op when
+            // lp.snr_std_dev <= 0 (returns 0.0f), so configs without
+            // fading remain bit-exactly deterministic. Indexing is
+            // directed (sender * n + rcv) so forward/reverse links can
+            // fade independently. snr_coherence_ms is a float in JSON
+            // but the OU helper takes uint64_t — cast at the call site.
+            const size_t link_idx =
+                static_cast<size_t>(tx.sender_id) * static_cast<size_t>(n)
+                + static_cast<size_t>(rcv);
+            _fading_last_update_ms[link_idx] = now;
+            const uint64_t coh_ms = static_cast<uint64_t>(
+                _cfg.simulation.radio.snr_coherence_ms);
+            const float fade_offset =
+                advanceFading(_fading[link_idx],
+                              lp.snr_std_dev,
+                              coh_ms,
+                              /*step_ms=*/now,
+                              _rng);
+            const float snr_at_rcv = lp.snr + fade_offset;
 
             // Order: collision → weak signal → loss → deliver.
             // Collision wins over weak signal (a packet is collided

@@ -46,6 +46,9 @@ run test_multi_sf_reception "$SCRIPT_DIR/test_multi_sf_reception.cpp" \
 run test_preamble_override "$SCRIPT_DIR/test_preamble_override.cpp" \
     "$REPO_ROOT/core/radio/SimRadio.cpp"
 
+run test_fading_applied "$SCRIPT_DIR/test_fading_applied.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp"
+
 test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
     "$SCRIPT_DIR/test_jsonconfig.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"
