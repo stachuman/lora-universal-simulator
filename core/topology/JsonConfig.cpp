@@ -23,6 +23,7 @@
 
 #include "core/topology/JsonConfig.h"
 
+#include <filesystem>
 #include <fstream>
 #include <set>
 #include <stdexcept>
@@ -329,6 +330,11 @@ SimConfig loadFromFile(const std::string& path) {
     json j = json::parse(f);
     auto cfg = parseJson(j);
     validateConfig(cfg);
+    // Record the absolute path so downstream code can resolve relative
+    // references (e.g. nodes[i].script) against the config's directory.
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(path, ec);
+    cfg.source_path = ec ? path : abs.string();
     return cfg;
 }
 

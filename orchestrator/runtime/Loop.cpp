@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <random>
 #include <string>
@@ -65,6 +66,53 @@ struct InFlight {
     std::vector<int>      interferer_at_rcv;
     std::vector<float>    interferer_snr_at_rcv;
 };
+
+// Resolve a node script path against multiple candidate locations so the
+// orchestrator works regardless of the user's current working directory.
+// Tried, in order:
+//   1. absolute path (used as-is)
+//   2. <config-dir>/<script>            (config-relative)
+//   3. <config-dir>/../<script>         (sibling-of-config-dir; covers the
+//                                        common test/<cfg>.json + examples/
+//                                        <script>.lua repo-root layout)
+//   4. <cwd>/<script>                   (backward compat for users whose
+//                                        configs already assume cwd-relative)
+// Returns the first existing absolute path; otherwise throws a
+// std::runtime_error listing every candidate that was tried.
+static std::string resolveScriptPath(const std::string& script_path,
+                                     const std::string& config_source_path) {
+    namespace fs = std::filesystem;
+    fs::path p(script_path);
+    std::vector<fs::path> candidates;
+
+    if (p.is_absolute()) {
+        candidates.push_back(p);
+    } else {
+        if (!config_source_path.empty()) {
+            fs::path config_dir = fs::path(config_source_path).parent_path();
+            candidates.push_back(config_dir / p);
+            candidates.push_back(config_dir.parent_path() / p);
+        }
+        std::error_code cwd_ec;
+        fs::path cwd = fs::current_path(cwd_ec);
+        if (!cwd_ec) candidates.push_back(cwd / p);
+    }
+
+    for (const auto& c : candidates) {
+        std::error_code ec;
+        if (fs::exists(c, ec)) {
+            std::error_code abs_ec;
+            fs::path abs = fs::absolute(c, abs_ec);
+            return abs_ec ? c.string() : abs.string();
+        }
+    }
+
+    std::string msg = "cannot resolve script path '" + script_path + "'. Tried:\n";
+    for (const auto& c : candidates) {
+        msg += "  - " + c.string() + "\n";
+    }
+    throw std::runtime_error(msg);
+}
 
 // Build the CapturedSignal struct used by evaluateCollision().
 CapturedSignal toCaptured(const InFlight& f, float snr_db_at_rcv) {
@@ -144,7 +192,9 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
     // Register + load scripts (must precede onInit so `self` is populated).
     for (int i = 0; i < n; ++i) {
         host.registerNode(i, nodes[i].get());
-        host.loadScript(i, cfg.nodes[i].script_path);
+        std::string resolved =
+            resolveScriptPath(cfg.nodes[i].script_path, cfg.source_path);
+        host.loadScript(i, resolved);
     }
 
     // sim_start lifecycle event — emitted before per-node onInit so

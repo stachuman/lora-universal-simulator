@@ -28,6 +28,12 @@
 #include <vector>
 
 struct SimConfig {
+    // Absolute path of the JSON file we were loaded from (empty if loaded
+    // from a string). Used by the orchestrator to resolve relative paths
+    // (e.g. nodes[i].script) against the config's own directory rather
+    // than the current working directory.
+    std::string source_path;
+
     // Optional human-readable name (top-level "_name" metadata). Other
     // underscore-prefixed top-level keys are intentionally ignored.
     std::string name;
