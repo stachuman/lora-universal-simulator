@@ -157,6 +157,26 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                        cfg.simulation.warmup_ms,
                        /*hot_start=*/false);
 
+    // Sanity check: warn if step_ms is coarser than the shortest LoRa
+    // symbol time across all nodes. Upstream emits the same diagnostic
+    // (Orchestrator::initSimulation lines ~1032-1046) — physics
+    // resolution suffers when the tick clock is slower than the radio's
+    // own symbol cadence. Pure diagnostic; no behavioural change.
+    {
+        double min_t_sym = 1e9;
+        for (auto& r : radios) {
+            const double t = r->getSymbolMs();
+            if (t < min_t_sym) min_t_sym = t;
+        }
+        if (min_t_sym < 1e9 &&
+            static_cast<double>(cfg.simulation.step_ms) > min_t_sym) {
+            std::fprintf(stderr,
+                "lus: warning — step_ms=%d exceeds min t_sym=%.3fms "
+                "across nodes; physics resolution may be too coarse\n",
+                cfg.simulation.step_ms, min_t_sym);
+        }
+    }
+
     // on_init pass; emit node_ready after each on_init returns. Universal
     // sim has no firmware/pub_key concept, so we pass an empty key and
     // use the script-side `role` config field (or "script" as a generic
