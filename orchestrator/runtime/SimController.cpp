@@ -527,9 +527,29 @@ void SimController::deliverReceptionsForStep() {
                 }
             }
 
-            // TODO(Y2): strict half-duplex enforcement — drop reception if
-            // `rcv`'s SimRadio was in TX_WAIT for any of [tx.start, tx.end].
-            // For v1 we trust the script.
+            // Strict half-duplex enforcement: a node can't receive while
+            // it's transmitting. If rcv has any of its own in-flight TX
+            // overlapping [tx.start_ms, tx.end_ms] (any time during the
+            // incoming packet's airtime), the radio was busy TX'ing and
+            // missed the packet — emit drop_halfduplex instead of rx.
+            bool rcv_was_tx = false;
+            for (const auto& other : _in_flight) {
+                if (other.sender_id != rcv) continue;
+                if (other.start_ms < tx.end_ms && other.end_ms > tx.start_ms) {
+                    rcv_was_tx = true;
+                    break;
+                }
+            }
+            if (rcv_was_tx) {
+                EventLog::dropHalfDuplex(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms));
+                continue;
+            }
 
             // Deliver to the script.
             _nodes[rcv]->onRecv(tx.bytes, snr_at_rcv, lp.rssi,
