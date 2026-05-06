@@ -1169,7 +1169,7 @@
       const viewBtn = document.getElementById('btn-view-timeline');
       viewBtn.style.display = '';
       viewBtn.onclick = () => {
-        window.location.href = '/static/visualize.html?sim=' + encodeURIComponent(simId);
+        window.location.href = '/static/visualize.html?id=' + encodeURIComponent(simId);
       };
     } catch (e) {
       addSystemEvent('Export failed: ' + e.message);

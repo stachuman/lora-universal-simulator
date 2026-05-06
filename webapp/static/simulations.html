@@ -249,7 +249,7 @@
     parts.push('<a href="/static/simulation.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">' + (sim.status === 'running' ? 'Progress' : 'Details') + '</a>');
 
     if (sim.status === 'completed') {
-      parts.push('<a href="/static/visualize.html?sim=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Timeline</a>');
+      parts.push('<a href="/static/visualize.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Timeline</a>');
       parts.push('<a href="/static/map_live.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Map</a>');
     }
 

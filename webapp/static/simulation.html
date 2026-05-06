@@ -614,7 +614,7 @@
       const links = document.getElementById('result-links');
       card.style.display = '';
       links.innerHTML =
-        '<a href="/static/visualize.html?sim=' + encodeURIComponent(simId) + '" class="btn btn-primary">View Timeline</a>' +
+        '<a href="/static/visualize.html?id=' + encodeURIComponent(simId) + '" class="btn btn-primary">View Timeline</a>' +
         '<a href="/static/map_live.html?id=' + encodeURIComponent(simId) + '" class="btn">View Map</a>' +
         '<a href="/static/interactive.html?id=' + encodeURIComponent(simId) + '" class="btn">Interactive</a>';
       loadStats();
