@@ -229,3 +229,34 @@ sol::table ScriptedNode::api_peers() {
     // protocol behaviour must do it on-air). For now: empty table.
     return _host.lua().create_table();
 }
+
+// Dynamic RX-SF retune. Mutates this node's slot in SimController's
+// _node_sf_rx_set; the loop reads that slot at delivery time, so the change
+// takes effect for subsequent packets without restarting the radio. Models
+// real-hardware behaviour where retuning the modem to a different SF is a
+// register write, not a reboot.
+//
+// Out-of-range SFs are clamped to [5,12] to match the JsonConfig sf_rx_set
+// parser. If no SFs survive validation in set_rx_sf_set, the existing set is
+// left untouched — scripts shouldn't be able to deafen a node by passing
+// `{}` or a table of invalid entries.
+void ScriptedNode::api_set_rx_sf(int sf) {
+    if (!_sf_rx_set) return;  // not attached yet (shouldn't happen post-init)
+    if (sf < 5) sf = 5;
+    if (sf > 12) sf = 12;
+    *_sf_rx_set = { sf };
+}
+
+void ScriptedNode::api_set_rx_sf_set(sol::table sf_set) {
+    if (!_sf_rx_set) return;
+    std::vector<int> result;
+    for (auto& kv : sf_set) {
+        sol::object v = kv.second;
+        int sf = -1;
+        if      (v.is<int64_t>()) sf = static_cast<int>(v.as<int64_t>());
+        else if (v.is<double>())  sf = static_cast<int>(v.as<double>());
+        else                       continue;
+        if (sf >= 5 && sf <= 12) result.push_back(sf);
+    }
+    if (!result.empty()) *_sf_rx_set = std::move(result);
+}

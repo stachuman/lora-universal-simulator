@@ -1,0 +1,28 @@
+{
+  "_name": "t08_dynamic_sf",
+  "_desc": "Dynamic SF retune via self:set_rx_sf. bob defaults to SF7 reception. First alice TX at SF12 is dropped with drop_sf_mismatch (proves baseline single-SF gating). bob then receives `set_rx_sf 12` and retunes. Second alice TX at SF12 is received cleanly. Models announce-and-tune protocols where a node tells listeners to switch SF for follow-up traffic.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/sf_picker.lua", "config": {} },
+    { "name": "bob",   "script": "examples/sf_picker.lua", "config": {} }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000,  "node": "alice", "command": "send_sf 12 pre-retune" },
+    { "at_ms": 5000,  "node": "bob",   "command": "set_rx_sf 12" },
+    { "at_ms": 10000, "node": "alice", "command": "send_sf 12 post-retune" }
+  ],
+  "expect": [
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob", "min": 1, "max": 1 },
+    { "type": "event_count_min", "event_type": "rx", "node": "bob", "min": 1 }
+  ]
+}

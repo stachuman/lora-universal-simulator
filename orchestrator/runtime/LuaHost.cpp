@@ -73,6 +73,10 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node) {
             });
         self.set_function("peers",
             [node](sol::object /*self*/) { return node->api_peers(); });
+        self.set_function("set_rx_sf",
+            [node](sol::object /*self*/, int sf) { node->api_set_rx_sf(sf); });
+        self.set_function("set_rx_sf_set",
+            [node](sol::object /*self*/, sol::table t) { node->api_set_rx_sf_set(t); });
     }
 }
 

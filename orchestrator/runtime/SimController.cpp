@@ -244,6 +244,12 @@ void SimController::initialize() {
         _nodes.emplace_back(std::make_unique<ScriptedNode>(
             i, _cfg.nodes[i].name,
             _host, *_radios[i], _events_out, _clock, _rng));
+        // Hand the node a stable pointer to its sf_rx_set slot so scripts
+        // can retune at runtime via self:set_rx_sf(...). _node_sf_rx_set
+        // was sized once via assign() above; the outer vector never
+        // reallocates, so &_node_sf_rx_set[i] stays valid for the lifetime
+        // of this controller.
+        _nodes[i]->attachSfRxSet(&_node_sf_rx_set[i]);
     }
 
     // Register + load scripts (must precede onInit so `self` is populated).

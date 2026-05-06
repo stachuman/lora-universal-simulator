@@ -72,9 +72,17 @@ public:
     void     api_log(sol::variadic_args args);
     void     api_emit(std::string type, sol::optional<sol::table> data);
     sol::table api_peers();
+    void     api_set_rx_sf(int sf);                      // single-SF retune
+    void     api_set_rx_sf_set(sol::table sf_set);       // multi-SF retune (opt-in)
 
     int                id()   const { return _id; }
     const std::string& name() const { return _name; }
+
+    // Called by SimController during init to point this node at its slot in
+    // SimController::_node_sf_rx_set. The pointed-to vector is stable for the
+    // lifetime of the controller (the outer vector is sized once via
+    // assign(n, {}) and never reallocates).
+    void attachSfRxSet(std::vector<int>* slot) { _sf_rx_set = slot; }
 
 private:
     int               _id;
@@ -86,6 +94,7 @@ private:
     std::mt19937&     _sim_rng;
     TimerWheel        _timers;
     std::vector<PendingTx> _pending_txs;
+    std::vector<int>* _sf_rx_set = nullptr;  // borrowed; set via attachSfRxSet
     // Note: timer callbacks are stored Lua-side under _LUS.nodes[id].timers[handle].
     // We don't keep them in C++ to avoid double-bookkeeping.
 };
