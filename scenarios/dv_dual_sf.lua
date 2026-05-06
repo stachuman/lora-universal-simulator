@@ -113,9 +113,7 @@ end
 
 local function beacon_fire(self)
   local frame = pack_beacon(self)
-  self:emit("beacon_tx", { n_entries = (function()
-    local c = 0; for _ in pairs(self.rt) do c = c + 1 end; return c
-  end)() })
+  self:emit("beacon_tx", { n_entries = rt_count(self.rt) })
   self:tx(frame, { sf = self.routing_sf })
   self:after(self.beacon_period_ms, function() beacon_fire(self) end)
 end
