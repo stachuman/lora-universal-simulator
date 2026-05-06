@@ -93,6 +93,22 @@ local function parse_data(frame)
   }
 end
 
+-- ---------- routing helpers --------------------------------------------------
+
+local function rt_count(rt)
+  local c = 0
+  for _ in pairs(rt) do c = c + 1 end
+  return c
+end
+
+local function maybe_emit_rt_full(self)
+  if self.rt_full_emitted then return end
+  if rt_count(self.rt) >= self.peer_count then
+    self:emit("rt_full", { peers = self.peer_count })
+    self.rt_full_emitted = true
+  end
+end
+
 -- ---------- script lifecycle ------------------------------------------------
 
 local function beacon_fire(self)
@@ -136,7 +152,8 @@ function on_recv(self, frame, meta)
     local b = parse_beacon(frame)
     if not b then return end
     self:emit("beacon_rx", { src = b.src, n_entries = #b.entries })
-    -- Direct entry: sender is a 1-hop neighbour at measured SNR.
+
+    -- Direct entry first.
     self.rt[b.src] = {
       next_hop = b.src,
       score    = meta.snr,
@@ -144,6 +161,36 @@ function on_recv(self, frame, meta)
       last_seen_ms = self:now(),
     }
     self:emit("rt_update", { dest = b.src, next = b.src, score = meta.snr, hops = 1 })
+
+    -- DV merge: each entry in the beacon (other than self) is a candidate
+    -- route via the beacon's sender.
+    for _, e in ipairs(b.entries) do
+      if e.dest ~= self.id and e.next ~= self.id then
+        local combined_score = math.min(meta.snr, e.score)
+        local combined_hops  = e.hops + 1
+        if combined_hops <= 8 then
+          local cur = self.rt[e.dest]
+          local better = (cur == nil)
+            or (combined_score > cur.score)
+            or (combined_score == cur.score and combined_hops < cur.hops)
+          if better then
+            self.rt[e.dest] = {
+              next_hop = b.src,
+              score    = combined_score,
+              hops     = combined_hops,
+              last_seen_ms = self:now(),
+            }
+            self:emit("rt_update", {
+              dest = e.dest, next = b.src,
+              score = combined_score, hops = combined_hops,
+            })
+          end
+        end
+      end
+    end
+
+    maybe_emit_rt_full(self)
+    return
   end
 end
 

@@ -1,0 +1,41 @@
+{
+  "_name": "t11_dv_convergence",
+  "_desc": "4-node line on lat/lon path-loss. After ~3 beacon rounds every node should have a routing table covering all 3 peers and emit rt_full.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance",
+      "alpha": 3.0,
+      "sigma_db": 0.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 14.0
+    }
+  },
+  "nodes": [
+    { "name": "alice",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
+      "lat": 41.3900, "lon": 2.1600 },
+    { "name": "bob",     "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
+      "lat": 41.4035, "lon": 2.1600 },
+    { "name": "charlie", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
+      "lat": 41.4170, "lon": 2.1600 },
+    { "name": "dave",    "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
+      "lat": 41.4305, "lon": 2.1600 }
+  ],
+  "topology": { "links": [] },
+  "commands": [],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice",   "emit_type": "rt_full", "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "bob",     "emit_type": "rt_full", "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "charlie", "emit_type": "rt_full", "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "dave",    "emit_type": "rt_full", "value": "\"peers\":3" }
+  ]
+}
