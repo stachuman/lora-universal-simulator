@@ -85,6 +85,26 @@ static SimConfig parseJson(const json& j) {
                 if (hw.contains("tx_to_rx_delay_ms")) cfg.simulation.radio.tx_to_rx_delay_ms = hw["tx_to_rx_delay_ms"].get<float>();
             }
         }
+        // Optional log-distance path-loss block (Phase R.2). When present,
+        // SimController computes per-pair SNR/RSSI from haversine distance
+        // between nodes' (lat, lon) and skips pairs lacking lat/lon.
+        if (sim.contains("path_loss")) {
+            const auto& pl = sim["path_loss"];
+            cfg.simulation.path_loss.present = true;
+            if (pl.contains("model"))          cfg.simulation.path_loss.model          = pl["model"].get<std::string>();
+            if (pl.contains("alpha"))          cfg.simulation.path_loss.alpha          = pl["alpha"].get<double>();
+            if (pl.contains("sigma_db"))       cfg.simulation.path_loss.sigma_db       = pl["sigma_db"].get<double>();
+            if (pl.contains("ref_distance_m")) cfg.simulation.path_loss.ref_distance_m = pl["ref_distance_m"].get<double>();
+            if (pl.contains("ref_loss_db"))    cfg.simulation.path_loss.ref_loss_db    = pl["ref_loss_db"].get<double>();
+            if (pl.contains("noise_floor_db")) cfg.simulation.path_loss.noise_floor_db = pl["noise_floor_db"].get<double>();
+            if (pl.contains("tx_power_dbm"))   cfg.simulation.path_loss.tx_power_dbm   = pl["tx_power_dbm"].get<double>();
+            if (cfg.simulation.path_loss.model != "log_distance") {
+                throw std::runtime_error(
+                    "config error at simulation.path_loss: model must be "
+                    "\"log_distance\" for v1 (got \""
+                    + cfg.simulation.path_loss.model + "\")");
+            }
+        }
         // NOTE: simulation.firmware, simulation.hot_start, simulation.delay_tuning
         // were intentionally stripped during the MeshCore -> universal port.
     }

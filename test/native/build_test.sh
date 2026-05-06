@@ -53,6 +53,10 @@ test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
     "$SCRIPT_DIR/test_jsonconfig.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"
 
+test_with_arg test_path_loss_config "$SCRIPT_DIR/sample_path_loss.json" \
+    "$SCRIPT_DIR/test_path_loss_config.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp"
+
 run test_sf_rx_set_parsing "$SCRIPT_DIR/test_sf_rx_set_parsing.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"
 

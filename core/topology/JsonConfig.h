@@ -57,6 +57,21 @@ struct SimConfig {
         float tx_to_rx_delay_ms = 5.0f;
     };
 
+    // Optional log-distance path-loss block. When `present` is true the
+    // SimController computes the link matrix from per-node lat/lon at
+    // sim init (see Phase R.2 plan). When false, only explicit
+    // topology.links entries apply.
+    struct PathLossSpec {
+        bool        present        = false;
+        std::string model          = "log_distance";
+        double      alpha          = 3.0;
+        double      sigma_db       = 0.0;
+        double      ref_distance_m = 1.0;
+        double      ref_loss_db    = 40.0;
+        double      noise_floor_db = -120.0;
+        double      tx_power_dbm   = 20.0;
+    };
+
     struct SimulationConfig {
         unsigned long duration_ms = 300000;
         int           step_ms     = 1;
@@ -67,7 +82,8 @@ struct SimConfig {
         uint32_t      epoch_start = 1700000000;
         uint64_t      seed        = 42;
 
-        RadioConfig radio;
+        RadioConfig  radio;
+        PathLossSpec path_loss;
     };
     SimulationConfig simulation;
 

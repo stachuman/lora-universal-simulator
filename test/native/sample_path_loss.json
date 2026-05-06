@@ -1,0 +1,25 @@
+{
+  "_name": "sample_path_loss",
+  "simulation": {
+    "duration_ms": 1000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance",
+      "alpha": 3.0,
+      "sigma_db": 4.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 20.0
+    }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/flooder.lua", "lat": 41.39, "lon":  2.16 },
+    { "name": "bob",   "script": "examples/flooder.lua", "lat": 41.40, "lon":  2.17 }
+  ],
+  "topology": { "links": [] },
+  "commands": [],
+  "expect": []
+}
