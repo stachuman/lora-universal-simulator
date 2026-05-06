@@ -1,0 +1,1111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Map — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script src="/static/js/api.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+
+  .mlv-status {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .mlv-status .sep { color: var(--text-dim); }
+  .mlv-status .spacer { flex: 1; }
+
+  /* Legend panel anchored inside the map as a Leaflet control */
+  .mlv-legend-panel {
+    background: rgba(255,255,255,0.94);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 10px;
+    color: var(--text);
+    line-height: 1.5;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    max-width: 220px;
+  }
+  .mlv-legend-panel .section-title {
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 9px;
+    margin-top: 4px;
+    margin-bottom: 2px;
+  }
+  .mlv-legend-panel .section-title:first-child { margin-top: 0; }
+  .mlv-legend-panel .row {
+    display: flex; align-items: center; gap: 5px;
+    white-space: nowrap;
+  }
+  .mlv-legend-panel .row-pair {
+    display: flex; gap: 10px;
+  }
+  .mlv-legend-panel .dot {
+    display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .mlv-legend-panel .bar {
+    display: inline-block; width: 18px; height: 3px;
+    flex-shrink: 0;
+    border-radius: 1px;
+  }
+  .mlv-legend-panel .bar.dashed {
+    background-image: linear-gradient(to right, currentColor 55%, transparent 55%) !important;
+    background-size: 6px 100%;
+    background-color: transparent !important;
+  }
+  .mlv-legend-panel .bar.halo {
+    box-shadow: 0 0 0 2px rgba(30,27,75,0.55);
+  }
+  .mlv-legend-panel .snr-gradient {
+    display: inline-block;
+    width: 80px; height: 6px; border-radius: 2px; flex-shrink: 0;
+    background: linear-gradient(to right,
+      hsl(0, 75%, 38%),
+      hsl(45, 75%, 42%),
+      hsl(90, 75%, 46%),
+      hsl(130, 75%, 50%));
+  }
+  .mlv-legend-panel .snr-labels {
+    display: flex; justify-content: space-between;
+    width: 80px; font-size: 8.5px; color: var(--text-muted);
+    margin-top: -1px;
+  }
+  .mlv-legend-panel .overlay-toggle {
+    display: flex; align-items: center; gap: 4px;
+    cursor: pointer;
+  }
+  .mlv-legend-panel .overlay-toggle input { margin: 0; cursor: pointer; }
+
+  /* Airtime utilization bars */
+  .mlv-airtime-bar { pointer-events: none; }
+  .mlv-airtime-bar .bar-bg {
+    width: 8px; height: 34px;
+    background: rgba(255,255,255,0.8);
+    border: 1px solid rgba(0,0,0,0.3);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.45);
+  }
+  .mlv-airtime-bar .bar-fill {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    background: #22c55e;
+    transition: height 0.3s ease, background-color 0.3s ease;
+  }
+  .mlv-airtime-bar .bar-label {
+    position: absolute;
+    left: 12px; top: 1px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    background: rgba(255,255,255,0.9);
+    padding: 1px 4px;
+    border-radius: 2px;
+    white-space: nowrap;
+    line-height: 1.3;
+  }
+
+  /* TX effectiveness bar */
+  .mlv-eff-bar { pointer-events: none; }
+  .mlv-eff-bar .bar-bg {
+    width: 8px; height: 34px;
+    background: rgba(255,255,255,0.8);
+    border: 1px solid rgba(0,0,0,0.3);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.45);
+  }
+  .mlv-eff-bar .bar-fill {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    background: #22c55e;
+    transition: height 0.3s ease, background-color 0.3s ease;
+  }
+  .mlv-eff-bar .bar-label {
+    position: absolute;
+    right: 12px; top: 1px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text);
+    background: rgba(255,255,255,0.9);
+    padding: 1px 4px;
+    border-radius: 2px;
+    white-space: nowrap;
+    line-height: 1.3;
+  }
+  .mlv-eff-bar .bar-label.dim { color: var(--text-dim); font-weight: 500; }
+
+  /* Collision count badge */
+  .mlv-collision-badge { pointer-events: none; }
+  .mlv-collision-badge .badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background: #dc2626;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    border: 1.5px solid rgba(255,255,255,0.9);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    text-align: center;
+    min-width: 14px;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #map { flex: 1; min-height: 0; background: #e8edf2; }
+  #map .leaflet-tile-pane { filter: saturate(0.5) brightness(0.98) contrast(0.85); }
+
+  /* Playback controls bar */
+  .mlv-controls {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .mlv-controls button {
+    padding: 3px 10px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .mlv-controls button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .mlv-controls button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .mlv-controls .time-display {
+    font-family: var(--font-mono);
+    min-width: 150px;
+    color: var(--text);
+  }
+  .mlv-controls .sep { color: var(--text-dim); }
+  .mlv-controls .speed-label { color: var(--text-muted); }
+
+  /* Log panel */
+  .mlv-log {
+    flex-shrink: 0;
+    height: 100px;
+    overflow-y: auto;
+    background: var(--bg-primary, #0d1117);
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    padding: 2px 6px;
+  }
+  .mlv-log .log-line {
+    display: flex;
+    gap: 8px;
+    padding: 1px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .mlv-log .log-time { color: var(--text-dim); flex-shrink: 0; }
+  .mlv-log .log-type { color: var(--accent); flex-shrink: 0; min-width: 70px; }
+  .mlv-log .log-msg  { color: var(--text); word-break: break-all; }
+
+  .mlv-placeholder {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    color: var(--text-muted);
+    text-align: center;
+    padding: 24px;
+  }
+  .mlv-placeholder[hidden] { display: none; }
+  .mlv-placeholder .big { font-size: 14px; color: var(--text); font-weight: 600; }
+  .mlv-placeholder .small { font-size: 11px; }
+
+  .leaflet-container { font: inherit; }
+  .leaflet-tooltip.mlv-label {
+    background: rgba(255,255,255,0.92);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 10px;
+    padding: 2px 5px;
+    box-shadow: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="mlv-status">
+  <span id="status">Loading…</span>
+  <span class="sep">|</span>
+  <span id="node-count">0 nodes</span>
+  <span class="sep">|</span>
+  <span id="event-count">0 events</span>
+  <span class="spacer"></span>
+</div>
+
+<div id="map"></div>
+
+<div id="no-coords" class="mlv-placeholder" hidden>
+  <div class="big">Map not available</div>
+  <div class="small">
+    This simulation's nodes don't have lat/lon coordinates configured.<br>
+    The map view requires geographic node positions.
+  </div>
+</div>
+
+<div class="mlv-controls" id="controls" style="display:none">
+  <button id="btn-pause" title="Pause / resume replay">⏸ Pause</button>
+  <button id="btn-restart" title="Restart replay from beginning">⏮ Restart</button>
+  <span class="sep">|</span>
+  <span class="speed-label">Speed:</span>
+  <button class="speed-btn" data-speed="1">1×</button>
+  <button class="speed-btn" data-speed="10">10×</button>
+  <button class="speed-btn active" data-speed="100">100×</button>
+  <button class="speed-btn" data-speed="1000">1000×</button>
+  <span class="sep">|</span>
+  <span class="time-display" id="time-display">now: 0.0s / 0.0s</span>
+</div>
+
+<div class="mlv-log" id="log-panel"></div>
+
+<script>
+// ── Parse sim id from URL ─────────────────────────────────────────────
+const params = new URLSearchParams(window.location.search);
+const SIM_ID = params.get('id');
+
+// ── DOM refs ──────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const statusEl      = $('status');
+const nodeCountEl   = $('node-count');
+const eventCountEl  = $('event-count');
+const mapEl         = $('map');
+const noCoordsEl    = $('no-coords');
+const controlsEl    = $('controls');
+const btnPause      = $('btn-pause');
+const btnRestart    = $('btn-restart');
+const timeDisplayEl = $('time-display');
+const logPanel      = $('log-panel');
+
+// ── Styling helpers ───────────────────────────────────────────────────
+function snrColor(snr) {
+  if (snr === null || snr === undefined || !Number.isFinite(snr)) return '#9ca3af';
+  const t = Math.max(0, Math.min(1, (snr + 10) / 35));
+  const hue = t * 130;
+  const light = 38 + t * 12;
+  return 'hsl(' + hue.toFixed(1) + ', 75%, ' + light.toFixed(1) + '%)';
+}
+function roleColor(role) {
+  return role === 'companion' ? '#16a34a' : '#2563eb';
+}
+
+const FALLBACK_HOLD_MS = 8000;
+const STATE_STYLE = {
+  idle:      { priority: 0 },
+  rx:        { priority: 1, fill: '#60a5fa', stroke: '#2563eb', weight: 3 },
+  dropped:   { priority: 1, fill: '#d1d5db', stroke: '#6b7280', weight: 2 },
+  weak:      { priority: 1, fill: '#fde68a', stroke: '#d97706', weight: 2 },
+  halfdup:   { priority: 1, fill: '#e5e7eb', stroke: '#6b7280', weight: 2 },
+  collision: { priority: 2, fill: '#fca5a5', stroke: '#dc2626', weight: 3 },
+  tx:        { priority: 3, fill: '#fbbf24', stroke: '#ea580c', weight: 4 },
+};
+
+const TX_OUTCOME = {
+  rx:              { color: '#16a34a', weight: 6, opacity: 0.95, dashArray: null  },
+  collision:       { color: '#ea580c', weight: 6, opacity: 0.90, dashArray: '8,6' },
+  drop_weak:       { color: '#dc2626', weight: 4, opacity: 0.85, dashArray: '3,4' },
+  drop_sf_mismatch:{ color: '#c026d3', weight: 4, opacity: 0.85, dashArray: '3,4' },
+  drop_halfduplex: { color: '#64748b', weight: 4, opacity: 0.80, dashArray: '8,4' },
+};
+const TX_OVERLAY_GRACE_MS = 5000;
+const TX_OVERLAY_MIN_MS   = 6000;
+
+// ── State ─────────────────────────────────────────────────────────────
+let leafletMap       = null;
+let markersByName    = {};
+let nodeMeta         = {};           // name -> { role, lat, lon, baseFill }
+let nodeCurrentState = {};           // name -> { key, priority, timerId }
+let activeTx         = {};           // pkt_hash -> { sender, layer, overlays, timerId }
+
+// Analytical overlays
+const OVERLAY_WINDOW_MS   = 10000;
+const COLLISION_WINDOW_MS = 30000;
+const overlays = { airtime: false, airtimeHeat: false, collisionHeat: false, txEff: false };
+let airtimeMarkers    = {};
+let airtimeHeatLayer  = null;
+let collisionHeatLayer= null;
+let collisionBadges   = {};
+let txEffMarkers      = {};
+let overlayRefreshTimer = null;
+
+// Replay state
+let allEvents       = [];
+let replayEndMs     = 60000;
+let replayCursor    = 0;           // simulated ms elapsed
+let replayNextIdx   = 0;           // index into allEvents
+let replayPaused    = false;
+let playbackSpeed   = 100;
+let lastRafTs       = null;        // wall-clock timestamp from last rAF
+let rafHandle       = null;
+
+// ── Leaflet init ──────────────────────────────────────────────────────
+function initLeaflet(nodes) {
+  const lats = nodes.map(n => n.lat), lons = nodes.map(n => n.lon);
+  const avgLat = lats.reduce((a,b) => a+b, 0) / lats.length;
+  const avgLon = lons.reduce((a,b) => a+b, 0) / lons.length;
+
+  leafletMap = L.map('map', { preferCanvas: true }).setView([avgLat, avgLon], 10);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18,
+    attribution: '&copy; OpenStreetMap',
+  }).addTo(leafletMap);
+
+  if (nodes.length > 1) {
+    const b = L.latLngBounds(nodes.map(n => [n.lat, n.lon]));
+    leafletMap.fitBounds(b, { padding: [30, 30] });
+  }
+
+  addLegendControl();
+}
+
+function addLegendControl() {
+  const ctrl = L.control({ position: 'bottomright' });
+  ctrl.onAdd = function () {
+    const div = L.DomUtil.create('div', 'mlv-legend-panel');
+    div.innerHTML = `
+      <div class="section-title">Nodes</div>
+      <div class="row-pair">
+        <div class="row"><span class="dot" style="background:#2563eb"></span>repeater</div>
+        <div class="row"><span class="dot" style="background:#16a34a"></span>companion</div>
+      </div>
+      <div class="row-pair">
+        <div class="row"><span class="dot" style="background:#fbbf24; box-shadow:0 0 0 2px #ea580c"></span>TX</div>
+        <div class="row"><span class="dot" style="background:#60a5fa"></span>RX</div>
+      </div>
+      <div class="row-pair">
+        <div class="row"><span class="dot" style="background:#fca5a5; box-shadow:0 0 0 2px #dc2626"></span>collision</div>
+        <div class="row"><span class="dot" style="background:#fde68a"></span>weak</div>
+      </div>
+
+      <div class="section-title">Packet outcome</div>
+      <div class="row"><span class="bar" style="background:#16a34a"></span>delivered</div>
+      <div class="row"><span class="bar dashed halo" style="color:#ea580c"></span>collision</div>
+      <div class="row"><span class="bar dashed" style="color:#dc2626"></span>SNR below threshold</div>
+      <div class="row"><span class="bar dashed" style="color:#c026d3"></span>SF mismatch</div>
+      <div class="row"><span class="bar dashed" style="color:#64748b"></span>half-duplex</div>
+
+      <div class="section-title">Analytical overlays</div>
+      <label class="overlay-toggle">
+        <input type="checkbox" id="toggle-airtime">
+        <span>Radio busy — bars</span>
+      </label>
+      <label class="overlay-toggle">
+        <input type="checkbox" id="toggle-airtime-heat">
+        <span>Radio busy — heatmap</span>
+      </label>
+      <label class="overlay-toggle">
+        <input type="checkbox" id="toggle-collision-heat">
+        <span>Collision heatmap</span>
+      </label>
+      <label class="overlay-toggle">
+        <input type="checkbox" id="toggle-tx-eff">
+        <span>TX effectiveness</span>
+      </label>
+    `;
+    L.DomEvent.disableClickPropagation(div);
+    L.DomEvent.disableScrollPropagation(div);
+    return div;
+  };
+  ctrl.addTo(leafletMap);
+}
+
+function renderTopology(nodes) {
+  const withCoords = nodes.filter(n => Number.isFinite(n.lat) && Number.isFinite(n.lon));
+  if (withCoords.length === 0) {
+    mapEl.style.display = 'none';
+    noCoordsEl.hidden = false;
+    console.warn('map_live: no nodes have lat/lon — map view disabled');
+    return false;
+  }
+
+  initLeaflet(withCoords);
+  drawNodes(nodes);
+  nodeCountEl.textContent = Object.keys(markersByName).length + ' nodes';
+  return true;
+}
+
+function drawNodes(nodes) {
+  for (const n of nodes) {
+    if (!Number.isFinite(n.lat) || !Number.isFinite(n.lon)) continue;
+    const role = n.role || 'repeater';
+    const baseFill = roleColor(role);
+    const marker = L.circleMarker([n.lat, n.lon], {
+      radius: 7,
+      color: baseFill,
+      weight: 2,
+      fillColor: baseFill,
+      fillOpacity: 0.85,
+    }).addTo(leafletMap);
+
+    // Tooltip: name, role, lat, lon, script (if available)
+    let tip = '<b>' + n.name + '</b><br>role: ' + role
+            + '<br>lat: ' + n.lat.toFixed(5)
+            + '<br>lon: ' + n.lon.toFixed(5);
+    if (n.script) tip += '<br>script: ' + n.script;
+    marker.bindTooltip(tip, { permanent: false, className: 'mlv-label' });
+
+    markersByName[n.name] = marker;
+    nodeMeta[n.name] = { role, lat: n.lat, lon: n.lon, baseFill };
+  }
+}
+
+// ── Node state transitions ────────────────────────────────────────────
+function resetNodeStyle(name) {
+  const m = markersByName[name];
+  const meta = nodeMeta[name];
+  if (!m || !meta) return;
+  m.setStyle({ color: meta.baseFill, weight: 2, fillColor: meta.baseFill, fillOpacity: 0.85 });
+  const cur = nodeCurrentState[name];
+  if (cur && cur.timerId) clearTimeout(cur.timerId);
+  delete nodeCurrentState[name];
+}
+
+function applyState(name, stateKey, holdMs) {
+  const m = markersByName[name];
+  const meta = nodeMeta[name];
+  if (!m || !meta) return;
+  const style = STATE_STYLE[stateKey];
+  if (!style) return;
+
+  const cur = nodeCurrentState[name];
+  if (cur && cur.priority > style.priority) return;
+  if (cur && cur.timerId) clearTimeout(cur.timerId);
+
+  m.setStyle({
+    color: style.stroke || meta.baseFill,
+    weight: style.weight || 2,
+    fillColor: style.fill || meta.baseFill,
+    fillOpacity: 0.95,
+  });
+
+  const effectiveHold = holdMs || FALLBACK_HOLD_MS;
+  const timerId = setTimeout(() => resetNodeStyle(name), effectiveHold / playbackSpeed);
+  nodeCurrentState[name] = { key: stateKey, priority: style.priority, timerId };
+}
+
+function resetAllStates() {
+  for (const name of Object.keys(nodeCurrentState)) resetNodeStyle(name);
+}
+
+// ── TX overlay lifecycle ──────────────────────────────────────────────
+function onTxStart(ev) {
+  const pkt = ev.pkt;
+  if (!pkt || !leafletMap) return;
+  const sender = ev.node;
+  if (!nodeMeta[sender]) return;
+  if (activeTx[pkt]) removeActiveTx(pkt);
+
+  const layer = L.layerGroup().addTo(leafletMap);
+  const lifetimeMs = Math.max(TX_OVERLAY_MIN_MS, (ev.airtime_ms || 0) + TX_OVERLAY_GRACE_MS);
+  const timerId = setTimeout(() => removeActiveTx(pkt), lifetimeMs / playbackSpeed);
+  activeTx[pkt] = { sender, layer, overlays: new Map(), timerId };
+}
+
+function addTxOverlay(pkt, receiver, outcomeKey, extra) {
+  const entry = activeTx[pkt];
+  if (!entry) return;
+  const style = TX_OUTCOME[outcomeKey];
+  if (!style) return;
+  const a = nodeMeta[entry.sender];
+  const b = nodeMeta[receiver];
+  if (!a || !b) return;
+
+  const prior = entry.overlays.get(receiver);
+  if (prior) {
+    entry.layer.removeLayer(prior.main);
+    if (prior.halo) entry.layer.removeLayer(prior.halo);
+  }
+
+  const latlngs = [[a.lat, a.lon], [b.lat, b.lon]];
+  let halo = null;
+  if (outcomeKey === 'collision') {
+    halo = L.polyline(latlngs, {
+      color: '#1e1b4b', weight: style.weight + 4, opacity: 0.55, interactive: false, lineCap: 'round',
+    });
+    entry.layer.addLayer(halo);
+  }
+
+  const line = L.polyline(latlngs, {
+    color: style.color, weight: style.weight, opacity: style.opacity,
+    dashArray: style.dashArray, interactive: true, lineCap: 'round',
+  });
+  let tip = entry.sender + ' → ' + receiver + ': ' + outcomeKey;
+  if (extra && extra.interferer) {
+    tip += ' (interferer=' + extra.interferer
+         + ', margin=' + (extra.snr_margin != null ? extra.snr_margin.toFixed(1) : '?') + ' dB)';
+  } else if (extra && extra.snr != null) {
+    tip += ' (SNR=' + extra.snr.toFixed(1) + ' dB)';
+  }
+  line.bindTooltip(tip, { sticky: true, className: 'mlv-label' });
+  entry.layer.addLayer(line);
+  entry.overlays.set(receiver, { main: line, halo });
+}
+
+function removeActiveTx(pkt) {
+  const entry = activeTx[pkt];
+  if (!entry) return;
+  if (entry.timerId) clearTimeout(entry.timerId);
+  if (entry.layer) leafletMap.removeLayer(entry.layer);
+  delete activeTx[pkt];
+}
+
+function removeAllActiveTx() {
+  for (const pkt of Object.keys(activeTx)) removeActiveTx(pkt);
+}
+
+// ── Analytical overlays ───────────────────────────────────────────────
+function windowEnd() { return replayCursor; }
+
+function computeAirtimeStats() {
+  const endMs = windowEnd();
+  const startMs = Math.max(0, endMs - OVERLAY_WINDOW_MS);
+  const durationMs = endMs - startMs;
+  if (durationMs <= 0) return { _durationMs: 0, _txMs: {}, _rxMs: {} };
+
+  const txMs = {}, rxMs = {};
+  const clip = (evStart, evDuration, bucket, node) => {
+    if (!node || !evDuration) return;
+    const a = Math.max(evStart, startMs), b = Math.min(evStart + evDuration, endMs);
+    if (b <= a) return;
+    bucket[node] = (bucket[node] || 0) + (b - a);
+  };
+
+  // Only scan events that have been fired (up to replayNextIdx)
+  for (let i = 0; i < replayNextIdx && i < allEvents.length; i++) {
+    const ev = allEvents[i];
+    if (typeof ev.time_ms !== 'number') continue;
+    if (ev.time_ms < startMs) continue;
+    if (ev.type === 'tx') clip(ev.time_ms, ev.airtime_ms || 0, txMs, ev.node);
+    else if (ev.type === 'rx' || ev.type === 'drop_halfduplex') clip(ev.time_ms, ev.airtime_ms || 0, rxMs, ev.to);
+  }
+
+  const result = { _durationMs: durationMs, _txMs: txMs, _rxMs: rxMs };
+  for (const name of Object.keys(nodeMeta)) {
+    const busy = (txMs[name] || 0) + (rxMs[name] || 0);
+    result[name] = Math.min(1, busy / durationMs);
+  }
+  return result;
+}
+
+function airtimeColor(util) {
+  if (util < 0.10) return '#22c55e';
+  if (util < 0.30) return '#f59e0b';
+  return '#dc2626';
+}
+
+function ensureAirtimeMarkers() {
+  if (!leafletMap) return;
+  for (const name of Object.keys(nodeMeta)) {
+    if (airtimeMarkers[name]) continue;
+    const meta = nodeMeta[name];
+    airtimeMarkers[name] = L.marker([meta.lat, meta.lon], {
+      icon: L.divIcon({
+        className: 'mlv-airtime-bar',
+        html: '<div class="bar-bg"><div class="bar-fill"></div></div><div class="bar-label">—</div>',
+        iconSize: [48, 34],
+        iconAnchor: [-14, 17],
+      }),
+      interactive: false, keyboard: false, zIndexOffset: -100,
+    });
+  }
+}
+
+function updateAirtimeBars() {
+  if (!overlays.airtime) return;
+  const stats = computeAirtimeStats();
+  const txMs = stats._txMs || {}, rxMs = stats._rxMs || {};
+  for (const name of Object.keys(airtimeMarkers)) {
+    const m = airtimeMarkers[name];
+    const el = m.getElement();
+    if (!el) continue;
+    const util = stats[name] || 0;
+    const pct = Math.round(util * 100);
+    const fill = el.querySelector('.bar-fill');
+    const label = el.querySelector('.bar-label');
+    if (fill) { fill.style.height = (util * 100) + '%'; fill.style.background = airtimeColor(util); }
+    if (label) { label.textContent = pct + '%'; }
+    const tx = txMs[name] || 0, rx = rxMs[name] || 0;
+    el.title = name + ': ' + pct + '% busy (TX ' + Math.round(tx) + ' ms, RX ' + Math.round(rx) + ' ms)';
+  }
+}
+
+function setAirtimeOverlay(on) {
+  overlays.airtime = on;
+  if (on) {
+    ensureAirtimeMarkers();
+    for (const m of Object.values(airtimeMarkers)) m.addTo(leafletMap);
+    updateAirtimeBars();
+    if (!overlayRefreshTimer) overlayRefreshTimer = setInterval(refreshOverlays, 1000);
+  } else {
+    for (const m of Object.values(airtimeMarkers)) { if (leafletMap.hasLayer(m)) leafletMap.removeLayer(m); }
+    if (overlayRefreshTimer && !anyOverlayOn()) { clearInterval(overlayRefreshTimer); overlayRefreshTimer = null; }
+  }
+}
+
+function anyOverlayOn() { return Object.values(overlays).some(v => v); }
+
+function refreshOverlays() {
+  if (overlays.airtime) updateAirtimeBars();
+  if (overlays.airtimeHeat) updateAirtimeHeat();
+  if (overlays.collisionHeat) updateCollisionHeat();
+  if (overlays.txEff) updateTxEffBars();
+}
+
+// Collision heatmap
+function computeCollisionStats() {
+  const endMs = windowEnd();
+  const startMs = Math.max(0, endMs - COLLISION_WINDOW_MS);
+  if (endMs <= startMs) return { _perNode: {}, _total: 0, _max: 0 };
+  const perNode = {};
+  let total = 0, max = 0;
+  for (let i = 0; i < replayNextIdx && i < allEvents.length; i++) {
+    const ev = allEvents[i];
+    if (ev.type !== 'collision') continue;
+    if (typeof ev.time_ms !== 'number') continue;
+    if (ev.time_ms < startMs || ev.time_ms > endMs) continue;
+    const name = ev.to;
+    if (!name || !nodeMeta[name]) continue;
+    perNode[name] = (perNode[name] || 0) + 1;
+    total++;
+    if (perNode[name] > max) max = perNode[name];
+  }
+  return { _perNode: perNode, _total: total, _max: max };
+}
+
+function updateCollisionHeat() {
+  if (!overlays.collisionHeat || !leafletMap) return;
+  const stats = computeCollisionStats();
+  const perNode = stats._perNode, maxCount = stats._max;
+  const points = [];
+  const logMax = Math.log1p(Math.max(1, maxCount));
+  for (const name of Object.keys(perNode)) {
+    const meta = nodeMeta[name];
+    if (!meta) continue;
+    points.push([meta.lat, meta.lon, Math.log1p(perNode[name]) / logMax]);
+  }
+  if (collisionHeatLayer) {
+    collisionHeatLayer.setLatLngs(points);
+  } else {
+    collisionHeatLayer = L.heatLayer(points, {
+      radius: 26, blur: 14, minOpacity: 0.40,
+      gradient: { 0.0: 'rgba(254,240,138,0)', 0.20: '#fcd34d', 0.50: '#f97316', 0.80: '#dc2626', 1.0: '#7f1d1d' },
+    }).addTo(leafletMap);
+  }
+  for (const name of Object.keys(nodeMeta)) updateCollisionBadge(name, perNode[name] || 0);
+}
+
+function updateCollisionBadge(name, count) {
+  if (count <= 0) {
+    if (collisionBadges[name]) { leafletMap.removeLayer(collisionBadges[name]); delete collisionBadges[name]; }
+    return;
+  }
+  const existing = collisionBadges[name];
+  if (existing) {
+    const el = existing.getElement();
+    const badge = el && el.querySelector('.badge');
+    if (badge) badge.textContent = count;
+    return;
+  }
+  const meta = nodeMeta[name];
+  if (!meta) return;
+  collisionBadges[name] = L.marker([meta.lat, meta.lon], {
+    icon: L.divIcon({
+      className: 'mlv-collision-badge',
+      html: '<div class="badge">' + count + '</div>',
+      iconSize: [30, 20], iconAnchor: [15, 28],
+    }),
+    interactive: false, keyboard: false, zIndexOffset: 400,
+  }).addTo(leafletMap);
+}
+
+function removeAllCollisionBadges() {
+  for (const name of Object.keys(collisionBadges)) leafletMap.removeLayer(collisionBadges[name]);
+  collisionBadges = {};
+}
+
+// Airtime heatmap
+function updateAirtimeHeat() {
+  if (!overlays.airtimeHeat || !leafletMap) return;
+  const stats = computeAirtimeStats();
+  const points = [];
+  for (const name of Object.keys(nodeMeta)) {
+    const util = stats[name] || 0;
+    if (util <= 0) continue;
+    const meta = nodeMeta[name];
+    points.push([meta.lat, meta.lon, Math.min(1, util / 0.5)]);
+  }
+  if (airtimeHeatLayer) {
+    airtimeHeatLayer.setLatLngs(points);
+  } else {
+    airtimeHeatLayer = L.heatLayer(points, {
+      radius: 28, blur: 16, minOpacity: 0.35,
+      gradient: { 0.0: 'rgba(103,232,249,0)', 0.20: '#67e8f9', 0.50: '#3b82f6', 0.80: '#a855f7', 1.0: '#6b21a8' },
+    }).addTo(leafletMap);
+  }
+}
+
+function setAirtimeHeatOverlay(on) {
+  overlays.airtimeHeat = on;
+  if (on) {
+    updateAirtimeHeat();
+    if (!overlayRefreshTimer) overlayRefreshTimer = setInterval(refreshOverlays, 1000);
+  } else {
+    if (airtimeHeatLayer) { leafletMap.removeLayer(airtimeHeatLayer); airtimeHeatLayer = null; }
+    if (overlayRefreshTimer && !anyOverlayOn()) { clearInterval(overlayRefreshTimer); overlayRefreshTimer = null; }
+  }
+}
+
+// TX effectiveness
+function computeTxEffectiveness() {
+  const endMs = windowEnd();
+  const startMs = Math.max(0, endMs - OVERLAY_WINDOW_MS);
+  if (endMs <= startMs) return { _perNode: {} };
+
+  const txBySender = new Map();
+  for (let i = 0; i < replayNextIdx && i < allEvents.length; i++) {
+    const ev = allEvents[i];
+    if (ev.type !== 'tx') continue;
+    if (typeof ev.time_ms !== 'number') continue;
+    if (ev.time_ms < startMs || ev.time_ms > endMs) continue;
+    if (!ev.pkt || !ev.node || !nodeMeta[ev.node]) continue;
+    txBySender.set(ev.pkt, ev.node);
+  }
+  const hadRx = new Set();
+  for (let i = 0; i < replayNextIdx && i < allEvents.length; i++) {
+    const ev = allEvents[i];
+    if (ev.type === 'rx' && ev.pkt && txBySender.has(ev.pkt)) hadRx.add(ev.pkt);
+  }
+  const totals = {}, effective = {};
+  for (const [pkt, sender] of txBySender) {
+    totals[sender] = (totals[sender] || 0) + 1;
+    if (hadRx.has(pkt)) effective[sender] = (effective[sender] || 0) + 1;
+  }
+  const perNode = {};
+  for (const name of Object.keys(nodeMeta)) {
+    const t = totals[name] || 0, e = effective[name] || 0;
+    perNode[name] = { total: t, effective: e, rate: t > 0 ? e / t : null };
+  }
+  return { _perNode: perNode };
+}
+
+function txEffColor(rate) {
+  if (rate === null) return '#9ca3af';
+  if (rate >= 0.90) return '#22c55e';
+  if (rate >= 0.60) return '#a3e635';
+  if (rate >= 0.30) return '#f59e0b';
+  return '#dc2626';
+}
+
+function ensureTxEffMarkers() {
+  if (!leafletMap) return;
+  for (const name of Object.keys(nodeMeta)) {
+    if (txEffMarkers[name]) continue;
+    const meta = nodeMeta[name];
+    txEffMarkers[name] = L.marker([meta.lat, meta.lon], {
+      icon: L.divIcon({
+        className: 'mlv-eff-bar',
+        html: '<div class="bar-bg"><div class="bar-fill"></div></div><div class="bar-label">—</div>',
+        iconSize: [48, 34], iconAnchor: [48 + 12, 17],
+      }),
+      interactive: false, keyboard: false, zIndexOffset: -100,
+    });
+  }
+}
+
+function updateTxEffBars() {
+  if (!overlays.txEff) return;
+  const stats = computeTxEffectiveness();
+  const perNode = stats._perNode;
+  for (const name of Object.keys(txEffMarkers)) {
+    const m = txEffMarkers[name];
+    const el = m.getElement();
+    if (!el) continue;
+    const info = perNode[name] || { total: 0, effective: 0, rate: null };
+    const fill = el.querySelector('.bar-fill');
+    const label = el.querySelector('.bar-label');
+    if (info.rate === null) {
+      if (fill) { fill.style.height = '0%'; fill.style.background = '#9ca3af'; }
+      if (label) { label.textContent = '—'; label.className = 'bar-label dim'; }
+    } else {
+      const pct = Math.round(info.rate * 100);
+      if (fill) { fill.style.height = (info.rate * 100) + '%'; fill.style.background = txEffColor(info.rate); }
+      if (label) { label.textContent = pct + '%'; label.className = 'bar-label'; }
+    }
+  }
+}
+
+function setTxEffOverlay(on) {
+  overlays.txEff = on;
+  if (on) {
+    ensureTxEffMarkers();
+    for (const m of Object.values(txEffMarkers)) m.addTo(leafletMap);
+    updateTxEffBars();
+    if (!overlayRefreshTimer) overlayRefreshTimer = setInterval(refreshOverlays, 1000);
+  } else {
+    for (const m of Object.values(txEffMarkers)) { if (leafletMap.hasLayer(m)) leafletMap.removeLayer(m); }
+    if (overlayRefreshTimer && !anyOverlayOn()) { clearInterval(overlayRefreshTimer); overlayRefreshTimer = null; }
+  }
+}
+
+function setCollisionHeatOverlay(on) {
+  overlays.collisionHeat = on;
+  if (on) {
+    updateCollisionHeat();
+    if (!overlayRefreshTimer) overlayRefreshTimer = setInterval(refreshOverlays, 1000);
+  } else {
+    if (collisionHeatLayer) { leafletMap.removeLayer(collisionHeatLayer); collisionHeatLayer = null; }
+    removeAllCollisionBadges();
+    if (overlayRefreshTimer && !anyOverlayOn()) { clearInterval(overlayRefreshTimer); overlayRefreshTimer = null; }
+  }
+}
+
+function wireOverlayToggles() {
+  const cbAir  = document.querySelector('#toggle-airtime');
+  const cbAirH = document.querySelector('#toggle-airtime-heat');
+  const cbColl = document.querySelector('#toggle-collision-heat');
+  const cbEff  = document.querySelector('#toggle-tx-eff');
+  if (!cbAir || !cbAirH || !cbColl || !cbEff) { setTimeout(wireOverlayToggles, 80); return; }
+  cbAir .addEventListener('change', () => setAirtimeOverlay(cbAir.checked));
+  cbAirH.addEventListener('change', () => setAirtimeHeatOverlay(cbAirH.checked));
+  cbColl.addEventListener('change', () => setCollisionHeatOverlay(cbColl.checked));
+  cbEff .addEventListener('change', () => setTxEffOverlay(cbEff.checked));
+}
+
+// ── Log panel ─────────────────────────────────────────────────────────
+const LOG_MAX_LINES = 200;
+
+function appendLog(evt) {
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const t = typeof evt.time_ms === 'number' ? (evt.time_ms / 1000).toFixed(3) + 's' : '—';
+  const msg = evt.msg || evt.text || evt.data || JSON.stringify(evt);
+  line.innerHTML = '<span class="log-time">' + t + '</span>'
+                 + '<span class="log-type">' + (evt.type || '?') + '</span>'
+                 + '<span class="log-msg">' + (evt.node ? '[' + evt.node + '] ' : '') + String(msg) + '</span>';
+  logPanel.appendChild(line);
+  // Trim to max lines
+  while (logPanel.children.length > LOG_MAX_LINES) logPanel.removeChild(logPanel.firstChild);
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
+// ── Replay engine ─────────────────────────────────────────────────────
+function fireEvent(evt) {
+  const hold = Math.max(200, FALLBACK_HOLD_MS / playbackSpeed);
+  switch (evt.type) {
+    case 'tx': {
+      const txHold = Math.max(hold, (evt.airtime_ms || 0) + 500);
+      applyState(evt.node, 'tx', txHold);
+      onTxStart(evt);
+      break;
+    }
+    case 'rx':
+      applyState(evt.to, 'rx', hold);
+      addTxOverlay(evt.pkt, evt.to, 'rx', { snr: evt.snr });
+      break;
+    case 'collision':
+      applyState(evt.to, 'collision', hold);
+      addTxOverlay(evt.pkt, evt.to, 'collision',
+                   { interferer: evt.interferer, snr_margin: evt.snr_margin, snr: evt.snr });
+      break;
+    case 'drop_weak':
+      applyState(evt.to, 'weak', hold);
+      addTxOverlay(evt.pkt, evt.to, 'drop_weak', { snr: evt.snr });
+      break;
+    case 'drop_sf_mismatch':
+      applyState(evt.to, 'dropped', hold);
+      addTxOverlay(evt.pkt, evt.to, 'drop_sf_mismatch');
+      break;
+    case 'drop_halfduplex':
+      applyState(evt.to, 'halfdup', hold);
+      addTxOverlay(evt.pkt, evt.to, 'drop_halfduplex');
+      break;
+    case 'tx_deferred':
+      applyState(evt.node, 'dropped', hold);
+      break;
+    case 'script_log':
+    case 'script_emit':
+    case 'cmd_reply':
+      appendLog(evt);
+      break;
+    default:
+      appendLog(evt);
+  }
+}
+
+function updateTimeDisplay() {
+  const nowS  = (replayCursor / 1000).toFixed(1);
+  const endS  = (replayEndMs  / 1000).toFixed(1);
+  timeDisplayEl.textContent = 'now: ' + nowS + 's / ' + endS + 's';
+}
+
+function replayFrame(wallTs) {
+  if (replayPaused) { lastRafTs = wallTs; rafHandle = requestAnimationFrame(replayFrame); return; }
+
+  const dtWall = lastRafTs === null ? 0 : wallTs - lastRafTs;
+  lastRafTs = wallTs;
+
+  // Advance simulated cursor
+  replayCursor += dtWall * playbackSpeed;
+  if (replayCursor > replayEndMs) replayCursor = replayEndMs;
+
+  // Fire all events whose time_ms <= replayCursor that haven't been fired yet
+  while (replayNextIdx < allEvents.length && allEvents[replayNextIdx].time_ms <= replayCursor) {
+    fireEvent(allEvents[replayNextIdx]);
+    replayNextIdx++;
+  }
+
+  // Update counters every frame (cheap enough)
+  eventCountEl.textContent = replayNextIdx + ' / ' + allEvents.length + ' events';
+  updateTimeDisplay();
+
+  if (replayCursor < replayEndMs) {
+    rafHandle = requestAnimationFrame(replayFrame);
+  } else {
+    statusEl.textContent = 'Replay complete';
+    btnPause.textContent = '▶ Replay';
+    replayPaused = true;
+    rafHandle = null;
+  }
+}
+
+function startReplay(events, endMs) {
+  allEvents    = events.slice().sort((a, b) => (a.time_ms || 0) - (b.time_ms || 0));
+  replayEndMs  = endMs || 60000;
+  replayCursor = 0;
+  replayNextIdx = 0;
+  replayPaused  = false;
+  lastRafTs     = null;
+
+  resetAllStates();
+  removeAllActiveTx();
+  logPanel.innerHTML = '';
+
+  controlsEl.style.display = '';
+  btnPause.textContent = '⏸ Pause';
+  updateTimeDisplay();
+
+  if (rafHandle) cancelAnimationFrame(rafHandle);
+  rafHandle = requestAnimationFrame(replayFrame);
+}
+
+function restartReplay() {
+  // Keep the same events & endMs, just reset cursor
+  replayCursor  = 0;
+  replayNextIdx = 0;
+  replayPaused  = false;
+  lastRafTs     = null;
+
+  resetAllStates();
+  removeAllActiveTx();
+  logPanel.innerHTML = '';
+  btnPause.textContent = '⏸ Pause';
+  updateTimeDisplay();
+
+  if (rafHandle) cancelAnimationFrame(rafHandle);
+  rafHandle = requestAnimationFrame(replayFrame);
+}
+
+// ── Playback controls ─────────────────────────────────────────────────
+btnPause.addEventListener('click', () => {
+  if (replayCursor >= replayEndMs) {
+    // "Replay" button after completion — full restart
+    restartReplay();
+    return;
+  }
+  replayPaused = !replayPaused;
+  btnPause.textContent = replayPaused ? '▶ Resume' : '⏸ Pause';
+  if (!replayPaused && !rafHandle) {
+    lastRafTs = null;
+    rafHandle = requestAnimationFrame(replayFrame);
+  }
+});
+
+btnRestart.addEventListener('click', restartReplay);
+
+document.querySelectorAll('.speed-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    playbackSpeed = parseFloat(btn.dataset.speed);
+    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+// ── Load sim data ─────────────────────────────────────────────────────
+async function loadSim() {
+  if (!SIM_ID) {
+    statusEl.textContent = 'No ?id= in URL — load as /static/map_live.html?id=<sim_id>';
+    return;
+  }
+  statusEl.textContent = 'Loading meta…';
+
+  let meta;
+  try {
+    meta = await fetchJSON('/api/sims/' + SIM_ID + '/meta');
+  } catch (e) {
+    statusEl.textContent = 'Failed to load meta: ' + e.message;
+    throw e;
+  }
+
+  const nodes = Array.isArray(meta.nodes) ? meta.nodes : [];
+  const endMs = (meta.sim_info && meta.sim_info.end_ms) ? meta.sim_info.end_ms : 60000;
+
+  const ok = renderTopology(nodes);
+  if (!ok) {
+    statusEl.textContent = 'No coordinates — map unavailable';
+    return;
+  }
+
+  statusEl.textContent = 'Loading events…';
+  let eventsData;
+  try {
+    eventsData = await fetchJSON('/api/sims/' + SIM_ID + '/events?from=0&to=2147483647&max=100000');
+  } catch (e) {
+    statusEl.textContent = 'Failed to load events: ' + e.message;
+    throw e;
+  }
+
+  const events = Array.isArray(eventsData.events) ? eventsData.events : [];
+  statusEl.textContent = 'Replaying ' + events.length + ' events';
+
+  wireOverlayToggles();
+  startReplay(events, endMs);
+}
+
+window.addEventListener('load', loadSim);
+</script>
+
+</body>
+</html>
