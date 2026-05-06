@@ -454,7 +454,11 @@ void SimController::registerTransmissionsForStep() {
                 const int sf    = (p.sf    >= 0) ? p.sf    : _radios[i]->getSF();
                 const int bw_hz = (p.bw_hz >= 0) ? p.bw_hz : _radios[i]->getBwHz();
                 const int cr    = (p.cr    >= 0) ? p.cr    : _radios[i]->getCR();
+                const int pre   = (p.preamble_sym >= 0)
+                                    ? p.preamble_sym
+                                    : _radios[i]->getPreambleSymbols();
                 _radios[i]->setRadioParams(sf, bw_hz, cr);
+                _radios[i]->setPreambleSymbols(pre);
 
                 const uint32_t airtime =
                     _radios[i]->getEstAirtimeFor(static_cast<int>(p.bytes.size()));
@@ -490,7 +494,11 @@ void SimController::registerTransmissionsForStep() {
             const int sf    = (p.sf    >= 0) ? p.sf    : _radios[i]->getSF();
             const int bw_hz = (p.bw_hz >= 0) ? p.bw_hz : _radios[i]->getBwHz();
             const int cr    = (p.cr    >= 0) ? p.cr    : _radios[i]->getCR();
+            const int pre   = (p.preamble_sym >= 0)
+                                ? p.preamble_sym
+                                : _radios[i]->getPreambleSymbols();
             _radios[i]->setRadioParams(sf, bw_hz, cr);
+            _radios[i]->setPreambleSymbols(pre);
 
             const uint32_t airtime =
                 _radios[i]->getEstAirtimeFor(static_cast<int>(p.bytes.size()));

@@ -43,6 +43,9 @@ run test_cross_sf_orthogonality "$SCRIPT_DIR/test_cross_sf_orthogonality.cpp" \
 run test_multi_sf_reception "$SCRIPT_DIR/test_multi_sf_reception.cpp" \
     "$REPO_ROOT/core/radio/SimRadio.cpp"
 
+run test_preamble_override "$SCRIPT_DIR/test_preamble_override.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp"
+
 test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
     "$SCRIPT_DIR/test_jsonconfig.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"

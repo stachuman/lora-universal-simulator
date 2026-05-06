@@ -68,6 +68,11 @@ public:
     double getSymbolMs() const { return (double)(1 << _sf) / (_bw_hz / 1000.0); }
     int    getPreambleSymbols() const { return _preamble_len; }
     double getPreambleMs() const { return (getPreambleSymbols() + 4.25) * getSymbolMs(); }
+    // Per-tx preamble override. The Semtech datasheet specifies a 6-symbol
+    // minimum (the preamble must contain enough symbols for the receiver to
+    // achieve sync) and the SX1262 stores the value as a 16-bit register
+    // (max 65535). Out-of-range values are clamped, not rejected.
+    void   setPreambleSymbols(int n);
 
     uint32_t getEstAirtimeFor(int len_bytes);
     float    getSnrThreshold() const;

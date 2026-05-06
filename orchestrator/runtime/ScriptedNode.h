@@ -38,10 +38,11 @@ class LuaHost;
 // per-tx parameter overrides).
 struct PendingTx {
     std::string bytes;
-    int sf = -1;          // -1 = use radio default
-    int bw_hz = -1;       // -1 = use radio default (NOTE: Hz, not kHz)
-    int cr = -1;          // -1 = use radio default
-    int power_dbm = -127; // -127 = use default
+    int sf = -1;            // -1 = use radio default
+    int bw_hz = -1;         // -1 = use radio default (NOTE: Hz, not kHz)
+    int cr = -1;            // -1 = use radio default
+    int power_dbm = -127;   // -127 = use default
+    int preamble_sym = -1;  // -1 = use radio default
 };
 
 class ScriptedNode {

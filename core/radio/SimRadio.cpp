@@ -23,6 +23,15 @@ SimRadio::SimRadio(VirtualClock& clock, int sf, int bw_hz, int cr,
     }
 }
 
+void SimRadio::setPreambleSymbols(int n) {
+    // LoRa preamble must be >= 6 symbols (Semtech datasheet) and the SX1262
+    // register is 16 bits wide. Clamp rather than reject so per-tx overrides
+    // from scripts can never desync the airtime calculation.
+    if (n < 6) n = 6;
+    if (n > 65535) n = 65535;
+    _preamble_len = n;
+}
+
 void SimRadio::setRadioParams(int sf, int bw_hz, int cr) {
     if (bw_hz <= 0) {
         fprintf(stderr, "SimRadio::setRadioParams: bw_hz=%d invalid, ignoring\n", bw_hz);

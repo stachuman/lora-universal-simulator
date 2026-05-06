@@ -159,10 +159,15 @@ void ScriptedNode::api_tx(std::string bytes, sol::optional<sol::table> opts) {
         sol::optional<int> bw_hz    = o["bw"];     // wire-format key is "bw" (Hz)
         sol::optional<int> cr       = o["cr"];
         sol::optional<int> pwr      = o["power_dbm"];
-        if (sf)    p.sf        = *sf;
-        if (bw_hz) p.bw_hz     = *bw_hz;
-        if (cr)    p.cr        = *cr;
-        if (pwr)   p.power_dbm = *pwr;
+        // preamble_sym is the canonical name; "preamble" is accepted as an alias
+        // for ergonomic Lua call-sites (`{ preamble = 16 }`).
+        sol::optional<int> pre      = o["preamble_sym"];
+        if (!pre) pre               = o["preamble"];
+        if (sf)    p.sf           = *sf;
+        if (bw_hz) p.bw_hz        = *bw_hz;
+        if (cr)    p.cr           = *cr;
+        if (pwr)   p.power_dbm    = *pwr;
+        if (pre)   p.preamble_sym = *pre;
     }
     _pending_txs.push_back(std::move(p));
 }
