@@ -1,0 +1,1847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Visualize — lora-universal-simulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Consolas', 'Menlo', monospace; font-size: 12px; background: #f5f5f8; color: #2a2a3e; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+#toolbar { display: flex; align-items: center; gap: 12px; padding: 6px 12px; background: #ffffff; border-bottom: 1px solid #d1d5db; flex-shrink: 0; z-index: 10; }
+#toolbar label { color: #6b7280; font-size: 11px; }
+#toolbar select, #toolbar input { background: #ffffff; color: #2a2a3e; border: 1px solid #d1d5db; padding: 3px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+#toolbar .sep { width: 1px; height: 20px; background: #d1d5db; }
+#toolbar .info { color: #6b7280; font-size: 11px; }
+#toolbar button { background: #e5e7eb; color: #374151; border: 1px solid #d1d5db; padding: 3px 10px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+#toolbar button:hover { background: #d1d5db; }
+#toolbar button.active { background: #3b82f6; border-color: #2563eb; color: #fff; }
+#main { display: flex; flex: 1; overflow: hidden; }
+#sidebar-resizer { width: 0; cursor: col-resize; background: #d1d5db; flex-shrink: 0; transition: width 0.2s, background 0.15s; position: relative; }
+#sidebar-resizer.shown { width: 6px; }
+#sidebar-resizer:hover, #sidebar-resizer.dragging { background: #2563eb; }
+#sidebar-resizer::after { content: ''; position: absolute; top: 50%; left: 1px; transform: translateY(-50%); height: 32px; width: 4px; border-left: 1px solid rgba(0,0,0,0.15); border-right: 1px solid rgba(0,0,0,0.15); pointer-events: none; }
+#sidebar { width: 0; background: #ffffff; border-left: 1px solid #d1d5db; overflow-y: auto; transition: width 0.2s; flex-shrink: 0; }
+#sidebar.open { width: 480px; }
+#sidebar.dragging { transition: none; }
+#sidebar-content { padding: 10px; min-width: 0; }
+#sidebar h3 { color: #2563eb; margin: 8px 0 4px; font-size: 12px; }
+#sidebar .field { margin: 2px 0; }
+#sidebar .field .key { color: #6b7280; }
+#sidebar .field .val { color: #2a2a3e; }
+#sidebar .pkt-link { color: #2563eb; cursor: pointer; text-decoration: underline; }
+#sidebar .pkt-link:hover { color: #1d4ed8; }
+#sidebar table { border-collapse: collapse; width: 100%; margin: 4px 0; }
+#sidebar td, #sidebar th { padding: 2px 6px; text-align: left; font-size: 11px; }
+#sidebar th { color: #6b7280; border-bottom: 1px solid #d1d5db; }
+#sidebar td { border-bottom: 1px solid #e5e7eb; }
+#canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+canvas { display: block; }
+#tooltip { position: absolute; display: none; background: #ffffffee; border: 1px solid #d1d5db; padding: 6px 10px; border-radius: 4px; font-size: 11px; pointer-events: none; z-index: 20; max-width: 400px; white-space: pre-wrap; color: #2a2a3e; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+#time-display { position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%); background: #ffffffcc; padding: 4px 12px; border-radius: 4px; font-size: 13px; color: #2563eb; z-index: 5; pointer-events: none; border: 1px solid #d1d5db; }
+#loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #9ca3af; font-size: 16px; }
+#scrollbar { display: flex; align-items: center; gap: 6px; padding: 4px 12px; background: #ffffff; border-top: 1px solid #d1d5db; flex-shrink: 0; }
+#scrollbar input[type=range] { flex: 1; height: 16px; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
+#scrollbar input[type=range]::-webkit-slider-runnable-track { height: 6px; background: #d1d5db; border-radius: 3px; }
+#scrollbar input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; background: #3b82f6; border-radius: 50%; margin-top: -6px; border: 2px solid #60a5fa; }
+#scrollbar input[type=range]::-moz-range-track { height: 6px; background: #d1d5db; border-radius: 3px; border: 0; }
+#scrollbar input[type=range]::-moz-range-thumb { width: 14px; height: 14px; background: #3b82f6; border-radius: 50%; border: 2px solid #60a5fa; }
+#scrollbar button { background: #e5e7eb; color: #374151; border: 1px solid #d1d5db; padding: 2px 8px; font-size: 12px; font-family: inherit; border-radius: 3px; cursor: pointer; min-width: 28px; }
+#scrollbar button:hover { background: #d1d5db; }
+#scrollbar .scroll-time { color: #6b7280; font-size: 11px; min-width: 80px; text-align: center; }
+@keyframes pulse-live { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+    <a href="/static/simulations.html" style="color:#2563eb;text-decoration:none;margin-right:8px;">&larr; Back</a>
+    <label>Nodes:</label>
+    <select id="node-order">
+        <option value="role">By role + name</option>
+        <option value="alpha">Alphabetical</option>
+        <option value="lat">By latitude</option>
+        <option value="activity">By activity</option>
+        <option value="trace">By trace</option>
+    </select>
+    <div class="sep"></div>
+    <label>Filter:</label>
+    <input id="node-filter" type="text" placeholder="node name..." style="width:120px">
+    <div class="sep"></div>
+    <button id="btn-zoom-fit" title="Fit all">Fit</button>
+    <button id="btn-trace-mode" title="Click packets to trace">Trace</button>
+    <button id="btn-rays" title="Show TX→RX propagation lines">Rays</button>
+    <div class="sep"></div>
+    <span id="info-text" class="info"></span>
+    <span id="follow-indicator" style="display:none;background:#dc2626;color:#fff;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;animation:pulse-live 1.5s ease infinite">LIVE</span>
+    <span style="flex:1"></span>
+    <span id="viewport-info" class="info"></span>
+</div>
+
+<div id="main">
+    <div id="canvas-wrap">
+        <canvas id="canvas"></canvas>
+        <div id="tooltip"></div>
+        <div id="time-display"></div>
+        <div id="loading">Loading...</div>
+    </div>
+    <div id="sidebar-resizer" title="Drag to resize trace panel"></div>
+    <div id="sidebar">
+        <div id="sidebar-content"></div>
+    </div>
+</div>
+<div id="scrollbar">
+    <button id="btn-zoom-in" title="Zoom in">+</button>
+    <button id="btn-zoom-out" title="Zoom out">&minus;</button>
+    <span class="scroll-time" id="scroll-from"></span>
+    <input type="range" id="time-slider" min="0" max="1000" value="0">
+    <span class="scroll-time" id="scroll-to"></span>
+</div>
+
+<script>
+// Get sim ID from URL params: visualize.html?id=abc123 or ?interactive=abc123
+const _params = new URLSearchParams(window.location.search);
+const SIM_ID = _params.get('id');
+const INTERACTIVE_ID = _params.get('interactive');
+const API_PREFIX = INTERACTIVE_ID
+    ? `/api/interactive/${INTERACTIVE_ID}`
+    : `/api/sims/${SIM_ID}`;
+const IS_IFRAME = window.parent !== window;
+let followMode = !!INTERACTIVE_ID;  // auto-follow in interactive mode
+
+if (!SIM_ID && !INTERACTIVE_ID) {
+    document.getElementById('loading').textContent = 'Error: No simulation ID. Use ?id=ID';
+}
+
+// ── State ──────────────────────────────────────────────────────
+const S = {
+    meta: null,
+    events: [],
+    nodes: [],           // ordered node list for display
+    nodeIndex: {},       // name -> index in nodes[]
+    nodeFilter: new Set(),
+
+    // Viewport (in simulation time ms)
+    viewFrom: 0,
+    viewTo: 10000,
+
+    // Canvas layout
+    laneH: 22,
+    labelW: 160,
+    headerH: 30,
+
+    // Vertical scroll (node lanes)
+    scrollY: 0,          // pixels scrolled down
+    maxScrollY: 0,       // computed from node count vs canvas height
+
+    // Rendered viewport snapshot (for hit-testing against what user actually sees)
+    renderedViewFrom: 0,
+    renderedViewTo: 10000,
+    renderedScrollY: 0,
+
+    // Interaction
+    dragging: false,
+    dragMoved: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragViewFrom: 0,
+    dragScrollY: 0,
+    traceMode: false,
+    raysMode: false,
+    tracePkt: null,
+    traceEvents: [],
+    traceHopDepth: null,
+    hoveredEvent: null,
+    selectedEvent: null,
+
+    // Cached data
+    cachedFrom: -1,
+    cachedTo: -1,
+    cachedEvents: [],
+    densityCache: null,
+
+    // Node activity counts (for sorting)
+    nodeActivity: {},
+
+    // Saved sort order before trace auto-switch
+    preTraceOrder: null,
+};
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+const timeDisplay = document.getElementById('time-display');
+const loading = document.getElementById('loading');
+const sidebar = document.getElementById('sidebar');
+const sidebarContent = document.getElementById('sidebar-content');
+
+const COLORS = {
+    sim_start:        '#aaaaff',
+    sim_end:          '#aaaaff',
+    node_ready:       '#88aa88',
+    tx:               '#88ddff',
+    rx:               '#88ff88',
+    drop_weak:        '#ff8888',
+    drop_sf_mismatch: '#ff6688',
+    drop_halfduplex:  '#ff4488',
+    collision:        '#ff4444',
+    tx_deferred:      '#ffcc44',
+    cmd_reply:        '#cccccc',
+    script_log:       '#ffffaa',
+    script_emit:      '#aaffff',
+    node_stats:       '#cccccc',
+    trace_highlight: '#ca8a04',
+    lane_bg: '#f0f0f4',
+    lane_bg_alt: '#e8e8ef',
+    lane_border: '#d1d5db',
+    text: '#666666',
+    time_grid: '#d1d5db',
+    time_text: '#999999',
+};
+
+// ── Data loading ───────────────────────────────────────────────
+async function fetchJSON(url) {
+    const r = await fetch(url);
+    return r.json();
+}
+
+async function init() {
+    S.meta = await fetchJSON(`${API_PREFIX}/meta`);
+    document.getElementById('info-text').textContent =
+        `${S.meta.nodes.length} nodes, ${S.meta.event_count} events, ` +
+        `${((S.meta.time_max - S.meta.time_min) / 1000).toFixed(1)}s`;
+
+    S.nodes = [...S.meta.nodes];
+    // Count activity per node from stats
+    for (const st of S.meta.stats || []) {
+        S.nodeActivity[st.node] = (st.sent_flood || 0) + (st.sent_direct || 0) +
+            (st.recv_direct || 0) + (st.recv_group || 0);
+    }
+    for (const st of S.meta.repeater_stats || []) {
+        if (st.stats_type === 'packets' && st.data) {
+            S.nodeActivity[st.node] = (S.nodeActivity[st.node] || 0) + (st.data.recv || 0) + (st.data.sent || 0);
+        }
+    }
+    sortNodes();
+
+    if (INTERACTIVE_ID) {
+        // Interactive mode: keep NOW at ~80% from left, 20% future
+        interactiveFollowViewport(S.meta.time_max);
+    } else {
+        S.viewFrom = S.meta.time_min;
+        S.viewTo = Math.min(S.meta.time_min + 30000, S.meta.time_max);
+    }
+
+    loading.style.display = 'none';
+    resize();
+    await loadViewport();
+    render();
+
+    // Interactive mode: start polling for new events
+    if (INTERACTIVE_ID) {
+        startInteractivePoll();
+    }
+}
+
+// ── Interactive viewport ─────────────────────────────────────────
+// Position NOW at ~80% from the left, with ~20% future visible.
+// Span stays stable (doesn't grow to fit all data), giving a scrolling-window feel.
+function interactiveFollowViewport(nowMs) {
+    let span = S.viewTo - S.viewFrom;
+    // On first call or zero span, pick a sensible default
+    if (span <= 0) span = 10000;
+    // Keep ~20% of the viewport as future past NOW (never less than 500ms)
+    const futureMs = Math.max(500, span * 0.2);
+    S.viewTo = nowMs + futureMs;
+    S.viewFrom = S.viewTo - span;
+    // Don't scroll before time_min — widen the window instead
+    if (S.viewFrom < S.meta.time_min) {
+        S.viewFrom = S.meta.time_min;
+        S.viewTo = S.viewFrom + span;
+    }
+}
+
+function startInteractivePoll() {
+    let failCount = 0;
+    const iv = setInterval(async () => {
+        try {
+            const m = await fetchJSON(`${API_PREFIX}/meta`);
+            failCount = 0;
+            if (m.time_max > S.meta.time_max || m.event_count > S.meta.event_count) {
+                const oldNodes = S.meta.nodes;
+                S.meta = m;
+                // If new nodes appeared, rebuild node list
+                if (m.nodes.length !== oldNodes.length) {
+                    S.nodes = [...m.nodes];
+                    sortNodes();
+                }
+                // Follow mode: keep NOW at ~80% from left
+                if (followMode) {
+                    interactiveFollowViewport(m.time_max);
+                }
+                // Invalidate cache so loadViewport re-fetches
+                S.cachedFrom = -1;
+                S.cachedTo = -1;
+                await loadViewport();
+                render();
+                syncScrollbar();
+                updateFollowIndicator();
+            }
+        } catch (e) {
+            failCount++;
+            if (e.message && e.message.startsWith('404')) {
+                clearInterval(iv);
+                console.warn('Interactive session gone, stopped polling');
+            } else if (failCount >= 5) {
+                clearInterval(iv);
+                console.warn('Too many polling failures, stopped polling');
+            }
+        }
+    }, 2000);
+}
+
+// Listen for parent iframe messages to update immediately (no polling delay)
+if (INTERACTIVE_ID) {
+    window.addEventListener('message', async (e) => {
+        if (!e.data || e.data.type !== 'timeUpdate') return;
+        const newTime = e.data.time_ms;
+        if (newTime > S.meta.time_max) {
+            S.meta.time_max = newTime;
+            S.meta.event_count = (e.data.event_count != null) ? e.data.event_count : S.meta.event_count;
+        }
+        if (followMode) {
+            interactiveFollowViewport(S.meta.time_max);
+        }
+        S.cachedFrom = -1;
+        S.cachedTo = -1;
+        await loadViewport();
+        render();
+        syncScrollbar();
+        updateFollowIndicator();
+        // Auto-refresh trace to pick up new relay hops
+        if (S.tracePkt) {
+            await tracePkt(S.tracePkt);
+        }
+    });
+}
+
+function updateFollowIndicator() {
+    const el = document.getElementById('follow-indicator');
+    if (!el) return;
+    el.style.display = followMode ? '' : 'none';
+}
+
+function sortNodes() {
+    const order = document.getElementById('node-order').value;
+    const filter = document.getElementById('node-filter').value.toLowerCase();
+
+    let nodes = [...S.meta.nodes];
+    if (order === 'role') {
+        nodes.sort((a, b) => {
+            // companions first, then repeaters, alpha within
+            const ca = a.role === 'companion' ? 0 : 1;
+            const cb = b.role === 'companion' ? 0 : 1;
+            if (ca !== cb) return ca - cb;
+            return a.name.localeCompare(b.name);
+        });
+    } else if (order === 'alpha') {
+        nodes.sort((a, b) => a.name.localeCompare(b.name));
+    } else if (order === 'lat') {
+        nodes.sort((a, b) => (b.lat || 0) - (a.lat || 0));
+    } else if (order === 'activity') {
+        nodes.sort((a, b) => (S.nodeActivity[b.name] || 0) - (S.nodeActivity[a.name] || 0));
+    } else if (order === 'trace') {
+        if (S.traceEvents && S.traceEvents.length > 0) {
+            // Build map of node -> earliest appearance time from trace events
+            const earliest = {};
+            for (const ev of S.traceEvents) {
+                const names = [];
+                if (ev.node) names.push(ev.node);
+                if (ev.from) names.push(ev.from);
+                if (ev.to) names.push(ev.to);
+                for (const n of names) {
+                    if (!(n in earliest) || ev.time_ms < earliest[n]) {
+                        earliest[n] = ev.time_ms;
+                    }
+                }
+            }
+            nodes.sort((a, b) => {
+                const aIn = a.name in earliest;
+                const bIn = b.name in earliest;
+                if (aIn && bIn) return earliest[a.name] - earliest[b.name];
+                if (aIn) return -1;
+                if (bIn) return 1;
+                return a.name.localeCompare(b.name);
+            });
+        } else {
+            // No active trace — fall back to role sort
+            nodes.sort((a, b) => {
+                const ca = a.role === 'companion' ? 0 : 1;
+                const cb = b.role === 'companion' ? 0 : 1;
+                if (ca !== cb) return ca - cb;
+                return a.name.localeCompare(b.name);
+            });
+        }
+    }
+
+    // Apply filter
+    if (filter) {
+        nodes = nodes.filter(n => n.name.toLowerCase().includes(filter));
+    }
+
+    S.nodes = nodes;
+    S.nodeIndex = {};
+    nodes.forEach((n, i) => S.nodeIndex[n.name] = i);
+}
+
+async function loadViewport() {
+    const span = S.viewTo - S.viewFrom;
+    // Use density mode for large spans
+    if (span > 60000) {
+        const bucketMs = Math.max(100, Math.round(span / canvas.width));
+        S.densityCache = await fetchJSON(
+            `${API_PREFIX}/density?from=${Math.floor(S.viewFrom)}&to=${Math.ceil(S.viewTo)}&bucket=${bucketMs}`);
+        S.cachedEvents = [];
+    } else {
+        S.densityCache = null;
+        // Avoid re-fetching if viewport is within cache
+        if (S.viewFrom >= S.cachedFrom && S.viewTo <= S.cachedTo && S.cachedEvents.length > 0) {
+            return;
+        }
+        // Fetch with margin for smooth panning
+        const margin = span * 0.5;
+        const from = Math.max(0, Math.floor(S.viewFrom - margin));
+        const to = Math.ceil(S.viewTo + margin);
+        const data = await fetchJSON(`${API_PREFIX}/events?from=${from}&to=${to}`);
+        S.cachedEvents = data.events;
+        S.cachedFrom = from;
+        S.cachedTo = to;
+    }
+}
+
+// ── Rendering ──────────────────────────────────────────────────
+function resize() {
+    const wrap = document.getElementById('canvas-wrap');
+    canvas.width = wrap.clientWidth;
+    canvas.height = wrap.clientHeight;
+    updateMaxScrollY();
+}
+
+function msToX(ms) {
+    return S.labelW + (ms - S.viewFrom) / (S.viewTo - S.viewFrom) * (canvas.width - S.labelW);
+}
+
+function xToMs(x) {
+    return S.viewFrom + (x - S.labelW) / (canvas.width - S.labelW) * (S.viewTo - S.viewFrom);
+}
+
+// Clamp viewport so viewFrom never goes below time_min.
+// When the viewport span exceeds the data range, anchor at time_min.
+// In interactive mode, allow viewTo to extend past time_max (for NOW margin).
+function clampViewport() {
+    const span = S.viewTo - S.viewFrom;
+    const range = S.meta.time_max - S.meta.time_min;
+    if (span >= range) {
+        // Viewport wider than data — just show from time_min
+        S.viewFrom = S.meta.time_min;
+        S.viewTo = S.viewFrom + span;
+    } else {
+        if (S.viewFrom < S.meta.time_min) {
+            S.viewFrom = S.meta.time_min;
+            S.viewTo = S.viewFrom + span;
+        }
+        // In interactive mode, don't clamp viewTo to time_max —
+        // interactiveFollowViewport intentionally extends past it for margin
+        if (!INTERACTIVE_ID && S.viewTo > S.meta.time_max) {
+            S.viewTo = S.meta.time_max;
+            S.viewFrom = S.viewTo - span;
+        }
+    }
+}
+
+function nodeToY(name) {
+    const idx = S.nodeIndex[name];
+    if (idx === undefined) return null;
+    return S.headerH + idx * S.laneH - S.scrollY;
+}
+
+function updateMaxScrollY() {
+    const totalH = S.nodes.length * S.laneH;
+    const visibleH = canvas.height - S.headerH;
+    S.maxScrollY = Math.max(0, totalH - visibleH);
+    S.scrollY = Math.min(S.scrollY, S.maxScrollY);
+}
+
+function render() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    // Snapshot viewport state for hit-testing (so clicks match what's drawn)
+    S.renderedViewFrom = S.viewFrom;
+    S.renderedViewTo = S.viewTo;
+    S.renderedScrollY = S.scrollY;
+
+    // Background
+    ctx.fillStyle = '#f5f5f8';
+    ctx.fillRect(0, 0, w, h);
+
+    updateMaxScrollY();
+
+    const nNodes = S.nodes.length;
+    const contentW = w - S.labelW;
+
+    // Clip content area below header
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, S.headerH, w, h - S.headerH);
+    ctx.clip();
+
+    // Draw lanes (with scrollY offset)
+    for (let i = 0; i < nNodes; i++) {
+        const y = S.headerH + i * S.laneH - S.scrollY;
+        if (y + S.laneH < S.headerH) continue;
+        if (y > h) break;
+        ctx.fillStyle = i % 2 === 0 ? COLORS.lane_bg : COLORS.lane_bg_alt;
+        ctx.fillRect(S.labelW, y, contentW, S.laneH);
+
+        // Lane border
+        ctx.strokeStyle = COLORS.lane_border;
+        ctx.beginPath();
+        ctx.moveTo(S.labelW, y + S.laneH);
+        ctx.lineTo(w, y + S.laneH);
+        ctx.stroke();
+    }
+
+    // Time grid lines in content area
+    drawTimeGrid(contentW, h);
+
+    ctx.restore();
+
+    // Label column background (over clipped content)
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, S.headerH, S.labelW, h - S.headerH);
+
+    // Draw labels (clipped to below header)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, S.headerH, S.labelW, h - S.headerH);
+    ctx.clip();
+    for (let i = 0; i < nNodes; i++) {
+        const y = S.headerH + i * S.laneH - S.scrollY;
+        if (y + S.laneH < S.headerH) continue;
+        if (y > h) break;
+        const node = S.nodes[i];
+        const isCompanion = node.role === 'companion';
+        ctx.fillStyle = isCompanion ? '#2563eb' : '#6b7280';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        const label = node.name.length > 20 ? node.name.slice(0, 19) + '\u2026' : node.name;
+        ctx.fillText(label, S.labelW - 6, y + S.laneH / 2);
+    }
+    ctx.restore();
+
+    // Header background + time axis
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, S.headerH);
+    // Header bottom border
+    ctx.strokeStyle = '#d1d5db';
+    ctx.beginPath();
+    ctx.moveTo(0, S.headerH);
+    ctx.lineTo(w, S.headerH);
+    ctx.stroke();
+    drawTimeAxis(contentW);
+
+    // Draw events (clipped to content area)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(S.labelW, S.headerH, w - S.labelW, h - S.headerH);
+    ctx.clip();
+
+    drawWarmupOverlay(h);
+
+    if (S.densityCache) {
+        drawDensity();
+    } else {
+        drawEvents();
+    }
+
+    // Draw trace overlay
+    if (S.tracePkt && S.traceEvents.length) {
+        drawTrace();
+    }
+
+    // Interactive mode: draw "now" line in content area
+    if (INTERACTIVE_ID && S.meta) {
+        drawNowLine(h);
+    }
+
+    ctx.restore();
+
+    // Interactive mode: draw "NOW" label in header (outside content clip)
+    if (INTERACTIVE_ID && S.meta) {
+        drawNowLabel();
+    }
+
+    // Time display
+    const centerMs = (S.viewFrom + S.viewTo) / 2;
+    const spanMs = S.viewTo - S.viewFrom;
+    timeDisplay.textContent = `${formatTime(S.viewFrom)} \u2014 ${formatTime(S.viewTo)} (${formatDuration(spanMs)})`;
+
+    // Viewport info
+    document.getElementById('viewport-info').textContent =
+        S.densityCache ? 'density mode' : `${S.cachedEvents.length} events in cache`;
+
+    // Vertical scrollbar indicator (right edge)
+    if (S.maxScrollY > 0) {
+        const trackH = h - S.headerH;
+        const totalH = S.nodes.length * S.laneH;
+        const thumbH = Math.max(20, trackH * trackH / totalH);
+        const thumbY = S.headerH + (S.scrollY / S.maxScrollY) * (trackH - thumbH);
+        ctx.fillStyle = '#c4c4c422';
+        ctx.fillRect(w - 6, S.headerH, 6, trackH);
+        ctx.fillStyle = '#aaaaaa88';
+        ctx.fillRect(w - 6, thumbY, 6, thumbH);
+    }
+
+    syncScrollbar();
+}
+
+function timeTickInterval(contentW) {
+    const span = S.viewTo - S.viewFrom;
+    const targetTicks = contentW / 100;
+    const rawInterval = span / targetTicks;
+    const niceIntervals = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000,
+                           10000, 20000, 30000, 60000, 120000, 300000, 600000, 1800000, 3600000];
+    return niceIntervals.find(n => n >= rawInterval) || rawInterval;
+}
+
+function drawTimeGrid(contentW, h) {
+    const interval = timeTickInterval(contentW);
+    const firstTick = Math.ceil(S.viewFrom / interval) * interval;
+    for (let t = firstTick; t <= S.viewTo; t += interval) {
+        const x = msToX(t);
+        if (x < S.labelW) continue;
+        ctx.strokeStyle = COLORS.time_grid;
+        ctx.beginPath();
+        ctx.moveTo(x, S.headerH);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+    }
+}
+
+function drawTimeAxis(contentW) {
+    const interval = timeTickInterval(contentW);
+    const firstTick = Math.ceil(S.viewFrom / interval) * interval;
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+
+    for (let t = firstTick; t <= S.viewTo; t += interval) {
+        const x = msToX(t);
+        if (x < S.labelW) continue;
+        ctx.fillStyle = COLORS.time_text;
+        ctx.fillText(formatTime(t), x, 4);
+    }
+}
+
+function drawWarmupOverlay(h) {
+    if (!S.meta || !S.meta.sim) return;
+    const warmup = S.meta.sim.warmup_ms || 0;
+    if (warmup <= 0) return;
+    if (warmup <= S.viewFrom) return;  // warmup region not visible
+
+    const x0 = Math.max(msToX(0), S.labelW);
+    const x1 = Math.min(msToX(warmup), canvas.width);
+    if (x1 <= x0) return;
+
+    // Semi-transparent overlay
+    ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+    ctx.fillRect(x0, 0, x1 - x0, h);
+
+    // Dashed vertical line at warmup boundary
+    ctx.strokeStyle = 'rgba(59, 130, 246, 0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x1, 0);
+    ctx.lineTo(x1, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+
+    // Label at top
+    const label = S.meta.sim.hot_start ? 'warmup / hot-start' : 'warmup';
+    ctx.font = '10px monospace';
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.7)';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const labelX = Math.max(x0 + 4, x1 - ctx.measureText(label).width - 6);
+    ctx.fillText(label, labelX, 4);
+}
+
+function drawNowLine(h) {
+    // Draws the vertical "now" line in the content area (called inside content clip)
+    const nowMs = S.meta.time_max;
+    if (nowMs < S.viewFrom || nowMs > S.viewTo) return;
+    const x = msToX(nowMs);
+    if (x < S.labelW || x > canvas.width) return;
+
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, S.headerH);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+}
+
+function drawNowLabel() {
+    // Draws the "NOW" label + triangle in the header area (called outside clip)
+    const nowMs = S.meta.time_max;
+    if (nowMs < S.viewFrom || nowMs > S.viewTo) return;
+    const x = msToX(nowMs);
+    if (x < S.labelW || x > canvas.width) return;
+
+    // Triangle pointing down at header bottom
+    ctx.fillStyle = '#dc2626';
+    ctx.beginPath();
+    ctx.moveTo(x, S.headerH);
+    ctx.lineTo(x - 5, S.headerH - 7);
+    ctx.lineTo(x + 5, S.headerH - 7);
+    ctx.closePath();
+    ctx.fill();
+
+    // Label above triangle
+    ctx.font = 'bold 9px monospace';
+    ctx.fillStyle = '#dc2626';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('NOW', x, S.headerH - 8);
+}
+
+function drawDensity() {
+    const d = S.densityCache;
+    if (!d) return;
+
+    for (const [nodeName, cats] of Object.entries(d.nodes)) {
+        const y = nodeToY(nodeName);
+        if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+
+        for (const [cat, buckets] of Object.entries(cats)) {
+            const color = COLORS[cat] || '#999';
+            for (let b = 0; b < buckets.length; b++) {
+                if (buckets[b] === 0) continue;
+                const t0 = d.from_ms + b * d.bucket_ms;
+                const t1 = t0 + d.bucket_ms;
+                const x0 = msToX(t0);
+                const x1 = msToX(t1);
+
+                // Intensity based on count
+                const intensity = Math.min(1, buckets[b] / 10);
+                ctx.globalAlpha = 0.3 + intensity * 0.7;
+                ctx.fillStyle = color;
+
+                const barH = S.laneH - 4;
+                let yOff = 2;
+                if (cat === 'rx') yOff = S.laneH / 2;
+                if (cat === 'collision' || cat === 'drop') yOff = S.laneH - barH / 3 - 2;
+
+                ctx.fillRect(x0, y + yOff, Math.max(1, x1 - x0), cat === 'tx' ? barH / 2 : barH / 3);
+            }
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawEvents() {
+    const events = S.cachedEvents;
+    const span = S.viewTo - S.viewFrom;
+    // Pixel per ms — determines label visibility
+    const pxPerMs = (canvas.width - S.labelW) / span;
+    const showLabels = pxPerMs > 0.15;  // ~150px per second
+    const showSnr = pxPerMs > 0.05;     // ~50px per second
+
+    for (const ev of events) {
+        const t = ev.time_ms;
+        const t_end = t + (ev.airtime_ms || 0);
+        if (t_end < S.viewFrom || t > S.viewTo) continue;
+
+        const etype = ev.type;
+        const x = msToX(t);
+
+        if (etype === 'tx') {
+            const y = nodeToY(ev.node);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            const airtime = ev.airtime_ms || 50;
+            const x2 = msToX(t + airtime);
+            const boxW = Math.max(2, x2 - x);
+            const boxH = S.laneH / 2 - 2;
+
+            const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
+            ctx.fillStyle = isTraced ? COLORS.trace_highlight : COLORS.tx;
+            ctx.globalAlpha = isTraced ? 0.9 : 0.85;
+            ctx.fillRect(x, y + 2, boxW, boxH);
+            ctx.globalAlpha = 1;
+
+            // Border
+            if (isTraced) {
+                ctx.strokeStyle = '#a16207';
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(x, y + 2, boxW, boxH);
+                ctx.lineWidth = 1;
+            }
+
+            // Hop number badge for relay TX bars in trace mode
+            if (isTraced && S.traceHopDepth && ev.pkt in S.traceHopDepth) {
+                const depth = S.traceHopDepth[ev.pkt];
+                if (depth > 0) {
+                    const bx = x + boxW - 1;
+                    const by = y + 2;
+                    const br = 6;
+                    ctx.fillStyle = '#ea580c';
+                    ctx.beginPath();
+                    ctx.arc(bx, by + br, br, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.font = 'bold 8px monospace';
+                    ctx.fillStyle = '#fff';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(String(depth), bx, by + br);
+                }
+            }
+
+            // Label on TX bar: pkt_type + route (or pkt hash if no room)
+            if (showLabels && boxW > 20) {
+                ctx.font = '9px monospace';
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                const maxChars = Math.floor(boxW / 5.5);
+                let label;
+                if (ev.pkt_type && maxChars >= 3) {
+                    label = ev.pkt_type;
+                    if (ev.route && maxChars >= label.length + 2) label += '/' + ev.route;
+                } else if (ev.pkt) {
+                    label = ev.pkt.slice(0, Math.min(8, maxChars));
+                } else {
+                    label = '';
+                }
+                if (label) ctx.fillText(label, x + 2, y + 2 + boxH / 2);
+            }
+        } else if (etype === 'rx') {
+            const y = nodeToY(ev.to);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
+            const airtime = ev.airtime_ms || 50;
+            const x2 = msToX(t + airtime);
+            const boxW = Math.max(2, x2 - x);
+            const boxH = S.laneH / 2 - 2;
+            const boxY = y + S.laneH / 2;
+
+            // Hollow (stroked) bar in lower half of lane
+            ctx.strokeStyle = isTraced ? COLORS.trace_highlight : COLORS.rx;
+            ctx.lineWidth = isTraced ? 2 : 1.5;
+            ctx.globalAlpha = isTraced ? 0.9 : 0.85;
+            ctx.strokeRect(x, boxY, boxW, boxH);
+
+            // Light fill for visibility
+            ctx.fillStyle = isTraced ? COLORS.trace_highlight : COLORS.rx;
+            ctx.globalAlpha = isTraced ? 0.2 : 0.15;
+            ctx.fillRect(x, boxY, boxW, boxH);
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1;
+
+            // SNR label next to RX bar
+            if (showSnr && ev.snr !== undefined) {
+                ctx.font = '8px monospace';
+                ctx.fillStyle = '#16a34a';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillText(ev.snr.toFixed(1), x + boxW + 2, boxY);
+            }
+
+            // Draw arrow from sender to receiver if both visible
+            if (isTraced) {
+                const yFrom = nodeToY(ev.from);
+                if (yFrom !== null) {
+                    ctx.strokeStyle = '#a1620766';
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(x, yFrom + S.laneH / 2);
+                    ctx.lineTo(x, y + S.laneH / 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
+        } else if (etype === 'collision') {
+            const y = nodeToY(ev.to);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
+            const sz = isTraced ? 8 : 5;
+            const cy = y + S.laneH / 2 + 2;
+
+            if (isTraced) {
+                // Bright glow circle behind the X
+                ctx.fillStyle = '#dc262644';
+                ctx.beginPath();
+                ctx.arc(x, cy, sz + 4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#dc262622';
+                ctx.beginPath();
+                ctx.arc(x, cy, sz + 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.strokeStyle = isTraced ? '#dc2626' : COLORS.collision;
+            ctx.lineWidth = isTraced ? 3 : 1.5;
+            ctx.globalAlpha = isTraced ? 1 : 0.85;
+            ctx.beginPath();
+            ctx.moveTo(x - sz, cy - sz); ctx.lineTo(x + sz, cy + sz);
+            ctx.moveTo(x + sz, cy - sz); ctx.lineTo(x - sz, cy + sz);
+            ctx.stroke();
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 1;
+
+            // SNR label for collision
+            if (showSnr && ev.snr !== undefined) {
+                ctx.font = isTraced ? '10px monospace' : '8px monospace';
+                ctx.fillStyle = isTraced ? '#dc2626' : '#dc2626';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'top';
+                ctx.fillText(ev.snr.toFixed(1), x + sz + 2, cy - sz);
+            }
+
+            // Interferer label below the X when zoomed in
+            if (showLabels && ev.interferer) {
+                ctx.font = '8px monospace';
+                ctx.fillStyle = '#dc2626';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText('by ' + ev.interferer, x, cy + sz + 2);
+            }
+        } else if (etype === 'drop_halfduplex') {
+            const y = nodeToY(ev.to);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
+            const airtime = ev.airtime_ms || 50;
+            const x2 = msToX(t + airtime);
+            const boxW = Math.max(2, x2 - x);
+            const boxH = S.laneH / 2 - 2;
+            const boxY = y + S.laneH / 2;
+
+            // Solid red fill — clearly "failed"
+            ctx.fillStyle = isTraced ? '#dc2626' : '#b91c1c';
+            ctx.globalAlpha = isTraced ? 0.5 : 0.4;
+            ctx.fillRect(x, boxY, boxW, boxH);
+
+            // Diagonal hatch lines across the bar
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x, boxY, boxW, boxH);
+            ctx.clip();
+            ctx.strokeStyle = isTraced ? '#dc2626' : '#b91c1c';
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = isTraced ? 0.8 : 0.6;
+            const step = 6;
+            for (let lx = x - boxH; lx < x + boxW + boxH; lx += step) {
+                ctx.beginPath();
+                ctx.moveTo(lx, boxY + boxH);
+                ctx.lineTo(lx + boxH, boxY);
+                ctx.stroke();
+            }
+            ctx.restore();
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1;
+        } else if (etype === 'drop_weak' || etype === 'drop_sf_mismatch') {
+            const y = nodeToY(ev.to || ev.node);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
+            if (isTraced) {
+                ctx.fillStyle = (COLORS[etype] || '#ff8888') + '44';
+                ctx.beginPath();
+                ctx.arc(x, y + S.laneH - 4, 8, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = COLORS[etype] || '#ff8888';
+                ctx.fillRect(x - 3, y + S.laneH - 7, 6, 6);
+            } else {
+                ctx.fillStyle = COLORS[etype] || '#ff8888';
+                ctx.globalAlpha = 0.6;
+                ctx.fillRect(x - 1, y + S.laneH - 5, 3, 3);
+                ctx.globalAlpha = 1;
+            }
+        } else if (etype === 'cmd_reply' || etype === 'script_log' || etype === 'script_emit') {
+            const y = nodeToY(ev.node);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            ctx.fillStyle = COLORS[etype] || '#cccccc';
+            ctx.globalAlpha = 0.8;
+            // Diamond
+            const sz = 3;
+            const cy = y + S.laneH / 2;
+            ctx.beginPath();
+            ctx.moveTo(x, cy - sz);
+            ctx.lineTo(x + sz, cy);
+            ctx.lineTo(x, cy + sz);
+            ctx.lineTo(x - sz, cy);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        } else if (etype === 'tx_deferred') {
+            const y = nodeToY(ev.node);
+            if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
+            // Yellow triangle pointing up
+            const sz = 4;
+            const cy = y + S.laneH / 4;
+            ctx.fillStyle = COLORS.tx_deferred;
+            ctx.globalAlpha = 0.85;
+            ctx.beginPath();
+            ctx.moveTo(x, cy - sz);
+            ctx.lineTo(x + sz, cy + sz);
+            ctx.lineTo(x - sz, cy + sz);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        }
+    }
+}
+
+function drawTrace() {
+    if (!S.traceEvents.length) return;
+    if (!S.raysMode) return;
+
+    // Sort by time
+    const sorted = [...S.traceEvents].sort((a, b) => a.time_ms - b.time_ms);
+
+    // Index TX events by (pkt, node) for matching to RX
+    const txByPktNode = {};
+    for (const ev of sorted) {
+        if (ev.type === 'tx') {
+            const key = (ev.pkt || '') + ':' + ev.node;
+            txByPktNode[key] = ev;
+        }
+    }
+
+    // Draw rays: TX end → RX marker for each (pkt, from) match
+    for (const rx of sorted) {
+        if (rx.type !== 'rx') continue;
+        const key = (rx.pkt || '') + ':' + rx.from;
+        const tx = txByPktNode[key];
+        if (!tx) continue;
+
+        const x1 = msToX(tx.time_ms + (tx.airtime_ms || 50));
+        const y1 = nodeToY(tx.node);
+        const x2 = msToX(rx.time_ms);
+        const y2 = nodeToY(rx.to);
+
+        if (y1 === null || y2 === null) continue;
+
+        const cy1 = y1 + S.laneH / 4;
+        const cy2 = y2 + S.laneH / 2;
+
+        // Ray line
+        ctx.strokeStyle = '#a16207aa';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x1, cy1);
+        ctx.lineTo(x2, cy2);
+        ctx.stroke();
+
+        // Arrowhead
+        const dx = x2 - x1, dy = cy2 - cy1;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 8) {
+            const ax = dx / len, ay = dy / len;
+            const sz = 5;
+            ctx.fillStyle = '#a16207aa';
+            ctx.beginPath();
+            ctx.moveTo(x2, cy2);
+            ctx.lineTo(x2 - sz * ax + sz * 0.4 * ay, cy2 - sz * ay - sz * 0.4 * ax);
+            ctx.lineTo(x2 - sz * ax - sz * 0.4 * ay, cy2 - sz * ay + sz * 0.4 * ax);
+            ctx.closePath();
+            ctx.fill();
+        }
+    }
+
+    // Draw relay links: RX → relay TX within the same lane (pkt hash changes on relay)
+    // Orange solid arrows to clearly show the path-building relay chain
+    for (const hop of (S.deepTrace ? S.deepTrace.hops : [])) {
+        if (!hop.relay_from) continue;
+        const parentHop = (S.deepTrace.hops || []).find(h => h.pkt === hop.relay_from);
+        if (!parentHop) continue;
+        const relayTx = hop.events.find(e => e.type === 'tx');
+        if (!relayTx) continue;
+        const triggerRx = parentHop.events.find(e => e.type === 'rx' && e.to === relayTx.node);
+        if (!triggerRx) continue;
+
+        const rxAirtime = triggerRx.airtime_ms || 50;
+        const x1 = msToX(triggerRx.time_ms + rxAirtime);
+        const y = nodeToY(relayTx.node);
+        const x2 = msToX(relayTx.time_ms);
+        if (y === null) continue;
+
+        // Orange arrow within lane: RX end → relay TX start
+        const cy1 = y + S.laneH * 3 / 4;  // bottom half (RX area)
+        const cy2 = y + S.laneH / 4;       // top half (TX area)
+        ctx.strokeStyle = '#ea580ccc';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x1, cy1);
+        // Curved connector: slight arc to make it visually distinct
+        const cpx = (x1 + x2) / 2;
+        const cpy = y + S.laneH / 2;
+        ctx.quadraticCurveTo(cpx, cpy, x2, cy2);
+        ctx.stroke();
+
+        // Arrowhead at relay TX
+        const adx = x2 - cpx, ady = cy2 - cpy;
+        const alen = Math.sqrt(adx * adx + ady * ady);
+        if (alen > 4) {
+            const ax = adx / alen, ay = ady / alen;
+            const sz = 4;
+            ctx.fillStyle = '#ea580ccc';
+            ctx.beginPath();
+            ctx.moveTo(x2, cy2);
+            ctx.lineTo(x2 - sz * ax + sz * 0.5 * ay, cy2 - sz * ay - sz * 0.5 * ax);
+            ctx.lineTo(x2 - sz * ax - sz * 0.5 * ay, cy2 - sz * ay + sz * 0.5 * ax);
+            ctx.closePath();
+            ctx.fill();
+        }
+    }
+
+    // Draw response connectors (companion response TXs) in green
+    for (const hop of (S.deepTrace ? S.deepTrace.hops : [])) {
+        if (!hop.response_from) continue;
+        const parentHop = (S.deepTrace.hops || []).find(h => h.pkt === hop.response_from);
+        if (!parentHop) continue;
+        const respTx = hop.events.find(e => e.type === 'tx');
+        if (!respTx) continue;
+        const triggerRx = parentHop.events.find(e => e.type === 'rx' && e.to === respTx.node);
+        if (!triggerRx) continue;
+
+        const x1 = msToX(triggerRx.time_ms);
+        const y = nodeToY(respTx.node);
+        const x2 = msToX(respTx.time_ms);
+        if (y === null) continue;
+
+        const cy = y + S.laneH / 2;
+        ctx.strokeStyle = '#16a34a66';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x1, cy);
+        ctx.lineTo(x2, cy - S.laneH / 4);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    ctx.lineWidth = 1;
+}
+
+// ── Time formatting ────────────────────────────────────────────
+function formatTime(ms) {
+    const s = ms / 1000;
+    if (s < 60) return s.toFixed(s < 10 ? 2 : 1) + 's';
+    const m = Math.floor(s / 60);
+    const rem = s - m * 60;
+    return m + ':' + rem.toFixed(1).padStart(4, '0');
+}
+
+function formatDuration(ms) {
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    return (ms / 60000).toFixed(1) + 'min';
+}
+
+// ── Interaction ────────────────────────────────────────────────
+canvas.addEventListener('wheel', async (e) => {
+    e.preventDefault();
+    if (followMode) { followMode = false; updateFollowIndicator(); }
+    const span = S.viewTo - S.viewFrom;
+
+    if (e.ctrlKey || e.metaKey) {
+        // Ctrl+wheel: zoom in/out (centered on mouse)
+        const mouseMs = xToMs(e.offsetX);
+        const factor = e.deltaY > 0 ? 1.3 : 1 / 1.3;
+        const newSpan = Math.max(100, Math.min(S.meta.time_max - S.meta.time_min, span * factor));
+        const ratio = (mouseMs - S.viewFrom) / span;
+        S.viewFrom = mouseMs - ratio * newSpan;
+        S.viewTo = mouseMs + (1 - ratio) * newSpan;
+        clampViewport();
+        await loadViewport();
+    } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        // Shift+wheel or horizontal scroll: move time window left/right
+        const delta = (e.shiftKey ? e.deltaY : e.deltaX);
+        const dMs = delta / (canvas.width - S.labelW) * span * 2;
+        S.viewFrom += dMs;
+        S.viewTo += dMs;
+        clampViewport();
+        await loadViewport();
+    } else {
+        // Vertical scroll: scroll node lanes up/down
+        S.scrollY += e.deltaY;
+        updateMaxScrollY();
+        S.scrollY = Math.max(0, Math.min(S.scrollY, S.maxScrollY));
+    }
+
+    render();
+}, { passive: false });
+
+canvas.addEventListener('mousedown', (e) => {
+    if (e.offsetX < S.labelW) return;
+    S.dragging = true;
+    S.dragMoved = false;
+    S.dragStartX = e.offsetX;
+    S.dragStartY = e.offsetY;
+    S.dragViewFrom = S.viewFrom;
+    S.dragScrollY = S.scrollY;
+});
+
+canvas.addEventListener('mousemove', async (e) => {
+    if (S.dragging) {
+        const dx = e.offsetX - S.dragStartX;
+        const dy = e.offsetY - S.dragStartY;
+        // Only start actual drag after threshold to avoid micro-shifts on click
+        if (!S.dragMoved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+        S.dragMoved = true;
+        canvas.style.cursor = 'grabbing';
+        if (followMode) { followMode = false; updateFollowIndicator(); }
+        const span = S.viewTo - S.viewFrom;
+
+        // Horizontal: pan time
+        const dMs = -dx / (canvas.width - S.labelW) * span;
+        S.viewFrom = S.dragViewFrom + dMs;
+        S.viewTo = S.viewFrom + span;
+        clampViewport();
+
+        // Vertical: scroll nodes
+        S.scrollY = S.dragScrollY - dy;
+        updateMaxScrollY();
+        S.scrollY = Math.max(0, Math.min(S.scrollY, S.maxScrollY));
+
+        await loadViewport();
+        render();
+        return;
+    }
+
+    // Hover detection
+    updateHover(e.offsetX, e.offsetY);
+});
+
+canvas.addEventListener('mouseup', () => {
+    S.dragging = false;
+    canvas.style.cursor = 'default';
+});
+
+canvas.addEventListener('mouseleave', () => {
+    S.dragging = false;
+    canvas.style.cursor = 'default';
+    tooltip.style.display = 'none';
+});
+
+canvas.addEventListener('dblclick', () => {
+    if (INTERACTIVE_ID && !followMode) {
+        followMode = true;
+        updateFollowIndicator();
+    }
+});
+
+canvas.addEventListener('click', async (e) => {
+    // Skip event selection if this was a drag gesture
+    if (S.dragMoved) return;
+
+    if (e.offsetX < S.labelW) {
+        // Clicked on node label — use rendered scrollY
+        const laneIdx = Math.floor((e.offsetY - S.headerH + S.renderedScrollY) / S.laneH);
+        if (laneIdx >= 0 && laneIdx < S.nodes.length) {
+            const n = S.nodes[laneIdx].name;
+            showNodeDetail(n);
+            emitFocusNode(n);                      // cross-iframe: center map on node
+        }
+        return;
+    }
+
+    const hit = findEventAt(e.offsetX, e.offsetY);
+    if (hit) {
+        if (hit.pkt) {
+            if (!S.traceMode) {
+                S.traceMode = true;
+                document.getElementById('btn-trace-mode').classList.add('active');
+            }
+            await tracePkt(hit.pkt);
+        } else {
+            showEventDetail(hit);
+        }
+        // Center the sibling map view on the TX source (or fall back to
+        // the receiver for pure RX/collision/drop events).
+        const focusNode = hit.node || hit.from || hit.to;
+        if (focusNode) emitFocusNode(focusNode);
+    }
+});
+
+// Post a focus-node hint to the parent window so sibling iframes (e.g. the
+// live map) can sync their view. No-op when loaded standalone.
+function emitFocusNode(name) {
+    if (!name || window.parent === window) return;
+    try {
+        window.parent.postMessage({ type: 'mlv-focus-node', node: name }, '*');
+    } catch (_) { /* ignore */ }
+}
+
+// ── Cross-iframe time sync ──────────────────────────────────────────
+// The live map's scrubber posts {type: 'mlv-scrub-time', t: ms} when the
+// user drags it. Center our viewport on that moment so both views share
+// context. No-op when loaded standalone or before meta has loaded.
+async function centerViewportOnTime(t) {
+    if (!S.meta) return;
+    const span = S.viewTo - S.viewFrom;
+    S.viewFrom = t - span * 0.5;
+    S.viewTo = S.viewFrom + span;
+    clampViewport();
+    await loadViewport();
+    render();
+}
+
+window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data !== 'object') return;
+    if (e.data.type === 'mlv-scrub-time' && typeof e.data.t === 'number') {
+        centerViewportOnTime(e.data.t);
+    }
+});
+
+function findEventAt(mx, my) {
+    if (S.densityCache) return null;
+    if (my < S.headerH) return null;
+
+    // Use rendered viewport state so hit-testing matches what's actually drawn
+    const vFrom = S.renderedViewFrom;
+    const vTo = S.renderedViewTo;
+    const sY = S.renderedScrollY;
+    const ms = vFrom + (mx - S.labelW) / (canvas.width - S.labelW) * (vTo - vFrom);
+    const laneIdx = Math.floor((my - S.headerH + sY) / S.laneH);
+    if (laneIdx < 0 || laneIdx >= S.nodes.length) return null;
+    const targetNode = S.nodes[laneIdx].name;
+
+    // Determine if click is in upper half (TX) or lower half (RX) of lane
+    const laneY = S.headerH + laneIdx * S.laneH - sY;
+    const relY = my - laneY;
+    const inUpperHalf = relY < S.laneH / 2;
+
+    // Search nearby events — TX bars match over their full airtime width
+    let best = null;
+    let bestDist = Infinity;
+    const span = vTo - vFrom;
+    const tolerance = span * 0.008; // 0.8% of viewport for point events
+
+    for (const ev of S.cachedEvents) {
+        let evNode = ev.node || ev.to || ev.from;
+        if (ev.type === 'rx' || ev.type === 'collision' || ev.type.startsWith('drop')) {
+            evNode = ev.to;
+        }
+        if (evNode !== targetNode) continue;
+
+        // Check lane half: TX in upper, RX/collision/drop in lower
+        const isTxType = ev.type === 'tx' || ev.type === 'cmd_reply';
+        const isRxType = !isTxType;
+        // Prefer events in the correct half, but allow cross-half if nothing else matches
+        const halfMismatch = (inUpperHalf && isRxType) || (!inUpperHalf && isTxType);
+
+        let dist;
+        if (ev.type === 'tx' || ev.type === 'rx' || ev.type === 'drop_halfduplex') {
+            // TX/RX bar spans [time_ms, time_ms + airtime_ms]
+            const end = ev.time_ms + (ev.airtime_ms || 50);
+            if (ms >= ev.time_ms - tolerance && ms <= end + tolerance) {
+                // Distance = 0 if inside bar, otherwise distance to nearest edge
+                dist = (ms >= ev.time_ms && ms <= end) ? 0 : Math.min(Math.abs(ms - ev.time_ms), Math.abs(ms - end));
+            } else {
+                continue;
+            }
+        } else {
+            dist = Math.abs(ev.time_ms - ms);
+            if (dist > tolerance) continue;
+        }
+
+        // Penalize events in wrong lane half so correct-half events win
+        if (halfMismatch) dist += tolerance * 2;
+
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = ev;
+        }
+    }
+    return best;
+}
+
+function updateHover(mx, my) {
+    const hit = findEventAt(mx, my);
+    if (!hit) {
+        tooltip.style.display = 'none';
+        return;
+    }
+
+    // Find event index for reference
+    const evIdx = S.cachedEvents.indexOf(hit);
+    const idxStr = evIdx >= 0 ? ` #${S.cachedFrom > 0 ? '~' : ''}${evIdx}` : '';
+
+    let text = `${hit.type}${idxStr} @ ${formatTime(hit.time_ms)}`;
+    if (hit.node) text += `\nnode: ${hit.node}`;
+    if (hit.from) text += `\nfrom: ${hit.from}`;
+    if (hit.to) text += `\nto: ${hit.to}`;
+    if (hit.pkt) text += `\npkt: ${hit.pkt}`;
+    if (hit.hex) text += `\nhex: ${hit.hex.slice(0, 32)}${hit.hex.length > 32 ? '\u2026' : ''}`;
+    if (hit.snr !== undefined) text += `\nsnr: ${hit.snr.toFixed(1)} dB`;
+    if (hit.rssi !== undefined) text += `\nrssi: ${hit.rssi.toFixed(1)} dBm`;
+    if (hit.interferer) text += `\ninterferer: ${hit.interferer}`;
+    if (hit.interferer_snr !== undefined && hit.interferer) text += `\ninterferer_snr: ${hit.interferer_snr.toFixed(1)} dB`;
+    if (hit.snr_margin !== undefined && hit.interferer) text += `\nmargin: ${hit.snr_margin.toFixed(1)} dB (needed to survive)`;
+    if (hit.airtime_ms) text += `\nairtime: ${hit.airtime_ms}ms`;
+    if (hit.command) text += `\ncmd: ${hit.command}`;
+    if (hit.reply) text += `\nreply: ${hit.reply.slice(0, 80)}`;
+    if (hit.threshold) text += `\nthreshold: ${hit.threshold.toFixed(1)} dB`;
+    if (hit.loss !== undefined) text += `\nloss prob: ${hit.loss.toFixed(2)}`;
+
+    tooltip.textContent = text;
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(mx + 12, canvas.width - 300) + 'px';
+    tooltip.style.top = (my + 12) + 'px';
+}
+
+// ── lus event vocabulary — no per-protocol packet decoder ─────────────────────────────────────
+
+// ── Trace mode ─────────────────────────────────────────────────
+// lus has no deep_trace endpoint; highlight all cached events sharing this pkt hash
+async function tracePkt(pkt) {
+    S.tracePkt = pkt;
+    if (window.parent !== window) {
+        try { window.parent.postMessage({ type: 'mlv-trace-pkt', pkt }, '*'); }
+        catch (_) { /* ignore */ }
+    }
+
+    // Collect matching events from the current event cache
+    const matched = S.cachedEvents.filter(ev => ev.pkt === pkt);
+    S.traceEvents = matched;
+    S.tracePkts = new Set([pkt]);
+    S.deepTrace = null;
+    S.traceHopDepth = null;
+
+    // Auto-switch to trace sort order
+    const orderSelect = document.getElementById('node-order');
+    if (orderSelect.value !== 'trace') {
+        S.preTraceOrder = orderSelect.value;
+        orderSelect.value = 'trace';
+    }
+    sortNodes();
+
+    showTraceDetail(pkt, matched);
+    render();
+}
+
+function clearTrace() {
+    S.tracePkt = null;
+    S.traceEvents = [];
+    S.tracePkts = null;
+    S.deepTrace = null;
+    S.traceHopDepth = null;
+
+    // Restore previous sort order if we auto-switched to trace
+    const orderSelect = document.getElementById('node-order');
+    if (orderSelect.value === 'trace' && S.preTraceOrder) {
+        orderSelect.value = S.preTraceOrder;
+    }
+    S.preTraceOrder = null;
+    sortNodes();
+
+    render();
+}
+
+// ── Navigation helpers ─────────────────────────────────────────
+async function jumpToEvent(nodeName, timeMs) {
+    // Ensure node is visible vertically
+    const idx = S.nodeIndex[nodeName];
+    if (idx !== undefined) {
+        const targetY = idx * S.laneH;
+        const visibleH = canvas.height - S.headerH;
+        if (targetY < S.scrollY || targetY + S.laneH > S.scrollY + visibleH) {
+            S.scrollY = Math.max(0, targetY - visibleH / 2);
+            updateMaxScrollY();
+            S.scrollY = Math.min(S.scrollY, S.maxScrollY);
+        }
+    }
+
+    // Center time window on event
+    const span = S.viewTo - S.viewFrom;
+    S.viewFrom = timeMs - span * 0.3;
+    S.viewTo = S.viewFrom + span;
+    clampViewport();
+
+    await loadViewport();
+    render();
+}
+
+// ── Sidebar detail views ───────────────────────────────────────
+const SIDEBAR_MIN_W = 200;
+const SIDEBAR_DEFAULT_W = 480;
+
+function _restoreSidebarWidth() {
+    try {
+        const saved = parseFloat(localStorage.getItem('viz-sidebar-width'));
+        if (saved && saved >= SIDEBAR_MIN_W) return saved;
+    } catch (_) {}
+    return SIDEBAR_DEFAULT_W;
+}
+
+function openSidebar() {
+    sidebar.style.width = _restoreSidebarWidth() + 'px';
+    sidebar.classList.add('open');
+    const resizer = document.getElementById('sidebar-resizer');
+    if (resizer) resizer.classList.add('shown');
+    setTimeout(() => { resize(); render(); }, 220);
+}
+
+function closeSidebar() {
+    sidebar.classList.remove('open');
+    sidebar.style.width = '';
+    const resizer = document.getElementById('sidebar-resizer');
+    if (resizer) resizer.classList.remove('shown');
+    setTimeout(() => { resize(); render(); }, 220);
+}
+
+// Drag-to-resize the sidebar (trace panel)
+(function setupSidebarResize() {
+    const resizer = document.getElementById('sidebar-resizer');
+    if (!resizer) return;
+    let dragging = false;
+    let startX = 0;
+    let startW = 0;
+
+    resizer.addEventListener('mousedown', e => {
+        if (!sidebar.classList.contains('open')) return;
+        dragging = true;
+        startX = e.clientX;
+        startW = sidebar.offsetWidth;
+        sidebar.classList.add('dragging');
+        resizer.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', e => {
+        if (!dragging) return;
+        const dx = e.clientX - startX;
+        // Resizer is on the LEFT edge of sidebar — moving cursor left = wider sidebar
+        let newW = startW - dx;
+        const maxW = Math.floor(window.innerWidth * 0.8);
+        if (newW < SIDEBAR_MIN_W) newW = SIDEBAR_MIN_W;
+        if (newW > maxW) newW = maxW;
+        sidebar.style.width = newW + 'px';
+        resize();
+        render();
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = false;
+        sidebar.classList.remove('dragging');
+        resizer.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        try {
+            localStorage.setItem('viz-sidebar-width', String(sidebar.offsetWidth));
+        } catch (_) {}
+    });
+})();
+
+function showEventDetail(ev) {
+    openSidebar();
+    // Field display order for lus events
+    const FIELD_ORDER = ['type', 'time_ms', 'node', 'from', 'to', 'snr', 'rssi',
+                         'packet_sf', 'rx_sf', 'pkt', 'hex', 'emit_type', 'msg', 'data'];
+    let html = `<h3>${ev.type}</h3>`;
+    html += `<div class="field"><span class="key">time: </span><span class="val">${formatTime(ev.time_ms)}</span></div>`;
+
+    const shown = new Set(['type', 'time_ms']);
+    for (const k of FIELD_ORDER) {
+        if (k === 'type' || k === 'time_ms') continue;
+        if (!(k in ev)) continue;
+        shown.add(k);
+        const v = ev[k];
+        let val = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : String(v);
+        if (k === 'pkt') {
+            html += `<div class="field"><span class="key">${k}: </span><span class="pkt-link" onclick="tracePkt('${escHtml(v)}')">${escHtml(val)}</span></div>`;
+        } else {
+            if (val.length > 100) val = val.slice(0, 100) + '\u2026';
+            html += `<div class="field"><span class="key">${k}: </span><span class="val">${escHtml(val)}</span></div>`;
+        }
+    }
+
+    // Remaining fields as raw JSON footer
+    const rest = Object.entries(ev).filter(([k]) => !shown.has(k));
+    if (rest.length > 0) {
+        html += `<h3>Raw</h3>`;
+        for (const [k, v] of rest) {
+            let val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+            if (val.length > 200) val = val.slice(0, 200) + '\u2026';
+            html += `<div class="field"><span class="key">${escHtml(k)}: </span><span class="val">${escHtml(val)}</span></div>`;
+        }
+    }
+
+    // Collision explanation box
+    if (ev.type === 'collision' && ev.interferer) {
+        html += `<div style="margin-top:8px;padding:6px 8px;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px;font-size:11px;color:#991b1b;">`;
+        html += `Packet from <b>${escHtml(ev.from)}</b> (SNR ${ev.snr !== undefined ? ev.snr.toFixed(1) : '?'}dB) destroyed by TX from <b>${escHtml(ev.interferer)}</b>.<br>`;
+        if (ev.snr_margin !== undefined) html += `Needed ${ev.snr_margin.toFixed(1)}dB more to survive capture.`;
+        html += `</div>`;
+    }
+
+    sidebarContent.innerHTML = html;
+}
+
+function showTraceDetail(pkt, events) {
+    openSidebar();
+    const sorted = [...events].sort((a, b) => a.time_ms - b.time_ms);
+
+    let html = `<h3>Trace: ${escHtml(pkt)}</h3>`;
+    html += `<div style="margin-bottom:6px"><button onclick="clearTrace(); closeSidebar();" style="background:#e5e7eb;color:#374151;border:1px solid #d1d5db;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:inherit;font-size:11px;">Clear trace</button></div>`;
+
+    if (sorted.length === 0) {
+        html += '<div style="color:#9ca3af;margin-top:8px">No events with this pkt hash in the current viewport. Pan or zoom to load more events, then click again.</div>';
+        sidebarContent.innerHTML = html;
+        return;
+    }
+
+    // Summary
+    const counts = {};
+    for (const ev of sorted) { counts[ev.type] = (counts[ev.type] || 0) + 1; }
+    html += `<div class="field"><span class="key">events: </span><span class="val">${Object.entries(counts).map(([t,c]) => `${c} ${t}`).join(', ')}</span></div>`;
+
+    // Event table
+    html += '<table><tr><th>Time</th><th>Type</th><th>Node</th><th>Detail</th></tr>';
+    for (const ev of sorted) {
+        const evNode = ev.node || ev.to || '';
+        let detail = '';
+        if (ev.from && ev.to) detail += `${ev.from}\u2192${ev.to}`;
+        else if (ev.from) detail += ev.from;
+        if (ev.snr !== undefined) detail += ` snr=${ev.snr.toFixed(1)}`;
+        if (ev.airtime_ms) detail += ` ${ev.airtime_ms}ms`;
+
+        const color = COLORS[ev.type] || '#6b7280';
+        const nodeHtml = evNode ? `<span class="pkt-link" data-jump-node="${escHtml(evNode)}" data-jump-time="${ev.time_ms}">${escHtml(evNode)}</span>` : '';
+        html += `<tr style="color:${color}"><td>${formatTime(ev.time_ms)}</td><td>${ev.type}</td><td>${nodeHtml}</td><td>${escHtml(detail)}</td></tr>`;
+    }
+    html += '</table>';
+
+    sidebarContent.innerHTML = html;
+
+    // Attach click handlers for jump links
+    sidebarContent.querySelectorAll('[data-jump-node]').forEach(el => {
+        el.addEventListener('click', () => {
+            jumpToEvent(el.dataset.jumpNode, parseFloat(el.dataset.jumpTime));
+        });
+    });
+}
+
+
+function showNodeDetail(name) {
+    openSidebar();
+    const meta = S.meta.nodes.find(n => n.name === name);
+    const stats = (S.meta.stats || []).find(s => s.node === name);
+
+    let html = `<h3>${escHtml(name)}</h3>`;
+    if (meta && meta.lat) {
+        html += `<div class="field"><span class="key">location: </span><span class="val">${meta.lat.toFixed(5)}, ${meta.lon.toFixed(5)}</span></div>`;
+    }
+    html += `<div class="field"><span class="key">role: </span><span class="val">${meta ? meta.role || 'unknown' : 'unknown'}</span></div>`;
+
+    if (stats) {
+        html += '<h3>Message stats</h3>';
+        html += `<div class="field"><span class="key">sent flood: </span><span class="val">${stats.sent_flood || 0}</span></div>`;
+        html += `<div class="field"><span class="key">sent direct: </span><span class="val">${stats.sent_direct || 0}</span></div>`;
+        html += `<div class="field"><span class="key">recv direct: </span><span class="val">${stats.recv_direct || 0}</span></div>`;
+        html += `<div class="field"><span class="key">recv group: </span><span class="val">${stats.recv_group || 0}</span></div>`;
+        if (stats.recv_direct_by_sender) {
+            html += '<h3>Received from</h3>';
+            for (const [sender, count] of Object.entries(stats.recv_direct_by_sender)) {
+                html += `<div class="field"><span class="key">${escHtml(sender)}: </span><span class="val">${count}</span></div>`;
+            }
+        }
+    }
+
+    // Repeater stats (core/radio/packets)
+    const rStats = (S.meta.repeater_stats || []).filter(s => s.node === name && s.stats_type);
+    if (rStats.length > 0) {
+        const radio = rStats.find(s => s.stats_type === 'radio');
+        if (radio && radio.data) {
+            html += '<h3>Radio</h3>';
+            const d = radio.data;
+            html += `<div class="field"><span class="key">Last RSSI: </span><span class="val">${d.last_rssi} dBm</span></div>`;
+            html += `<div class="field"><span class="key">Last SNR: </span><span class="val">${d.last_snr.toFixed(2)} dB</span></div>`;
+            html += `<div class="field"><span class="key">TX airtime: </span><span class="val">${d.tx_air_secs}s</span></div>`;
+            html += `<div class="field"><span class="key">RX airtime: </span><span class="val">${d.rx_air_secs}s</span></div>`;
+        }
+        const pkts = rStats.find(s => s.stats_type === 'packets');
+        if (pkts && pkts.data) {
+            html += '<h3>Packets</h3>';
+            const d = pkts.data;
+            html += `<div class="field"><span class="key">Received: </span><span class="val">${d.recv}</span></div>`;
+            html += `<div class="field"><span class="key">Sent: </span><span class="val">${d.sent}</span></div>`;
+            html += `<div class="field"><span class="key">Flood TX/RX: </span><span class="val">${d.flood_tx} / ${d.flood_rx}</span></div>`;
+            html += `<div class="field"><span class="key">Direct TX/RX: </span><span class="val">${d.direct_tx} / ${d.direct_rx}</span></div>`;
+            if (d.recv_errors > 0)
+                html += `<div class="field"><span class="key">Errors: </span><span class="val" style="color:#dc2626">${d.recv_errors}</span></div>`;
+        }
+        const core = rStats.find(s => s.stats_type === 'core');
+        if (core && core.data) {
+            html += '<h3>Core</h3>';
+            const d = core.data;
+            html += `<div class="field"><span class="key">Uptime: </span><span class="val">${d.uptime_secs}s</span></div>`;
+            html += `<div class="field"><span class="key">Queue: </span><span class="val">${d.queue_len}</span></div>`;
+            if (d.errors > 0)
+                html += `<div class="field"><span class="key">Errors: </span><span class="val" style="color:#dc2626">${d.errors}</span></div>`;
+        }
+    }
+
+    sidebarContent.innerHTML = html;
+}
+
+function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ── Controls ───────────────────────────────────────────────────
+document.getElementById('node-order').addEventListener('change', () => {
+    sortNodes();
+    render();
+});
+
+document.getElementById('node-filter').addEventListener('input', () => {
+    sortNodes();
+    render();
+});
+
+document.getElementById('btn-zoom-fit').addEventListener('click', async () => {
+    S.viewFrom = S.meta.time_min;
+    S.viewTo = S.meta.time_max;
+    await loadViewport();
+    render();
+});
+
+document.getElementById('btn-trace-mode').addEventListener('click', () => {
+    S.traceMode = !S.traceMode;
+    document.getElementById('btn-trace-mode').classList.toggle('active', S.traceMode);
+    if (!S.traceMode) clearTrace();
+});
+
+document.getElementById('btn-rays').addEventListener('click', () => {
+    S.raysMode = !S.raysMode;
+    document.getElementById('btn-rays').classList.toggle('active', S.raysMode);
+    render();
+});
+
+window.addEventListener('resize', () => { resize(); render(); });
+
+// ── Scrollbar ──────────────────────────────────────────────────
+const timeSlider = document.getElementById('time-slider');
+const scrollFrom = document.getElementById('scroll-from');
+const scrollTo = document.getElementById('scroll-to');
+
+function syncScrollbar() {
+    if (!S.meta) return;
+    const totalSpan = S.meta.time_max - S.meta.time_min;
+    if (totalSpan <= 0) return;
+    const viewSpan = S.viewTo - S.viewFrom;
+    // Slider represents the center of the viewport as fraction of total range
+    const center = (S.viewFrom + S.viewTo) / 2;
+    const fraction = (center - S.meta.time_min) / totalSpan;
+    timeSlider.value = Math.round(fraction * 1000);
+    scrollFrom.textContent = formatTime(S.viewFrom);
+    scrollTo.textContent = formatTime(S.viewTo);
+}
+
+let sliderDragging = false;
+timeSlider.addEventListener('input', async () => {
+    sliderDragging = true;
+    const fraction = timeSlider.value / 1000;
+    const totalSpan = S.meta.time_max - S.meta.time_min;
+    const viewSpan = S.viewTo - S.viewFrom;
+    const center = S.meta.time_min + fraction * totalSpan;
+    S.viewFrom = center - viewSpan / 2;
+    S.viewTo = center + viewSpan / 2;
+    clampViewport();
+    await loadViewport();
+    render();
+});
+timeSlider.addEventListener('mouseup', () => { sliderDragging = false; });
+timeSlider.addEventListener('touchend', () => { sliderDragging = false; });
+
+document.getElementById('btn-zoom-in').addEventListener('click', async () => {
+    const center = (S.viewFrom + S.viewTo) / 2;
+    const newSpan = Math.max(100, (S.viewTo - S.viewFrom) / 2);
+    S.viewFrom = center - newSpan / 2;
+    S.viewTo = center + newSpan / 2;
+    await loadViewport();
+    render();
+});
+
+document.getElementById('btn-zoom-out').addEventListener('click', async () => {
+    const center = (S.viewFrom + S.viewTo) / 2;
+    const totalSpan = S.meta.time_max - S.meta.time_min;
+    const newSpan = Math.min(totalSpan || 10000, (S.viewTo - S.viewFrom) * 2);
+    S.viewFrom = center - newSpan / 2;
+    S.viewTo = center + newSpan / 2;
+    clampViewport();
+    await loadViewport();
+    render();
+});
+
+// ── Keyboard shortcuts ─────────────────────────────────────────
+document.addEventListener('keydown', async (e) => {
+    const span = S.viewTo - S.viewFrom;
+    if (e.key === 'Escape') {
+        clearTrace();
+        closeSidebar();
+    } else if (e.key === 'f') {
+        S.viewFrom = S.meta.time_min;
+        S.viewTo = S.meta.time_max;
+        await loadViewport();
+        render();
+    } else if (e.key === 'ArrowRight') {
+        const shift = span * 0.2;
+        S.viewFrom += shift;
+        S.viewTo += shift;
+        clampViewport();
+        await loadViewport();
+        render();
+    } else if (e.key === 'ArrowLeft') {
+        const shift = span * 0.2;
+        S.viewFrom -= shift;
+        S.viewTo -= shift;
+        clampViewport();
+        await loadViewport();
+        render();
+    } else if (e.key === 't') {
+        S.traceMode = !S.traceMode;
+        document.getElementById('btn-trace-mode').classList.toggle('active', S.traceMode);
+        if (!S.traceMode) clearTrace();
+    } else if (e.key === 'r') {
+        S.raysMode = !S.raysMode;
+        document.getElementById('btn-rays').classList.toggle('active', S.raysMode);
+        render();
+    }
+});
+
+// ── Init ───────────────────────────────────────────────────────
+
+// Iframe/interactive mode: simplify toolbar
+if (IS_IFRAME || INTERACTIVE_ID) {
+    // Hide back link
+    const backLink = document.querySelector('#toolbar a');
+    if (backLink) backLink.style.display = 'none';
+}
+if (INTERACTIVE_ID) {
+    document.getElementById('follow-indicator').style.display = '';
+}
+
+init();
+</script>
+</body>
+</html>
