@@ -10,10 +10,23 @@
 <script src="/static/js/api.js"></script>
 <style>
   html, body { height: 100%; margin: 0; }
-  body { display: flex; flex-direction: column; overflow: hidden; }
+  /* 3-row × 2-col grid:
+       header spans both cols     (auto height)
+       timeline | map fills middle (1fr)
+       log feed spans both cols   (180px) */
+  body {
+    display: grid;
+    grid-template-rows: auto 1fr 180px;
+    grid-template-columns: 320px 1fr;
+    grid-template-areas:
+      "header header"
+      "timeline map"
+      "log log";
+    overflow: hidden;
+  }
 
   .mlv-status {
-    flex-shrink: 0;
+    grid-area: header;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -25,6 +38,47 @@
   }
   .mlv-status .sep { color: var(--text-dim); }
   .mlv-status .spacer { flex: 1; }
+  .mlv-back {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .mlv-back:hover { text-decoration: underline; }
+
+  /* Vertical event timeline (left column) */
+  .mlv-timeline {
+    grid-area: timeline;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .mlv-timeline-header {
+    position: sticky; top: 0;
+    background: var(--bg-secondary);
+    padding: 4px 8px;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--border);
+    z-index: 1;
+  }
+  .mlv-tl-line {
+    display: grid;
+    grid-template-columns: 60px 50px 1fr;
+    gap: 6px;
+    padding: 2px 8px;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    cursor: pointer;
+  }
+  .mlv-tl-line:hover { background: var(--bg-primary); }
+  .mlv-tl-time { color: var(--text-dim); }
+  .mlv-tl-type { font-weight: 700; }
+  .mlv-tl-detail { color: var(--text); word-break: break-all; }
 
   /* Legend panel anchored inside the map as a Leaflet control */
   .mlv-legend-panel {
@@ -171,18 +225,15 @@
     font-variant-numeric: tabular-nums;
   }
 
-  #map { flex: 1; min-height: 0; background: #e8edf2; }
+  #map { grid-area: map; min-height: 0; background: #e8edf2; }
   #map .leaflet-tile-pane { filter: saturate(0.5) brightness(0.98) contrast(0.85); }
 
   /* Playback controls bar */
+  /* Compact controls live inline in the header bar now */
   .mlv-controls {
-    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
-    background: var(--bg-secondary);
-    border-top: 1px solid var(--border);
     font-size: 11px;
     color: var(--text-muted);
   }
@@ -208,10 +259,9 @@
   .mlv-controls .sep { color: var(--text-dim); }
   .mlv-controls .speed-label { color: var(--text-muted); }
 
-  /* Log panel */
+  /* Log panel — full-width strip below the map + timeline */
   .mlv-log {
-    flex-shrink: 0;
-    height: 100px;
+    grid-area: log;
     overflow-y: auto;
     background: var(--bg-primary, #0d1117);
     border-top: 1px solid var(--border);
@@ -231,7 +281,7 @@
   .mlv-log .log-msg  { color: var(--text); word-break: break-all; }
 
   .mlv-placeholder {
-    flex: 1;
+    grid-area: map;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -258,15 +308,36 @@
 </head>
 <body>
 
+<!-- Header: back-link + sim status + inline playback controls -->
 <div class="mlv-status">
+  <a class="mlv-back" href="/static/simulations.html" title="Back to simulations list">← Back</a>
+  <span class="sep">|</span>
   <span id="status">Loading…</span>
   <span class="sep">|</span>
   <span id="node-count">0 nodes</span>
   <span class="sep">|</span>
   <span id="event-count">0 events</span>
   <span class="spacer"></span>
+  <div class="mlv-controls" id="controls" style="display:none">
+    <button id="btn-pause" title="Pause / resume replay">⏸ Pause</button>
+    <button id="btn-restart" title="Restart replay from beginning">⏮ Restart</button>
+    <span class="sep">|</span>
+    <span class="speed-label">Speed:</span>
+    <button class="speed-btn" data-speed="1">1×</button>
+    <button class="speed-btn" data-speed="10">10×</button>
+    <button class="speed-btn active" data-speed="100">100×</button>
+    <button class="speed-btn" data-speed="1000">1000×</button>
+    <span class="sep">|</span>
+    <span class="time-display" id="time-display">now: 0.0s / 0.0s</span>
+  </div>
+  <span class="sep">|</span>
   <a id="link-timeline" href="#" style="margin-right:8px">Timeline</a>
   <a id="link-details" href="#">Details</a>
+</div>
+
+<!-- Left: vertical timeline of fired radio events -->
+<div class="mlv-timeline" id="tl-panel">
+  <div class="mlv-timeline-header">Events (radio)</div>
 </div>
 
 <div id="map"></div>
@@ -279,19 +350,7 @@
   </div>
 </div>
 
-<div class="mlv-controls" id="controls" style="display:none">
-  <button id="btn-pause" title="Pause / resume replay">⏸ Pause</button>
-  <button id="btn-restart" title="Restart replay from beginning">⏮ Restart</button>
-  <span class="sep">|</span>
-  <span class="speed-label">Speed:</span>
-  <button class="speed-btn" data-speed="1">1×</button>
-  <button class="speed-btn" data-speed="10">10×</button>
-  <button class="speed-btn active" data-speed="100">100×</button>
-  <button class="speed-btn" data-speed="1000">1000×</button>
-  <span class="sep">|</span>
-  <span class="time-display" id="time-display">now: 0.0s / 0.0s</span>
-</div>
-
+<!-- Bottom: scrolling log feed (script_log + script_emit + cmd_reply) -->
 <div class="mlv-log" id="log-panel"></div>
 
 <script>
@@ -923,9 +982,54 @@ function appendLog(evt) {
   logPanel.scrollTop = logPanel.scrollHeight;
 }
 
+// ── Timeline panel (left) — radio events as they fire ─────────────────
+const TL_MAX_LINES = 500;
+const tlPanel = document.getElementById('tl-panel');
+const TL_TYPE_COLOR = {
+  tx:               '#2563eb',
+  rx:               '#16a34a',
+  drop_weak:        '#f97316',
+  drop_sf_mismatch: '#f43f5e',
+  drop_halfduplex:  '#be123c',
+  collision:        '#dc2626',
+  tx_deferred:      '#f59e0b',
+};
+
+function appendTimeline(evt) {
+  // Use the visualization fire-time so timeline order matches when events
+  // appear on the map (rx events fire at TX-start, not at delivery).
+  const ftime = (typeof fireMs === 'function') ? fireMs(evt) : evt.time_ms;
+  const t = (ftime / 1000).toFixed(3) + 's';
+  const type = evt.type;
+  const node = evt.node || evt.from || evt.to || '?';
+  let detail = '';
+  if (evt.label) detail = evt.label + (evt.info ? ' · ' + evt.info : '');
+  else if (evt.to && evt.from && evt.from !== node) detail = evt.from + '→' + evt.to;
+  else if (evt.airtime_ms) detail = evt.airtime_ms + 'ms';
+
+  const row = document.createElement('div');
+  row.className = 'mlv-tl-line';
+  row.innerHTML = '<span class="mlv-tl-time">' + t + '</span>'
+                + '<span class="mlv-tl-type" style="color:' + (TL_TYPE_COLOR[type] || '#64748b') + '">'
+                + (type.length > 8 ? type.slice(0, 8) : type) + '</span>'
+                + '<span class="mlv-tl-detail"><b>' + node + '</b> ' + detail + '</span>';
+  tlPanel.appendChild(row);
+  while (tlPanel.children.length - 1 > TL_MAX_LINES) {
+    // children[0] is the sticky header — remove from index 1
+    tlPanel.removeChild(tlPanel.children[1]);
+  }
+  tlPanel.scrollTop = tlPanel.scrollHeight;
+}
+
+const TL_TYPES = new Set(['tx', 'rx', 'drop_weak', 'drop_sf_mismatch',
+                          'drop_halfduplex', 'collision', 'tx_deferred']);
+
 // ── Replay engine ─────────────────────────────────────────────────────
 function fireEvent(evt) {
   const hold = Math.max(200, FALLBACK_HOLD_MS / playbackSpeed);
+  // Mirror radio events into the left timeline column so the user sees a
+  // chronological list growing alongside the map animation.
+  if (TL_TYPES.has(evt.type)) appendTimeline(evt);
   switch (evt.type) {
     case 'tx': {
       const txHold = Math.max(hold, (evt.airtime_ms || 0) + 500);
@@ -1027,6 +1131,8 @@ function startReplay(events, endMs) {
   resetAllStates();
   removeAllActiveTx();
   logPanel.innerHTML = '';
+  // Wipe timeline rows but keep the sticky header (children[0]).
+  while (tlPanel.children.length > 1) tlPanel.removeChild(tlPanel.lastChild);
 
   controlsEl.style.display = '';
   btnPause.textContent = '⏸ Pause';
@@ -1046,6 +1152,7 @@ function restartReplay() {
   resetAllStates();
   removeAllActiveTx();
   logPanel.innerHTML = '';
+  while (tlPanel.children.length > 1) tlPanel.removeChild(tlPanel.lastChild);
   btnPause.textContent = '⏸ Pause';
   updateTimeDisplay();
 
