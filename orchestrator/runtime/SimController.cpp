@@ -338,22 +338,14 @@ void SimController::deliverReceptionsForStep() {
             // keep the loop deterministic-ish without per-link state.
             const float snr_at_rcv = lp.snr;
 
-            // Per-link Bernoulli loss.
-            if (lp.loss > 0.0f) {
-                std::uniform_real_distribution<float> u(0.0f, 1.0f);
-                if (u(_rng) < lp.loss) {
-                    EventLog::dropLoss(
-                        static_cast<unsigned long>(now),
-                        _nodes[tx.sender_id]->name().c_str(),
-                        _nodes[rcv]->name().c_str(),
-                        lp.loss,
-                        reinterpret_cast<const uint8_t*>(tx.bytes.data()),
-                        static_cast<int>(tx.bytes.size()));
-                    continue;
-                }
-            }
+            // Order: collision → weak signal → loss → deliver.
+            // Collision wins over weak signal (a packet is collided
+            // regardless of whether it would otherwise have been
+            // decodable), and weak-signal drops happen before the
+            // stochastic loss roll so the verdict is deterministic
+            // for tests that pin SF and link SNR.
 
-            // Collision check is now resolved at TX-start time
+            // Collision check is resolved at TX-start time
             // (see registerTransmissionsForStep below — bidirectional
             // evaluateCollision matching upstream's behaviour). We
             // just consult the per-receiver flag here.
@@ -373,6 +365,40 @@ void SimController::deliverReceptionsForStep() {
                     worst_interferer_snr,
                     snr_margin);
                 continue;
+            }
+
+            // SF-dependent SNR threshold gate. A single-channel LoRa
+            // receiver dynamically tunes to the packet's SF on each
+            // preamble, so the decoding threshold lookup must use
+            // the PACKET's SF rather than the receiver's currently-
+            // configured one. See SimRadio::getSnrThreshold(int sf)
+            // (R.1.2) for the static overload and Semtech AN1200.22
+            // Table 13 for the per-SF demodulator floors.
+            const float thr = SimRadio::getSnrThreshold(tx.sf);
+            if (snr_at_rcv < thr) {
+                EventLog::dropWeak(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    snr_at_rcv, thr,
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()));
+                continue;
+            }
+
+            // Per-link Bernoulli loss.
+            if (lp.loss > 0.0f) {
+                std::uniform_real_distribution<float> u(0.0f, 1.0f);
+                if (u(_rng) < lp.loss) {
+                    EventLog::dropLoss(
+                        static_cast<unsigned long>(now),
+                        _nodes[tx.sender_id]->name().c_str(),
+                        _nodes[rcv]->name().c_str(),
+                        lp.loss,
+                        reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                        static_cast<int>(tx.bytes.size()));
+                    continue;
+                }
             }
 
             // TODO(Y2): strict half-duplex enforcement — drop reception if

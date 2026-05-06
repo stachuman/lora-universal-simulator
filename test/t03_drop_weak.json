@@ -1,0 +1,27 @@
+{
+  "_name": "t03_drop_weak",
+  "_desc": "alice -> bob with link SNR -16 dB. SF7 TX (threshold -7.5 dB) -> drop_weak. SF12 TX (threshold -20 dB) -> rx.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/sf_picker.lua", "config": {} },
+    { "name": "bob",   "script": "examples/sf_picker.lua", "config": {} }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": -16.0, "rssi": -110.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 5000,  "node": "alice", "command": "send_sf 7 hello-sf7" },
+    { "at_ms": 15000, "node": "alice", "command": "send_sf 12 hello-sf12" }
+  ],
+  "expect": [
+    { "type": "event_count_min", "event_type": "drop_weak", "node": "bob", "min": 1 },
+    { "type": "event_count_min", "event_type": "rx", "node": "bob", "min": 1 }
+  ]
+}

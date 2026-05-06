@@ -12,28 +12,39 @@
 
 namespace {
 
-// True iff `e["node"]` matches `node_name`, given a name->id table for
-// looking up the integer form. Returns true if the assertion did not
-// specify a node filter (`node_name` empty).
+// True iff any of `e["node"]`, `e["from"]`, or `e["to"]` matches
+// `node_name`. Returns true if the assertion did not specify a node
+// filter (`node_name` empty).
 //
-// Background: tx/rx/cmd_reply events emit `"node"` (or `"from"`/`"to"`)
-// as a string name; script_emit/script_log emit it as an integer id.
-// We accept either form against the assertion's name.
+// Background: events come in two shapes. tx/cmd_reply/script_emit/
+// script_log/node_ready/node_stats use a single `"node"` field
+// (string name OR integer id depending on the emitter). Receive-side
+// events (rx, drop_weak, drop_loss, collision) use directional
+// `"from"` (sender) and `"to"` (receiver) string fields. A user
+// asserting `"node": "bob"` against rx/drop_weak naturally means
+// "events touching bob" — so we accept a match against any of the
+// three fields rather than requiring the test author to know which
+// emitter uses which key.
 bool nodeMatches(const nlohmann::json& e,
                  const std::string& node_name,
                  const std::unordered_map<std::string, int>& name_to_id) {
     if (node_name.empty()) return true;
-    if (!e.contains("node")) return false;
-    const auto& nf = e["node"];
-    if (nf.is_string()) {
-        return nf.get<std::string>() == node_name;
-    }
-    if (nf.is_number_integer()) {
-        auto it = name_to_id.find(node_name);
-        if (it == name_to_id.end()) return false;
-        return nf.get<int>() == it->second;
-    }
-    return false;
+
+    auto fieldMatches = [&](const char* key) -> bool {
+        if (!e.contains(key)) return false;
+        const auto& v = e[key];
+        if (v.is_string()) {
+            return v.get<std::string>() == node_name;
+        }
+        if (v.is_number_integer()) {
+            auto it = name_to_id.find(node_name);
+            if (it == name_to_id.end()) return false;
+            return v.get<int>() == it->second;
+        }
+        return false;
+    };
+
+    return fieldMatches("node") || fieldMatches("from") || fieldMatches("to");
 }
 
 }  // namespace
