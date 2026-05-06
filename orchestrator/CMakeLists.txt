@@ -5,6 +5,7 @@ add_executable(lus
     runtime/LuaHost.cpp
     runtime/ScriptedNode.cpp
     runtime/SimController.cpp
+    runtime/InteractiveRepl.cpp
     runtime/Loop.cpp
     test_runner/ExpectRunner.cpp
 )
