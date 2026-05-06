@@ -283,7 +283,15 @@ function on_recv(self, frame, meta)
       local route = self.rt[d.dst]
       if route == nil then
         self:emit("forward_fail", { dst = d.dst, reason = "no_route" })
+      elseif self.pending_tx ~= nil then
+        -- Forwarder already busy with another in-flight TX. Cannot occur in
+        -- scenario A (sequential hops) but possible under concurrent loads.
+        self:emit("forward_fail", { dst = d.dst, reason = "tx_busy" })
       else
+        -- TODO(scenario-B): factor this six-step launch into start_dance(self,
+        -- origin, dst, next_hop, payload) — same pattern is duplicated below
+        -- in on_command. Holding off until scenario B forces a signature that
+        -- accommodates timeout/retry.
         local mid = gen_msg_id(self)
         self.pending_tx = {
           origin  = d.origin,           -- preserve originator across hops

@@ -1,6 +1,6 @@
 {
   "_name": "s01_dv_dual_sf",
-  "_desc": "Distance-vector routing on SF7; data on SF12 via per-hop dual-SF dance. 4-node line, deterministic path-loss. Skeleton — protocol fills in across Tasks 2-5.",
+  "_desc": "Distance-vector routing on SF7; data on SF12 via per-hop dual-SF dance. 4-node line, deterministic path-loss. drop_sf_mismatch bounds reflect bystanders overhearing SF12 frames they can't decode (SF12 reach > adjacent on this topology); per-node counts (from+to): alice=7, bob=7, charlie=6, dave=8. Bound 15 ≈ 2x max-observed catches order-of-magnitude regressions while tolerating timing fluctuations.",
   "simulation": {
     "duration_ms": 60000,
     "step_ms": 1,
@@ -43,9 +43,9 @@
     { "type": "script_emit_contains", "node": "bob",     "emit_type": "rts_tx",    "value": "\"next\":2" },
     { "type": "script_emit_contains", "node": "charlie", "emit_type": "rts_tx",    "value": "\"next\":3" },
     { "type": "script_emit_contains", "node": "dave",    "emit_type": "delivered", "value": "hello-world" },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "alice",   "min": 0, "max": 20 },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob",     "min": 0, "max": 20 },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "charlie", "min": 0, "max": 20 },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "dave",    "min": 0, "max": 20 }
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "alice",   "min": 0, "max": 15 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob",     "min": 0, "max": 15 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "charlie", "min": 0, "max": 15 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "dave",    "min": 0, "max": 15 }
   ]
 }
