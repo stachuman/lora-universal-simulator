@@ -651,6 +651,24 @@ void SimController::registerTransmissionsForStep() {
             const uint32_t airtime =
                 _radios[i]->getEstAirtimeFor(static_cast<int>(p.bytes.size()));
 
+            // Half-duplex (sender side): a node can't initiate a new TX
+            // while its previous TX is still in flight. Real hardware
+            // has one PA path; the second TX has to wait. _in_flight is
+            // already compacted (deliverReceptionsForStep ran first) so
+            // any entry with sender_id == i still has end_ms > now.
+            bool self_tx_in_flight = false;
+            for (const auto& other : _in_flight) {
+                if (other.sender_id == i) { self_tx_in_flight = true; break; }
+            }
+            if (self_tx_in_flight) {
+                EventLog::txDeferred(static_cast<unsigned long>(now),
+                                     _nodes[i]->name().c_str(),
+                                     static_cast<int>(p.bytes.size()),
+                                     "self_tx_in_flight");
+                _nodes[i]->onRadioBusy();
+                continue;
+            }
+
             // Listen-Before-Talk: if the channel is busy from this node's
             // POV (a prior reachable transmitter is still on the air and
             // its busy notification was recorded by the LbtModel), defer
@@ -745,12 +763,21 @@ void SimController::registerTransmissionsForStep() {
             // whether the observer's hardware would actually have detected
             // the preamble at the link's SNR. Marginal/weak links may
             // miss; reliable links almost always notify.
+            //
+            // Same loop also calls SimRadio::notifyRxStart on each
+            // observer so that any future code path checking
+            // radio.isReceiving() sees the correct state. lus's loop
+            // does not currently consult that flag (the in_flight
+            // ground-truth check above is more robust), but keeping the
+            // SimRadio state hygienic prevents downstream surprises and
+            // matches meshcore_real_sim's wiring.
             const auto& just_pushed = _in_flight.back();
             for (int observer = 0; observer < n; ++observer) {
                 if (observer == i) continue;
                 LinkParams lp;
                 if (!_links->getLink(i, observer, lp)) continue;
                 if (lp.snr <= -100.0f) continue;
+                _radios[observer]->notifyRxStart(static_cast<uint32_t>(airtime));
                 if (!_lbt->shouldNotifyBusy(lp.snr)) continue;
                 _lbt->notifyChannelBusy(observer, i,
                                         just_pushed.end_ms, lp.snr);
