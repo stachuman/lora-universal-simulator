@@ -95,18 +95,26 @@ end
 
 -- ---------- script lifecycle ------------------------------------------------
 
+local function beacon_fire(self)
+  local frame = pack_beacon(self)
+  self:emit("beacon_tx", { n_entries = (function()
+    local c = 0; for _ in pairs(self.rt) do c = c + 1 end; return c
+  end)() })
+  self:tx(frame, { sf = self.routing_sf })
+  self:after(self.beacon_period_ms, function() beacon_fire(self) end)
+end
+
 function on_init(self, config)
-  self.routing_sf      = config.routing_sf      or 7
-  self.data_sf         = config.data_sf         or 12
+  self.routing_sf       = config.routing_sf      or 7
+  self.data_sf          = config.data_sf         or 12
   self.beacon_period_ms = config.beacon_period_ms or 5000
 
-  self.rt              = {}     -- rt[dest_id] = { next_hop, score, hops, last_seen_ms }
+  self.rt              = {}
   self.next_msg_id     = 1
-  self.pending_tx      = nil    -- in-flight outbound user message (set in Task 4)
-  self.pending_rx      = nil    -- accepted-RTS context awaiting DATA (set in Task 4)
+  self.pending_tx      = nil
+  self.pending_rx      = nil
   self.rt_full_emitted = false
 
-  -- Build name_to_id and peer_count from sim:nodes().
   self.name_to_id = {}
   self.id_to_name = {}
   local nodes = sim:nodes()
@@ -115,10 +123,28 @@ function on_init(self, config)
     self.id_to_name[n.id]   = n.name
   end
   self.peer_count = #nodes - 1
+
+  -- ID-staggered first beacon to avoid collisions on first round.
+  self:after(self.id * 100, function() beacon_fire(self) end)
 end
 
 function on_recv(self, frame, meta)
-  -- Filled in across Tasks 2-5.
+  if #frame == 0 then return end
+  local tag = frame:sub(1, 1)
+
+  if tag == "B" then
+    local b = parse_beacon(frame)
+    if not b then return end
+    self:emit("beacon_rx", { src = b.src, n_entries = #b.entries })
+    -- Direct entry: sender is a 1-hop neighbour at measured SNR.
+    self.rt[b.src] = {
+      next_hop = b.src,
+      score    = meta.snr,
+      hops     = 1,
+      last_seen_ms = self:now(),
+    }
+    self:emit("rt_update", { dest = b.src, next = b.src, score = meta.snr, hops = 1 })
+  end
 end
 
 function on_command(self, cmd_str)

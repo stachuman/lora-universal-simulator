@@ -1,0 +1,32 @@
+{
+  "_name": "t10_dv_beacons",
+  "_desc": "Two adjacent nodes; beacons go out on routing SF and direct-entry rt updates fire on reception. Validates pack/parse helpers + scheduling.",
+  "simulation": {
+    "duration_ms": 12000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 5.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "event_count_min", "event_type": "script_emit", "node": "alice", "min": 2 },
+    { "type": "event_count_min", "event_type": "script_emit", "node": "bob",   "min": 2 },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "beacon_tx", "value": "" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_tx", "value": "" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "beacon_rx", "value": "\"src\":1" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx", "value": "\"src\":0" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_update", "value": "\"dest\":1" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_update", "value": "\"dest\":0" }
+  ]
+}
