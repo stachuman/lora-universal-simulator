@@ -53,6 +53,17 @@ struct InFlight {
     uint16_t pre_sym;      // preamble symbols (taken from sender's SimRadio)
     float    t_sym_ms;
     float    t_preamble_ms;
+
+    // Per-receiver collision state. Populated at TX-start time by
+    // registerTransmissions (mirroring upstream Orchestrator.cpp lines
+    // ~590-619: the bidirectional isDestroyedBy() pair). deliverReceptions
+    // just consults these flags — the physics decision is already final.
+    //   collided_at_rcv[r] : true if this packet is destroyed at receiver r
+    //   interferer_at_rcv[r] : sender_id of the strongest interferer (-1 = none)
+    //   interferer_snr_at_rcv[r] : SNR of that interferer at r (for events)
+    std::vector<uint8_t>  collided_at_rcv;       // bool-vector workaround
+    std::vector<int>      interferer_at_rcv;
+    std::vector<float>    interferer_snr_at_rcv;
 };
 
 // Build the CapturedSignal struct used by evaluateCollision().
@@ -233,31 +244,14 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                     }
                 }
 
-                // Collision check against every other in-flight TX that
-                // overlaps in time with this one and is also heard at `rcv`.
-                bool collided = false;
-                int  worst_interferer = -1;
-                float worst_interferer_snr = 0.0f;
-                for (size_t j = 0; j < in_flight.size(); ++j) {
-                    if (j == idx) continue;
-                    const InFlight& other = in_flight[j];
-                    if (other.sender_id == rcv) continue;  // self-TX irrelevant
-                    // Time overlap?
-                    if (other.end_ms <= tx.start_ms ||
-                        other.start_ms >= tx.end_ms) continue;
-                    LinkParams lp2;
-                    if (!links.getLink(other.sender_id, rcv, lp2)) continue;
-                    CapturedSignal primary    = toCaptured(tx,    snr_at_rcv);
-                    CapturedSignal interferer = toCaptured(other, lp2.snr);
-                    auto d = evaluateCollision(coll_cfg, primary, interferer);
-                    if (!d.survived) {
-                        collided = true;
-                        worst_interferer     = other.sender_id;
-                        worst_interferer_snr = lp2.snr;
-                        break;
-                    }
-                }
-                if (collided) {
+                // Collision check is now resolved at TX-start time
+                // (see registerTransmissions below — bidirectional
+                // evaluateCollision matching upstream's behaviour). We
+                // just consult the per-receiver flag here.
+                if (rcv < static_cast<int>(tx.collided_at_rcv.size()) &&
+                    tx.collided_at_rcv[rcv]) {
+                    const int   worst_interferer     = tx.interferer_at_rcv[rcv];
+                    const float worst_interferer_snr = tx.interferer_snr_at_rcv[rcv];
                     const float snr_margin = snr_at_rcv - worst_interferer_snr;
                     EventLog::collision(
                         static_cast<unsigned long>(now),
@@ -326,6 +320,54 @@ LoopResult runSimulation(const SimConfig& cfg, std::ostream& events_out) {
                 f.pre_sym       = static_cast<uint16_t>(radios[i]->getPreambleSymbols());
                 f.t_sym_ms      = static_cast<float>(radios[i]->getSymbolMs());
                 f.t_preamble_ms = static_cast<float>(radios[i]->getPreambleMs());
+                f.collided_at_rcv.assign(static_cast<size_t>(n), 0);
+                f.interferer_at_rcv.assign(static_cast<size_t>(n), -1);
+                f.interferer_snr_at_rcv.assign(static_cast<size_t>(n), 0.0f);
+
+                // Bidirectional collision evaluation at TX-start time.
+                // Matches upstream Orchestrator.cpp::registerTransmissions
+                // (lines ~590-619): for every existing in-flight `e` and
+                // every receiver `r ≠ e.sender_id, ≠ f.sender_id`, run
+                // evaluateCollision both directions and stamp the loser
+                // with collided_at_rcv[r] = true. Once a packet is
+                // delivered + popped from in_flight, no further check is
+                // needed: the flag carries the verdict.
+                for (auto& e : in_flight) {
+                    // Time overlap?
+                    if (e.end_ms <= f.start_ms || e.start_ms >= f.end_ms)
+                        continue;
+                    for (int r = 0; r < n; ++r) {
+                        if (r == f.sender_id || r == e.sender_id) continue;
+                        LinkParams lp_f, lp_e;
+                        if (!links.getLink(f.sender_id, r, lp_f)) continue;
+                        if (!links.getLink(e.sender_id, r, lp_e)) continue;
+                        CapturedSignal sig_f = toCaptured(f, lp_f.snr);
+                        CapturedSignal sig_e = toCaptured(e, lp_e.snr);
+
+                        // f-vs-e: does the new TX get destroyed by the existing one?
+                        auto df = evaluateCollision(coll_cfg, sig_f, sig_e);
+                        if (!df.survived) {
+                            // Track strongest interferer (highest SNR).
+                            if (f.interferer_at_rcv[r] < 0 ||
+                                lp_e.snr > f.interferer_snr_at_rcv[r]) {
+                                f.interferer_at_rcv[r]     = e.sender_id;
+                                f.interferer_snr_at_rcv[r] = lp_e.snr;
+                            }
+                            f.collided_at_rcv[r] = 1;
+                        }
+                        // e-vs-f: does the existing TX get destroyed by the new one?
+                        auto de = evaluateCollision(coll_cfg, sig_e, sig_f);
+                        if (!de.survived) {
+                            if (r >= static_cast<int>(e.collided_at_rcv.size())) continue;
+                            if (e.interferer_at_rcv[r] < 0 ||
+                                lp_f.snr > e.interferer_snr_at_rcv[r]) {
+                                e.interferer_at_rcv[r]     = f.sender_id;
+                                e.interferer_snr_at_rcv[r] = lp_f.snr;
+                            }
+                            e.collided_at_rcv[r] = 1;
+                        }
+                    }
+                }
 
                 EventLog::tx(static_cast<unsigned long>(now),
                              nodes[i]->name().c_str(),
