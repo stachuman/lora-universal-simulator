@@ -6,6 +6,15 @@ scripted-node infrastructure end-to-end but leaves several runtime-physics
 features dormant for v2. They are built and unit-tested in isolation; just
 not wired into the main loop.
 
+## R.1.7 note: single-SF reception default + sf_rx_set opt-in
+
+`nodes[i].sf_rx_set` (default empty -> resolved to `[node.sf]`) selects
+which SFs the receiver decodes. Single-SF default matches real Semtech
+hardware (SX1262/SX1276/LR1110/SX1280 — confirmed across datasheets and
+AN1200.85). Opt into idealized multi-SF reception (e.g. `[7..12]`) for
+paper-reproduction (Centelles et al. 2024) or future scanner-repeater
+experiments. SF-mismatch packets emit `drop_sf_mismatch`.
+
 ## Documented in T13's report
 
 ### 1. LBT gating before TX scheduling

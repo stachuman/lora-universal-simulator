@@ -23,6 +23,7 @@
 
 #include "core/topology/JsonConfig.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -116,6 +117,36 @@ static SimConfig parseJson(const json& j) {
             if (nd.contains("sf")) def.sf = nd["sf"].get<int>();
             if (nd.contains("bw")) def.bw = nd["bw"].get<int>();
             if (nd.contains("cr")) def.cr = nd["cr"].get<int>();
+
+            // Optional sf_rx_set: per-node list of SFs the receiver can
+            // decode. Absent -> empty vector; SimController defaults to
+            // [node.sf] at init (single-SF, matches real LoRa hardware).
+            // Present -> copy values verbatim; out-of-range entries are
+            // warn-and-clamped to [5, 12].
+            if (nd.contains("sf_rx_set")) {
+                if (!nd["sf_rx_set"].is_array()) {
+                    throw std::runtime_error(
+                        "config error at " + ctx
+                        + ": field \"sf_rx_set\" must be a JSON array of integers");
+                }
+                for (const auto& v : nd["sf_rx_set"]) {
+                    if (!v.is_number_integer()) {
+                        throw std::runtime_error(
+                            "config error at " + ctx
+                            + ": each entry of \"sf_rx_set\" must be an integer");
+                    }
+                    int sf_v = v.get<int>();
+                    if (sf_v < 5 || sf_v > 12) {
+                        int clamped = sf_v < 5 ? 5 : 12;
+                        std::fprintf(stderr,
+                            "lus: warning at %s: sf_rx_set entry %d out of range "
+                            "[5, 12]; clamping to %d\n",
+                            ctx.c_str(), sf_v, clamped);
+                        sf_v = clamped;
+                    }
+                    def.sf_rx_set.push_back(sf_v);
+                }
+            }
 
             if (nd.contains("lat") && nd.contains("lon")) {
                 def.lat = nd["lat"].get<double>();

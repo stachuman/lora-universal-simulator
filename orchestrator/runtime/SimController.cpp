@@ -165,6 +165,18 @@ void SimController::initialize() {
     _radios.reserve(static_cast<size_t>(n));
     _nodes.reserve(static_cast<size_t>(n));
 
+    // Resolve per-node sf_rx_set: empty config -> [node.sf] (single-SF,
+    // matches real Semtech LoRa hardware). See SimController.h note.
+    _node_sf_rx_set.assign(static_cast<size_t>(n), {});
+    for (int i = 0; i < n; ++i) {
+        if (_cfg.nodes[i].sf_rx_set.empty()) {
+            const int node_sf = _cfg.nodes[i].sf;  // already merged with globals
+            _node_sf_rx_set[i] = { node_sf };
+        } else {
+            _node_sf_rx_set[i] = _cfg.nodes[i].sf_rx_set;
+        }
+    }
+
     for (int i = 0; i < n; ++i) {
         const int sf = _cfg.nodes[i].sf;        // already merged with global defaults
         const int bw_khz = _cfg.nodes[i].bw;
@@ -390,6 +402,28 @@ void SimController::deliverReceptionsForStep() {
                     worst_interferer >= 0 ? _nodes[worst_interferer]->name().c_str() : nullptr,
                     worst_interferer_snr,
                     snr_margin);
+                continue;
+            }
+
+            // SF-mismatch gate (R.1.7). Real Semtech LoRa hardware
+            // (SX1262/SX1276/LR1110/SX1280) decodes only the SF it is
+            // currently tuned to — confirmed across all chip-family
+            // datasheets and AN1200.85. If the packet's SF is not in
+            // this receiver's sf_rx_set, the modem never sees it.
+            // The default sf_rx_set is [node.sf] (single-SF); configs
+            // can opt into multi-SF reception by listing more entries.
+            const auto& rx_set = _node_sf_rx_set[rcv];
+            if (std::find(rx_set.begin(), rx_set.end(), tx.sf) == rx_set.end()) {
+                // -1 in the rx_sf field flags a multi-SF / scanner
+                // receiver; otherwise emit the single configured SF.
+                const int rx_sf_field = (rx_set.size() == 1) ? rx_set[0] : -1;
+                EventLog::dropSfMismatch(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    tx.sf, rx_sf_field,
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()));
                 continue;
             }
 

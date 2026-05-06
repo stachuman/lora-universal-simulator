@@ -53,6 +53,9 @@ test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
     "$SCRIPT_DIR/test_jsonconfig.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"
 
+run test_sf_rx_set_parsing "$SCRIPT_DIR/test_sf_rx_set_parsing.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp"
+
 run test_timerwheel "$SCRIPT_DIR/test_timerwheel.cpp" \
     "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp"
 

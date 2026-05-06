@@ -67,6 +67,14 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
               float loss_prob,
               const uint8_t* data, int len);
 
+// SF mismatch — receiver isn't tuned to the packet's spreading factor
+// (single-SF LoRa hardware). `rx_sf` is the receiver's currently
+// configured SF when its sf_rx_set has exactly one entry, or -1 to
+// flag "scanner / multi-SF" receivers.
+void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
+                    int packet_sf, int rx_sf,
+                    const uint8_t* data, int len);
+
 // TX failure events
 void txFail(unsigned long time_ms, const char* node, uint32_t count);
 

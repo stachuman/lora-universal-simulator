@@ -83,6 +83,16 @@ struct SimConfig {
         int bw = -1;
         int cr = -1;
 
+        // Per-node receive-SF set. Empty means "default to [node.sf]" at
+        // SimController init time (single-SF reception, matching real
+        // Semtech LoRa hardware: SX1262/SX1276/LR1110/SX1280 all decode
+        // only one SF at a time per Semtech datasheets + AN1200.85).
+        // Configurable to >1 entry for opt-in idealized multi-SF
+        // reception (e.g. paper reproduction or scanner-repeater
+        // experiments). Each entry must be in [5, 12]; out-of-range
+        // values are warn-and-clamped at parse time.
+        std::vector<int> sf_rx_set;
+
         // Optional geo-location (passed through to events for analysis).
         double lat = 0.0;
         double lon = 0.0;

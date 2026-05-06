@@ -1,6 +1,6 @@
 {
   "_name": "t03_drop_weak",
-  "_desc": "alice -> bob with link SNR -16 dB. SF7 TX (threshold -7.5 dB) -> drop_weak. SF12 TX (threshold -20 dB) -> rx.",
+  "_desc": "alice and bob both at SF7 (default sf_rx_set=[7]). Link SNR -10 dB is below SF7 threshold -7.5 dB so two TX attempts both drop_weak. With single-SF reception default (R.1.7), no cross-SF tricks; this directly exercises the SNR-threshold gate.",
   "simulation": {
     "duration_ms": 30000,
     "step_ms": 1,
@@ -13,15 +13,13 @@
   ],
   "topology": {
     "links": [
-      { "from": "alice", "to": "bob", "snr": -16.0, "rssi": -110.0, "bidir": true }
+      { "from": "alice", "to": "bob", "snr": -10.0, "rssi": -110.0, "bidir": true }
     ]
   },
   "commands": [
-    { "at_ms": 5000,  "node": "alice", "command": "send_sf 7 hello-sf7" },
-    { "at_ms": 15000, "node": "alice", "command": "send_sf 12 hello-sf12" }
+    { "at_ms": 5000, "node": "alice", "command": "send_sf 7 hello-sf7" }
   ],
   "expect": [
-    { "type": "event_count_min", "event_type": "drop_weak", "node": "bob", "min": 1 },
-    { "type": "event_count_min", "event_type": "rx", "node": "bob", "min": 1 }
+    { "type": "event_count_min", "event_type": "drop_weak", "node": "bob", "min": 1 }
   ]
 }

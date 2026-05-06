@@ -131,6 +131,14 @@ private:
     std::vector<bool>                    _command_fired;
     std::vector<InFlight>                _in_flight;
 
+    // Per-node receive-SF set. Defaults to [node.sf] when the JSON config
+    // leaves nodes[i].sf_rx_set empty (single-SF reception, matching real
+    // Semtech LoRa hardware). Configurable to a multi-element vector for
+    // opt-in idealized multi-SF reception. Consulted by
+    // deliverReceptionsForStep before the SNR-threshold gate to drop
+    // off-band packets with drop_sf_mismatch.
+    std::vector<std::vector<int>>        _node_sf_rx_set;
+
     // Per-link fading state. Indexed `sender * n + receiver` (directed:
     // n*n entries, not symmetric n*(n-1)/2). Directed lets the forward
     // and reverse links of a pair fade independently — typical of real-

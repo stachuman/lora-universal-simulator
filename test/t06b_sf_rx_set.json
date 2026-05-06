@@ -1,0 +1,26 @@
+{
+  "_name": "t06b_sf_rx_set",
+  "_desc": "Same as t06 but bob's sf_rx_set explicitly includes SF12 (idealized multi-SF reception, opt-in for paper-reproduction or scanner-repeater experiments). The SF12 packet is decoded; no drop_sf_mismatch fires.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/sf_picker.lua", "config": {} },
+    { "name": "bob",   "script": "examples/sf_picker.lua", "config": {}, "sf_rx_set": [7, 8, 9, 10, 11, 12] }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 5000, "node": "alice", "command": "send_sf 12 hello-sf12" }
+  ],
+  "expect": [
+    { "type": "event_count_min", "event_type": "rx", "node": "bob", "min": 1 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob", "min": 0, "max": 0 }
+  ]
+}
