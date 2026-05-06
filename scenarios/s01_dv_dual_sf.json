@@ -31,6 +31,21 @@
       "lat": 41.4305, "lon": 2.1600 }
   ],
   "topology": { "links": [] },
-  "commands": [],
-  "expect": []
+  "commands": [
+    { "at_ms": 30000, "node": "alice", "command": "send dave hello-world" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice",   "emit_type": "rt_full",   "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "bob",     "emit_type": "rt_full",   "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "charlie", "emit_type": "rt_full",   "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "dave",    "emit_type": "rt_full",   "value": "\"peers\":3" },
+    { "type": "script_emit_contains", "node": "alice",   "emit_type": "rts_tx",    "value": "\"next\":1" },
+    { "type": "script_emit_contains", "node": "bob",     "emit_type": "rts_tx",    "value": "\"next\":2" },
+    { "type": "script_emit_contains", "node": "charlie", "emit_type": "rts_tx",    "value": "\"next\":3" },
+    { "type": "script_emit_contains", "node": "dave",    "emit_type": "delivered", "value": "hello-world" },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "alice",   "min": 0, "max": 20 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob",     "min": 0, "max": 20 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "charlie", "min": 0, "max": 20 },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "dave",    "min": 0, "max": 20 }
+  ]
 }

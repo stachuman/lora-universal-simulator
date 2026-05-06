@@ -109,6 +109,14 @@ local function maybe_emit_rt_full(self)
   end
 end
 
+local function gen_msg_id(self)
+  -- Pack node id into upper 8 bits to keep ids globally unique-ish for diagnostics.
+  local mid = (self.id * 256 + self.next_msg_id) % 65536
+  self.next_msg_id = self.next_msg_id + 1
+  if self.next_msg_id > 255 then self.next_msg_id = 1 end
+  return mid
+end
+
 -- ---------- script lifecycle ------------------------------------------------
 
 local function beacon_fire(self)
@@ -272,19 +280,29 @@ function on_recv(self, frame, meta)
     if d.dst == self.id then
       self:emit("delivered", { origin = d.origin, payload = d.payload })
     else
-      -- Forwarding is added in Task 5. For now: log the gap.
-      self:emit("forward_skipped", { dst = d.dst, reason = "not_implemented" })
+      local route = self.rt[d.dst]
+      if route == nil then
+        self:emit("forward_fail", { dst = d.dst, reason = "no_route" })
+      else
+        local mid = gen_msg_id(self)
+        self.pending_tx = {
+          origin  = d.origin,           -- preserve originator across hops
+          dst     = d.dst,
+          next    = route.next_hop,
+          msg_id  = mid,
+          payload = d.payload,
+        }
+        local rts = pack_rts(d.origin, self.id, d.dst, route.next_hop, mid, self.data_sf)
+        self:emit("rts_tx", {
+          origin = d.origin, dst = d.dst, next = route.next_hop, msg_id = mid,
+        })
+        self:tx(rts, { sf = self.routing_sf })
+        self:set_rx_sf(self.data_sf)
+        self:emit("retune_for_cts", { sf = self.data_sf })
+      end
     end
     return
   end
-end
-
-local function gen_msg_id(self)
-  -- Pack node id into upper 8 bits to keep ids globally unique-ish for diagnostics.
-  local mid = (self.id * 256 + self.next_msg_id) % 65536
-  self.next_msg_id = self.next_msg_id + 1
-  if self.next_msg_id > 255 then self.next_msg_id = 1 end
-  return mid
 end
 
 function on_command(self, cmd_str)
