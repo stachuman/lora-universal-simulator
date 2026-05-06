@@ -242,10 +242,10 @@ function on_init(self, config)
   -- handful of µs to settle on the new SF — pad with 5ms by default.
   self.cts_to_data_gap_ms = config.cts_to_data_gap_ms or 5
   -- RTS retry policy. CTS round-trip (RTS-air + receiver-process + CTS-air
-  -- + safety) is ~50ms at SF7; default timeout 100ms gives 2x margin.
+  -- + safety) is ~50ms at SF7; default timeout 500ms
   -- If retry fires while we're mid-RX of someone else (pending_rx set),
   -- reschedule using rts_busy_retry_ms so we don't TX over the channel.
-  self.rts_timeout_ms     = config.rts_timeout_ms     or 100
+  self.rts_timeout_ms     = config.rts_timeout_ms     or 500
   self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
   self.rts_max_retries    = config.rts_max_retries    or 3
 
