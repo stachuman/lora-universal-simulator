@@ -93,15 +93,21 @@ below). Higher is better.
 
 ### 4.1 Beacon scheduling
 
+There is no hot-start in this design — no collision-free warmup window for
+control traffic. Beacon timing must therefore be randomized so nodes don't
+lock into a fixed phase relationship and concentrate their TXs into the
+same step over and over.
+
 At `on_init`:
 - Build `name_to_id` from `sim:nodes()` (all node names → ids, including self)
-- Schedule first beacon at `self:after(self.id * 100, beacon_fire)` —
-  deterministic ID-based stagger, no collisions on first round
-- Inside `beacon_fire`: emit beacon, then `self:after(self.beacon_period_ms,
-  beacon_fire)` (re-arm)
+- Schedule first beacon at `self:after(self:rand(0, beacon_period_ms),
+  beacon_fire)` — random offset within one period spreads the first round
+- Inside `beacon_fire`: emit beacon, then re-arm via `self:after(jittered,
+  beacon_fire)` where `jittered = self:rand(period_ms*0.8, period_ms*1.2+1)`
+  (±20% jitter) so phases drift apart over time rather than aligning
 
-Using `self:after` (re-armed) instead of `self:every` so the period can be
-randomized later if needed without rewriting scheduling.
+Using `self:after` (re-armed) instead of `self:every` is required for
+the per-fire jitter pattern; `self:every` is fixed-period.
 
 ### 4.2 Beacon contents
 
@@ -224,7 +230,7 @@ This is essential because on `data_sf` other nodes may still hear the
 frame physically (e.g., when SF12 reaches 2-3 hops away). Without
 next-hop filtering the protocol would loop or duplicate.
 
-### 5.3 No timeouts (scenario A)
+### 5.3 No timeouts (scenario A); LBT disabled in s01
 
 If a CTS doesn't arrive (e.g., the simulator dropped the RTS), the
 sender's `pending_tx` stays set and `set_rx_sf(data_sf)` is never reverted.
@@ -232,6 +238,17 @@ This is fine in scenario A because the deterministic path-loss + line
 topology guarantees adjacent reception. Scenario B will need a timeout +
 retry that resets `pending_tx` and `set_rx_sf` back to `routing_sf`; that
 is explicitly out of scope for this spec.
+
+Combined with §4.1's randomized beacon timing, however, this leaves a
+known failure mode: a beacon TX that starts at the same step as a
+data-plane response causes the simulator's LBT model to defer the response
+(emitting `tx_deferred` and calling `on_radio_busy`) without retransmitting
+it. The protocol does not handle `on_radio_busy`, so the response is lost.
+
+The s01 scenario sidesteps this by setting `simulation.radio.cad_miss_prob:
+1.0` — every CAD check is a miss, so the LBT model never defers. Real
+hardware addresses this with retries, which scenario B will introduce
+together with the timeout logic.
 
 ## 6. Wire format (summary)
 
@@ -265,7 +282,7 @@ the network is not required (scenario A has only one in-flight message).
     "duration_ms": 60000,
     "step_ms": 1,
     "warmup_ms": 0,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "radio": { "sf": 7, "bw": 250, "cr": 5, "cad_miss_prob": 1.0 },
     "path_loss": {
       "model": "log_distance",
       "alpha": 3.0,
