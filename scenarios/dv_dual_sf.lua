@@ -112,10 +112,10 @@ end
 -- ---------- script lifecycle ------------------------------------------------
 
 local function beacon_fire(self)
-  -- Skip beacon TX while in the middle of a data exchange (pending_tx means
-  -- we just sent RTS and are waiting for CTS on data_sf; pending_rx means we
-  -- are waiting for DATA on data_sf). Transmitting a beacon would collide with
-  -- the data-plane frames on the same channel.
+  -- Skip beacon TX while a data exchange is in progress. Any TX (even on
+  -- routing_sf) ties up the half-duplex radio and the pending CTS or DATA
+  -- on data_sf would be missed. The re-arm below is unconditional so beacon
+  -- cadence stays stable; at most one fire is suppressed per exchange.
   if self.pending_tx == nil and self.pending_rx == nil then
     local frame = pack_beacon(self)
     self:emit("beacon_tx", { n_entries = rt_count(self.rt) })
@@ -201,6 +201,12 @@ function on_recv(self, frame, meta)
     local r = parse_rts(frame)
     if not r then return end
     if r.next ~= self.id then return end  -- not for us; silent discard
+    if self.pending_rx ~= nil then
+      -- Already mid-exchange as a receiver; surfacing this so it's visible
+      -- if it ever happens (scenario A: never; B/C with concurrency: maybe).
+      self:emit("rts_rejected_busy", { from = r.src, msg_id = r.msg_id })
+      return
+    end
 
     self:emit("rts_rx", { from = r.src, origin = r.origin, dst = r.dst, msg_id = r.msg_id })
     -- Remember the RTS context so we can match the incoming DATA.
