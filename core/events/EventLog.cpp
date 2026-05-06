@@ -287,6 +287,18 @@ void txFail(unsigned long time_ms, const char* node, uint32_t count) {
     emitLine(buf);
 }
 
+void txDeferred(unsigned long time_ms, const char* node,
+                int len, const char* reason) {
+    char esc_reason[256];
+    json_escape(esc_reason, sizeof(esc_reason), reason ? reason : "");
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"tx_deferred\",\"time_ms\":%lu,\"node\":\"%s\","
+        "\"len\":%d,\"reason\":\"%s\"}\n",
+        time_ms, node, len, esc_reason);
+    emitLine(buf);
+}
+
 void luaCallback(unsigned long time_ms, const char* fn_name) {
     char fn_esc[256];
     json_escape(fn_esc, sizeof(fn_esc), fn_name);

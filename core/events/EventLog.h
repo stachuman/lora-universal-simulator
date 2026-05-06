@@ -70,6 +70,12 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
 // TX failure events
 void txFail(unsigned long time_ms, const char* node, uint32_t count);
 
+// Listen-Before-Talk: a node tried to transmit but the channel was busy
+// (per LbtModel::isChannelBusy). The pending TX is dropped and the script
+// is notified via on_radio_busy; retry policy is left to the script.
+void txDeferred(unsigned long time_ms, const char* node,
+                int len, const char* reason);
+
 // Command/reply round-trip (e.g. orchestrator → node CLI)
 void cmdReply(unsigned long time_ms, const char* node,
               const char* command, const char* reply);

@@ -261,14 +261,16 @@ void SimController::initialize() {
     _fading.assign(static_cast<size_t>(n) * static_cast<size_t>(n), LinkFadingState{});
     _fading_last_update_ms.assign(static_cast<size_t>(n) * static_cast<size_t>(n), 0ULL);
 
-    // LBT model is constructed but enforcement is deferred (Y2 TODO below).
+    // LBT model — consulted by registerTransmissionsForStep before each
+    // pending TX (isChannelBusy) and updated after each successful TX
+    // (notifyChannelBusy per reachable observer, gated by shouldNotifyBusy
+    // for the SNR-modulated CAD-miss roll). See R.1.6.
     _lbt = std::make_unique<LbtModel>(
         n,
         LbtConfig{_cfg.simulation.radio.cad_miss_prob,
                   _cfg.simulation.radio.cad_reliable_snr,
                   _cfg.simulation.radio.cad_marginal_snr},
         _cfg.simulation.seed ^ 0xCAFEBABEull);
-    (void)_lbt;  // referenced only by Y2 enforcement path
 
     // Collision config from radio block.
     _coll_cfg = CollisionConfig{};
@@ -527,6 +529,21 @@ void SimController::registerTransmissionsForStep() {
             const uint32_t airtime =
                 _radios[i]->getEstAirtimeFor(static_cast<int>(p.bytes.size()));
 
+            // Listen-Before-Talk: if the channel is busy from this node's
+            // POV (a prior reachable transmitter is still on the air and
+            // its busy notification was recorded by the LbtModel), defer
+            // this TX. Emit tx_deferred + notify the script via
+            // on_radio_busy and skip the InFlight push entirely. The
+            // script chooses retry policy.
+            if (_lbt->isChannelBusy(i, now)) {
+                EventLog::txDeferred(static_cast<unsigned long>(now),
+                                     _nodes[i]->name().c_str(),
+                                     static_cast<int>(p.bytes.size()),
+                                     "channel_busy");
+                _nodes[i]->onRadioBusy();
+                continue;
+            }
+
             // TODO(Y2): plumb through SimRadio::startSendRaw so half-
             // duplex/LBT bookkeeping fires; for v1 we synthesise the
             // InFlight directly.
@@ -597,6 +614,23 @@ void SimController::registerTransmissionsForStep() {
                          airtime);
 
             _in_flight.push_back(std::move(f));
+
+            // Notify LBT for every observer that can hear this sender, so
+            // their next TX-time isChannelBusy() check sees this airtime.
+            // Gated by shouldNotifyBusy(): the CAD-miss roll determines
+            // whether the observer's hardware would actually have detected
+            // the preamble at the link's SNR. Marginal/weak links may
+            // miss; reliable links almost always notify.
+            const auto& just_pushed = _in_flight.back();
+            for (int observer = 0; observer < n; ++observer) {
+                if (observer == i) continue;
+                LinkParams lp;
+                if (!_links->getLink(i, observer, lp)) continue;
+                if (lp.snr <= -100.0f) continue;
+                if (!_lbt->shouldNotifyBusy(lp.snr)) continue;
+                _lbt->notifyChannelBusy(observer, i,
+                                        just_pushed.end_ms, lp.snr);
+            }
         }
     }
 }
