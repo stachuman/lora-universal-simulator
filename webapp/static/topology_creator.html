@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>New Topology — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  /* Full-height split layout */
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+
+  .tc-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 16px; background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border); flex-shrink: 0; height: 44px;
+  }
+  .tc-header .brand { font-size: 14px; font-weight: 700; color: var(--accent); }
+  .tc-header .sep { color: var(--text-dim); }
+  .tc-header h2 { margin: 0; font-size: 14px; color: var(--text-heading); }
+  .tc-header .spacer { flex: 1; }
+
+  .tc-body {
+    flex: 1; display: flex; overflow: hidden;
+  }
+
+  /* Left panel */
+  .tc-panel {
+    width: 300px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    background: var(--bg-secondary);
+    overflow-y: auto; overflow-x: hidden;
+  }
+
+  .tc-section {
+    padding: 12px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .tc-section h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); font-weight: 700; margin-bottom: 8px;
+  }
+
+  /* Region mini-map */
+  #region-map { height: 160px; border-radius: var(--radius); margin-bottom: 8px; }
+
+  /* Param rows */
+  .param-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  }
+  .param-row label {
+    font-size: 10px; color: var(--text-dim); width: 90px; flex-shrink: 0;
+  }
+  .param-row input, .param-row select {
+    flex: 1; min-width: 0;
+    background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-light);
+    padding: 3px 6px; font-size: 11px; font-family: var(--font-mono);
+    border-radius: var(--radius);
+  }
+  .param-row input:focus, .param-row select:focus {
+    outline: none; border-color: var(--accent);
+  }
+
+  /* Grid for 2-col params */
+  .param-grid-2 {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  }
+  .param-grid-2 .p-field label {
+    font-size: 10px; color: var(--text-dim); display: block; margin-bottom: 2px;
+  }
+  .param-grid-2 .p-field input, .param-grid-2 .p-field select {
+    width: 100%;
+    background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-light);
+    padding: 3px 6px; font-size: 11px; font-family: var(--font-mono);
+    border-radius: var(--radius);
+  }
+
+  /* Mode-specific sections */
+  .mode-section { display: none; }
+  .mode-section.active { display: block; }
+
+  /* Preset buttons */
+  .preset-buttons {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .preset-buttons button {
+    font-size: 10px; padding: 3px 8px;
+  }
+
+  /* Action buttons at bottom */
+  .tc-actions {
+    padding: 12px; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px;
+    flex-shrink: 0;
+  }
+  .tc-actions button { width: 100%; justify-content: center; }
+  .tc-actions .name-row {
+    display: flex; gap: 6px;
+  }
+  .tc-actions .name-row input { flex: 1; }
+
+  /* Right map area */
+  .tc-map-area {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+  }
+
+  #main-map {
+    flex: 1; min-height: 0;
+    background: #e8edf2;
+  }
+
+  /* Status bar */
+  .tc-statusbar {
+    padding: 6px 12px; background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  /* Leaflet tooltip */
+  .leaflet-tooltip.tc-label {
+    background: rgba(255,255,255,0.92);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 10px; padding: 2px 5px;
+    box-shadow: none;
+  }
+
+  /* Error banner */
+  .tc-error {
+    margin: 8px 12px;
+    padding: 8px 10px;
+    background: #fee2e2;
+    border: 1px solid #fca5a5;
+    border-radius: var(--radius);
+    font-size: 11px;
+    color: var(--error);
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<div class="tc-header">
+  <a href="/static/topologies.html" class="btn btn-sm">&larr; Back</a>
+  <span class="sep">|</span>
+  <span class="brand">lora-universal-simulator</span>
+  <span class="sep">/</span>
+  <h2>New Topology</h2>
+  <span class="spacer"></span>
+</div>
+
+<div class="tc-body">
+  <!-- ── Left panel ──────────────────────────────────── -->
+  <div class="tc-panel">
+
+    <!-- Name -->
+    <div class="tc-section">
+      <h4>Name</h4>
+      <input id="topo-name" class="form-input" type="text" placeholder="e.g. barcelona-mesh-1">
+    </div>
+
+    <!-- Region mini-map -->
+    <div class="tc-section">
+      <h4>Region</h4>
+      <div id="region-map"></div>
+      <div style="font-size:10px; color:var(--text-dim);">Mini-map shows current map viewport. The main map is the placement canvas.</div>
+    </div>
+
+    <!-- Placement mode -->
+    <div class="tc-section">
+      <h4>Placement Mode</h4>
+      <div class="param-row">
+        <label>Mode</label>
+        <select id="placement-mode" onchange="onModeChange()">
+          <option value="manual">Manual (click on map)</option>
+          <option value="grid">Grid</option>
+          <option value="random">Random</option>
+        </select>
+      </div>
+
+      <!-- Grid params -->
+      <div id="mode-grid" class="mode-section">
+        <div class="param-grid-2" style="margin-bottom:6px;">
+          <div class="p-field">
+            <label>Center lat</label>
+            <input id="grid-lat" type="number" step="any" value="41.39">
+          </div>
+          <div class="p-field">
+            <label>Center lon</label>
+            <input id="grid-lon" type="number" step="any" value="2.16">
+          </div>
+          <div class="p-field">
+            <label>N (rows)</label>
+            <input id="grid-nx" type="number" value="3" min="1" max="20">
+          </div>
+          <div class="p-field">
+            <label>M (cols)</label>
+            <input id="grid-ny" type="number" value="3" min="1" max="20">
+          </div>
+          <div class="p-field">
+            <label>Spacing (m)</label>
+            <input id="grid-spacing" type="number" value="5000" min="100" step="100">
+          </div>
+          <div class="p-field">
+            <label>Name prefix</label>
+            <input id="grid-prefix" type="text" value="n">
+          </div>
+        </div>
+      </div>
+
+      <!-- Random params -->
+      <div id="mode-random" class="mode-section">
+        <div style="font-size:10px; color:var(--text-dim); margin-bottom:6px;">Bounding box: south, west, north, east</div>
+        <div class="param-grid-2" style="margin-bottom:6px;">
+          <div class="p-field">
+            <label>South lat</label>
+            <input id="rand-south" type="number" step="any" value="41.30">
+          </div>
+          <div class="p-field">
+            <label>West lon</label>
+            <input id="rand-west" type="number" step="any" value="2.05">
+          </div>
+          <div class="p-field">
+            <label>North lat</label>
+            <input id="rand-north" type="number" step="any" value="41.48">
+          </div>
+          <div class="p-field">
+            <label>East lon</label>
+            <input id="rand-east" type="number" step="any" value="2.27">
+          </div>
+          <div class="p-field">
+            <label>Count</label>
+            <input id="rand-count" type="number" value="12" min="1" max="200">
+          </div>
+          <div class="p-field">
+            <label>Name prefix</label>
+            <input id="rand-prefix" type="text" value="n">
+          </div>
+        </div>
+        <div class="param-row">
+          <label>Seed (optional)</label>
+          <input id="rand-seed" type="number" placeholder="blank = random">
+        </div>
+      </div>
+
+      <!-- Manual hint -->
+      <div id="mode-manual" class="mode-section active">
+        <div style="font-size:10px; color:var(--text-dim); line-height:1.5;">
+          Click on the map to place nodes.<br>
+          Double-click near a node to remove it.
+        </div>
+      </div>
+    </div>
+
+    <!-- Path-loss -->
+    <div class="tc-section">
+      <h4>Path-loss Parameters</h4>
+      <div class="preset-buttons">
+        <button class="btn btn-sm" onclick="applyPreset('suburban')">Suburban (α=3, σ=0)</button>
+        <button class="btn btn-sm" onclick="applyPreset('urban')">Urban (α=3.5, σ=4)</button>
+        <button class="btn btn-sm" onclick="applyPreset('freespace')">Free-space (α=2, σ=0)</button>
+      </div>
+      <div class="param-row">
+        <label>alpha (path exp)</label>
+        <input id="pl-alpha" type="number" step="0.1" min="1" max="6" value="3.0">
+      </div>
+      <div class="param-row">
+        <label>sigma_db</label>
+        <input id="pl-sigma" type="number" step="0.5" min="0" max="20" value="0">
+      </div>
+      <div class="param-row">
+        <label>ref_distance_m</label>
+        <input id="pl-refdist" type="number" step="0.1" min="0.1" value="1.0">
+      </div>
+      <div class="param-row">
+        <label>ref_loss_db</label>
+        <input id="pl-refloss" type="number" step="0.5" value="40.0">
+      </div>
+      <div class="param-row">
+        <label>noise_floor_db</label>
+        <input id="pl-noisefloor" type="number" step="0.5" value="-120.0">
+      </div>
+      <div class="param-row">
+        <label>tx_power_dbm</label>
+        <input id="pl-txpower" type="number" step="0.5" value="14.0">
+      </div>
+    </div>
+
+    <div class="tc-error" id="tc-error"></div>
+
+    <!-- Actions -->
+    <div class="tc-actions">
+      <div class="name-row">
+        <button class="btn btn-primary" id="btn-place" onclick="placeNodes()">Place Nodes</button>
+        <button class="btn" id="btn-preview-snr" onclick="previewSNR()" disabled>Preview SNR</button>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <input id="save-name" class="form-input" type="text" placeholder="Topology name..." style="flex:1">
+        <button class="btn btn-success" id="btn-save" onclick="saveTopo()" disabled>Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Map area ────────────────────────────────────── -->
+  <div class="tc-map-area">
+    <div id="main-map"></div>
+    <div class="tc-statusbar" id="statusbar">0 nodes placed</div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  // ── State ──────────────────────────────────────────────
+  let nodes = [];           // [{name, lat, lon}]
+  let snrMatrix = null;     // N×N matrix of SNR values after preview
+  let leafletMap = null;
+  let regionMap = null;
+  let markerGroup = null;
+  let edgeGroup  = null;
+
+  // ── SNR color thresholds (lus) ──────────────────────────
+  function snrColor(snr) {
+    if (snr === null || snr === undefined || !Number.isFinite(snr)) return '#9ca3af';
+    if (snr >= 5)    return '#16a34a';   // green  — good link
+    if (snr >= -7.5) return '#eab308';   // yellow — SF7 boundary
+    if (snr >= -20)  return '#f97316';   // amber  — SF12 only
+    return '#dc2626';                     // red    — no link
+  }
+
+  // ── Path-loss presets ────────────────────────────────────
+  window.applyPreset = function(key) {
+    const presets = {
+      suburban:  { alpha: 3.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+      urban:     { alpha: 3.5,  sigma: 4,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+      freespace: { alpha: 2.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+    };
+    const p = presets[key];
+    if (!p) return;
+    document.getElementById('pl-alpha').value      = p.alpha;
+    document.getElementById('pl-sigma').value      = p.sigma;
+    document.getElementById('pl-refdist').value    = p.refdist;
+    document.getElementById('pl-refloss').value    = p.refloss;
+    document.getElementById('pl-noisefloor').value = p.noise;
+    document.getElementById('pl-txpower').value    = p.tx;
+  };
+
+  // ── Placement mode toggle ────────────────────────────────
+  window.onModeChange = function() {
+    const mode = document.getElementById('placement-mode').value;
+    document.getElementById('mode-manual').classList.toggle('active', mode === 'manual');
+    document.getElementById('mode-grid').classList.toggle('active', mode === 'grid');
+    document.getElementById('mode-random').classList.toggle('active', mode === 'random');
+
+    // Hide place button for manual (it's click-to-place)
+    document.getElementById('btn-place').style.display = mode === 'manual' ? 'none' : '';
+  };
+
+  // ── Leaflet maps init ────────────────────────────────────
+  function initMaps() {
+    // Region mini-map (decorative — shows location context)
+    regionMap = L.map('region-map', { zoomControl: false, attributionControl: false })
+      .setView([41.39, 2.16], 7);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(regionMap);
+
+    // Main placement map
+    leafletMap = L.map('main-map', { preferCanvas: true })
+      .setView([41.39, 2.16], 10);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(leafletMap);
+
+    edgeGroup   = L.featureGroup().addTo(leafletMap);
+    markerGroup = L.featureGroup().addTo(leafletMap);
+
+    // Manual placement: click to add, dblclick to remove nearest
+    leafletMap.on('click', function(e) {
+      const mode = document.getElementById('placement-mode').value;
+      if (mode !== 'manual') return;
+      addNode(e.latlng.lat, e.latlng.lng);
+    });
+
+    leafletMap.on('dblclick', function(e) {
+      const mode = document.getElementById('placement-mode').value;
+      if (mode !== 'manual') return;
+      L.DomEvent.stopPropagation(e);
+      removeNearestNode(e.latlng.lat, e.latlng.lng);
+    });
+
+    // Sync region mini-map center whenever main map moves
+    leafletMap.on('moveend', function() {
+      const c = leafletMap.getCenter();
+      regionMap.setView([c.lat, c.lng], Math.max(3, leafletMap.getZoom() - 4));
+    });
+  }
+
+  // ── Node helpers ────────────────────────────────────────
+  function nextNodeName() {
+    const prefix = document.getElementById('grid-prefix').value || 'n';
+    const n = nodes.length + 1;
+    return prefix + String(n).padStart(2, '0');
+  }
+
+  function addNode(lat, lon, name) {
+    if (!name) name = nextNodeName();
+    nodes.push({ name, lat: parseFloat(lat.toFixed(6)), lon: parseFloat(lon.toFixed(6)) });
+    snrMatrix = null;
+    redrawMap();
+    updateStatus();
+    updateButtons();
+  }
+
+  function removeNearestNode(lat, lon) {
+    if (nodes.length === 0) return;
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < nodes.length; i++) {
+      const d = Math.hypot(nodes[i].lat - lat, nodes[i].lon - lon);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    nodes.splice(best, 1);
+    snrMatrix = null;
+    redrawMap();
+    updateStatus();
+    updateButtons();
+  }
+
+  // ── Redraw map ──────────────────────────────────────────
+  function redrawMap() {
+    markerGroup.clearLayers();
+    edgeGroup.clearLayers();
+
+    // Draw edges (SNR preview)
+    if (snrMatrix && snrMatrix.length === nodes.length) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const snr = snrMatrix[i][j];
+          const color = snrColor(snr);
+          const line = L.polyline(
+            [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
+            { color, weight: 1.5, opacity: 0.7, interactive: true }
+          );
+          const snrStr = (snr != null && Number.isFinite(snr)) ? snr.toFixed(1) + ' dB' : 'N/A';
+          line.bindTooltip(
+            nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snrStr,
+            { sticky: true, className: 'tc-label' }
+          );
+          edgeGroup.addLayer(line);
+        }
+      }
+    }
+
+    // Draw node markers
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      const marker = L.circleMarker([n.lat, n.lon], {
+        radius: 6, color: '#2563eb', weight: 2,
+        fillColor: '#3b82f6', fillOpacity: 0.9,
+      }).addTo(markerGroup);
+      marker.bindTooltip(n.name + '<br>' + n.lat.toFixed(5) + ', ' + n.lon.toFixed(5),
+        { permanent: false, className: 'tc-label' });
+      marker._nodeIdx = i;
+    }
+  }
+
+  // ── Status bar ──────────────────────────────────────────
+  function updateStatus() {
+    const bar = document.getElementById('statusbar');
+    let msg = nodes.length + ' node' + (nodes.length !== 1 ? 's' : '') + ' placed';
+
+    if (snrMatrix && snrMatrix.length === nodes.length) {
+      let green = 0, yellow = 0, amber = 0, red = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const s = snrMatrix[i][j];
+          if (!Number.isFinite(s)) { red++; continue; }
+          if (s >= 5)    green++;
+          else if (s >= -7.5) yellow++;
+          else if (s >= -20)  amber++;
+          else red++;
+        }
+      }
+      msg += ' | SNR preview: ' + green + ' green, ' + yellow + ' yellow, ' + amber + ' amber, ' + red + ' red';
+    }
+
+    bar.textContent = msg;
+  }
+
+  function updateButtons() {
+    const hasNodes = nodes.length >= 2;
+    document.getElementById('btn-preview-snr').disabled = !hasNodes;
+    document.getElementById('btn-save').disabled = nodes.length === 0;
+  }
+
+  // ── Place nodes (grid / random) ──────────────────────────
+  window.placeNodes = async function() {
+    const mode = document.getElementById('placement-mode').value;
+    clearError();
+
+    let endpoint, body;
+    if (mode === 'grid') {
+      endpoint = '/api/topo-creator/generate-grid';
+      body = {
+        center_lat:  parseFloat(document.getElementById('grid-lat').value),
+        center_lon:  parseFloat(document.getElementById('grid-lon').value),
+        n_x:         parseInt(document.getElementById('grid-nx').value),
+        n_y:         parseInt(document.getElementById('grid-ny').value),
+        spacing_m:   parseFloat(document.getElementById('grid-spacing').value),
+        name_prefix: document.getElementById('grid-prefix').value || 'n',
+      };
+    } else if (mode === 'random') {
+      endpoint = '/api/topo-creator/generate-random';
+      body = {
+        bbox: [
+          parseFloat(document.getElementById('rand-south').value),
+          parseFloat(document.getElementById('rand-west').value),
+          parseFloat(document.getElementById('rand-north').value),
+          parseFloat(document.getElementById('rand-east').value),
+        ],
+        count:       parseInt(document.getElementById('rand-count').value),
+        name_prefix: document.getElementById('rand-prefix').value || 'n',
+      };
+      const seedVal = document.getElementById('rand-seed').value.trim();
+      if (seedVal !== '') body.seed = parseInt(seedVal);
+    } else {
+      // manual — nothing to do
+      return;
+    }
+
+    try {
+      document.getElementById('btn-place').disabled = true;
+      const result = await postJSON(endpoint, body);
+      nodes = (result.nodes || []).map(n => ({
+        name: n.name,
+        lat:  parseFloat(n.lat.toFixed(6)),
+        lon:  parseFloat(n.lon.toFixed(6)),
+      }));
+      snrMatrix = null;
+      redrawMap();
+      if (nodes.length > 0) {
+        const bounds = L.latLngBounds(nodes.map(n => [n.lat, n.lon]));
+        leafletMap.fitBounds(bounds, { padding: [30, 30] });
+        regionMap.fitBounds(bounds, { padding: [10, 10] });
+      }
+      updateStatus();
+      updateButtons();
+    } catch (e) {
+      showError('Place failed: ' + e.message);
+    } finally {
+      document.getElementById('btn-place').disabled = false;
+    }
+  };
+
+  // ── Preview SNR ──────────────────────────────────────────
+  window.previewSNR = async function() {
+    if (nodes.length < 2) return;
+    clearError();
+
+    const path_loss = collectPathLoss();
+    try {
+      document.getElementById('btn-preview-snr').disabled = true;
+      document.getElementById('statusbar').textContent = 'Computing SNR preview…';
+      const result = await postJSON('/api/topo-creator/preview-snr', { nodes, path_loss });
+      snrMatrix = result.matrix;
+      redrawMap();
+      updateStatus();
+    } catch (e) {
+      showError('SNR preview failed: ' + e.message);
+      updateStatus();
+    } finally {
+      document.getElementById('btn-preview-snr').disabled = (nodes.length < 2);
+    }
+  };
+
+  // ── Collect path-loss params ─────────────────────────────
+  function collectPathLoss() {
+    return {
+      model:          'log_distance',
+      alpha:          parseFloat(document.getElementById('pl-alpha').value),
+      sigma_db:       parseFloat(document.getElementById('pl-sigma').value),
+      ref_distance_m: parseFloat(document.getElementById('pl-refdist').value),
+      ref_loss_db:    parseFloat(document.getElementById('pl-refloss').value),
+      noise_floor_db: parseFloat(document.getElementById('pl-noisefloor').value),
+      tx_power_dbm:   parseFloat(document.getElementById('pl-txpower').value),
+    };
+  }
+
+  // ── Save topology ────────────────────────────────────────
+  window.saveTopo = async function() {
+    if (nodes.length === 0) return;
+    clearError();
+
+    // Prefer the save-name input; fall back to the top name input
+    const nameA = document.getElementById('save-name').value.trim();
+    const nameB = document.getElementById('topo-name').value.trim();
+    const name  = nameA || nameB;
+
+    if (!name) {
+      showError('Please enter a topology name before saving.');
+      return;
+    }
+
+    const payload = {
+      name,
+      path_loss: collectPathLoss(),
+      nodes,
+    };
+
+    try {
+      document.getElementById('btn-save').disabled = true;
+      await postJSON('/api/topologies', payload);
+      window.location.href = '/static/topologies.html';
+    } catch (e) {
+      showError('Save failed: ' + e.message);
+      document.getElementById('btn-save').disabled = false;
+    }
+  };
+
+  // ── Error helpers ────────────────────────────────────────
+  function showError(msg) {
+    const el = document.getElementById('tc-error');
+    el.textContent = msg;
+    el.style.display = '';
+  }
+
+  function clearError() {
+    const el = document.getElementById('tc-error');
+    el.style.display = 'none';
+  }
+
+  // ── Init ────────────────────────────────────────────────
+  initMaps();
+  onModeChange();
+  updateButtons();
+})();
+</script>
+</body>
+</html>

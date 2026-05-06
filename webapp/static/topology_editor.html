@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edit Topology — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+
+  /* Toolbar */
+  .te-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px; height: 44px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .te-header .brand { font-size: 14px; font-weight: 700; color: var(--accent); }
+  .te-header .sep { color: var(--text-dim); }
+  .te-header .spacer { flex: 1; }
+  .te-header h2 { margin: 0; font-size: 14px; color: var(--text-heading); }
+
+  /* Body split */
+  .te-body {
+    flex: 1; display: flex; overflow: hidden;
+  }
+
+  /* Left panel */
+  .te-panel {
+    width: 320px; flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    background: var(--bg-secondary);
+    overflow: hidden;
+  }
+
+  .panel-toolbar {
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  }
+  .panel-toolbar input {
+    flex: 1; min-width: 0;
+    background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-light);
+    padding: 4px 8px; font-size: 11px; font-family: var(--font-mono);
+    border-radius: var(--radius);
+  }
+  .panel-toolbar input:focus { outline: none; border-color: var(--accent); }
+
+  /* Name / path-loss section */
+  .te-section {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
+  }
+  .te-section h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); font-weight: 700; margin-bottom: 6px;
+  }
+
+  .param-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 5px;
+  }
+  .param-row label {
+    font-size: 10px; color: var(--text-dim); width: 100px; flex-shrink: 0;
+  }
+  .param-row input, .param-row select {
+    flex: 1; min-width: 0;
+    background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-light);
+    padding: 3px 6px; font-size: 11px; font-family: var(--font-mono);
+    border-radius: var(--radius);
+  }
+  .param-row input:focus, .param-row select:focus {
+    outline: none; border-color: var(--accent);
+  }
+
+  /* Node list */
+  .node-list {
+    flex: 1; overflow-y: auto;
+  }
+  .node-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; cursor: pointer;
+    border-bottom: 1px solid var(--border-light);
+    font-size: 12px;
+  }
+  .node-item:hover { background: rgba(37,99,235,0.06); }
+  .node-item.selected {
+    background: rgba(37,99,235,0.10);
+    border-left: 3px solid var(--accent);
+    padding-left: 7px;
+  }
+  .node-item .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .node-item .name { flex: 1; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .node-item .meta { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+
+  /* Node detail section */
+  .node-detail {
+    border-top: 1px solid var(--border);
+    overflow-y: auto;
+    flex-shrink: 0;
+    max-height: 48%;
+    padding: 10px 12px;
+  }
+  .node-detail h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); font-weight: 700; margin-bottom: 8px;
+  }
+  .det-field {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 5px;
+  }
+  .det-field label {
+    font-size: 10px; color: var(--text-dim); width: 52px; flex-shrink: 0;
+  }
+  .det-field input {
+    flex: 1; min-width: 0;
+    background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-light);
+    padding: 3px 6px; font-size: 11px; font-family: var(--font-mono);
+    border-radius: var(--radius);
+  }
+  .det-field input:focus { outline: none; border-color: var(--accent); }
+
+  /* Panel footer */
+  .panel-footer {
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    font-size: 10px; color: var(--text-muted);
+    flex-shrink: 0;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+
+  /* Map area */
+  .te-map-area {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+  }
+  .map-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+    flex-shrink: 0; font-size: 11px; color: var(--text-muted);
+  }
+  .map-header label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  #te-map { flex: 1; min-height: 0; }
+
+  /* Status bar */
+  .te-status {
+    padding: 5px 12px; background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .leaflet-tooltip.te-label {
+    background: rgba(255,255,255,0.92);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 10px; padding: 2px 5px;
+    box-shadow: none;
+  }
+
+  /* Preset buttons for path-loss */
+  .preset-buttons {
+    display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .preset-buttons button {
+    font-size: 10px; padding: 2px 7px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<div class="te-header">
+  <a href="/static/topologies.html" class="btn btn-sm">&larr; Back</a>
+  <span class="sep">|</span>
+  <span class="brand">lora-universal-simulator</span>
+  <span class="sep">/</span>
+  <h2 id="page-title">Edit Topology</h2>
+  <span class="spacer"></span>
+  <button class="btn" id="btn-preview-snr" onclick="previewSNR()">Preview SNR</button>
+  <button class="btn btn-primary" id="btn-save" onclick="saveTopo()">Save</button>
+  <button class="btn btn-danger" id="btn-cancel" onclick="window.location.href='/static/topologies.html'">Cancel</button>
+</div>
+
+<div class="te-body">
+  <!-- ── Left panel ──────────────────────────────────── -->
+  <div class="te-panel">
+
+    <!-- Name -->
+    <div class="te-section">
+      <h4>Topology Name</h4>
+      <div class="param-row">
+        <label>Name</label>
+        <input id="topo-name" type="text" placeholder="Topology name..." oninput="markDirty()">
+      </div>
+    </div>
+
+    <!-- Path-loss -->
+    <div class="te-section">
+      <h4>Path-loss</h4>
+      <div class="preset-buttons">
+        <button class="btn btn-sm" onclick="applyPreset('suburban')">Suburban</button>
+        <button class="btn btn-sm" onclick="applyPreset('urban')">Urban</button>
+        <button class="btn btn-sm" onclick="applyPreset('freespace')">Free-space</button>
+      </div>
+      <div class="param-row">
+        <label>alpha</label>
+        <input id="pl-alpha" type="number" step="0.1" min="1" max="6" value="3.0" oninput="markDirty()">
+      </div>
+      <div class="param-row">
+        <label>sigma_db</label>
+        <input id="pl-sigma" type="number" step="0.5" min="0" max="20" value="0" oninput="markDirty()">
+      </div>
+      <div class="param-row">
+        <label>ref_dist_m</label>
+        <input id="pl-refdist" type="number" step="0.1" min="0.1" value="1.0" oninput="markDirty()">
+      </div>
+      <div class="param-row">
+        <label>ref_loss_db</label>
+        <input id="pl-refloss" type="number" step="0.5" value="40.0" oninput="markDirty()">
+      </div>
+      <div class="param-row">
+        <label>noise_floor_db</label>
+        <input id="pl-noisefloor" type="number" step="0.5" value="-120.0" oninput="markDirty()">
+      </div>
+      <div class="param-row">
+        <label>tx_power_dbm</label>
+        <input id="pl-txpower" type="number" step="0.5" value="14.0" oninput="markDirty()">
+      </div>
+    </div>
+
+    <!-- Node search + add -->
+    <div class="panel-toolbar">
+      <input id="node-search" type="text" placeholder="Search nodes..." oninput="onSearch(this.value)">
+      <button class="btn btn-sm" id="btn-add-node" onclick="addNodeAtCenter()" title="Add node at map center">+</button>
+    </div>
+
+    <!-- Node list -->
+    <div class="node-list" id="node-list"></div>
+
+    <!-- Node detail (shown on selection) -->
+    <div class="node-detail" id="node-detail" style="display:none">
+      <h4 id="det-title">Selected Node</h4>
+      <div class="det-field">
+        <label>Name</label>
+        <input id="det-name" type="text" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label>Lat</label>
+        <input id="det-lat" type="number" step="any" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label>Lon</label>
+        <input id="det-lon" type="number" step="any" oninput="onDetChange()">
+      </div>
+      <div style="margin-top:8px; display:flex; gap:6px;">
+        <button class="btn btn-sm btn-danger" id="btn-delete-node" onclick="deleteSelectedNode()">Delete Node</button>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="panel-footer">
+      <span id="footer-stats">Nodes: 0</span>
+      <span id="dirty-indicator" style="color:var(--warning)"></span>
+    </div>
+  </div>
+
+  <!-- ── Map area ────────────────────────────────────── -->
+  <div class="te-map-area">
+    <div class="map-header">
+      <label><input type="checkbox" id="map-labels" onchange="redrawMap()"> Labels</label>
+      <span style="font-size:10px; color:var(--text-dim)">Drag markers to reposition nodes.</span>
+    </div>
+    <div id="te-map"></div>
+    <div class="te-status" id="te-status">Loading…</div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const topoId = params.get('id');
+
+  let nodes = [];
+  let snrMatrix = null;
+  let isDirty = false;
+  let selectedIdx = null;
+  let searchFilter = '';
+
+  let leafletMap = null;
+  let markerGroup = null;
+  let edgeGroup = null;
+
+  // ── Dirty tracking ────────────────────────────────────
+  window.markDirty = function() {
+    isDirty = true;
+    document.getElementById('dirty-indicator').textContent = '● unsaved';
+  };
+
+  function markClean() {
+    isDirty = false;
+    document.getElementById('dirty-indicator').textContent = '';
+  }
+
+  window.addEventListener('beforeunload', (e) => {
+    if (isDirty) e.preventDefault();
+  });
+
+  // ── Path-loss presets ────────────────────────────────────
+  window.applyPreset = function(key) {
+    const presets = {
+      suburban:  { alpha: 3.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+      urban:     { alpha: 3.5,  sigma: 4,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+      freespace: { alpha: 2.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+    };
+    const p = presets[key];
+    if (!p) return;
+    document.getElementById('pl-alpha').value      = p.alpha;
+    document.getElementById('pl-sigma').value      = p.sigma;
+    document.getElementById('pl-refdist').value    = p.refdist;
+    document.getElementById('pl-refloss').value    = p.refloss;
+    document.getElementById('pl-noisefloor').value = p.noise;
+    document.getElementById('pl-txpower').value    = p.tx;
+    markDirty();
+  };
+
+  // ── Collect path-loss ────────────────────────────────────
+  function collectPathLoss() {
+    return {
+      model:          'log_distance',
+      alpha:          parseFloat(document.getElementById('pl-alpha').value),
+      sigma_db:       parseFloat(document.getElementById('pl-sigma').value),
+      ref_distance_m: parseFloat(document.getElementById('pl-refdist').value),
+      ref_loss_db:    parseFloat(document.getElementById('pl-refloss').value),
+      noise_floor_db: parseFloat(document.getElementById('pl-noisefloor').value),
+      tx_power_dbm:   parseFloat(document.getElementById('pl-txpower').value),
+    };
+  }
+
+  // ── SNR color thresholds ────────────────────────────────
+  function snrColor(snr) {
+    if (snr === null || snr === undefined || !Number.isFinite(snr)) return '#9ca3af';
+    if (snr >= 5)    return '#16a34a';
+    if (snr >= -7.5) return '#eab308';
+    if (snr >= -20)  return '#f97316';
+    return '#dc2626';
+  }
+
+  // ── Leaflet init ────────────────────────────────────────
+  function initMap(center) {
+    leafletMap = L.map('te-map', { preferCanvas: true })
+      .setView(center || [41.39, 2.16], 11);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(leafletMap);
+
+    edgeGroup   = L.featureGroup().addTo(leafletMap);
+    markerGroup = L.featureGroup().addTo(leafletMap);
+
+    // Click on map background deselects
+    leafletMap.on('click', () => deselectNode());
+  }
+
+  // ── Redraw map ──────────────────────────────────────────
+  window.redrawMap = function() {
+    if (!leafletMap) return;
+    markerGroup.clearLayers();
+    edgeGroup.clearLayers();
+
+    const showLabels = document.getElementById('map-labels').checked;
+
+    // Edges
+    if (snrMatrix && snrMatrix.length === nodes.length) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          if (nodes[i].lat == null || nodes[j].lat == null) continue;
+          const snr = snrMatrix[i][j];
+          const line = L.polyline(
+            [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
+            { color: snrColor(snr), weight: 1.5, opacity: 0.65, interactive: true }
+          );
+          const s = (snr != null && Number.isFinite(snr)) ? snr.toFixed(1) + ' dB' : 'N/A';
+          line.bindTooltip(nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + s,
+            { sticky: true, className: 'te-label' });
+          edgeGroup.addLayer(line);
+        }
+      }
+    }
+
+    // Nodes
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.lat == null || n.lon == null) continue;
+      const isSelected = i === selectedIdx;
+      const marker = L.circleMarker([n.lat, n.lon], {
+        radius: isSelected ? 9 : 6,
+        color: isSelected ? '#ea580c' : '#2563eb',
+        weight: isSelected ? 3 : 2,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.9,
+      });
+      if (showLabels) {
+        marker.bindTooltip(n.name, { permanent: true, direction: 'top', offset: [0, -10], className: 'te-label' });
+      } else {
+        marker.bindTooltip(n.name + '<br>' + n.lat.toFixed(5) + ', ' + n.lon.toFixed(5),
+          { permanent: false, className: 'te-label' });
+      }
+      marker._nodeIdx = i;
+
+      marker.on('click', function(e) {
+        L.DomEvent.stopPropagation(e);
+        selectNode(this._nodeIdx);
+      });
+
+      // Draggable
+      const draggable = new L.Draggable(marker._path || marker._icon || marker.getElement() || document.createElement('div'));
+      marker.on('mousedown', function() {
+        this.dragging && this.dragging.enable();
+      });
+      marker.dragging && marker.dragging.enable();
+      marker.on('dragend', function() {
+        const pos = this.getLatLng();
+        const idx = this._nodeIdx;
+        nodes[idx].lat = parseFloat(pos.lat.toFixed(6));
+        nodes[idx].lon = parseFloat(pos.lng.toFixed(6));
+        snrMatrix = null;
+        markDirty();
+        if (selectedIdx === idx) renderDetail();
+        redrawMap();
+      });
+
+      markerGroup.addLayer(marker);
+    }
+  };
+
+  // ── Node list ────────────────────────────────────────────
+  function renderNodeList() {
+    const container = document.getElementById('node-list');
+    container.innerHTML = '';
+    const filter = searchFilter.toLowerCase();
+    const sorted = nodes.map((_, i) => i)
+      .sort((a, b) => (nodes[a].name || '').localeCompare(nodes[b].name || ''));
+
+    for (const idx of sorted) {
+      const n = nodes[idx];
+      if (filter && !n.name.toLowerCase().includes(filter)) continue;
+
+      const div = document.createElement('div');
+      div.className = 'node-item' + (idx === selectedIdx ? ' selected' : '');
+      div.dataset.idx = idx;
+      div.innerHTML =
+        '<span class="dot" style="background:#3b82f6"></span>' +
+        '<span class="name">' + escapeHtml(n.name) + '</span>' +
+        '<span class="meta">' + (n.lat != null ? n.lat.toFixed(4) : '—') + '</span>';
+      div.addEventListener('click', () => selectNode(idx));
+      container.appendChild(div);
+    }
+
+    document.getElementById('footer-stats').textContent = 'Nodes: ' + nodes.length;
+  }
+
+  // ── Detail panel ─────────────────────────────────────────
+  function renderDetail() {
+    const panel = document.getElementById('node-detail');
+    if (selectedIdx === null || selectedIdx >= nodes.length) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = '';
+    const n = nodes[selectedIdx];
+    document.getElementById('det-title').textContent = 'Node: ' + n.name;
+    document.getElementById('det-name').value = n.name || '';
+    document.getElementById('det-lat').value  = n.lat  != null ? n.lat : '';
+    document.getElementById('det-lon').value  = n.lon  != null ? n.lon : '';
+  }
+
+  // detail change handler
+  window.onDetChange = function() {
+    if (selectedIdx === null || selectedIdx >= nodes.length) return;
+    const oldName = nodes[selectedIdx].name;
+    const newName = document.getElementById('det-name').value;
+    nodes[selectedIdx].name = newName;
+    nodes[selectedIdx].lat  = parseFloat(document.getElementById('det-lat').value) || nodes[selectedIdx].lat;
+    nodes[selectedIdx].lon  = parseFloat(document.getElementById('det-lon').value) || nodes[selectedIdx].lon;
+    snrMatrix = null;
+    markDirty();
+    renderNodeList();
+    redrawMap();
+  };
+
+  // ── Selection ────────────────────────────────────────────
+  function selectNode(idx) {
+    selectedIdx = idx;
+    renderNodeList();
+    renderDetail();
+    redrawMap();
+    // scroll to node in list
+    const container = document.getElementById('node-list');
+    const items = container.querySelectorAll('.node-item');
+    for (const item of items) {
+      if (parseInt(item.dataset.idx) === idx) {
+        item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        break;
+      }
+    }
+  }
+
+  function deselectNode() {
+    selectedIdx = null;
+    renderNodeList();
+    renderDetail();
+    redrawMap();
+  }
+
+  // ── Search ────────────────────────────────────────────────
+  window.onSearch = function(val) {
+    searchFilter = val;
+    renderNodeList();
+  };
+
+  // ── Add node ──────────────────────────────────────────────
+  window.addNodeAtCenter = function() {
+    const center = leafletMap ? leafletMap.getCenter() : { lat: 41.39, lng: 2.16 };
+    const name = 'n' + String(nodes.length + 1).padStart(2, '0');
+    nodes.push({
+      name,
+      lat: parseFloat(center.lat.toFixed(6)),
+      lon: parseFloat(center.lng.toFixed(6)),
+    });
+    snrMatrix = null;
+    markDirty();
+    renderNodeList();
+    redrawMap();
+    selectNode(nodes.length - 1);
+  };
+
+  // ── Delete selected node ──────────────────────────────────
+  window.deleteSelectedNode = function() {
+    if (selectedIdx === null) return;
+    const name = nodes[selectedIdx].name;
+    if (!confirm('Delete node "' + name + '"?')) return;
+    nodes.splice(selectedIdx, 1);
+    selectedIdx = null;
+    snrMatrix = null;
+    markDirty();
+    renderNodeList();
+    renderDetail();
+    redrawMap();
+  };
+
+  // ── Preview SNR ───────────────────────────────────────────
+  window.previewSNR = async function() {
+    if (nodes.length < 2) {
+      setStatus('Need at least 2 nodes to preview SNR.', true);
+      return;
+    }
+    const path_loss = collectPathLoss();
+    try {
+      document.getElementById('btn-preview-snr').disabled = true;
+      setStatus('Computing SNR preview…');
+      const result = await postJSON('/api/topo-creator/preview-snr', { nodes, path_loss });
+      snrMatrix = result.matrix;
+      redrawMap();
+      setStatus(nodes.length + ' nodes | SNR preview applied');
+    } catch (e) {
+      setStatus('SNR preview failed: ' + e.message, true);
+    } finally {
+      document.getElementById('btn-preview-snr').disabled = false;
+    }
+  };
+
+  // ── Save ──────────────────────────────────────────────────
+  window.saveTopo = async function() {
+    const name = document.getElementById('topo-name').value.trim();
+    if (!name) {
+      setStatus('Topology name is required.', true);
+      return;
+    }
+
+    const payload = {
+      name,
+      path_loss: collectPathLoss(),
+      nodes,
+    };
+
+    try {
+      document.getElementById('btn-save').disabled = true;
+      setStatus('Saving…');
+      await putJSON('/api/topologies/' + topoId, payload);
+      markClean();
+      setStatus('Saved.');
+      window.location.href = '/static/topologies.html';
+    } catch (e) {
+      setStatus('Save failed: ' + e.message, true);
+      document.getElementById('btn-save').disabled = false;
+    }
+  };
+
+  // ── Status ────────────────────────────────────────────────
+  function setStatus(msg, isErr) {
+    const el = document.getElementById('te-status');
+    el.textContent = msg;
+    el.style.color = isErr ? 'var(--error)' : 'var(--text-muted)';
+  }
+
+  // ── Load topology ─────────────────────────────────────────
+  async function loadTopology() {
+    if (!topoId) {
+      setStatus('No topology ID in URL (?id=…)', true);
+      return;
+    }
+
+    try {
+      setStatus('Loading topology…');
+      const entry = await fetchJSON('/api/topologies/' + topoId);
+
+      document.title = 'Edit: ' + (entry.name || topoId) + ' — lora-universal-simulator';
+      document.getElementById('page-title').textContent = 'Edit: ' + (entry.name || topoId);
+      document.getElementById('topo-name').value = entry.name || '';
+
+      // Path-loss
+      const pl = entry.path_loss || {};
+      document.getElementById('pl-alpha').value      = pl.alpha           != null ? pl.alpha           : 3.0;
+      document.getElementById('pl-sigma').value      = pl.sigma_db        != null ? pl.sigma_db        : 0;
+      document.getElementById('pl-refdist').value    = pl.ref_distance_m  != null ? pl.ref_distance_m  : 1.0;
+      document.getElementById('pl-refloss').value    = pl.ref_loss_db     != null ? pl.ref_loss_db     : 40.0;
+      document.getElementById('pl-noisefloor').value = pl.noise_floor_db  != null ? pl.noise_floor_db  : -120.0;
+      document.getElementById('pl-txpower').value    = pl.tx_power_dbm    != null ? pl.tx_power_dbm    : 14.0;
+
+      nodes = (entry.nodes || []).map(n => ({
+        name: n.name,
+        lat:  n.lat != null ? parseFloat(n.lat) : null,
+        lon:  n.lon != null ? parseFloat(n.lon) : null,
+      }));
+
+      // Determine map center
+      const geoNodes = nodes.filter(n => n.lat != null && n.lon != null);
+      let center = [41.39, 2.16];
+      if (geoNodes.length > 0) {
+        const avgLat = geoNodes.reduce((s, n) => s + n.lat, 0) / geoNodes.length;
+        const avgLon = geoNodes.reduce((s, n) => s + n.lon, 0) / geoNodes.length;
+        center = [avgLat, avgLon];
+      }
+
+      initMap(center);
+      renderNodeList();
+      renderDetail();
+      markClean();
+
+      if (geoNodes.length > 1) {
+        const bounds = L.latLngBounds(geoNodes.map(n => [n.lat, n.lon]));
+        leafletMap.fitBounds(bounds, { padding: [30, 30] });
+      }
+
+      redrawMap();
+      setStatus(nodes.length + ' nodes loaded.');
+    } catch (e) {
+      setStatus('Failed to load topology: ' + e.message, true);
+      // Still init the map so the page is usable
+      initMap([41.39, 2.16]);
+    }
+  }
+
+  loadTopology();
+})();
+</script>
+</body>
+</html>

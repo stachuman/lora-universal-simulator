@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Topologies — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<style>
+  /* Actions flex */
+  .actions-cell {
+    display: flex;
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+  .path-loss-cell {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Nav bar ─────────────────────────────────────────── -->
+<nav class="navbar">
+  <span class="brand">lora-universal-simulator</span>
+  <ul class="nav-links">
+    <li><a href="/static/index.html">Dashboard</a></li>
+    <li><a href="/static/simulations.html">Simulations</a></li>
+    <li><a href="/static/topologies.html" class="active">Topologies</a></li>
+    <li><a href="/static/interactive.html">Interactive REPL</a></li>
+  </ul>
+  <span class="spacer"></span>
+</nav>
+
+<!-- ── Page content ────────────────────────────────────── -->
+<div class="page-wide">
+  <div class="flex items-center justify-between mb-16">
+    <div class="flex items-center gap-12">
+      <a href="/static/index.html" class="btn btn-sm">&larr; Back</a>
+      <h1 style="margin-bottom:0">Topologies</h1>
+    </div>
+    <div class="flex gap-8">
+      <button class="btn" onclick="loadTopologies()">Refresh</button>
+      <a href="/static/topology_creator.html" class="btn btn-primary">+ New Topology</a>
+    </div>
+  </div>
+
+  <div id="topos-loading" class="empty-state">
+    <div class="spinner"></div>
+    <p class="mt-8">Loading topologies...</p>
+  </div>
+
+  <div id="topos-empty" class="card empty-state hidden">
+    <p>No topologies yet.</p>
+    <a href="/static/topology_creator.html" class="btn btn-primary mt-8">Create your first topology</a>
+  </div>
+
+  <div id="topos-error" class="alert alert-error hidden"></div>
+
+  <div id="topos-table-wrap" class="card hidden" style="padding:0; overflow:hidden;">
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Nodes</th>
+            <th>Path-loss</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="topos-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm delete dialog -->
+<div id="confirm-overlay" class="confirm-overlay hidden">
+  <div class="confirm-dialog">
+    <h3>Delete Topology</h3>
+    <p id="confirm-msg">Are you sure you want to delete this topology?</p>
+    <div class="btn-row">
+      <button class="btn" onclick="cancelDelete()">Cancel</button>
+      <button class="btn btn-danger" id="confirm-delete-btn" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  let allTopos = [];
+  let deleteTargetId = null;
+
+  async function loadTopologies() {
+    const loading = document.getElementById('topos-loading');
+    const empty   = document.getElementById('topos-empty');
+    const tableW  = document.getElementById('topos-table-wrap');
+    const errDiv  = document.getElementById('topos-error');
+
+    loading.classList.remove('hidden');
+    empty.classList.add('hidden');
+    tableW.classList.add('hidden');
+    errDiv.classList.add('hidden');
+
+    try {
+      const topos = await fetchJSON('/api/topologies');
+      loading.classList.add('hidden');
+
+      allTopos = Array.isArray(topos) ? topos : [];
+
+      if (allTopos.length === 0) {
+        empty.classList.remove('hidden');
+        return;
+      }
+
+      tableW.classList.remove('hidden');
+
+      // Sort by created desc
+      allTopos.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+      renderTable();
+
+    } catch (err) {
+      loading.classList.add('hidden');
+      errDiv.textContent = 'Failed to load topologies: ' + err.message;
+      errDiv.classList.remove('hidden');
+    }
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('topos-tbody');
+    tbody.innerHTML = '';
+
+    for (const t of allTopos) {
+      const tr = document.createElement('tr');
+
+      // Name
+      const tdName = document.createElement('td');
+      tdName.textContent = t.name || '--';
+      tr.appendChild(tdName);
+
+      // Node count
+      const tdNodes = document.createElement('td');
+      tdNodes.textContent = t.node_count != null ? t.node_count : '--';
+      tr.appendChild(tdNodes);
+
+      // Path-loss summary
+      const tdPL = document.createElement('td');
+      tdPL.className = 'path-loss-cell';
+      if (t.has_path_loss) {
+        // Fetch the actual params lazily: the summary endpoint only has has_path_loss boolean
+        tdPL.textContent = 'yes';
+      } else {
+        tdPL.textContent = '--';
+      }
+      tr.appendChild(tdPL);
+
+      // Created
+      const tdCreated = document.createElement('td');
+      tdCreated.textContent = formatTime(t.created_at);
+      tr.appendChild(tdCreated);
+
+      // Actions
+      const tdAct = document.createElement('td');
+      const actDiv = document.createElement('div');
+      actDiv.className = 'actions-cell';
+      actDiv.innerHTML =
+        '<a href="/static/topology_editor.html?id=' + encodeURIComponent(t.id) + '" class="btn btn-sm">Edit</a>' +
+        '<button class="btn btn-sm btn-danger" onclick="promptDelete(\'' + escapeHtml(t.id) + '\', \'' + escapeHtml(t.name || t.id) + '\')">Delete</button>';
+      tdAct.appendChild(actDiv);
+      tr.appendChild(tdAct);
+
+      tbody.appendChild(tr);
+    }
+  }
+
+  // ── Delete flow ──────────────────────────────────
+  window.promptDelete = function(topoId, topoName) {
+    deleteTargetId = topoId;
+    document.getElementById('confirm-msg').textContent =
+      'Delete topology "' + topoName + '"? This cannot be undone.';
+    document.getElementById('confirm-overlay').classList.remove('hidden');
+  };
+
+  window.cancelDelete = function() {
+    deleteTargetId = null;
+    document.getElementById('confirm-overlay').classList.add('hidden');
+  };
+
+  window.confirmDelete = async function() {
+    if (!deleteTargetId) return;
+    const id = deleteTargetId;
+    document.getElementById('confirm-overlay').classList.add('hidden');
+    try {
+      await deleteJSON('/api/topologies/' + encodeURIComponent(id));
+      allTopos = allTopos.filter(t => t.id !== id);
+      if (allTopos.length === 0) {
+        document.getElementById('topos-table-wrap').classList.add('hidden');
+        document.getElementById('topos-empty').classList.remove('hidden');
+      } else {
+        renderTable();
+      }
+    } catch (e) {
+      const errDiv = document.getElementById('topos-error');
+      errDiv.textContent = 'Delete failed: ' + e.message;
+      errDiv.classList.remove('hidden');
+    }
+    deleteTargetId = null;
+  };
+
+  // Expose for refresh button
+  window.loadTopologies = loadTopologies;
+
+  // Initial load
+  loadTopologies();
+})();
+</script>
+</body>
+</html>

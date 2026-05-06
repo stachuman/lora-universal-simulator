@@ -217,6 +217,7 @@
   <ul class="nav-links">
     <li><a href="/static/index.html">Dashboard</a></li>
     <li><a href="/static/simulations.html">Simulations</a></li>
+    <li><a href="/static/topologies.html">Topologies</a></li>
   </ul>
   <span class="spacer"></span>
 </nav>
@@ -238,7 +239,20 @@
         <input type="file" id="json-file-input" accept=".json" style="display:none">
         <span id="file-name" style="font-size:11px; color:var(--text-dim)"></span>
       </div>
-      <div class="flex gap-8">
+
+      <!-- Load from saved topology -->
+      <div class="file-row" style="border-top:1px solid var(--border); padding-top:10px; margin-top:4px; flex-wrap:wrap; gap:8px;">
+        <label style="width:100%; margin-bottom:4px; font-size:11px; color:var(--text-muted);">
+          Or start from a saved topology (merges nodes + path_loss; you fill in simulation, commands, duration):
+        </label>
+        <select id="topo-select" class="form-input" style="flex:1; min-width:180px; font-size:11px;">
+          <option value="">— select a topology —</option>
+        </select>
+        <button class="btn" id="btn-load-topo" onclick="loadFromTopo()" disabled>Load Topology</button>
+        <a href="/static/topologies.html" class="btn btn-sm" style="align-self:center;">Manage Topologies</a>
+      </div>
+
+      <div class="flex gap-8" style="margin-top:10px;">
         <button class="btn btn-primary" onclick="submitSim()">Run Simulation</button>
       </div>
       <div id="form-error" class="alert alert-error hidden"></div>
@@ -357,7 +371,82 @@
     // Show new sim form only
     document.getElementById('new-sim-section').style.display = '';
     document.getElementById('sim-view-section').style.display = 'none';
+    // Populate topology dropdown
+    populateTopoSelect();
   }
+
+  // ── Load saved topologies into select ──────────────────
+  async function populateTopoSelect() {
+    const sel = document.getElementById('topo-select');
+    const btn = document.getElementById('btn-load-topo');
+    try {
+      const topos = await fetchJSON('/api/topologies');
+      if (!Array.isArray(topos) || topos.length === 0) return;
+      // Sort newest first
+      topos.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+      for (const t of topos) {
+        const opt = document.createElement('option');
+        opt.value = t.id;
+        opt.textContent = t.name + ' (' + (t.node_count || 0) + ' nodes)';
+        sel.appendChild(opt);
+      }
+      sel.addEventListener('change', () => {
+        btn.disabled = !sel.value;
+      });
+    } catch (e) {
+      // Topology list unavailable — silently skip
+    }
+  }
+
+  // ── Merge topology into scenario textarea ───────────────
+  window.loadFromTopo = async function() {
+    const sel = document.getElementById('topo-select');
+    const topoId = sel.value;
+    if (!topoId) return;
+
+    const btn = document.getElementById('btn-load-topo');
+    const errDiv = document.getElementById('form-error');
+    errDiv.classList.add('hidden');
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+
+    try {
+      const topo = await fetchJSON('/api/topologies/' + encodeURIComponent(topoId));
+
+      // Build a minimal scenario scaffold from the topology's nodes + path_loss
+      // The user then adds simulation {}, commands [], duration_ms etc.
+      const scenario = {
+        simulation: {
+          duration_ms: 300000,
+          radio: {
+            model: 'log_distance',
+            alpha:          topo.path_loss ? topo.path_loss.alpha          : 3.0,
+            sigma_db:       topo.path_loss ? topo.path_loss.sigma_db       : 0,
+            ref_distance_m: topo.path_loss ? topo.path_loss.ref_distance_m : 1.0,
+            ref_loss_db:    topo.path_loss ? topo.path_loss.ref_loss_db    : 40.0,
+            noise_floor_db: topo.path_loss ? topo.path_loss.noise_floor_db : -120.0,
+            tx_power_dbm:   topo.path_loss ? topo.path_loss.tx_power_dbm   : 14.0,
+          },
+        },
+        nodes: (topo.nodes || []).map(n => ({
+          name:   n.name,
+          lat:    n.lat,
+          lon:    n.lon,
+          script: '',
+        })),
+        commands: [],
+      };
+
+      document.getElementById('scenario-json').value = JSON.stringify(scenario, null, 2);
+      document.getElementById('file-name').textContent = 'Loaded from topology: ' + (topo.name || topoId);
+    } catch (e) {
+      errDiv.textContent = 'Failed to load topology: ' + e.message;
+      errDiv.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Load Topology';
+    }
+  };
 
   // File picker wires textarea
   document.getElementById('json-file-input').addEventListener('change', function(e) {
