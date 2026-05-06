@@ -129,7 +129,13 @@ local function beacon_fire(self)
     self:emit("beacon_tx", { n_entries = rt_count(self.rt) })
     self:tx(frame, { sf = self.routing_sf })
   end
-  self:after(self.beacon_period_ms, function() beacon_fire(self) end)
+  -- Jittered re-arm: ±20% of period. No hot-start in this design, so a
+  -- deterministic period would lock all four nodes into a fixed phase
+  -- relationship and concentrate their TXs into the same step over and
+  -- over. Random spread breaks that and keeps beacons collision-resistant.
+  local lo = self.beacon_period_ms * 4 // 5
+  local hi = self.beacon_period_ms * 6 // 5
+  self:after(self:rand(lo, hi + 1), function() beacon_fire(self) end)
 end
 
 function on_init(self, config)
@@ -152,8 +158,9 @@ function on_init(self, config)
   end
   self.peer_count = #nodes - 1
 
-  -- ID-staggered first beacon to avoid collisions on first round.
-  self:after(self.id * 100, function() beacon_fire(self) end)
+  -- Random first-fire offset within one period. Since there is no hot-start,
+  -- this is what spreads the very first round of beacons across the period.
+  self:after(self:rand(0, self.beacon_period_ms), function() beacon_fire(self) end)
 end
 
 function on_recv(self, frame, meta)
