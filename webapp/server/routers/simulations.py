@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from server.config import validate_safe_id
 from server.services.config_validator import validate as validate_lus_config
 from server.services.event_index import EventIndex, EventIndexCache
 from server.services.sim_manager import SimManager
@@ -36,7 +37,17 @@ class CreateSimRequest(BaseModel):
 
 
 def _get_sim_or_404(sim_id: str, request: Request):
-    """Return the SimRecord for *sim_id*, or raise 404."""
+    """Return the SimRecord for *sim_id*, or raise 404.
+
+    Validates *sim_id* against [A-Za-z0-9_-] before lookup so a
+    user-supplied path-traversal pattern (e.g., "../etc/passwd") is
+    rejected at the API boundary even if SimManager would have returned
+    None for it anyway.
+    """
+    try:
+        validate_safe_id(sim_id, "sim_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     sim_manager: SimManager = request.app.state.sim_manager
     sim = sim_manager.get_sim(sim_id)
     if sim is None:
@@ -102,7 +113,7 @@ def _cached_json_response(request: Request, sim_id: str, data) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.post("", include_in_schema=True)
+@router.post("", status_code=201, include_in_schema=True)
 async def create_sim(body: CreateSimRequest, request: Request):
     """Start a new simulation from a config JSON dict."""
     parsed, errors = validate_lus_config(body.config_json)
@@ -159,6 +170,10 @@ async def get_sim(sim_id: str, request: Request):
 @router.delete("/{sim_id}")
 async def delete_sim(sim_id: str, request: Request):
     """Cancel and delete a simulation and all its data."""
+    try:
+        validate_safe_id(sim_id, "sim_id")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     sim_manager: SimManager = request.app.state.sim_manager
     event_cache: EventIndexCache = request.app.state.event_cache
 
@@ -217,12 +232,19 @@ async def sim_node_events(
     """Return events involving a specific node in a time range."""
     index = _get_index(sim_id, request)
     events = index.query_node_range(node, from_ms, to_ms)
-    return {"node": node, "events": events}
+    return _cached_json_response(request, sim_id,
+                                 {"node": node, "events": events})
 
 
-@router.get("/{sim_id}/progress")
-async def sim_progress(sim_id: str, request: Request):
-    """SSE endpoint streaming simulation progress updates."""
+@router.get("/{sim_id}/stream")
+async def sim_stream(sim_id: str, request: Request):
+    """SSE endpoint streaming simulation progress + event notifications.
+
+    Reconnecting clients DO NOT replay missed events — map_live.html must
+    open the connection before/at sim creation and hold it open for the
+    duration of the run. Spec §8: live tracking flow uses this endpoint
+    name ('stream', not 'progress').
+    """
     sim_manager: SimManager = request.app.state.sim_manager
     sim = sim_manager.get_sim(sim_id)
     if not sim:
