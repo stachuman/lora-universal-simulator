@@ -51,3 +51,17 @@ time ./build/orchestrator/lus test/t99_perf_smoke.json /dev/null
 Last measured: real 0m5.9s (user 5.9s / sys 0.0s) on AMD EPYC 7402P
 24-Core (Linux 6.8, Release build, vanilla Lua 5.4). Comfortably
 under the 5-minute Y1 target.
+
+## Webapp (live tracking + REPL)
+
+The `webapp/` directory contains an optional FastAPI + vanilla-JS frontend
+for live simulation tracking, swim-lane replay, and a browser-driven
+interactive REPL. After building the `lus` binary, run:
+
+```bash
+cd webapp
+pip install -r requirements.txt
+bash run.sh
+```
+
+Open http://localhost:8000. See `webapp/ARCHITECTURE.md` for details.

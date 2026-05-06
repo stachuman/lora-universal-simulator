@@ -1,0 +1,20 @@
+services:
+  webapp:
+    image: lus-webapp:latest
+    build:
+      context: ..
+      dockerfile: webapp/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - webapp-data:/app/data
+      - ../build/orchestrator/lus:/app/lus:ro
+    environment:
+      - ORCHESTRATOR_PATH=/app/lus
+      - LUS_CWD=/app
+      - DATA_DIR=/app/data
+      - MAX_CONCURRENT_SIMS=4
+    restart: unless-stopped
+
+volumes:
+  webapp-data:
