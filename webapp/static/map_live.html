@@ -10,18 +10,14 @@
 <script src="/static/js/api.js"></script>
 <style>
   html, body { height: 100%; margin: 0; }
-  /* 3-row × 2-col grid:
-       header spans both cols     (auto height)
-       timeline | map fills middle (1fr)
-       log feed spans both cols   (180px) */
+  /* 3-row × 1-col grid: header / map / swim-lane timeline iframe */
   body {
     display: grid;
-    grid-template-rows: auto 1fr 180px;
-    grid-template-columns: 320px 1fr;
+    grid-template-rows: auto 1fr 280px;
     grid-template-areas:
-      "header header"
-      "timeline map"
-      "log log";
+      "header"
+      "map"
+      "timeline";
     overflow: hidden;
   }
 
@@ -46,39 +42,15 @@
   }
   .mlv-back:hover { text-decoration: underline; }
 
-  /* Vertical event timeline (left column) */
-  .mlv-timeline {
+  /* Bottom-row swim-lane timeline (embedded visualize.html iframe) */
+  .mlv-timeline-frame {
     grid-area: timeline;
-    overflow-y: auto;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-top: 1px solid var(--border);
     background: var(--bg-secondary);
-    border-right: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-muted);
   }
-  .mlv-timeline-header {
-    position: sticky; top: 0;
-    background: var(--bg-secondary);
-    padding: 4px 8px;
-    font-size: 10px;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    letter-spacing: 0.4px;
-    border-bottom: 1px solid var(--border);
-    z-index: 1;
-  }
-  .mlv-tl-line {
-    display: grid;
-    grid-template-columns: 60px 50px 1fr;
-    gap: 6px;
-    padding: 2px 8px;
-    border-bottom: 1px solid rgba(0,0,0,0.04);
-    cursor: pointer;
-  }
-  .mlv-tl-line:hover { background: var(--bg-primary); }
-  .mlv-tl-time { color: var(--text-dim); }
-  .mlv-tl-type { font-weight: 700; }
-  .mlv-tl-detail { color: var(--text); word-break: break-all; }
 
   /* Legend panel anchored inside the map as a Leaflet control */
   .mlv-legend-panel {
@@ -259,26 +231,8 @@
   .mlv-controls .sep { color: var(--text-dim); }
   .mlv-controls .speed-label { color: var(--text-muted); }
 
-  /* Log panel — full-width strip below the map + timeline */
-  .mlv-log {
-    grid-area: log;
-    overflow-y: auto;
-    background: var(--bg-primary, #0d1117);
-    border-top: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-muted);
-    padding: 2px 6px;
-  }
-  .mlv-log .log-line {
-    display: flex;
-    gap: 8px;
-    padding: 1px 0;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
-  }
-  .mlv-log .log-time { color: var(--text-dim); flex-shrink: 0; }
-  .mlv-log .log-type { color: var(--accent); flex-shrink: 0; min-width: 70px; }
-  .mlv-log .log-msg  { color: var(--text); word-break: break-all; }
+  /* Log panel removed — script_log / script_emit / cmd_reply are now
+     surfaced as additional rows in the timeline. */
 
   .mlv-placeholder {
     grid-area: map;
@@ -335,11 +289,6 @@
   <a id="link-details" href="#">Details</a>
 </div>
 
-<!-- Left: vertical timeline of fired radio events -->
-<div class="mlv-timeline" id="tl-panel">
-  <div class="mlv-timeline-header">Events (radio)</div>
-</div>
-
 <div id="map"></div>
 
 <div id="no-coords" class="mlv-placeholder" hidden>
@@ -350,8 +299,8 @@
   </div>
 </div>
 
-<!-- Bottom: scrolling log feed (script_log + script_emit + cmd_reply) -->
-<div class="mlv-log" id="log-panel"></div>
+<!-- Bottom: swim-lane timeline (renders visualize.html for the same sim) -->
+<iframe class="mlv-timeline-frame" id="tl-frame" title="Timeline"></iframe>
 
 <script>
 // ── Parse sim id from URL ─────────────────────────────────────────────
@@ -369,7 +318,6 @@ const controlsEl    = $('controls');
 const btnPause      = $('btn-pause');
 const btnRestart    = $('btn-restart');
 const timeDisplayEl = $('time-display');
-const logPanel      = $('log-panel');
 
 // ── Styling helpers ───────────────────────────────────────────────────
 function snrColor(snr) {
@@ -965,71 +913,22 @@ function wireOverlayToggles() {
   cbEff .addEventListener('change', () => setTxEffOverlay(cbEff.checked));
 }
 
-// ── Log panel ─────────────────────────────────────────────────────────
-const LOG_MAX_LINES = 200;
+// ── Bottom timeline iframe ────────────────────────────────────────────
+// The bottom strip embeds visualize.html for the same sim — same swim-lane
+// canvas, same event vocabulary, same colors. Keeps the two views
+// rendering-coupled (one source of truth for swim-lane drawing) and lets
+// the user pan/zoom the timeline independently of the map animation.
+const tlFrame = document.getElementById('tl-frame');
 
-function appendLog(evt) {
-  const line = document.createElement('div');
-  line.className = 'log-line';
-  const t = typeof evt.time_ms === 'number' ? (evt.time_ms / 1000).toFixed(3) + 's' : '—';
-  const msg = evt.msg || evt.text || evt.data || JSON.stringify(evt);
-  line.innerHTML = '<span class="log-time">' + t + '</span>'
-                 + '<span class="log-type">' + (evt.type || '?') + '</span>'
-                 + '<span class="log-msg">' + (evt.node ? '[' + evt.node + '] ' : '') + String(msg) + '</span>';
-  logPanel.appendChild(line);
-  // Trim to max lines
-  while (logPanel.children.length > LOG_MAX_LINES) logPanel.removeChild(logPanel.firstChild);
-  logPanel.scrollTop = logPanel.scrollHeight;
-}
-
-// ── Timeline panel (left) — radio events as they fire ─────────────────
-const TL_MAX_LINES = 500;
-const tlPanel = document.getElementById('tl-panel');
-const TL_TYPE_COLOR = {
-  tx:               '#2563eb',
-  rx:               '#16a34a',
-  drop_weak:        '#f97316',
-  drop_sf_mismatch: '#f43f5e',
-  drop_halfduplex:  '#be123c',
-  collision:        '#dc2626',
-  tx_deferred:      '#f59e0b',
-};
-
-function appendTimeline(evt) {
-  // Use the visualization fire-time so timeline order matches when events
-  // appear on the map (rx events fire at TX-start, not at delivery).
-  const ftime = (typeof fireMs === 'function') ? fireMs(evt) : evt.time_ms;
-  const t = (ftime / 1000).toFixed(3) + 's';
-  const type = evt.type;
-  const node = evt.node || evt.from || evt.to || '?';
-  let detail = '';
-  if (evt.label) detail = evt.label + (evt.info ? ' · ' + evt.info : '');
-  else if (evt.to && evt.from && evt.from !== node) detail = evt.from + '→' + evt.to;
-  else if (evt.airtime_ms) detail = evt.airtime_ms + 'ms';
-
-  const row = document.createElement('div');
-  row.className = 'mlv-tl-line';
-  row.innerHTML = '<span class="mlv-tl-time">' + t + '</span>'
-                + '<span class="mlv-tl-type" style="color:' + (TL_TYPE_COLOR[type] || '#64748b') + '">'
-                + (type.length > 8 ? type.slice(0, 8) : type) + '</span>'
-                + '<span class="mlv-tl-detail"><b>' + node + '</b> ' + detail + '</span>';
-  tlPanel.appendChild(row);
-  while (tlPanel.children.length - 1 > TL_MAX_LINES) {
-    // children[0] is the sticky header — remove from index 1
-    tlPanel.removeChild(tlPanel.children[1]);
-  }
-  tlPanel.scrollTop = tlPanel.scrollHeight;
-}
-
-const TL_TYPES = new Set(['tx', 'rx', 'drop_weak', 'drop_sf_mismatch',
-                          'drop_halfduplex', 'collision', 'tx_deferred']);
+// Stub helpers for any callers that still want to log events somewhere.
+// In this layout, script_log / script_emit / cmd_reply are visible in the
+// embedded visualize.html iframe; the map-side script keeps no separate
+// log panel.
+function appendLog(_evt) { /* no-op — events are shown in the iframe */ }
 
 // ── Replay engine ─────────────────────────────────────────────────────
 function fireEvent(evt) {
   const hold = Math.max(200, FALLBACK_HOLD_MS / playbackSpeed);
-  // Mirror radio events into the left timeline column so the user sees a
-  // chronological list growing alongside the map animation.
-  if (TL_TYPES.has(evt.type)) appendTimeline(evt);
   switch (evt.type) {
     case 'tx': {
       const txHold = Math.max(hold, (evt.airtime_ms || 0) + 500);
@@ -1130,9 +1029,7 @@ function startReplay(events, endMs) {
 
   resetAllStates();
   removeAllActiveTx();
-  logPanel.innerHTML = '';
-  // Wipe timeline rows but keep the sticky header (children[0]).
-  while (tlPanel.children.length > 1) tlPanel.removeChild(tlPanel.lastChild);
+  // Bottom timeline is an iframe owned by visualize.html — no reset needed.
 
   controlsEl.style.display = '';
   btnPause.textContent = '⏸ Pause';
@@ -1151,8 +1048,6 @@ function restartReplay() {
 
   resetAllStates();
   removeAllActiveTx();
-  logPanel.innerHTML = '';
-  while (tlPanel.children.length > 1) tlPanel.removeChild(tlPanel.lastChild);
   btnPause.textContent = '⏸ Pause';
   updateTimeDisplay();
 
@@ -1196,6 +1091,8 @@ async function loadSim() {
   const ld = document.getElementById('link-details');
   if (lt) lt.href = '/static/visualize.html?id=' + encodeURIComponent(SIM_ID);
   if (ld) ld.href = '/static/simulation.html?id=' + encodeURIComponent(SIM_ID);
+  // Point the bottom-strip iframe at the same sim — same swim-lane viewer.
+  if (tlFrame) tlFrame.src = '/static/visualize.html?id=' + encodeURIComponent(SIM_ID);
   statusEl.textContent = 'Loading meta…';
 
   let meta;
