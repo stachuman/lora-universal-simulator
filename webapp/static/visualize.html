@@ -173,21 +173,23 @@ const loading = document.getElementById('loading');
 const sidebar = document.getElementById('sidebar');
 const sidebarContent = document.getElementById('sidebar-content');
 
+// Saturated palette tuned for the light lane background (#f0f0f4).
+// Pastel hues wash out almost entirely; these tones keep contrast.
 const COLORS = {
-    sim_start:        '#aaaaff',
-    sim_end:          '#aaaaff',
-    node_ready:       '#88aa88',
-    tx:               '#88ddff',
-    rx:               '#88ff88',
-    drop_weak:        '#ff8888',
-    drop_sf_mismatch: '#ff6688',
-    drop_halfduplex:  '#ff4488',
-    collision:        '#ff4444',
-    tx_deferred:      '#ffcc44',
-    cmd_reply:        '#cccccc',
-    script_log:       '#ffffaa',
-    script_emit:      '#aaffff',
-    node_stats:       '#cccccc',
+    sim_start:        '#4338ca',  // indigo-700
+    sim_end:          '#4338ca',
+    node_ready:       '#15803d',  // green-700
+    tx:               '#2563eb',  // blue-600   — sender block
+    rx:               '#16a34a',  // green-600  — receiver bar
+    drop_weak:        '#f97316',  // orange-500
+    drop_sf_mismatch: '#f43f5e',  // rose-500
+    drop_halfduplex:  '#be123c',  // rose-700
+    collision:        '#dc2626',  // red-600
+    tx_deferred:      '#f59e0b',  // amber-500
+    cmd_reply:        '#64748b',  // slate-500
+    script_log:       '#b45309',  // amber-700  — visible on light bg
+    script_emit:      '#0891b2',  // cyan-600
+    node_stats:       '#475569',  // slate-600
     trace_highlight: '#ca8a04',
     lane_bg: '#f0f0f4',
     lane_bg_alt: '#e8e8ef',
