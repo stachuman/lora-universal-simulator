@@ -7,6 +7,7 @@
 #include "orchestrator/runtime/SimController.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <sstream>
@@ -188,6 +189,25 @@ void LuaHost::bindSimGlobals(SimController& ctrl) {
                 out[i + 1] = entry;
             }
             return out;
+        });
+
+    // sim:link_snr(from_name, to_name) -> number | nil
+    // Returns the static link SNR in dB (after path-loss + topology.links
+    // overrides). nil if either node name is unknown or no link exists.
+    // Useful for adaptive scripts that want to inspect link quality.
+    sim.set_function("link_snr",
+        [&ctrl](sol::object /*self*/, std::string from, std::string to) -> sol::object {
+            sol::state_view L(ctrl.luaHost().lua());
+            int fi = -1, ti = -1;
+            const auto& nodes = ctrl.config().nodes;
+            for (size_t i = 0; i < nodes.size(); ++i) {
+                if (nodes[i].name == from) fi = static_cast<int>(i);
+                if (nodes[i].name == to)   ti = static_cast<int>(i);
+            }
+            if (fi < 0 || ti < 0) return sol::lua_nil;
+            float s = ctrl.linkSnrDb(fi, ti);
+            if (std::isnan(s)) return sol::lua_nil;
+            return sol::make_object(L, s);
         });
 
     // sim:events(n?) -> { event_table, ... }    (last N, default 10)

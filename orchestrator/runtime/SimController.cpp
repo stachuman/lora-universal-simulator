@@ -39,6 +39,7 @@
 #include "core/topology/JsonConfig.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -126,6 +127,13 @@ SimController::~SimController() = default;
 
 int SimController::eventCount() const {
     return static_cast<int>(EventLog::events().size());
+}
+
+float SimController::linkSnrDb(int from, int to) const {
+    if (!_links) return std::nanf("");
+    LinkParams lp;
+    if (!_links->getLink(from, to, lp)) return std::nanf("");
+    return lp.snr;
 }
 
 void SimController::initialize() {

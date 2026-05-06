@@ -84,6 +84,12 @@ public:
     LuaHost&         luaHost()        { return _host; }
     const SimConfig& config() const   { return _cfg; }
 
+    // Current link SNR (dB) between two node ids. Returns NaN when no link
+    // is configured (sender == receiver, or path-loss/topology produced no
+    // entry). Reflects the static link configuration; per-step fading is
+    // applied at delivery time and is not visible here.
+    float linkSnrDb(int from, int to) const;
+
     // For Ctrl-C: REPL sets this to true to abort an in-progress runUntil.
     void requestInterrupt() { _interrupted = true; }
 
