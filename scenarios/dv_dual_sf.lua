@@ -130,6 +130,80 @@ local function name_of(self, id)
   return self.id_to_name[id] or ("#" .. tostring(id))
 end
 
+-- Forward decl so start_rts_timeout can refer to itself recursively via
+-- the timeout-fire callback (Lua needs the local in scope first).
+local start_rts_timeout
+
+-- Fires after rts_timeout_ms with no CTS. Decides retry vs giveup vs
+-- defer (when busy as receiver of someone else's data).
+local function rts_timeout_fire(self, captured_msg_id)
+  -- CTS arrived → pending_tx already cleared. Nothing to do.
+  if self.pending_tx == nil then return end
+  -- Different in-flight (e.g., a forward kicked off after our own
+  -- finished). Same captured_msg_id check keeps stale timers harmless.
+  if self.pending_tx.msg_id ~= captured_msg_id then return end
+
+  -- Channel busy as receiver — defer to a shorter retry; don't TX over
+  -- someone else's incoming data plane.
+  if self.pending_rx ~= nil then
+    self:log(string.format("rts_retry_deferred (busy as receiver) msg=%d",
+      captured_msg_id))
+    self:after(self.rts_busy_retry_ms, function()
+      rts_timeout_fire(self, captured_msg_id)
+    end)
+    return
+  end
+
+  if self.pending_tx.retries_left <= 0 then
+    self:emit("rts_giveup", {
+      dst    = self.pending_tx.dst,
+      next   = self.pending_tx.next,
+      msg_id = captured_msg_id,
+    })
+    self:log(string.format("rts_giveup msg=%d (max retries exhausted, dst=%s)",
+      captured_msg_id, name_of(self, self.pending_tx.dst)))
+    self.pending_tx = nil
+    return
+  end
+
+  -- Resend RTS with same msg_id. Receiver detects duplicate and
+  -- re-sends CTS (same msg_id matched against its pending_rx).
+  self.pending_tx.retries_left = self.pending_tx.retries_left - 1
+  local rts = pack_rts(self.pending_tx.origin, self.id, self.pending_tx.dst,
+                       self.pending_tx.next, self.pending_tx.msg_id, self.data_sf)
+  self:emit("rts_retry", {
+    origin       = self.pending_tx.origin,
+    dst          = self.pending_tx.dst,
+    next         = self.pending_tx.next,
+    msg_id       = self.pending_tx.msg_id,
+    retries_left = self.pending_tx.retries_left,
+  })
+  self:log(string.format("rts_retry -> %s msg_id=%d (retries_left=%d)",
+    name_of(self, self.pending_tx.next),
+    self.pending_tx.msg_id,
+    self.pending_tx.retries_left))
+  self:tx(rts, {
+    sf    = self.routing_sf,
+    label = "RTS-rty",
+    info  = string.format("retry next=%s msg=%d retries_left=%d",
+      name_of(self, self.pending_tx.next),
+      self.pending_tx.msg_id,
+      self.pending_tx.retries_left),
+  })
+  start_rts_timeout(self)
+end
+
+-- Schedule a CTS-wait timeout for the currently in-flight pending_tx.
+-- Captures msg_id so the timer is harmless after pending_tx is cleared
+-- or replaced by a different flight.
+start_rts_timeout = function(self)
+  if not self.pending_tx then return end
+  local captured_msg_id = self.pending_tx.msg_id
+  self:after(self.rts_timeout_ms, function()
+    rts_timeout_fire(self, captured_msg_id)
+  end)
+end
+
 -- ---------- script lifecycle ------------------------------------------------
 
 local function beacon_fire(self)
@@ -167,6 +241,13 @@ function on_init(self, config)
   -- simulator's set_rx_sf is instantaneous, but real hardware needs a
   -- handful of µs to settle on the new SF — pad with 5ms by default.
   self.cts_to_data_gap_ms = config.cts_to_data_gap_ms or 5
+  -- RTS retry policy. CTS round-trip (RTS-air + receiver-process + CTS-air
+  -- + safety) is ~50ms at SF7; default timeout 100ms gives 2x margin.
+  -- If retry fires while we're mid-RX of someone else (pending_rx set),
+  -- reschedule using rts_busy_retry_ms so we don't TX over the channel.
+  self.rts_timeout_ms     = config.rts_timeout_ms     or 100
+  self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
+  self.rts_max_retries    = config.rts_max_retries    or 3
 
   self.rt              = {}
   self.next_msg_id     = 1
@@ -252,11 +333,29 @@ function on_recv(self, frame, meta)
     if not r then return end
     if r.next ~= self.id then return end  -- not for us; silent discard
     if self.pending_rx ~= nil then
-      -- Already mid-exchange as a receiver; surfacing this so it's visible
-      -- if it ever happens (scenario A: never; B/C with concurrency: maybe).
+      -- Duplicate RTS from the same sender for the same msg_id: the
+      -- originator's CTS-wait timer fired (our previous CTS may have
+      -- been lost) and they retried. Re-send the CTS with the same
+      -- msg_id so the dance can continue. pending_rx is unchanged.
+      if self.pending_rx.from == r.src and self.pending_rx.msg_id == r.msg_id then
+        self:emit("rts_rx_dup", { from = r.src, msg_id = r.msg_id })
+        self:log(string.format("rts_rx_dup <- %s msg_id=%d -> resending CTS",
+          name_of(self, r.src), r.msg_id))
+        local cts = pack_cts(self.id, r.msg_id)
+        self:emit("cts_tx", { to = r.src, msg_id = r.msg_id, dup = true })
+        self:tx(cts, {
+          sf    = self.routing_sf,
+          label = "CTS-dup",
+          info  = string.format("re-CTS to=%s msg=%d", name_of(self, r.src), r.msg_id),
+        })
+        return
+      end
+      -- Different RTS while we're already mid-exchange — reject with
+      -- the existing busy event for visibility.
       self:emit("rts_rejected_busy", { from = r.src, msg_id = r.msg_id })
-      self:log(string.format("rts_rejected_busy: from %s msg_id=%d (already in pending_rx)",
-        name_of(self, r.src), r.msg_id))
+      self:log(string.format("rts_rejected_busy: from %s msg_id=%d (already in pending_rx for %s/%d)",
+        name_of(self, r.src), r.msg_id,
+        name_of(self, self.pending_rx.from), self.pending_rx.msg_id))
       return
     end
 
@@ -372,11 +471,12 @@ function on_recv(self, frame, meta)
         -- accommodates timeout/retry.
         local mid = gen_msg_id(self)
         self.pending_tx = {
-          origin  = d.origin,           -- preserve originator across hops
-          dst     = d.dst,
-          next    = route.next_hop,
-          msg_id  = mid,
-          payload = d.payload,
+          origin       = d.origin,         -- preserve originator across hops
+          dst          = d.dst,
+          next         = route.next_hop,
+          msg_id       = mid,
+          payload      = d.payload,
+          retries_left = self.rts_max_retries,
         }
         self:log(string.format("forward: dst=%s, my next-hop=%s, new msg_id=%d",
           name_of(self, d.dst), name_of(self, route.next_hop), mid))
@@ -384,8 +484,8 @@ function on_recv(self, frame, meta)
         self:emit("rts_tx", {
           origin = d.origin, dst = d.dst, next = route.next_hop, msg_id = mid,
         })
-        self:log(string.format("rts_tx -> %s msg_id=%d (forwarding) -> retuning RX to SF%d",
-          name_of(self, route.next_hop), mid, self.data_sf))
+        self:log(string.format("rts_tx -> %s msg_id=%d (forwarding, RX stays on routing SF%d for CTS)",
+          name_of(self, route.next_hop), mid, self.routing_sf))
         self:tx(rts, {
           sf    = self.routing_sf,
           label = "RTS-fwd",
@@ -393,8 +493,8 @@ function on_recv(self, frame, meta)
             name_of(self, d.origin), name_of(self, d.dst),
             name_of(self, route.next_hop), mid, self.data_sf),
         })
-        -- Forwarder stays on routing_sf RX — CTS will come back on
-        -- routing_sf (not data_sf as in the older protocol). No retune.
+        -- Forwarder stays on routing_sf RX — CTS comes back on routing_sf.
+        start_rts_timeout(self)
       end
     end
     return
@@ -414,11 +514,12 @@ function on_command(self, cmd_str)
   self:log(string.format("send: dst=%s (id=%d) via %s (id=%d) msg_id=%d payload=%q",
     dst_name, dst_id, name_of(self, route.next_hop), route.next_hop, mid, text))
   self.pending_tx = {
-    origin   = self.id,
-    dst      = dst_id,
-    next     = route.next_hop,
-    msg_id   = mid,
-    payload  = text,
+    origin       = self.id,
+    dst          = dst_id,
+    next         = route.next_hop,
+    msg_id       = mid,
+    payload      = text,
+    retries_left = self.rts_max_retries,
   }
 
   local frame = pack_rts(self.id, self.id, dst_id, route.next_hop, mid, self.data_sf)
@@ -434,6 +535,7 @@ function on_command(self, cmd_str)
 
   -- Originator stays on routing_sf RX. CTS will come back on routing_sf
   -- (short airtime, no SF mismatch); only the DATA leg uses data_sf.
+  start_rts_timeout(self)
 
   return string.format("sent RTS msg_id=%d to %s via %d", mid, dst_name, route.next_hop)
 end
