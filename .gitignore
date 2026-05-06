@@ -10,3 +10,12 @@ test/native/*.bin
 test/*_events.ndjson
 scenarios/*_events.ndjson
 docs/superpoweras/
+
+webapp/data/
+webapp/__pycache__/
+webapp/server/__pycache__/
+webapp/server/routers/__pycache__/
+webapp/server/services/__pycache__/
+webapp/server/models/__pycache__/
+webapp/tests/__pycache__/
+.pytest_cache/
