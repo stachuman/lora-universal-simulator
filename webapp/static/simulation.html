@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulation — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<style>
+  .sim-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .sim-header h1 { margin-bottom: 0; }
+  .sim-header .header-actions { display: flex; gap: 8px; }
+
+  .sim-grid {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .sim-grid { grid-template-columns: 1fr; }
+  }
+
+  /* Progress card */
+  .progress-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .progress-card h2 { margin-bottom: 12px; }
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .progress-details {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 8px;
+  }
+
+  /* Results area */
+  .results-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .results-card h2 { margin-bottom: 12px; }
+  .result-links { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Stats summary card */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .stat-box {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+  }
+  .stat-box .stat-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .stat-box .stat-value {
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .stat-box .stat-detail {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+  .stat-good { color: #16a34a; }
+  .stat-warn { color: #ea580c; }
+  .stat-bad  { color: #dc2626; }
+  .stat-dim  { color: var(--text-dim); }
+
+  /* Assertions card */
+  .assert-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 8px;
+  }
+  .assert-table th {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 2px solid var(--border);
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .assert-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .assert-pass { color: #16a34a; font-weight: 600; }
+  .assert-fail { color: #dc2626; font-weight: 600; }
+  .assert-summary {
+    font-size: 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+  }
+  .assert-summary-pass { background: rgba(22,163,74,0.08); color: #16a34a; }
+  .assert-summary-fail { background: rgba(220,38,38,0.08); color: #dc2626; }
+
+  /* Log / messages area */
+  .log-area {
+    background: #f0f0f4;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+    max-height: 300px;
+    overflow-y: auto;
+    line-height: 1.6;
+  }
+  .log-area .log-line { padding: 2px 0; }
+  .log-area .log-line.summary { color: var(--accent); }
+  .log-area .log-line.error { color: var(--error); }
+  .log-area .log-line.pass { color: var(--success); }
+  .log-area .log-line.fail { color: var(--error); font-weight: 700; }
+
+  /* Info card */
+  .info-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .info-card h3 { margin-bottom: 8px; }
+  .info-grid {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 4px 12px;
+    font-size: 12px;
+  }
+  .info-grid .key { color: var(--text-muted); }
+  .info-grid .val { color: var(--text); }
+
+  /* Config JSON toggle */
+  .config-toggle {
+    margin-top: 12px;
+  }
+  .config-toggle summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .config-toggle pre {
+    background: #f0f0f4;
+    padding: 8px;
+    border-radius: var(--radius);
+    overflow-x: auto;
+    max-height: 300px;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+  }
+
+  /* New simulation form card */
+  .new-sim-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .new-sim-card h2 { margin-bottom: 12px; }
+  .new-sim-card label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 4px; }
+  .new-sim-card textarea {
+    width: 100%;
+    height: 200px;
+    font-family: monospace;
+    font-size: 11px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-primary);
+    color: var(--text);
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .new-sim-card .file-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  #form-error { margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <span class="brand">lora-universal-simulator</span>
+  <ul class="nav-links">
+    <li><a href="/static/index.html">Dashboard</a></li>
+    <li><a href="/static/simulations.html">Simulations</a></li>
+  </ul>
+  <span class="spacer"></span>
+</nav>
+
+<div class="page" style="max-width:1100px">
+
+  <!-- ── New Simulation form (shown when no ?id= in URL) ── -->
+  <div id="new-sim-section">
+    <div class="sim-header">
+      <h1>New Simulation</h1>
+    </div>
+
+    <div class="new-sim-card">
+      <h2>Scenario JSON</h2>
+      <label for="scenario-json">Paste a complete lus scenario JSON below, or load it from a file:</label>
+      <textarea id="scenario-json" placeholder='{"simulation": {...}, "nodes": [...], "topology": {...}, "commands": [...]}' spellcheck="false"></textarea>
+      <div class="file-row">
+        <button class="btn" onclick="document.getElementById('json-file-input').click()">Load from file</button>
+        <input type="file" id="json-file-input" accept=".json" style="display:none">
+        <span id="file-name" style="font-size:11px; color:var(--text-dim)"></span>
+      </div>
+      <div class="flex gap-8">
+        <button class="btn btn-primary" onclick="submitSim()">Run Simulation</button>
+      </div>
+      <div id="form-error" class="alert alert-error hidden"></div>
+    </div>
+  </div>
+
+  <!-- ── Running/existing sim view (shown when ?id= is in URL) ── -->
+  <div id="sim-view-section" style="display:none">
+    <div class="sim-header">
+      <h1>Simulation <code id="sim-id-display" style="font-size:14px;color:var(--text-muted)"></code></h1>
+      <div class="header-actions">
+        <a href="/static/simulations.html" class="btn btn-sm">All Simulations</a>
+        <a href="/static/simulation.html" class="btn btn-sm">+ New</a>
+        <button class="btn btn-sm btn-danger" id="btn-cancel" style="display:none">Cancel</button>
+        <button class="btn btn-sm btn-danger" id="btn-delete" style="display:none">Delete</button>
+      </div>
+    </div>
+
+    <div id="loading-state" class="empty-state">
+      <div class="spinner"></div>
+      <p>Loading simulation...</p>
+    </div>
+
+    <div id="error-state" class="empty-state" style="display:none">
+      <p style="color:var(--error)" id="error-msg"></p>
+      <a href="/static/simulations.html" class="btn mt-8">Back to Simulations</a>
+    </div>
+
+    <div id="main-content" style="display:none">
+      <div class="sim-grid">
+        <div class="sim-main">
+          <!-- Progress -->
+          <div class="progress-card" id="progress-card">
+            <h2>Progress</h2>
+            <div class="progress-label">
+              <span id="progress-status">Connecting...</span>
+              <span id="progress-pct"></span>
+            </div>
+            <div class="progress-bar">
+              <div class="fill" id="progress-fill" style="width:0%"></div>
+            </div>
+            <div class="progress-details" id="progress-details"></div>
+          </div>
+
+          <!-- Result links (shown on completion) -->
+          <div class="results-card" id="results-card" style="display:none">
+            <h2>Results</h2>
+            <div class="result-links" id="result-links"></div>
+          </div>
+
+          <!-- Stats summary (shown on completion) -->
+          <div class="results-card" id="stats-card" style="display:none">
+            <h2>Statistics</h2>
+            <div class="stats-grid" id="stats-grid"></div>
+          </div>
+
+          <!-- Assertions (shown when assertions exist) -->
+          <div class="results-card" id="assertions-card" style="display:none">
+            <h2>Assertions</h2>
+            <div id="assertions-summary"></div>
+            <table class="assert-table" id="assertions-table">
+              <thead><tr><th>Status</th><th>Type</th><th>Details</th></tr></thead>
+              <tbody id="assertions-body"></tbody>
+            </table>
+          </div>
+
+          <!-- Log output -->
+          <div class="results-card">
+            <h2>Output</h2>
+            <div class="log-area" id="log-area">
+              <div class="log-line" style="color:var(--text-dim)">Waiting for output...</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sim-sidebar">
+          <!-- Info -->
+          <div class="info-card">
+            <h3>Simulation Info</h3>
+            <div class="info-grid" id="info-grid">
+              <span class="key">Status:</span><span class="val" id="info-status">--</span>
+              <span class="key">Nodes:</span><span class="val" id="info-nodes">--</span>
+              <span class="key">Duration:</span><span class="val" id="info-duration">--</span>
+              <span class="key">Created:</span><span class="val" id="info-created">--</span>
+              <span class="key">Completed:</span><span class="val" id="info-completed">--</span>
+            </div>
+            <div class="config-toggle">
+              <details>
+                <summary>Config JSON</summary>
+                <pre id="config-json">(loading...)</pre>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm dialog -->
+<div id="confirm-dialog" style="display:none"></div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  // ── New simulation form logic ───────────────────────────
+  const params = new URLSearchParams(window.location.search);
+  const simId = params.get('id') || params.get('sim');
+
+  if (simId) {
+    // Show the sim view, hide the new-sim form
+    document.getElementById('new-sim-section').style.display = 'none';
+    document.getElementById('sim-view-section').style.display = '';
+    initSimView(simId);
+  } else {
+    // Show new sim form only
+    document.getElementById('new-sim-section').style.display = '';
+    document.getElementById('sim-view-section').style.display = 'none';
+  }
+
+  // File picker wires textarea
+  document.getElementById('json-file-input').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('file-name').textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      document.getElementById('scenario-json').value = ev.target.result;
+    };
+    reader.readAsText(file);
+  });
+
+  window.submitSim = async function() {
+    const raw = document.getElementById('scenario-json').value.trim();
+    const errDiv = document.getElementById('form-error');
+    errDiv.classList.add('hidden');
+
+    if (!raw) {
+      errDiv.textContent = 'Please paste a scenario JSON or load one from a file.';
+      errDiv.classList.remove('hidden');
+      return;
+    }
+
+    let config_json;
+    try {
+      config_json = JSON.parse(raw);
+    } catch (e) {
+      errDiv.textContent = 'Invalid JSON: ' + e.message;
+      errDiv.classList.remove('hidden');
+      return;
+    }
+
+    try {
+      const result = await postJSON('/api/sims', { config_json });
+      const id = result.id;
+
+      // Decide redirect: if any node has lat/lon → map_live, else → simulation status page
+      const hasGeo = config_json.nodes && config_json.nodes.some(n => n.lat != null);
+      if (hasGeo) {
+        window.location.href = '/static/map_live.html?id=' + encodeURIComponent(id);
+      } else {
+        window.location.href = '/static/simulation.html?id=' + encodeURIComponent(id);
+      }
+    } catch (e) {
+      errDiv.textContent = 'Failed to start simulation: ' + e.message;
+      errDiv.classList.remove('hidden');
+    }
+  };
+
+  // ── Existing simulation view logic ──────────────────────
+  function initSimView(simId) {
+    document.getElementById('sim-id-display').textContent = simId;
+    document.title = 'Simulation ' + truncate(simId, 12) + ' — lora-universal-simulator';
+
+    let sseSource = null;
+    let simData = null;
+    let logLines = [];
+
+    // Load initial sim data
+    loadSim();
+
+    async function loadSim() {
+      try {
+        simData = await fetchJSON('/api/sims/' + encodeURIComponent(simId));
+        document.getElementById('loading-state').style.display = 'none';
+        document.getElementById('main-content').style.display = '';
+        updateInfo(simData);
+
+        if (simData.status === 'running' || simData.status === 'pending') {
+          startSSE();
+          document.getElementById('btn-cancel').style.display = '';
+        } else {
+          showFinalState(simData);
+        }
+      } catch (e) {
+        showError('Failed to load simulation: ' + e.message);
+      }
+    }
+
+    function updateInfo(data) {
+      const summary = data.config_summary || {};
+      document.getElementById('info-status').innerHTML = '<span class="badge badge-' + (data.status || 'pending') + '">' + (data.status || 'pending') + '</span>';
+      document.getElementById('info-nodes').textContent = summary.node_count || '--';
+      document.getElementById('info-duration').textContent = formatDuration(summary.duration_ms);
+      document.getElementById('info-created').textContent = formatTime(data.created_at);
+      document.getElementById('info-completed').textContent = data.completed_at ? formatTime(data.completed_at) : '--';
+
+      // Show delete button for non-running sims
+      if (data.status !== 'running' && data.status !== 'pending') {
+        document.getElementById('btn-delete').style.display = '';
+      }
+
+      // Show config_summary in the pre block
+      const configEl = document.getElementById('config-json');
+      if (summary && Object.keys(summary).length > 0) {
+        configEl.textContent = JSON.stringify(summary, null, 2);
+      } else {
+        configEl.textContent = '(not available)';
+      }
+    }
+
+    function showFinalState(data) {
+      const fill = document.getElementById('progress-fill');
+      const status = document.getElementById('progress-status');
+      const pct = document.getElementById('progress-pct');
+
+      if (data.status === 'completed') {
+        fill.style.width = '100%';
+        fill.style.background = 'var(--success)';
+        status.textContent = 'Completed';
+        pct.textContent = '100%';
+        showResultLinks();
+        addLogLine('Simulation completed.', 'pass');
+      } else if (data.status === 'failed') {
+        fill.style.width = (data.progress || 0) + '%';
+        fill.style.background = 'var(--error)';
+        status.textContent = 'Failed';
+        pct.textContent = '';
+        addLogLine('Simulation failed: ' + (data.error || 'unknown error'), 'error');
+      } else if (data.status === 'cancelled') {
+        fill.style.width = (data.progress || 0) + '%';
+        fill.style.background = 'var(--warning)';
+        status.textContent = 'Cancelled';
+        pct.textContent = '';
+        addLogLine('Simulation was cancelled.', 'error');
+      }
+    }
+
+    function startSSE() {
+      const fill = document.getElementById('progress-fill');
+      const status = document.getElementById('progress-status');
+      const pct = document.getElementById('progress-pct');
+      const details = document.getElementById('progress-details');
+
+      clearLog();
+      addLogLine('Connecting to simulation...', '');
+
+      // LUS SSE endpoint is /stream (not /progress)
+      sseSource = connectSSE(
+        '/api/sims/' + encodeURIComponent(simId) + '/stream',
+        function onMessage(data) {
+          if (typeof data !== 'object') return;
+
+          // done sentinel
+          if (data.done) {
+            pollFinal();
+            cleanup();
+            return;
+          }
+
+          // Phase updates
+          if (data.phase) {
+            const phaseLabels = {
+              'init': 'Initializing',
+              'hot-start': 'Hot-start',
+              'warmup': 'Warmup',
+              'running': 'Running',
+            };
+            status.textContent = phaseLabels[data.phase] || data.phase;
+            if (data.message) {
+              details.textContent = data.message;
+            }
+          }
+
+          if (data.progress != null) {
+            const p = Math.round(data.progress * 100);
+            fill.style.width = p + '%';
+            pct.textContent = p + '%';
+            if (!data.phase) status.textContent = 'Running';
+          }
+
+          if (data.message && !data.phase) {
+            details.textContent = data.message;
+          }
+
+          if (data.detail) {
+            addLogLine(data.detail, classifyLine(data.detail));
+          }
+
+          if (data.status === 'completed') {
+            fill.style.width = '100%';
+            fill.style.background = 'var(--success)';
+            status.textContent = 'Completed';
+            pct.textContent = '100%';
+            addLogLine('Simulation completed.', 'pass');
+            showResultLinks();
+            updateInfoStatus('completed');
+            cleanup();
+          }
+
+          if (data.status === 'failed') {
+            fill.style.background = 'var(--error)';
+            status.textContent = 'Failed';
+            addLogLine('Simulation failed: ' + (data.error || 'unknown error'), 'error');
+            updateInfoStatus('failed');
+            cleanup();
+          }
+
+          if (data.status === 'cancelled') {
+            fill.style.background = 'var(--warning)';
+            status.textContent = 'Cancelled';
+            addLogLine('Simulation was cancelled.', 'error');
+            updateInfoStatus('cancelled');
+            cleanup();
+          }
+        },
+        function onError() {
+          status.textContent = 'Connection lost. Checking...';
+          pollFinal();
+          cleanup();
+        }
+      );
+    }
+
+    async function pollFinal() {
+      try {
+        const data = await fetchJSON('/api/sims/' + encodeURIComponent(simId));
+        updateInfo(data);
+        showFinalState(data);
+      } catch (e) {
+        addLogLine('Could not check final status: ' + e.message, 'error');
+      }
+    }
+
+    function cleanup() {
+      if (sseSource) {
+        sseSource.close();
+        sseSource = null;
+      }
+      document.getElementById('btn-cancel').style.display = 'none';
+      document.getElementById('btn-delete').style.display = '';
+    }
+
+    function updateInfoStatus(st) {
+      document.getElementById('info-status').innerHTML = '<span class="badge badge-' + st + '">' + st + '</span>';
+      document.getElementById('info-completed').textContent = formatTime(new Date());
+    }
+
+    function showResultLinks() {
+      const card = document.getElementById('results-card');
+      const links = document.getElementById('result-links');
+      card.style.display = '';
+      links.innerHTML =
+        '<a href="/static/visualize.html?sim=' + encodeURIComponent(simId) + '" class="btn btn-primary">View Timeline</a>' +
+        '<a href="/static/map_live.html?id=' + encodeURIComponent(simId) + '" class="btn">View Map</a>' +
+        '<a href="/static/interactive.html?id=' + encodeURIComponent(simId) + '" class="btn">Interactive</a>';
+      loadStats();
+    }
+
+    async function loadStats() {
+      try {
+        const meta = await fetchJSON('/api/sims/' + encodeURIComponent(simId) + '/meta');
+        const summary = meta.summary || {};
+        const stats = meta.stats || [];
+        renderStatsCard(summary, stats);
+        renderAssertions(meta.assertions);
+      } catch (_) { /* stats not available yet */ }
+    }
+
+    function pctStr(num, den) {
+      if (!den) return '--';
+      return Math.round(num / den * 100) + '%';
+    }
+
+    function renderStatsCard(summary, stats) {
+      const card = document.getElementById('stats-card');
+      const grid = document.getElementById('stats-grid');
+      card.style.display = '';
+      let html = '';
+
+      // --- Radio layer ---
+      const r = summary.radio;
+      if (r) {
+        html += statBox('Radio RX Efficiency', r.rx_efficiency.toFixed(1) + '%',
+          colorClass(r.rx_efficiency),
+          r.rx + ' RX / ' + (r.rx + r.collision + r.drop) + ' opportunities');
+        html += statBox('Radio TX / RX', r.tx + ' / ' + r.rx, '',
+          r.collision + ' collision, ' + r.drop + ' drop');
+      }
+
+      // --- Delivery ---
+      const d = summary.delivery;
+      if (d && d.sent > 0) {
+        const pct = Math.round(d.received / d.sent * 100);
+        html += statBox('DM Delivery', pct + '%', colorClass(pct),
+          d.received + '/' + d.sent + ' received');
+        if (d.flood && d.flood.sent > 0) {
+          html += statBox('Flood Delivery', pctStr(d.flood.received, d.flood.sent),
+            colorClass(d.flood.received / d.flood.sent * 100),
+            d.flood.received + '/' + d.flood.sent);
+        }
+        if (d.path && d.path.sent > 0) {
+          html += statBox('Path Delivery', pctStr(d.path.received, d.path.sent),
+            colorClass(d.path.received / d.path.sent * 100),
+            d.path.received + '/' + d.path.sent);
+        }
+      }
+
+      // --- Channel ---
+      const ch = summary.channel;
+      if (ch && ch.expected > 0) {
+        const pct = Math.round(ch.received / ch.expected * 100);
+        html += statBox('Channel Delivery', pct + '%', colorClass(pct),
+          ch.received + '/' + ch.expected + ' receptions');
+      }
+
+      // --- Acks ---
+      const a = summary.acks;
+      if (a && a.pending > 0) {
+        const pct = Math.round(a.received / a.pending * 100);
+        html += statBox('Acks (total)', pct + '%', colorClass(pct),
+          a.received + '/' + a.pending + ' received');
+      }
+
+      // --- Message fate ---
+      const f = summary.fate;
+      if (f && f.tracked > 0) {
+        html += statBox('Messages Tracked', f.tracked + '',
+          f.lost > 0 ? 'stat-warn' : 'stat-good',
+          f.delivered + ' delivered, ' + f.lost + ' lost');
+      }
+
+      // Fallback: legacy stats array
+      if (!summary.radio && stats.length > 0) {
+        html += renderLegacyStats(stats);
+      }
+
+      grid.innerHTML = html;
+    }
+
+    function renderLegacyStats(stats) {
+      let sentFlood = 0, sentDirect = 0, sentGroup = 0;
+      let recvDirect = 0, recvGroup = 0;
+      let acksPending = 0, acksRecv = 0;
+      for (const s of stats) {
+        sentFlood += s.sent_flood || 0;
+        sentDirect += s.sent_direct || 0;
+        sentGroup += s.sent_group || 0;
+        recvDirect += s.recv_direct || 0;
+        recvGroup += s.recv_group || 0;
+        acksPending += s.acks_pending || 0;
+        acksRecv += s.acks_received || 0;
+      }
+      let html = '';
+      const dmSent = sentFlood + sentDirect;
+      if (dmSent > 0) {
+        const pct = Math.round(recvDirect / dmSent * 100);
+        html += statBox('DM Delivery', pct + '%', colorClass(pct),
+          recvDirect + '/' + dmSent + ' received');
+      }
+      if (acksPending > 0) {
+        const pct = Math.round(acksRecv / acksPending * 100);
+        html += statBox('Acks', pct + '%', colorClass(pct),
+          acksRecv + '/' + acksPending + ' received');
+      }
+      if (sentGroup > 0) {
+        html += statBox('Channel', recvGroup + ' rx', '', sentGroup + ' sent');
+      }
+      return html;
+    }
+
+    function statBox(label, value, cls, detail) {
+      return '<div class="stat-box">' +
+        '<div class="stat-label">' + escapeHtml(label) + '</div>' +
+        '<div class="stat-value ' + (cls || '') + '">' + escapeHtml(value) + '</div>' +
+        (detail ? '<div class="stat-detail">' + escapeHtml(detail) + '</div>' : '') +
+        '</div>';
+    }
+
+    function renderAssertions(assertions) {
+      if (!assertions || !assertions.results || !assertions.results.length) return;
+      const card = document.getElementById('assertions-card');
+      const body = document.getElementById('assertions-body');
+      const summaryEl = document.getElementById('assertions-summary');
+      card.style.display = '';
+
+      const allPass = assertions.failed === 0;
+      summaryEl.innerHTML = '<div class="assert-summary ' +
+        (allPass ? 'assert-summary-pass' : 'assert-summary-fail') + '">' +
+        assertions.passed + ' passed, ' + assertions.failed + ' failed out of ' + assertions.total +
+        '</div>';
+
+      let html = '';
+      for (const r of assertions.results) {
+        const cls = r.status === 'pass' ? 'assert-pass' : 'assert-fail';
+        const icon = r.status === 'pass' ? 'PASS' : 'FAIL';
+        const parts = [];
+        if (r.node) parts.push('node=' + r.node);
+        if (r.command) parts.push('cmd="' + escapeHtml(r.command) + '"');
+        if (r.value) parts.push('value="' + escapeHtml(r.value) + '"');
+        if (r.event_type) parts.push('event=' + r.event_type);
+        if (r.min != null) parts.push('min=' + r.min);
+        if (r.max != null) parts.push('max=' + r.max);
+        if (r.count != null) parts.push('count=' + r.count);
+        if (r.actual != null) parts.push('actual=' + r.actual);
+        const detail = parts.length ? parts.join(', ') : '';
+        html += '<tr><td class="' + cls + '">' + icon + '</td>' +
+                '<td>' + escapeHtml(r.type) + '</td>' +
+                '<td>' + escapeHtml(detail) + '</td></tr>';
+      }
+      body.innerHTML = html;
+    }
+
+    function colorClass(pct) {
+      if (pct >= 90) return 'stat-good';
+      if (pct >= 50) return 'stat-warn';
+      return 'stat-bad';
+    }
+
+    // Log helpers
+    function classifyLine(text) {
+      if (/=== Simulation Summary/i.test(text)) return 'summary';
+      if (/^Delivery/i.test(text)) return 'summary';
+      if (/^Acks/i.test(text)) return 'summary';
+      if (/^Channel:/i.test(text)) return 'summary';
+      if (/^Radio:/i.test(text)) return 'summary';
+      if (/^Message fate/i.test(text)) return 'summary';
+      if (/Per delivered message/i.test(text)) return 'summary';
+      if (/Per lost message/i.test(text)) return 'summary';
+      if (/ASSERTIONS:.*passed/i.test(text)) return 'pass';
+      if (/ASSERTIONS:.*failed/i.test(text)) return 'fail';
+      if (/PASS/i.test(text)) return 'pass';
+      if (/FAIL/i.test(text)) return 'fail';
+      if (/error/i.test(text)) return 'error';
+      return '';
+    }
+
+    function addLogLine(text, cls) {
+      const area = document.getElementById('log-area');
+      if (logLines.length === 0) area.innerHTML = '';
+      const div = document.createElement('div');
+      div.className = 'log-line' + (cls ? ' ' + cls : '');
+      div.textContent = text;
+      area.appendChild(div);
+      area.scrollTop = area.scrollHeight;
+      logLines.push(text);
+    }
+
+    function clearLog() {
+      document.getElementById('log-area').innerHTML = '';
+      logLines = [];
+    }
+
+    // ── Confirm dialog flow ──────────────────────────────
+    let confirmAction = null;
+
+    function showConfirm(title, msg, action) {
+      const el = document.getElementById('confirm-dialog');
+      confirmAction = action;
+      el.style.display = '';
+      el.innerHTML = `
+        <div class="confirm-overlay" onclick="if(event.target===event.currentTarget){hideConfirm()}">
+          <div class="confirm-dialog">
+            <h3>${escapeHtml(title)}</h3>
+            <p>${escapeHtml(msg)}</p>
+            <div class="btn-row">
+              <button class="btn" onclick="hideConfirm()">Cancel</button>
+              <button class="btn btn-danger" onclick="doConfirm()">Confirm</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function hideConfirm() {
+      document.getElementById('confirm-dialog').style.display = 'none';
+      confirmAction = null;
+    }
+
+    async function doConfirm() {
+      const action = confirmAction;
+      hideConfirm();
+      if (action) await action();
+    }
+
+    // Expose for inline handlers
+    window.hideConfirm = hideConfirm;
+    window.doConfirm = doConfirm;
+
+    // Cancel button
+    document.getElementById('btn-cancel').addEventListener('click', () => {
+      showConfirm('Cancel Simulation', 'Cancel this running simulation?', async () => {
+        try {
+          await deleteJSON('/api/sims/' + encodeURIComponent(simId));
+          addLogLine('Simulation cancelled.', 'error');
+          cleanup();
+          updateInfoStatus('cancelled');
+        } catch (e) {
+          alert('Cancel failed: ' + e.message);
+        }
+      });
+    });
+
+    // Delete button
+    document.getElementById('btn-delete').addEventListener('click', () => {
+      showConfirm('Delete Simulation', 'Delete this simulation and all its data?', async () => {
+        try {
+          await deleteJSON('/api/sims/' + encodeURIComponent(simId));
+          window.location.href = '/static/simulations.html';
+        } catch (e) {
+          alert('Delete failed: ' + e.message);
+        }
+      });
+    });
+
+    function showError(msg) {
+      document.getElementById('loading-state').style.display = 'none';
+      document.getElementById('error-state').style.display = '';
+      document.getElementById('error-msg').textContent = msg;
+    }
+  }
+})();
+</script>
+</body>
+</html>

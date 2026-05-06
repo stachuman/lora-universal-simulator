@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulations — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<style>
+  /* Expandable row detail */
+  .detail-row td {
+    padding: 0 !important;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .detail-content {
+    padding: 12px 16px;
+    background: var(--bg-primary);
+    font-size: 11px;
+  }
+
+  .detail-content pre {
+    background: #f0f0f4;
+    padding: 8px;
+    border-radius: var(--radius);
+    overflow-x: auto;
+    max-height: 200px;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+  }
+
+  .detail-content .detail-grid {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 4px 12px;
+    margin-bottom: 8px;
+  }
+
+  .detail-content .detail-grid .key {
+    color: var(--text-muted);
+  }
+
+  .detail-content .detail-grid .val {
+    color: var(--text);
+  }
+
+  .detail-content .error-msg {
+    color: var(--error);
+    margin-top: 6px;
+  }
+
+  /* Clickable row */
+  table.data-table tbody tr.sim-row {
+    cursor: pointer;
+  }
+
+  table.data-table tbody tr.sim-row:hover td {
+    background: rgba(37, 99, 235, 0.06);
+  }
+
+  /* Actions flex */
+  .actions-cell {
+    display: flex;
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+</style>
+</head>
+<body>
+
+<!-- ── Nav bar ─────────────────────────────────────────── -->
+<nav class="navbar">
+  <span class="brand">lora-universal-simulator</span>
+  <ul class="nav-links">
+    <li><a href="/static/index.html">Dashboard</a></li>
+    <li><a href="/static/simulations.html" class="active">Simulations</a></li>
+  </ul>
+  <span class="spacer"></span>
+</nav>
+
+<!-- ── Page content ────────────────────────────────────── -->
+<div class="page-wide">
+  <div class="flex items-center justify-between mb-16">
+    <h1 style="margin-bottom:0">Simulations</h1>
+    <div class="flex gap-8">
+      <a href="/static/simulation.html" class="btn btn-primary">+ New Simulation</a>
+      <button class="btn" onclick="loadSimulations()">Refresh</button>
+    </div>
+  </div>
+
+  <div id="sims-loading" class="empty-state">
+    <div class="spinner"></div>
+    <p class="mt-8">Loading simulations...</p>
+  </div>
+
+  <div id="sims-empty" class="card empty-state hidden">
+    <p>No simulations found.</p>
+    <a href="/static/simulation.html" class="btn btn-primary mt-8">Create your first simulation</a>
+  </div>
+
+  <div id="sims-error" class="alert alert-error hidden"></div>
+
+  <div id="sims-table-wrap" class="card hidden" style="padding:0; overflow:hidden;">
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Nodes</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="sims-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="auto-status" style="margin-top:8px; font-size:11px; color:var(--text-dim)"></div>
+</div>
+
+<!-- Confirm delete dialog (hidden) -->
+<div id="confirm-overlay" class="confirm-overlay hidden">
+  <div class="confirm-dialog">
+    <h3>Delete Simulation</h3>
+    <p id="confirm-msg">Are you sure you want to delete this simulation?</p>
+    <div class="btn-row">
+      <button class="btn" onclick="cancelDelete()">Cancel</button>
+      <button class="btn btn-danger" id="confirm-delete-btn" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  let allSims = [];
+  let expandedId = null;
+  let refreshTimer = null;
+  let deleteTargetId = null;
+
+  async function loadSimulations() {
+    const loading = document.getElementById('sims-loading');
+    const empty   = document.getElementById('sims-empty');
+    const tableW  = document.getElementById('sims-table-wrap');
+    const tbody   = document.getElementById('sims-tbody');
+    const errDiv  = document.getElementById('sims-error');
+
+    errDiv.classList.add('hidden');
+
+    try {
+      const sims = await fetchJSON('/api/sims');
+      loading.classList.add('hidden');
+
+      allSims = Array.isArray(sims) ? sims : [];
+
+      if (allSims.length === 0) {
+        empty.classList.remove('hidden');
+        tableW.classList.add('hidden');
+        return;
+      }
+
+      empty.classList.add('hidden');
+      tableW.classList.remove('hidden');
+
+      // Sort by created desc
+      allSims.sort((a, b) => new Date(b.completed_at || b.created_at || 0) - new Date(a.completed_at || a.created_at || 0));
+
+      renderTable();
+      scheduleAutoRefresh();
+
+    } catch (err) {
+      loading.classList.add('hidden');
+      errDiv.textContent = 'Failed to load simulations: ' + err.message;
+      errDiv.classList.remove('hidden');
+    }
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('sims-tbody');
+    tbody.innerHTML = '';
+
+    for (const sim of allSims) {
+      // Main row
+      const tr = document.createElement('tr');
+      tr.className = 'sim-row';
+      tr.dataset.simId = sim.id;
+
+      tr.addEventListener('click', function(e) {
+        // Don't toggle if clicking a button/link
+        if (e.target.closest('a') || e.target.closest('button')) return;
+        toggleDetail(sim.id);
+      });
+
+      // ID
+      const tdId = document.createElement('td');
+      tdId.innerHTML = '<code title="' + escapeHtml(sim.id) + '">' + escapeHtml(truncate(sim.id, 12)) + '</code>';
+      tr.appendChild(tdId);
+
+      // Name (from config._name or config_summary.name if available)
+      const tdName = document.createElement('td');
+      const name = (sim.config_summary && sim.config_summary.name) ||
+                   (sim.config && sim.config._name) || '--';
+      tdName.textContent = name;
+      tr.appendChild(tdName);
+
+      // Status
+      const tdStatus = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-' + (sim.status || 'pending');
+      badge.textContent = sim.status || 'pending';
+      tdStatus.appendChild(badge);
+      tr.appendChild(tdStatus);
+
+      // Nodes
+      const tdNodes = document.createElement('td');
+      const nodeCount = sim.node_count ||
+                        (sim.config_summary && sim.config_summary.node_count) ||
+                        (sim.config && sim.config.nodes ? sim.config.nodes.length : '--');
+      tdNodes.textContent = nodeCount;
+      tr.appendChild(tdNodes);
+
+      // Created
+      const tdCreated = document.createElement('td');
+      tdCreated.textContent = formatTime(sim.created_at);
+      tr.appendChild(tdCreated);
+
+      // Actions
+      const tdAct = document.createElement('td');
+      tdAct.innerHTML = buildActions(sim);
+      tr.appendChild(tdAct);
+
+      tbody.appendChild(tr);
+
+      // Detail row (hidden by default)
+      if (expandedId === sim.id) {
+        tbody.appendChild(buildDetailRow(sim));
+      }
+    }
+  }
+
+  function buildActions(sim) {
+    const parts = [];
+
+    // Detail view — always available
+    parts.push('<a href="/static/simulation.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">' + (sim.status === 'running' ? 'Progress' : 'Details') + '</a>');
+
+    if (sim.status === 'completed') {
+      parts.push('<a href="/static/visualize.html?sim=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Timeline</a>');
+      parts.push('<a href="/static/map_live.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Map</a>');
+    }
+
+    // Delete
+    parts.push('<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); promptDelete(\'' + escapeHtml(sim.id) + '\')">Del</button>');
+
+    return '<div class="actions-cell">' + parts.join('') + '</div>';
+  }
+
+  function buildDetailRow(sim) {
+    const tr = document.createElement('tr');
+    tr.className = 'detail-row';
+    const td = document.createElement('td');
+    td.colSpan = 6;
+
+    let html = '<div class="detail-content"><div class="detail-grid">';
+    html += '<span class="key">Full ID:</span><span class="val"><code>' + escapeHtml(sim.id) + '</code></span>';
+    html += '<span class="key">Status:</span><span class="val">' + (sim.status || '--') + '</span>';
+    html += '<span class="key">Created:</span><span class="val">' + formatTime(sim.created_at) + '</span>';
+
+    if (sim.started_at) {
+      html += '<span class="key">Started:</span><span class="val">' + formatTime(sim.started_at) + '</span>';
+    }
+    if (sim.completed_at) {
+      html += '<span class="key">Completed:</span><span class="val">' + formatTime(sim.completed_at) + '</span>';
+    }
+
+    // Node names
+    if (sim.config && sim.config.nodes) {
+      const names = sim.config.nodes.map(n => n.name).join(', ');
+      html += '<span class="key">Nodes:</span><span class="val">' + escapeHtml(names) + '</span>';
+    }
+
+    html += '</div>';
+
+    if (sim.error) {
+      html += '<div class="error-msg">Error: ' + escapeHtml(sim.error) + '</div>';
+    }
+
+    // Config summary
+    if (sim.config) {
+      html += '<details><summary style="cursor:pointer; color:var(--text-muted); font-size:11px; margin-top:4px;">Config JSON</summary>';
+      html += '<pre>' + escapeHtml(JSON.stringify(sim.config, null, 2)) + '</pre></details>';
+    }
+
+    html += '</div>';
+    td.innerHTML = html;
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function toggleDetail(simId) {
+    if (expandedId === simId) {
+      expandedId = null;
+    } else {
+      expandedId = simId;
+    }
+    renderTable();
+  }
+
+  function scheduleAutoRefresh() {
+    const hasRunning = allSims.some(s => s.status === 'running');
+    const statusEl = document.getElementById('auto-status');
+    if (refreshTimer) clearInterval(refreshTimer);
+
+    if (hasRunning) {
+      statusEl.textContent = 'Auto-refreshing every 3s (running simulations detected)';
+      refreshTimer = setInterval(loadSimulations, 3000);
+    } else {
+      statusEl.textContent = '';
+      refreshTimer = null;
+    }
+  }
+
+  // ── Delete flow ──────────────────────────────────
+  window.promptDelete = function(simId) {
+    deleteTargetId = simId;
+    document.getElementById('confirm-msg').textContent =
+      'Are you sure you want to delete simulation ' + truncate(simId, 16) + '?';
+    document.getElementById('confirm-overlay').classList.remove('hidden');
+  };
+
+  window.cancelDelete = function() {
+    deleteTargetId = null;
+    document.getElementById('confirm-overlay').classList.add('hidden');
+  };
+
+  window.confirmDelete = async function() {
+    if (!deleteTargetId) return;
+    const id = deleteTargetId;
+    document.getElementById('confirm-overlay').classList.add('hidden');
+    try {
+      await deleteJSON('/api/sims/' + encodeURIComponent(id));
+      allSims = allSims.filter(s => s.id !== id);
+      if (expandedId === id) expandedId = null;
+      renderTable();
+    } catch (e) {
+      const errDiv = document.getElementById('sims-error');
+      errDiv.textContent = 'Delete failed: ' + e.message;
+      errDiv.classList.remove('hidden');
+    }
+    deleteTargetId = null;
+  };
+
+  // Expose for refresh button
+  window.loadSimulations = loadSimulations;
+
+  // Initial load
+  loadSimulations();
+})();
+</script>
+</body>
+</html>

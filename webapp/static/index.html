@@ -2,12 +2,236 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>lora-universal-simulator</title>
-<style>body{font-family:sans-serif;max-width:600px;margin:40px auto;padding:0 20px;}</style>
+<link rel="stylesheet" href="/static/css/common.css">
 </head>
 <body>
-<h1>lora-universal-simulator</h1>
-<p>Webapp is up. Routers and pages will be added in subsequent tasks.</p>
-<p><a href="/health">/health</a></p>
+
+<!-- ── Nav bar ─────────────────────────────────────────── -->
+<nav class="navbar">
+  <span class="brand">lora-universal-simulator</span>
+  <ul class="nav-links">
+    <li><a href="/static/index.html" class="active">Dashboard</a></li>
+    <li><a href="/static/simulations.html">Simulations</a></li>
+  </ul>
+  <span class="spacer"></span>
+  <span style="font-size:11px; color:var(--text-dim)">v0.1</span>
+</nav>
+
+<!-- ── Dashboard ───────────────────────────────────────── -->
+<div class="page">
+  <h1>Dashboard</h1>
+
+  <!-- Action buttons -->
+  <div class="flex gap-12 mb-16">
+    <a href="/static/simulation.html" class="btn btn-primary btn-lg">+ New Simulation</a>
+    <button class="btn" onclick="loadSims()">Refresh</button>
+  </div>
+
+  <!-- Recent simulations -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Recent Simulations</h2>
+      <span id="auto-refresh-status" style="font-size:11px; color:var(--text-dim)"></span>
+    </div>
+
+    <div id="sims-loading" class="empty-state" style="padding:24px">
+      <div class="spinner"></div>
+      <p class="mt-8">Loading simulations...</p>
+    </div>
+
+    <div id="sims-empty" class="empty-state hidden">
+      <p>No simulations yet.</p>
+      <a href="/static/simulation.html" class="btn btn-primary">Create your first simulation</a>
+    </div>
+
+    <div id="sims-table-wrap" class="table-wrap hidden">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Nodes</th>
+            <th>Duration</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="sims-tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="sims-error" class="alert alert-error hidden"></div>
+  </div>
+</div>
+
+<!-- Confirm delete dialog -->
+<div id="confirm-overlay" class="confirm-overlay hidden">
+  <div class="confirm-dialog">
+    <h3>Delete Simulation</h3>
+    <p id="confirm-msg">Are you sure?</p>
+    <div class="btn-row">
+      <button class="btn" onclick="cancelDelete()">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  let refreshTimer = null;
+  const MAX_RECENT = 20;
+
+  async function loadSims() {
+    const loading = document.getElementById('sims-loading');
+    const empty   = document.getElementById('sims-empty');
+    const tableW  = document.getElementById('sims-table-wrap');
+    const tbody   = document.getElementById('sims-tbody');
+    const errDiv  = document.getElementById('sims-error');
+
+    errDiv.classList.add('hidden');
+
+    try {
+      const sims = await fetchJSON('/api/sims');
+      loading.classList.add('hidden');
+
+      const all = Array.isArray(sims) ? sims : [];
+
+      if (all.length === 0) {
+        empty.classList.remove('hidden');
+        tableW.classList.add('hidden');
+        return;
+      }
+
+      empty.classList.add('hidden');
+      tableW.classList.remove('hidden');
+
+      // Sort by created desc, limit to recent
+      const recent = all
+        .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+        .slice(0, MAX_RECENT);
+
+      tbody.innerHTML = '';
+      for (const sim of recent) {
+        const tr = document.createElement('tr');
+
+        // ID (truncated)
+        const tdId = document.createElement('td');
+        tdId.innerHTML = `<code title="${escapeHtml(sim.id)}">${escapeHtml(truncate(sim.id, 12))}</code>`;
+        tr.appendChild(tdId);
+
+        // Status badge
+        const tdStatus = document.createElement('td');
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-' + (sim.status || 'pending');
+        badge.textContent = sim.status || 'pending';
+        tdStatus.appendChild(badge);
+        tr.appendChild(tdStatus);
+
+        // Nodes
+        const tdNodes = document.createElement('td');
+        const nodeCount = sim.node_count || (sim.config && sim.config.nodes ? sim.config.nodes.length : '--');
+        tdNodes.textContent = nodeCount;
+        tr.appendChild(tdNodes);
+
+        // Duration
+        const tdDur = document.createElement('td');
+        const dur = sim.duration_ms || (sim.config && sim.config.simulation ? sim.config.simulation.duration_ms : null);
+        tdDur.textContent = formatDuration(dur);
+        tr.appendChild(tdDur);
+
+        // Created
+        const tdCreated = document.createElement('td');
+        tdCreated.textContent = formatTime(sim.created_at);
+        tr.appendChild(tdCreated);
+
+        // Actions
+        const tdAct = document.createElement('td');
+        tdAct.innerHTML = buildActions(sim);
+        tr.appendChild(tdAct);
+
+        tbody.appendChild(tr);
+      }
+
+      // Schedule auto-refresh if any running
+      scheduleAutoRefresh(all.some(s => s.status === 'running'));
+
+    } catch (err) {
+      loading.classList.add('hidden');
+      errDiv.textContent = 'Failed to load simulations: ' + err.message;
+      errDiv.classList.remove('hidden');
+    }
+  }
+
+  function buildActions(sim) {
+    const parts = [];
+    if (sim.status === 'completed') {
+      parts.push(`<a href="/static/visualize.html?sim=${encodeURIComponent(sim.id)}" class="btn btn-sm">Timeline</a>`);
+      parts.push(`<a href="/static/map_live.html?id=${encodeURIComponent(sim.id)}" class="btn btn-sm">Map</a>`);
+    }
+    if (sim.status === 'running') {
+      parts.push(`<a href="/static/simulation.html?id=${encodeURIComponent(sim.id)}" class="btn btn-sm">Progress</a>`);
+    }
+    if (sim.status === 'failed') {
+      parts.push(`<span class="btn btn-sm btn-danger" title="${escapeHtml(sim.error || '')}">Error</span>`);
+    }
+    if (sim.status !== 'running' && sim.status !== 'pending') {
+      parts.push(`<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteSim('${escapeHtml(sim.id)}')">Del</button>`);
+    }
+    return parts.join(' ');
+  }
+
+  let deleteTargetId = null;
+
+  function deleteSim(id) {
+    deleteTargetId = id;
+    document.getElementById('confirm-msg').textContent =
+      'Delete simulation ' + truncate(id, 16) + ' and all its data?';
+    document.getElementById('confirm-overlay').classList.remove('hidden');
+  }
+
+  function cancelDelete() {
+    deleteTargetId = null;
+    document.getElementById('confirm-overlay').classList.add('hidden');
+  }
+
+  async function confirmDelete() {
+    if (!deleteTargetId) return;
+    const id = deleteTargetId;
+    document.getElementById('confirm-overlay').classList.add('hidden');
+    deleteTargetId = null;
+    try {
+      await deleteJSON('/api/sims/' + encodeURIComponent(id));
+      loadSims();
+    } catch (err) {
+      alert('Delete failed: ' + err.message);
+    }
+  }
+
+  function scheduleAutoRefresh(hasRunning) {
+    const statusEl = document.getElementById('auto-refresh-status');
+    if (refreshTimer) clearInterval(refreshTimer);
+
+    if (hasRunning) {
+      statusEl.textContent = 'Auto-refreshing every 5s';
+      refreshTimer = setInterval(loadSims, 5000);
+    } else {
+      statusEl.textContent = '';
+      refreshTimer = null;
+    }
+  }
+
+  // Expose globally for the refresh button and inline onclick handlers
+  window.loadSims = loadSims;
+  window.deleteSim = deleteSim;
+  window.cancelDelete = cancelDelete;
+  window.confirmDelete = confirmDelete;
+
+  // Initial load
+  loadSims();
+})();
+</script>
 </body>
 </html>
