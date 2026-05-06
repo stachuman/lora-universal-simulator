@@ -31,7 +31,7 @@ CONFIGS=("$@")
 if [ ${#CONFIGS[@]} -eq 0 ]; then
     while IFS= read -r f; do
         CONFIGS+=("$f")
-    done < <(ls "$SCRIPT_DIR"/t*.json 2>/dev/null | sort)
+    done < <( { ls "$SCRIPT_DIR"/t*.json 2>/dev/null; ls "$REPO_ROOT"/scenarios/s*.json 2>/dev/null; } | sort )
 fi
 
 if [ ${#CONFIGS[@]} -eq 0 ]; then
