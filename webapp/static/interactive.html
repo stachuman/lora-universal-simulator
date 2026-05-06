@@ -1086,6 +1086,8 @@
 
   // Command helper popover — lus REPL commands
   const REPL_CMDS = [
+    { group: 'Help' },
+    { cmd: ':help', desc: 'Show all available REPL commands' },
     { group: 'Simulation control' },
     { cmd: ':time', desc: 'Show current sim time' },
     { cmd: ':nodes', desc: 'List all nodes' },
