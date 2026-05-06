@@ -112,9 +112,15 @@ end
 -- ---------- script lifecycle ------------------------------------------------
 
 local function beacon_fire(self)
-  local frame = pack_beacon(self)
-  self:emit("beacon_tx", { n_entries = rt_count(self.rt) })
-  self:tx(frame, { sf = self.routing_sf })
+  -- Skip beacon TX while in the middle of a data exchange (pending_tx means
+  -- we just sent RTS and are waiting for CTS on data_sf; pending_rx means we
+  -- are waiting for DATA on data_sf). Transmitting a beacon would collide with
+  -- the data-plane frames on the same channel.
+  if self.pending_tx == nil and self.pending_rx == nil then
+    local frame = pack_beacon(self)
+    self:emit("beacon_tx", { n_entries = rt_count(self.rt) })
+    self:tx(frame, { sf = self.routing_sf })
+  end
   self:after(self.beacon_period_ms, function() beacon_fire(self) end)
 end
 
@@ -190,9 +196,115 @@ function on_recv(self, frame, meta)
     maybe_emit_rt_full(self)
     return
   end
+
+  if tag == "R" then
+    local r = parse_rts(frame)
+    if not r then return end
+    if r.next ~= self.id then return end  -- not for us; silent discard
+
+    self:emit("rts_rx", { from = r.src, origin = r.origin, dst = r.dst, msg_id = r.msg_id })
+    -- Remember the RTS context so we can match the incoming DATA.
+    self.pending_rx = {
+      from    = r.src,
+      origin  = r.origin,
+      dst     = r.dst,
+      msg_id  = r.msg_id,
+    }
+    self:set_rx_sf(self.data_sf)
+    self:emit("retune_for_data", { sf = self.data_sf })
+
+    local cts = pack_cts(self.id, r.msg_id)
+    self:emit("cts_tx", { to = r.src, msg_id = r.msg_id })
+    self:tx(cts, { sf = self.data_sf })
+    return
+  end
+
+  if tag == "C" then
+    local c = parse_cts(frame)
+    if not c then return end
+    if self.pending_tx == nil then return end
+    if c.msg_id ~= self.pending_tx.msg_id then return end
+
+    self:emit("cts_rx", { from = c.src, msg_id = c.msg_id })
+    local d = pack_data(
+      self.pending_tx.origin,
+      self.id,
+      self.pending_tx.dst,
+      self.pending_tx.next,
+      self.pending_tx.msg_id,
+      self.pending_tx.payload
+    )
+    self:emit("data_tx", {
+      origin = self.pending_tx.origin,
+      dst    = self.pending_tx.dst,
+      next   = self.pending_tx.next,
+      msg_id = self.pending_tx.msg_id,
+      len    = #self.pending_tx.payload,
+    })
+    self:tx(d, { sf = self.data_sf })
+    self:set_rx_sf(self.routing_sf)
+    self.pending_tx = nil
+    return
+  end
+
+  if tag == "D" then
+    local d = parse_data(frame)
+    if not d then return end
+    if d.next ~= self.id then return end
+    if self.pending_rx == nil or d.msg_id ~= self.pending_rx.msg_id then return end
+
+    self:emit("data_rx", {
+      from   = d.src,
+      origin = d.origin,
+      dst    = d.dst,
+      msg_id = d.msg_id,
+      len    = #d.payload,
+    })
+    self:set_rx_sf(self.routing_sf)
+    self.pending_rx = nil
+
+    if d.dst == self.id then
+      self:emit("delivered", { origin = d.origin, payload = d.payload })
+    else
+      -- Forwarding is added in Task 5. For now: log the gap.
+      self:emit("forward_skipped", { dst = d.dst, reason = "not_implemented" })
+    end
+    return
+  end
+end
+
+local function gen_msg_id(self)
+  -- Pack node id into upper 8 bits to keep ids globally unique-ish for diagnostics.
+  local mid = (self.id * 256 + self.next_msg_id) % 65536
+  self.next_msg_id = self.next_msg_id + 1
+  if self.next_msg_id > 255 then self.next_msg_id = 1 end
+  return mid
 end
 
 function on_command(self, cmd_str)
-  -- Filled in in Task 4.
-  return "ERROR: protocol not yet wired"
+  local dst_name, text = cmd_str:match("^send (%S+) (.+)$")
+  if not dst_name then return "ERROR: usage: send <dst_name> <text>" end
+  local dst_id = self.name_to_id[dst_name]
+  if dst_id == nil then return "ERROR: unknown dst: " .. dst_name end
+  local route = self.rt[dst_id]
+  if route == nil then return "ERROR: no route to " .. dst_name end
+  if self.pending_tx ~= nil then return "ERROR: busy" end
+
+  local mid = gen_msg_id(self)
+  self.pending_tx = {
+    origin   = self.id,
+    dst      = dst_id,
+    next     = route.next_hop,
+    msg_id   = mid,
+    payload  = text,
+  }
+
+  local frame = pack_rts(self.id, self.id, dst_id, route.next_hop, mid, self.data_sf)
+  self:emit("rts_tx", { origin = self.id, dst = dst_id, next = route.next_hop, msg_id = mid })
+  self:tx(frame, { sf = self.routing_sf })
+
+  self:set_rx_sf(self.data_sf)
+  self:emit("retune_for_cts", { sf = self.data_sf })
+
+  return string.format("sent RTS msg_id=%d to %s via %d", mid, dst_name, route.next_hop)
 end
