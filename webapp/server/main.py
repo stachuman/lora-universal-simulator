@@ -16,8 +16,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import Settings
-from server.routers import simulations
+from server.routers import interactive, simulations
 from server.services.event_index import EventIndexCache
+from server.services.interactive_manager import InteractiveSessionManager
 from server.services.sim_manager import SimManager
 
 
@@ -33,7 +34,16 @@ async def lifespan(app: FastAPI):
         cwd=settings.LUS_CWD,
     )
     app.state.event_cache = EventIndexCache(max_size=5)
+    app.state.interactive_manager = InteractiveSessionManager(
+        data_dir=settings.DATA_DIR,
+        orchestrator_path=str(settings.ORCHESTRATOR_PATH),
+        max_sessions=settings.MAX_INTERACTIVE_SESSIONS,
+        idle_timeout_s=settings.INTERACTIVE_IDLE_TIMEOUT_S,
+        cwd=settings.LUS_CWD,
+    )
+    app.state.interactive_manager.start_cleanup_loop()
     yield
+    await app.state.interactive_manager.shutdown()
 
 
 app = FastAPI(title="lora-universal-simulator", lifespan=lifespan)
@@ -41,6 +51,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(simulations.router, prefix="/api/sims", tags=["sims"])
+app.include_router(interactive.router, prefix="/api/interactive", tags=["interactive"])
 
 # Static mount — served from webapp/static/.
 _static = pathlib.Path(__file__).resolve().parent.parent / "static"
