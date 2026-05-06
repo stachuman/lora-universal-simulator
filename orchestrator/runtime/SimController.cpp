@@ -189,6 +189,11 @@ void SimController::initialize() {
         _host.loadScript(i, resolved);
     }
 
+    // Expose the global `sim` table so scripts can drive the stepper. Bound
+    // here, after script load and before on_init, so unusual scripts that
+    // reach for sim:* during on_init still see it.
+    _host.bindSimGlobals(*this);
+
     // sim_start lifecycle event — emitted before per-node onInit so
     // downstream tooling (visualisers, log analyzers) sees a clear
     // bookend marker at the start of the NDJSON stream. Matches upstream

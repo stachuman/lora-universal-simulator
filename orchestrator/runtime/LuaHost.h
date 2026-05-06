@@ -27,6 +27,7 @@
 #include <cstdint>
 
 class ScriptedNode;
+class SimController;
 
 class LuaHost {
 public:
@@ -41,6 +42,13 @@ public:
     // and copy any of {on_init, on_recv, on_command, on_radio_busy} into the
     // node's script table.
     void loadScript(int node_id, const std::string& path);
+
+    // Expose a global `sim` table to Lua, bound to the supplied SimController.
+    // Methods are dispatched colon-style (sim:time(), sim:step(ms), ...).
+    // Bindings hold `ctrl` by reference; the controller must outlive this
+    // LuaHost (true for the standard SimController-owns-LuaHost ownership).
+    // Idempotent in spirit — calling twice replaces the previous bindings.
+    void bindSimGlobals(SimController& ctrl);
 
     // Callback dispatchers. Each tolerates a missing optional callback (no-op).
     void callOnInit(int node_id, const sol::table& config);

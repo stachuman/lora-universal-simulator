@@ -2,6 +2,7 @@
 #include "orchestrator/runtime/ScriptedNode.h"
 
 #include "core/events/EventLog.h"
+#include "core/events/JsonToSol.h"
 #include "orchestrator/runtime/LuaHost.h"
 
 #include <sstream>
@@ -27,32 +28,6 @@ ScriptedNode::ScriptedNode(int id, std::string name,
 // -----------------------------------------------------------------------------
 
 namespace {
-
-// Convert nlohmann::json -> sol::object (recursively). Tables, arrays, scalars.
-sol::object json_to_sol(sol::state_view L, const nlohmann::json& j) {
-    if (j.is_null())    return sol::make_object(L, sol::lua_nil);
-    if (j.is_boolean()) return sol::make_object(L, j.get<bool>());
-    if (j.is_number_integer())  return sol::make_object(L, j.get<int64_t>());
-    if (j.is_number_unsigned()) return sol::make_object(L, j.get<uint64_t>());
-    if (j.is_number_float())    return sol::make_object(L, j.get<double>());
-    if (j.is_string())          return sol::make_object(L, j.get<std::string>());
-    if (j.is_array()) {
-        sol::table t = L.create_table();
-        int i = 1;
-        for (const auto& v : j) {
-            t[i++] = json_to_sol(L, v);
-        }
-        return t;
-    }
-    if (j.is_object()) {
-        sol::table t = L.create_table();
-        for (auto it = j.begin(); it != j.end(); ++it) {
-            t[it.key()] = json_to_sol(L, it.value());
-        }
-        return t;
-    }
-    return sol::make_object(L, sol::lua_nil);
-}
 
 // Walk a sol::table and produce an nlohmann::json mirror. Keeps Lua arrays
 // (consecutive 1..N integer keys) as JSON arrays; everything else becomes a
@@ -126,7 +101,7 @@ std::string sol_to_string(const sol::object& o) {
 
 void ScriptedNode::onInit(const nlohmann::json& config) {
     sol::state_view L(_host.lua());
-    sol::object cfg_obj = json_to_sol(L, config);
+    sol::object cfg_obj = lus::json_to_sol(L, config);
     sol::table cfg_tbl = cfg_obj.is<sol::table>()
         ? cfg_obj.as<sol::table>()
         : L.create_table();

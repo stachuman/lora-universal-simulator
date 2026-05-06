@@ -1,8 +1,13 @@
 // orchestrator/runtime/LuaHost.cpp
 #include "orchestrator/runtime/LuaHost.h"
 
+#include "core/events/EventLog.h"
+#include "core/events/JsonToSol.h"
 #include "orchestrator/runtime/ScriptedNode.h"
+#include "orchestrator/runtime/SimController.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -111,6 +116,93 @@ void LuaHost::loadScript(int node_id, const std::string& path) {
             script_tbl[name] = fn;
         }
     }
+}
+
+void LuaHost::bindSimGlobals(SimController& ctrl) {
+    // Replace any previous binding so a re-init produces a fresh sim table.
+    sol::table sim = _lua.create_named_table("sim");
+
+    // sim:time()  -> uint64 millis
+    sim.set_function("time",
+        [&ctrl](sol::object /*self*/) -> uint64_t {
+            return ctrl.simTimeMs();
+        });
+
+    // Internal helper: pack a StepResult into a Lua table.
+    auto pack_result = [&ctrl](const StepResult& r) {
+        sol::table t = ctrl.luaHost().lua().create_table();
+        t["ended"]      = r.ended;
+        t["new_events"] = r.new_events;
+        t["now_ms"]     = r.now_ms;
+        return t;
+    };
+
+    // sim:step(ms?) -> { ended, new_events, now_ms }
+    // ms omitted (or 0) uses cfg.simulation.step_ms.
+    sim.set_function("step",
+        [&ctrl, pack_result](sol::object /*self*/, sol::optional<uint64_t> ms) {
+            StepResult r = ctrl.step(ms.value_or(0));
+            return pack_result(r);
+        });
+
+    // sim:run(ms?) -> { ended, new_events, now_ms }
+    // ms = relative duration to run for; if omitted, runs to cfg.duration_ms.
+    sim.set_function("run",
+        [&ctrl, pack_result](sol::object /*self*/, sol::optional<uint64_t> ms) {
+            uint64_t target = ms.has_value()
+                ? ctrl.simTimeMs() + ms.value()
+                : static_cast<uint64_t>(ctrl.config().simulation.duration_ms);
+            StepResult r = ctrl.runUntil(target);
+            return pack_result(r);
+        });
+
+    // sim:next() -> { ended, new_events, now_ms }
+    // Step until the EventLog buffer grows.
+    sim.set_function("next",
+        [&ctrl, pack_result](sol::object /*self*/) {
+            StepResult r = ctrl.runUntilNextEvent();
+            return pack_result(r);
+        });
+
+    // sim:cmd(node_name, text) -> reply string
+    sim.set_function("cmd",
+        [&ctrl](sol::object /*self*/, std::string node, std::string text) {
+            return ctrl.fireCommand(node, text);
+        });
+
+    // sim:nodes() -> { {id, name, script}, ... }
+    sim.set_function("nodes",
+        [&ctrl](sol::object /*self*/) {
+            sol::state_view L(ctrl.luaHost().lua());
+            sol::table out = L.create_table();
+            const auto& nodes = ctrl.config().nodes;
+            for (size_t i = 0; i < nodes.size(); ++i) {
+                sol::table entry = L.create_table();
+                entry["id"]     = static_cast<int>(i);
+                entry["name"]   = nodes[i].name;
+                entry["script"] = nodes[i].script_path;
+                out[i + 1] = entry;
+            }
+            return out;
+        });
+
+    // sim:events(n?) -> { event_table, ... }    (last N, default 10)
+    // Each event is parsed back from EventLog::events()'s in-memory buffer
+    // into a Lua table via lus::json_to_sol.
+    sim.set_function("events",
+        [&ctrl](sol::object /*self*/, sol::optional<int> n_opt) {
+            sol::state_view L(ctrl.luaHost().lua());
+            sol::table out = L.create_table();
+            const auto& evs = EventLog::events();
+            const int total = static_cast<int>(evs.size());
+            const int n = std::max(0, n_opt.value_or(10));
+            const int start = std::max(0, total - n);
+            int out_idx = 1;
+            for (int i = start; i < total; ++i) {
+                out[out_idx++] = lus::json_to_sol(L, evs[i]);
+            }
+            return out;
+        });
 }
 
 void LuaHost::callOnInit(int node_id, const sol::table& config) {
