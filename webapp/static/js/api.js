@@ -70,8 +70,12 @@ function connectSSE(url, onMessage, onError) {
       onMessage(event.data);
     }
   };
+  // EventSource fires onerror on every failed reconnect attempt while
+  // readyState is still CONNECTING. Only surface the error to the caller
+  // when the connection has been permanently CLOSED — let the browser
+  // retry transient hiccups silently.
   es.onerror = (event) => {
-    if (onError) onError(event);
+    if (es.readyState === EventSource.CLOSED && onError) onError(event);
   };
   return es;
 }

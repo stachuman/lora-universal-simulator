@@ -368,6 +368,15 @@
     reader.onload = function(ev) {
       document.getElementById('scenario-json').value = ev.target.result;
     };
+    reader.onerror = function(ev) {
+      const msg = (ev.target.error && ev.target.error.message) || 'unknown error';
+      const err = document.getElementById('form-error');
+      if (err) {
+        err.textContent = 'Could not read file: ' + msg;
+        err.classList.remove('hidden');
+      }
+      document.getElementById('file-name').textContent = '';
+    };
     reader.readAsText(file);
   });
 
@@ -502,10 +511,13 @@
         function onMessage(data) {
           if (typeof data !== 'object') return;
 
-          // done sentinel
+          // done sentinel from sim_manager: schedule the final poll first
+          // (which will refresh stats + result links via showFinalState),
+          // then close the SSE only after that completes. Without the
+          // ordering, cleanup() runs synchronously and the user can briefly
+          // see a "completed" state with no result links.
           if (data.done) {
-            pollFinal();
-            cleanup();
+            pollFinal().finally(cleanup);
             return;
           }
 
