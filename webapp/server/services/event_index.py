@@ -20,16 +20,23 @@ class EventIndex:
     def __init__(self, path: str):
         self.events: list[dict] = []
         self.times: list[int] = []          # parallel to events, for bisect
-        self.by_node: dict[str, list[int]] = {}  # node -> event indices
+        # by_node uses string node names ("alice"); _index_event coerces
+        # integer ids (which lus emits on script_log/script_emit) to names
+        # via id_to_name when possible, otherwise falls back to str(id).
+        self.by_node: dict[str, list[int]] = {}
         self.by_pkt: dict[str, list[int]] = {}   # pkt hash -> event indices
         self.nodes: list[dict] = []          # node metadata from node_ready
         self.node_set: dict[str, dict] = {}  # name -> metadata
+        self.id_to_name: dict[int, str] = {}  # int id -> name (built from node_ready order)
         self.time_min: int = 0
         self.time_max: int = 0
         self.sim_info: dict = {}
         self.cmd_replies: list[int] = []     # indices of cmd_reply events
-        self.stats: list[dict] = []          # companion node_stats events
-        self.repeater_stats: list[dict] = []  # repeater node_stats (with stats_type)
+        # In lus, every node_stats event carries stats_type so all of them
+        # land in repeater_stats. self.stats is retained for compatibility
+        # with the meshcore_real_sim shape but stays empty in lus.
+        self.stats: list[dict] = []
+        self.repeater_stats: list[dict] = []
         self.summary: dict = {}              # sim_summary event (radio, delivery, acks, fate)
         self.assertions: dict = {}           # assertions event (pass/fail results)
 
@@ -81,13 +88,17 @@ class EventIndex:
             self.sim_info["end_ms"] = time_ms
             return
         if etype == "node_ready":
-            meta = {"name": ev["node"], "pub": ev.get("pub", ""),
-                    "role": ev.get("role", "repeater")}
+            name = ev["node"]
+            meta = {"name": name, "role": ev.get("role", "script")}
             if "lat" in ev:
                 meta["lat"] = ev["lat"]
                 meta["lon"] = ev["lon"]
-            self.node_set[ev["node"]] = meta
+            self.node_set[name] = meta
             self.nodes.append(meta)
+            # Map the implicit numeric id (registration order) to the name
+            # so script_log / script_emit events that carry int node ids
+            # can be re-indexed under the canonical string name.
+            self.id_to_name[len(self.nodes) - 1] = name
             # Don't store as regular event — metadata only
             return
         if etype == "sim_summary":
@@ -107,10 +118,17 @@ class EventIndex:
         self.events.append(ev)
         self.times.append(time_ms)
 
-        # Index by node(s) involved
+        # Index by node(s) involved. lus's tx/rx events use string names
+        # (`"node": "alice"`), but script_log/script_emit use the integer
+        # id (`"node": 0`). Resolve to canonical string name via id_to_name
+        # so query_node_range("alice", ...) matches both shapes.
         for key in ("node", "from", "to"):
             if key in ev:
-                name = ev[key]
+                ident = ev[key]
+                if isinstance(ident, int):
+                    name = self.id_to_name.get(ident, str(ident))
+                else:
+                    name = ident
                 if name not in self.by_node:
                     self.by_node[name] = []
                 self.by_node[name].append(idx)

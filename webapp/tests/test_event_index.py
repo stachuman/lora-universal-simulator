@@ -60,6 +60,27 @@ def test_cache_returns_same_instance(tmp_path):
     assert a is b
 
 
+def test_script_log_int_id_indexed_under_name(tmp_path):
+    """lus emits script_log/script_emit with integer node ids; the index
+    must coerce them to canonical string names via id_to_name so a
+    query_node_range('alice', ...) call returns both her tx (string key)
+    AND her script_log (int key, coerced) events."""
+    p = tmp_path / "events.ndjson"
+    lines = [
+        {"type": "node_ready", "time_ms": 0, "node": "alice"},
+        {"type": "node_ready", "time_ms": 0, "node": "bob"},
+        {"type": "tx", "time_ms": 100, "node": "alice"},
+        {"type": "script_log", "time_ms": 200, "node": 0, "msg": "alice talking"},
+        {"type": "script_log", "time_ms": 300, "node": 1, "msg": "bob talking"},
+    ]
+    p.write_text("\n".join(json.dumps(e) for e in lines) + "\n")
+
+    idx = EventIndex(str(p))
+    alice_events = idx.query_node_range("alice", 0, 1000)
+    types = sorted(e["type"] for e in alice_events)
+    assert types == ["script_log", "tx"]
+
+
 def test_cache_evicts_lru(tmp_path):
     dir_a = tmp_path / "a"
     dir_b = tmp_path / "b"
