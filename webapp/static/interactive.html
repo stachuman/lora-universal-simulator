@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interactive — lora-universal-simulator</title>
+<link rel="stylesheet" href="/static/css/common.css">
+<style>
+  .ia-layout {
+    display: flex;
+    height: calc(100vh - 44px);
+    overflow: hidden;
+  }
+
+  /* Left sidebar — node cards */
+  .ia-sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--bg-secondary);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .ia-sidebar h3 {
+    padding: 10px 12px 6px;
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-light);
+  }
+  .node-card {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-light);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .node-card:hover { background: var(--bg-tertiary); }
+  .node-card.active { background: #dbeafe; }
+  .node-card .node-name {
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .node-card .node-role {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-left: 6px;
+  }
+  .node-role-repeater { background: #dbeafe; color: #2563eb; }
+  .node-role-companion { background: #dcfce7; color: #16a34a; }
+  .node-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.2s;
+  }
+  .node-card.expanded .node-detail { max-height: 300px; }
+  .node-detail pre {
+    font-size: 10px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 4px;
+    padding: 4px 6px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius);
+  }
+
+  /* Center — event log + controls */
+  .ia-center {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  /* Top bar */
+  .ia-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .ia-topbar .session-info {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .ia-topbar .sim-time {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-heading);
+  }
+  .ia-topbar .step-input {
+    width: 80px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-input);
+    color: var(--text);
+  }
+  .ia-topbar .conn-status {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .conn-connected { background: #dcfce7; color: var(--success); }
+  .conn-disconnected { background: #fee2e2; color: var(--error); }
+  .conn-connecting { background: #fef3c7; color: var(--warning); }
+
+  /* Visualization iframe(s) */
+  .ia-viz-wrap {
+    flex: 1;
+    min-height: 150px;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: row;
+  }
+  .ia-viz-wrap iframe {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    border: none;
+  }
+  .ia-viz-wrap .ia-viz-pane {
+    flex: 1 1 50%;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Vertical split handle between swim-lane and map */
+  .ia-split-handle {
+    width: 6px;
+    cursor: col-resize;
+    background: var(--border);
+    flex-shrink: 0;
+    transition: background 0.15s;
+    position: relative;
+  }
+  .ia-split-handle:hover,
+  .ia-split-handle.active { background: var(--accent); }
+  .ia-split-handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 1px;
+    transform: translateY(-50%);
+    height: 32px;
+    width: 4px;
+    border-left: 1px solid rgba(0,0,0,0.15);
+    border-right: 1px solid rgba(0,0,0,0.15);
+  }
+
+  /* Resize handle */
+  .ia-resize-handle {
+    height: 6px;
+    cursor: row-resize;
+    background: var(--border);
+    flex-shrink: 0;
+    transition: background 0.15s;
+    position: relative;
+  }
+  .ia-resize-handle:hover,
+  .ia-resize-handle.active { background: var(--accent); }
+  .ia-resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 1px;
+    transform: translateX(-50%);
+    width: 32px;
+    height: 4px;
+    border-top: 1px solid rgba(0,0,0,0.15);
+    border-bottom: 1px solid rgba(0,0,0,0.15);
+  }
+
+  /* Events panel (below resize handle) — split into events (left) + scheduled commands (right) */
+  .ia-events-panel {
+    height: 200px;
+    min-height: 60px;
+    display: flex;
+    flex-direction: row;
+    overflow: hidden;
+  }
+  .ia-events-left {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .ia-cmds-right {
+    width: 340px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: var(--bg-primary);
+    overflow: hidden;
+  }
+  .ia-cmds-header {
+    padding: 6px 14px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+  }
+  .ia-cmds {
+    flex: 1;
+    overflow-y: auto;
+    font-size: 11px;
+  }
+  .ia-cmds table { width: 100%; border-collapse: collapse; }
+  .ia-cmds thead { position: sticky; top: 0; z-index: 2; }
+  .ia-cmds th {
+    text-align: left;
+    padding: 4px 8px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 10px;
+  }
+  .ia-cmds td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-light);
+    vertical-align: top;
+    font-family: var(--font-mono);
+  }
+  .ia-cmds tr.passed td { opacity: 0.4; }
+  .ia-cmds tr.passed { background: rgba(0,0,0,0.02); }
+  .ia-cmds .cmd-empty { padding: 12px 14px; color: var(--text-dim); font-size: 11px; }
+
+  /* Event log */
+  .ia-events {
+    flex: 1;
+    overflow-y: auto;
+    background: var(--bg-primary);
+  }
+  .ia-events table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .ia-events thead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+  .ia-events th {
+    text-align: left;
+    padding: 6px 8px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 10px;
+  }
+  .ia-events td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-light);
+    vertical-align: top;
+  }
+  .ia-events tr:hover td { background: rgba(37, 99, 235, 0.04); }
+  .evt-tx td { border-left: 3px solid #2563eb; }
+  .evt-rx td { border-left: 3px solid #16a34a; }
+  .evt-collision td { border-left: 3px solid #dc2626; }
+  .evt-drop_halfduplex td, .evt-drop_loss td { border-left: 3px solid #d97706; }
+  .evt-cmd_reply td { border-left: 3px solid #8b5cf6; }
+  .evt-other td { border-left: 3px solid #9ca3af; }
+
+  /* Filter bar */
+  .ia-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 14px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .ia-filter select {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-input);
+    color: var(--text);
+  }
+  .ia-filter label { color: var(--text-muted); }
+  .event-count { color: var(--text-dim); }
+
+  /* Bottom command bar */
+  .ia-cmdbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .ia-cmdbar select, .ia-cmdbar input[type="text"] {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-input);
+    color: var(--text);
+  }
+  .ia-cmdbar input[type="text"] { flex: 1; }
+  .ia-cmdbar .cmd-help-anchor { position: relative; }
+
+  /* Command helper popover */
+  .cmd-help-pop {
+    position: absolute; bottom: 100%; right: 0;
+    margin-bottom: 6px;
+    width: 280px; max-height: 340px; overflow-y: auto;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 -4px 24px rgba(0,0,0,0.12);
+    z-index: 200; padding: 6px 0;
+  }
+  .cmd-help-pop .cmd-group { padding: 4px 10px 2px; font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .cmd-help-pop .cmd-item {
+    display: flex; align-items: baseline; gap: 6px;
+    padding: 4px 10px; cursor: pointer; font-size: 11px;
+  }
+  .cmd-help-pop .cmd-item:hover { background: rgba(37,99,235,0.06); }
+  .cmd-help-pop .cmd-item .cmd-name { font-family: var(--font-mono); color: var(--accent); white-space: nowrap; }
+  .cmd-help-pop .cmd-item .cmd-desc { color: var(--text-muted); font-size: 10px; }
+
+  /* Create flow */
+  .create-flow {
+    max-width: 600px;
+    margin: 48px auto;
+    padding: 0 20px;
+  }
+  .create-flow h1 { margin-bottom: 24px; }
+  .config-list {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .config-item {
+    padding: 10px 14px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    cursor: pointer;
+    background: var(--bg-secondary);
+    transition: border-color 0.15s;
+  }
+  .config-item:hover { border-color: var(--accent); }
+  .config-item.selected { border-color: var(--accent); background: #dbeafe; }
+  .config-item .config-name { font-weight: 600; font-size: 13px; }
+  .config-item .config-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+  /* Startup overlay */
+  .ia-startup-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    z-index: 5;
+    gap: 12px;
+  }
+  .ia-startup-overlay .spinner { width: 32px; height: 32px; }
+  .ia-startup-overlay .startup-msg {
+    font-size: 13px;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 320px;
+  }
+  .ia-startup-overlay .startup-phase {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+  }
+  @keyframes startup-dots {
+    0% { content: ''; }
+    25% { content: '.'; }
+    50% { content: '..'; }
+    75% { content: '...'; }
+  }
+  .startup-dots::after {
+    content: '';
+    animation: startup-dots 1.5s steps(4, end) infinite;
+  }
+
+  /* Post-session bar */
+  .ia-post {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #fef3c7;
+    border-top: 1px solid #fcd34d;
+    flex-shrink: 0;
+  }
+  .ia-post span { font-size: 12px; color: var(--warning); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- Nav bar -->
+<nav class="navbar">
+  <span class="brand">lora-universal-simulator</span>
+  <ul class="nav-links">
+    <li><a href="/static/index.html">Dashboard</a></li>
+    <li><a href="/static/simulations.html">Simulations</a></li>
+  </ul>
+  <span class="spacer"></span>
+</nav>
+
+<!-- Create flow (shown when no ?id= param) -->
+<div id="create-flow" class="create-flow hidden">
+  <h1>New Interactive Session</h1>
+  <div class="card">
+    <h3>Scenario JSON</h3>
+    <div class="flex gap-8 items-center mt-8 mb-8">
+      <label class="btn btn-sm" style="cursor:pointer">
+        Load from file
+        <input type="file" id="scenario-file" accept=".json" style="display:none">
+      </label>
+    </div>
+    <textarea id="scenario-json" rows="14"
+      style="width:100%; font-family:var(--font-mono); font-size:11px; padding:8px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-input); color:var(--text); resize:vertical;"
+      placeholder='Paste scenario JSON here, e.g. {"nodes":[...],"simulation":{"duration_ms":60000}}'></textarea>
+  </div>
+  <div class="flex gap-8 items-center mt-12">
+    <button class="btn btn-primary btn-lg" id="btn-create">Start Interactive Session</button>
+    <span id="create-status" style="font-size:12px; color:var(--text-muted)"></span>
+  </div>
+</div>
+
+<!-- Session UI (shown when ?id= param present) -->
+<div id="session-ui" class="ia-layout hidden">
+  <!-- Left sidebar -->
+  <div class="ia-sidebar">
+    <h3>Nodes</h3>
+    <div id="node-list"></div>
+  </div>
+
+  <!-- Center -->
+  <div class="ia-center">
+    <!-- Top bar -->
+    <div class="ia-topbar">
+      <span class="session-info" id="session-id"></span>
+      <span class="conn-status conn-connecting" id="conn-status">Connecting</span>
+      <span class="spacer"></span>
+      <span class="sim-time" id="sim-time">0.000s</span>
+      <span style="color:var(--text-dim); font-size:11px">step:</span>
+      <input type="number" class="step-input" id="step-ms" value="1000" min="1">
+      <span style="color:var(--text-dim); font-size:11px">ms</span>
+      <button class="btn btn-sm btn-primary" id="btn-step">Step</button>
+      <button class="btn btn-sm" id="btn-next">Next</button>
+      <button class="btn btn-sm btn-success" id="btn-run-all">Run All</button>
+      <button class="btn btn-sm" id="btn-summary">Events</button>
+    </div>
+
+    <!-- Visualization iframes: swim-lane (left) and live map (right) -->
+    <div class="ia-viz-wrap" id="viz-wrap">
+      <div class="ia-startup-overlay" id="startup-overlay">
+        <div class="spinner"></div>
+        <div class="startup-msg" id="startup-msg">Connecting to session<span class="startup-dots"></span></div>
+        <div class="startup-phase" id="startup-phase"></div>
+      </div>
+      <iframe id="viz-iframe" title="Swim-lane visualization"></iframe>
+      <div class="ia-split-handle" id="split-handle"></div>
+      <iframe id="map-iframe" title="Live map"></iframe>
+    </div>
+
+    <!-- Resize handle -->
+    <div class="ia-resize-handle" id="resize-handle"></div>
+
+    <!-- Event log panel (left) + scheduled commands (right) -->
+    <div class="ia-events-panel" id="events-panel">
+      <div class="ia-events-left">
+        <!-- Filter bar -->
+        <div class="ia-filter">
+          <label>Filter:</label>
+          <select id="event-filter">
+            <option value="all">All Events</option>
+            <option value="tx">TX</option>
+            <option value="rx">RX</option>
+            <option value="collision">Collision</option>
+            <option value="drop">Drops</option>
+            <option value="cmd_reply">Cmd Reply</option>
+          </select>
+          <span class="event-count" id="event-count">0 events</span>
+          <span class="spacer"></span>
+          <label><input type="checkbox" id="auto-scroll" checked> Auto-scroll</label>
+          <button class="btn btn-sm" id="btn-clear-events">Clear</button>
+        </div>
+
+        <!-- Event log table -->
+        <div class="ia-events" id="events-container">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:80px">Time</th>
+                <th style="width:70px">Type</th>
+                <th style="width:80px">From</th>
+                <th style="width:80px">To</th>
+                <th style="width:70px">Pkt</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="events-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="ia-cmds-right">
+        <div class="ia-cmds-header">Scheduled commands (<span id="cmds-count">0</span>)</div>
+        <div class="ia-cmds" id="cmds-container">
+          <div class="cmd-empty">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Post-session bar (hidden until session closes) -->
+    <div class="ia-post hidden" id="post-bar">
+      <span>Session ended</span>
+      <span class="spacer"></span>
+      <button class="btn btn-sm btn-primary" id="btn-export">Export to Simulations</button>
+      <button class="btn btn-sm" id="btn-view-timeline" style="display:none">View Timeline</button>
+    </div>
+
+    <!-- Command bar -->
+    <div class="ia-cmdbar" id="cmd-bar">
+      <select id="cmd-node"><option value="">-- node --</option></select>
+      <input type="text" id="cmd-input" placeholder="REPL command (e.g. :step 1000)">
+      <button class="btn btn-sm btn-primary" id="btn-send-cmd">Send</button>
+      <div class="cmd-help-anchor">
+        <button class="btn btn-sm" id="btn-repl-cmds">REPL Cmds</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+(function() {
+  const MAX_EVENTS = 1000;
+  let sessionId = new URLSearchParams(window.location.search).get('id');
+  let wsConn = null;
+  let events = [];
+  let sessionClosed = false;
+
+  // ── Route: create flow or session UI ──
+  if (!sessionId) {
+    showCreateFlow();
+  } else {
+    showSessionUI();
+  }
+
+  // ── Cleanup on navigation / tab close ──
+  // When the user leaves the interactive view, terminate the backing
+  // orchestrator session immediately rather than waiting for the 60s
+  // idle timer. Uses `fetch keepalive` so the request survives page
+  // unload in modern browsers. pagehide fires on navigation, tab close,
+  // and bfcache transitions — the union of all "leaving this page" cases.
+  window.addEventListener('pagehide', () => {
+    if (!sessionId || sessionClosed) return;
+    try {
+      fetch('/api/interactive/' + sessionId, {
+        method: 'DELETE',
+        keepalive: true,
+      });
+    } catch (_) { /* best-effort — page is unloading */ }
+  });
+
+  // ── Create flow ──────────────────────────────────────
+  function showCreateFlow() {
+    document.getElementById('create-flow').classList.remove('hidden');
+  }
+
+  // Load scenario JSON from file
+  document.getElementById('scenario-file').addEventListener('change', function() {
+    const file = this.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      document.getElementById('scenario-json').value = e.target.result;
+    };
+    reader.readAsText(file);
+  });
+
+  document.getElementById('btn-create').addEventListener('click', async function() {
+    const raw = document.getElementById('scenario-json').value.trim();
+    if (!raw) {
+      document.getElementById('create-status').textContent = 'Paste or load a scenario JSON first.';
+      return;
+    }
+    let configJson;
+    try {
+      configJson = JSON.parse(raw);
+    } catch (e) {
+      document.getElementById('create-status').textContent = 'Invalid JSON: ' + e.message;
+      return;
+    }
+    this.disabled = true;
+    document.getElementById('create-status').textContent = 'Creating session...';
+    try {
+      const result = await postJSON('/api/interactive/', { config_json: configJson });
+      window.location.href = '/static/interactive.html?id=' + encodeURIComponent(result.id);
+    } catch (e) {
+      document.getElementById('create-status').textContent = 'Error: ' + e.message;
+      this.disabled = false;
+    }
+  });
+
+  // ── Session UI ──────────────────────────────────────
+  function showSessionUI() {
+    document.getElementById('session-ui').classList.remove('hidden');
+    document.getElementById('session-id').textContent = 'Session: ' + sessionId;
+    connectWebSocket();
+  }
+
+  function connectWebSocket() {
+    setConnStatus('connecting');
+    wsConn = connectWS('/api/interactive/' + sessionId + '/ws', {
+      onOpen() {
+        // Don't set 'connected' yet — wait for 'ready' or 'starting' message
+      },
+      onMessage(msg) {
+        handleWSMessage(msg);
+      },
+      onClose() {
+        if (!sessionClosed) setConnStatus('disconnected');
+      },
+      onError() {
+        setConnStatus('disconnected');
+      },
+    }, { reconnect: true, reconnectDelay: 2000 });
+  }
+
+  function setConnStatus(s) {
+    const el = document.getElementById('conn-status');
+    el.className = 'conn-status conn-' + s;
+    el.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  // ── WS message handler ──────────────────────────────
+  function handleWSMessage(msg) {
+    switch (msg.type) {
+      case 'starting':
+        showStartupStatus(msg.message || 'Initializing orchestrator...');
+        break;
+      case 'ready':
+        hideStartupOverlay();
+        setConnStatus('connected');
+        populateNodes(msg.nodes);
+        updateTime(msg.time_ms);
+        if (msg.step_ms) document.getElementById('step-ms').value = msg.step_ms;
+        // Load visualization iframe
+        initVizIframe();
+        // Fetch the source config so we can show the scheduled command list
+        loadScheduledCommands();
+        break;
+      case 'event':
+        addEvent(msg.data);
+        break;
+      case 'response':
+        handleResponse(msg);
+        break;
+      case 'closed':
+        sessionClosed = true;
+        hideStartupOverlay();
+        setConnStatus('disconnected');
+        document.getElementById('post-bar').classList.remove('hidden');
+        document.querySelector('#post-bar span').textContent = 'Session ended: ' + (msg.reason || 'closed');
+        disableControls();
+        if (wsConn) wsConn.close();
+        break;
+      case 'error':
+        addSystemEvent('Error: ' + msg.message);
+        break;
+    }
+  }
+
+  function showStartupStatus(message) {
+    const overlay = document.getElementById('startup-overlay');
+    const msgEl = document.getElementById('startup-msg');
+    const phaseEl = document.getElementById('startup-phase');
+    if (overlay) overlay.style.display = '';
+    if (msgEl) msgEl.innerHTML = escapeHtml(message) + '<span class="startup-dots"></span>';
+    if (phaseEl) {
+      phaseEl.textContent = 'lus is initializing the simulation process...';
+    }
+    // Update conn-status to show something more descriptive
+    const connEl = document.getElementById('conn-status');
+    connEl.className = 'conn-status conn-connecting';
+    connEl.textContent = 'Starting';
+  }
+
+  function hideStartupOverlay() {
+    const overlay = document.getElementById('startup-overlay');
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  function handleResponse(msg) {
+    const data = msg.data;
+    if (!data) return;
+
+    if (data.error) {
+      addSystemEvent('Error: ' + data.error);
+      return;
+    }
+
+    // Update time from step/next/time responses
+    if (data.stepped_to_ms !== undefined) updateTime(data.stepped_to_ms);
+    else if (data.time_ms !== undefined) updateTime(data.time_ms);
+
+    // Handle finished
+    if (data.finished) {
+      addSystemEvent('Simulation finished');
+    }
+
+    // cmd responses
+    if (msg.cmd === 'status' || msg.cmd === 'nodes' || msg.cmd === 'time' || msg.cmd === 'events' || msg.cmd === 'cmd' || msg.cmd === 'lua') {
+      addSystemEvent(msg.cmd + ': ' + JSON.stringify(data, null, 0).substring(0, 200));
+    }
+
+    // Update node detail if status response
+    if (msg.cmd === 'status' && data.node) {
+      updateNodeDetail(data);
+    }
+  }
+
+  // ── Time display ────────────────────────────────────
+  let _currentSimMs = 0;
+  function updateTime(ms) {
+    _currentSimMs = ms;
+    const s = (ms / 1000).toFixed(3);
+    document.getElementById('sim-time').textContent = s + 's';
+    // Notify iframe to update viewport immediately (no polling delay)
+    const iframe = document.getElementById('viz-iframe');
+    if (iframe && iframe.contentWindow) {
+      try {
+        iframe.contentWindow.postMessage({ type: 'timeUpdate', time_ms: ms }, '*');
+      } catch (_) {}
+    }
+    updateScheduledCommandsState(ms);
+  }
+
+  // ── Scheduled commands panel ────────────────────────
+  let _scheduledCommands = [];
+
+  async function loadScheduledCommands() {
+    try {
+      const cfg = await fetchJSON('/api/interactive/' + sessionId + '/config');
+      const cmds = Array.isArray(cfg && cfg.commands) ? cfg.commands.slice() : [];
+      cmds.sort((a, b) => (a.at_ms || 0) - (b.at_ms || 0));
+      _scheduledCommands = cmds;
+      renderScheduledCommands();
+      updateScheduledCommandsState(_currentSimMs);
+    } catch (e) {
+      const cont = document.getElementById('cmds-container');
+      if (cont) cont.innerHTML = '<div class="cmd-empty">Failed to load: ' + escapeHtml(e.message || String(e)) + '</div>';
+    }
+  }
+
+  function _formatAtMs(ms) {
+    if (ms == null) return '--';
+    const total = Math.round(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return h + 'h' + String(m).padStart(2, '0') + 'm' + String(s).padStart(2, '0') + 's';
+    if (m > 0) return m + 'm' + String(s).padStart(2, '0') + 's';
+    return s + 's';
+  }
+
+  function renderScheduledCommands() {
+    const cont = document.getElementById('cmds-container');
+    const countEl = document.getElementById('cmds-count');
+    if (countEl) countEl.textContent = _scheduledCommands.length;
+    if (!cont) return;
+    if (!_scheduledCommands.length) {
+      cont.innerHTML = '<div class="cmd-empty">No scheduled commands in this config.</div>';
+      return;
+    }
+    let html = '<table><thead><tr>'
+      + '<th style="width:60px">At</th>'
+      + '<th style="width:70px">Node</th>'
+      + '<th>Command</th>'
+      + '</tr></thead><tbody>';
+    _scheduledCommands.forEach((c, i) => {
+      const at = c.at_ms || 0;
+      const node = c.node || '';
+      const cmdText = c.command || c.cmd || (c.lua ? 'lua: ' + c.lua : '') || '';
+      html += '<tr data-idx="' + i + '" data-at="' + at + '">'
+        + '<td>' + escapeHtml(_formatAtMs(at)) + '</td>'
+        + '<td>' + escapeHtml(node) + '</td>'
+        + '<td>' + escapeHtml(cmdText) + '</td>'
+        + '</tr>';
+    });
+    html += '</tbody></table>';
+    cont.innerHTML = html;
+  }
+
+  function updateScheduledCommandsState(simMs) {
+    const cont = document.getElementById('cmds-container');
+    if (!cont) return;
+    const rows = cont.querySelectorAll('tr[data-at]');
+    rows.forEach(tr => {
+      const at = parseFloat(tr.dataset.at);
+      if (at <= simMs) tr.classList.add('passed');
+      else tr.classList.remove('passed');
+    });
+  }
+
+  // ── Nodes ───────────────────────────────────────────
+  function populateNodes(nodes) {
+    const list = document.getElementById('node-list');
+    const select = document.getElementById('cmd-node');
+    list.innerHTML = '';
+    select.innerHTML = '<option value="">-- node --</option>';
+
+    // Sort: companions first, then repeaters, alphabetical within each
+    const companions = nodes.filter(n => n.role === 'companion').sort((a, b) => a.name.localeCompare(b.name));
+    const repeaters = nodes.filter(n => n.role !== 'companion').sort((a, b) => a.name.localeCompare(b.name));
+    const sorted = [...companions, ...repeaters];
+
+    // Sidebar cards
+    sorted.forEach(n => {
+      const card = document.createElement('div');
+      card.className = 'node-card';
+      card.dataset.name = n.name;
+      const roleClass = n.role === 'repeater' ? 'node-role-repeater' : 'node-role-companion';
+      card.innerHTML = `
+        <span class="node-name">${escapeHtml(n.name)}</span>
+        <span class="node-role ${roleClass}">${escapeHtml(n.role)}</span>
+        <div class="node-detail"><div class="spinner" style="margin:8px auto;display:none"></div><pre></pre></div>
+      `;
+      card.addEventListener('click', () => toggleNodeCard(card, n.name));
+      list.appendChild(card);
+    });
+
+    // Command bar dropdown with optgroups
+    if (companions.length > 0 && repeaters.length > 0) {
+      const compGroup = document.createElement('optgroup');
+      compGroup.label = 'Companions';
+      companions.forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n.name;
+        opt.textContent = n.name;
+        compGroup.appendChild(opt);
+      });
+      select.appendChild(compGroup);
+
+      const repGroup = document.createElement('optgroup');
+      repGroup.label = 'Repeaters';
+      repeaters.forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n.name;
+        opt.textContent = n.name;
+        repGroup.appendChild(opt);
+      });
+      select.appendChild(repGroup);
+    } else {
+      sorted.forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n.name;
+        opt.textContent = n.name;
+        select.appendChild(opt);
+      });
+    }
+  }
+
+  function toggleNodeCard(card, name) {
+    const wasExpanded = card.classList.contains('expanded');
+    // Collapse all
+    document.querySelectorAll('.node-card').forEach(c => c.classList.remove('expanded', 'active'));
+    if (!wasExpanded) {
+      card.classList.add('expanded', 'active');
+      queryNodeStatus(card, name);
+    }
+  }
+
+  async function queryNodeStatus(card, name) {
+    const spinner = card.querySelector('.spinner');
+    const pre = card.querySelector('pre');
+    spinner.style.display = 'block';
+    pre.textContent = 'Click :nodes or use REPL commands to inspect this node.';
+    spinner.style.display = 'none';
+  }
+
+  function updateNodeDetail(data) {
+    // lus status cmd maps to :time — nothing node-specific to show here
+  }
+
+  // ── Event log ───────────────────────────────────────
+  const eventFilter = document.getElementById('event-filter');
+  const eventsTbody = document.getElementById('events-tbody');
+  const eventsContainer = document.getElementById('events-container');
+
+  function addEvent(evt) {
+    events.push(evt);
+    if (events.length > MAX_EVENTS) {
+      events.shift();
+      // Remove first row
+      if (eventsTbody.firstChild) eventsTbody.removeChild(eventsTbody.firstChild);
+    }
+    const row = createEventRow(evt);
+    if (row) {
+      eventsTbody.appendChild(row);
+      if (document.getElementById('auto-scroll').checked) {
+        eventsContainer.scrollTop = eventsContainer.scrollHeight;
+      }
+    }
+    document.getElementById('event-count').textContent = events.length + ' events';
+  }
+
+  function addSystemEvent(text) {
+    addEvent({ type: '_system', _text: text, time_ms: null });
+  }
+
+  function createEventRow(evt) {
+    // Filter check
+    const filter = eventFilter.value;
+    if (!passesFilter(evt, filter)) return null;
+
+    const tr = document.createElement('tr');
+    const evtType = evt.type || 'other';
+    if (evtType === '_system') {
+      tr.className = 'evt-other';
+      tr.innerHTML = `<td colspan="6" style="color:var(--text-muted); font-style:italic">${escapeHtml(evt._text)}</td>`;
+      return tr;
+    }
+
+    const cssClass = evtType.startsWith('drop') ? 'evt-' + evtType : 'evt-' + evtType;
+    tr.className = 'evt-' + (evtType.startsWith('drop') ? evtType : evtType);
+    if (!tr.className.match(/evt-(tx|rx|collision|drop_halfduplex|drop_loss|cmd_reply)/)) {
+      tr.className = 'evt-other';
+    }
+
+    const timeStr = evt.time_ms != null ? (evt.time_ms / 1000).toFixed(3) : '--';
+    const from = evt.node || evt.from || '';
+    const to = evt.to || '';
+    const pkt = evt.pkt || '';
+
+    let details = '';
+    if (evtType === 'tx') {
+      details = `${evt.pkt_type || ''} ${evt.route || ''} air=${evt.airtime_ms || ''}ms`;
+    } else if (evtType === 'rx') {
+      details = `SNR=${evt.snr != null ? evt.snr.toFixed(1) : '?'}dB ${evt.pkt_type || ''}`;
+    } else if (evtType === 'collision') {
+      details = `interferer=${evt.interferer || '?'} margin=${evt.snr_margin != null ? evt.snr_margin.toFixed(1) : '?'}dB`;
+    } else if (evtType === 'cmd_reply') {
+      details = `${evt.command || ''}: ${truncate(evt.reply || '', 60)}`;
+    } else if (evtType.startsWith('drop')) {
+      details = evtType;
+    } else {
+      details = JSON.stringify(evt).substring(0, 80);
+    }
+
+    tr.innerHTML = `
+      <td>${escapeHtml(timeStr)}</td>
+      <td>${escapeHtml(evtType)}</td>
+      <td>${escapeHtml(from)}</td>
+      <td>${escapeHtml(to)}</td>
+      <td title="${escapeHtml(pkt)}">${escapeHtml(truncate(pkt, 8))}</td>
+      <td>${escapeHtml(details)}</td>
+    `;
+    return tr;
+  }
+
+  function passesFilter(evt, filter) {
+    if (filter === 'all') return true;
+    const t = evt.type || '';
+    if (filter === 'drop') return t.startsWith('drop');
+    return t === filter;
+  }
+
+  eventFilter.addEventListener('change', rebuildEventTable);
+
+  function rebuildEventTable() {
+    eventsTbody.innerHTML = '';
+    events.forEach(evt => {
+      const row = createEventRow(evt);
+      if (row) eventsTbody.appendChild(row);
+    });
+    if (document.getElementById('auto-scroll').checked) {
+      eventsContainer.scrollTop = eventsContainer.scrollHeight;
+    }
+  }
+
+  document.getElementById('btn-clear-events').addEventListener('click', () => {
+    events = [];
+    eventsTbody.innerHTML = '';
+    document.getElementById('event-count').textContent = '0 events';
+    // Reload visualization iframe
+    const iframe = document.getElementById('viz-iframe');
+    if (iframe.src && iframe.src !== 'about:blank') {
+      iframe.src = iframe.src;
+    }
+  });
+
+  // ── Controls ────────────────────────────────────────
+  document.getElementById('btn-step').addEventListener('click', () => {
+    const ms = parseInt(document.getElementById('step-ms').value) || 1000;
+    if (wsConn) wsConn.send({ cmd: 'step', ms: ms });
+  });
+
+  document.getElementById('btn-next').addEventListener('click', () => {
+    if (wsConn) wsConn.send({ cmd: 'next' });
+  });
+
+  document.getElementById('btn-run-all').addEventListener('click', () => {
+    // Step a very large amount to finish the simulation
+    if (wsConn) wsConn.send({ cmd: 'step', ms: 999999999 });
+  });
+
+  document.getElementById('btn-summary').addEventListener('click', () => {
+    if (wsConn) wsConn.send({ cmd: 'events', n: 10 });
+  });
+
+  // Command bar
+  document.getElementById('btn-send-cmd').addEventListener('click', sendCommand);
+  document.getElementById('cmd-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendCommand();
+  });
+
+  function sendCommand() {
+    const node = document.getElementById('cmd-node').value;
+    const input = document.getElementById('cmd-input').value.trim();
+    if (!input) return;
+
+    // Parse colon-prefix REPL commands typed directly in the bar
+    if (input.startsWith(':')) {
+      const parts = input.slice(1).split(/\s+/);
+      const name = parts[0];
+      const rest = parts.slice(1);
+      let msg;
+      if (name === 'step') msg = { cmd: 'step', ms: rest[0] ? parseInt(rest[0]) : undefined };
+      else if (name === 'run') msg = { cmd: 'run', ms: rest[0] ? parseInt(rest[0]) : undefined };
+      else if (name === 'next') msg = { cmd: 'next' };
+      else if (name === 'nodes') msg = { cmd: 'nodes' };
+      else if (name === 'time') msg = { cmd: 'time' };
+      else if (name === 'events') msg = { cmd: 'events', n: rest[0] ? parseInt(rest[0]) : 10 };
+      else if (name === 'lua') msg = { cmd: 'lua', code: rest.join(' ') };
+      else if (name === 'cmd') msg = { cmd: 'cmd', node: rest[0] || node, command: rest.slice(1).join(' ') };
+      else if (name === 'quit' || name === 'exit') msg = { cmd: 'quit' };
+      else {
+        addSystemEvent('Unknown REPL command: ' + input);
+        return;
+      }
+      if (wsConn) wsConn.send(msg);
+    } else {
+      // Node-targeted command
+      if (!node) {
+        addSystemEvent('Select a node first, or prefix REPL commands with :');
+        return;
+      }
+      if (wsConn) wsConn.send({ cmd: 'cmd', node: node, command: input });
+    }
+    document.getElementById('cmd-input').value = '';
+  }
+
+  // Command helper popover — lus REPL commands
+  const REPL_CMDS = [
+    { group: 'Simulation control' },
+    { cmd: ':time', desc: 'Show current sim time' },
+    { cmd: ':nodes', desc: 'List all nodes' },
+    { cmd: ':step', desc: 'Advance one tick (default step_ms)' },
+    { cmd: ':step <ms>', desc: 'Advance by ms milliseconds' },
+    { cmd: ':run', desc: 'Run to end of simulation' },
+    { cmd: ':run <ms>', desc: 'Run for ms milliseconds' },
+    { cmd: ':next', desc: 'Run until the next event fires' },
+    { group: 'Node interaction' },
+    { cmd: ':cmd <node> <text>', desc: "Dispatch text to node's on_command handler" },
+    { cmd: ':events', desc: 'Show last 10 events' },
+    { cmd: ':events <n>', desc: 'Show last n events' },
+    { group: 'Scripting' },
+    { cmd: ':lua <code>', desc: 'Evaluate a Lua snippet on node 0' },
+    { group: 'Session' },
+    { cmd: ':quit', desc: 'End the interactive session' },
+  ];
+
+  let _cmdPopOpen = null;
+
+  function showCmdHelp(btnId, cmds) {
+    closeCmdHelp();
+    const anchor = document.getElementById(btnId).parentElement;
+    const pop = document.createElement('div');
+    pop.className = 'cmd-help-pop';
+    pop.id = 'cmd-help-pop';
+
+    for (const item of cmds) {
+      if (item.group) {
+        const g = document.createElement('div');
+        g.className = 'cmd-group';
+        g.textContent = item.group;
+        pop.appendChild(g);
+      } else {
+        const d = document.createElement('div');
+        d.className = 'cmd-item';
+        d.innerHTML = '<span class="cmd-name">' + escapeHtml(item.cmd.split(' ')[0]) + '</span><span class="cmd-desc">' + escapeHtml(item.desc) + '</span>';
+        d.addEventListener('click', () => {
+          document.getElementById('cmd-input').value = item.cmd;
+          document.getElementById('cmd-input').focus();
+          closeCmdHelp();
+        });
+        pop.appendChild(d);
+      }
+    }
+
+    anchor.appendChild(pop);
+    _cmdPopOpen = true;
+    setTimeout(() => document.addEventListener('click', _cmdHelpOutsideClick), 0);
+  }
+
+  function _cmdHelpOutsideClick(e) {
+    const pop = document.getElementById('cmd-help-pop');
+    if (pop && !pop.contains(e.target) && e.target.id !== 'btn-repl-cmds') {
+      closeCmdHelp();
+    }
+  }
+
+  function closeCmdHelp() {
+    _cmdPopOpen = false;
+    const pop = document.getElementById('cmd-help-pop');
+    if (pop) pop.remove();
+    document.removeEventListener('click', _cmdHelpOutsideClick);
+  }
+
+  document.getElementById('btn-repl-cmds').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (_cmdPopOpen) { closeCmdHelp(); return; }
+    showCmdHelp('btn-repl-cmds', REPL_CMDS);
+  });
+
+  // ── Post-session actions ────────────────────────────
+  document.getElementById('btn-export').addEventListener('click', async function() {
+    this.disabled = true;
+    try {
+      const result = await postJSON('/api/interactive/' + sessionId + '/export', {});
+      const simId = result.sim_id;
+      addSystemEvent('Exported as simulation: ' + simId);
+      const viewBtn = document.getElementById('btn-view-timeline');
+      viewBtn.style.display = '';
+      viewBtn.onclick = () => {
+        window.location.href = '/static/visualize.html?sim=' + encodeURIComponent(simId);
+      };
+    } catch (e) {
+      addSystemEvent('Export failed: ' + e.message);
+      this.disabled = false;
+    }
+  });
+
+  function disableControls() {
+    document.getElementById('btn-step').disabled = true;
+    document.getElementById('btn-next').disabled = true;
+    document.getElementById('btn-run-all').disabled = true;
+    document.getElementById('btn-summary').disabled = true;
+    document.getElementById('btn-send-cmd').disabled = true;
+    document.getElementById('cmd-bar').style.opacity = '0.5';
+  }
+
+  // ── Visualization iframes (swim-lane + live map) ────
+  let vizIframeLoaded = false;
+  function initVizIframe() {
+    if (vizIframeLoaded) return;
+    vizIframeLoaded = true;
+    document.getElementById('viz-iframe').src =
+      '/static/visualize.html?interactive=' + encodeURIComponent(sessionId);
+    document.getElementById('map-iframe').src =
+      '/static/map_live.html?interactive=' + encodeURIComponent(sessionId);
+  }
+
+  // ── Horizontal split drag between the two iframes ──
+  (function setupSplitDrag() {
+    const handle = document.getElementById('split-handle');
+    const left = document.getElementById('viz-iframe');
+    const right = document.getElementById('map-iframe');
+    let startX, startLeftW, startRightW;
+
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault();
+      startX = e.clientX;
+      startLeftW = left.offsetWidth;
+      startRightW = right.offsetWidth;
+      handle.classList.add('active');
+      // Cover iframes so mousemove isn't swallowed by them
+      left.style.pointerEvents = 'none';
+      right.style.pointerEvents = 'none';
+      document.addEventListener('mousemove', onDrag);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    function onDrag(e) {
+      const dx = e.clientX - startX;
+      const newLeft = Math.max(120, startLeftW + dx);
+      const newRight = Math.max(120, startRightW - dx);
+      left.style.flex = '0 0 ' + newLeft + 'px';
+      right.style.flex = '1 1 ' + newRight + 'px';
+    }
+    function onUp() {
+      handle.classList.remove('active');
+      left.style.pointerEvents = '';
+      right.style.pointerEvents = '';
+      document.removeEventListener('mousemove', onDrag);
+      document.removeEventListener('mouseup', onUp);
+    }
+  })();
+
+  // ── Iframe message relay ────────────────────────────
+  // Sibling iframes can't message each other directly; the parent is the
+  // hub. Relayed message types:
+  //   mlv-focus-node  (swim-lane → map): center map on a node
+  //   mlv-scrub-time  (map → swim-lane): center swim-lane viewport on a time
+  //   mlv-trace-pkt   (swim-lane → map): trace a packet's flood tree on map
+  window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data !== 'object') return;
+    const mapIframe = document.getElementById('map-iframe');
+    const vizIframe = document.getElementById('viz-iframe');
+    if (e.data.type === 'mlv-focus-node' || e.data.type === 'mlv-trace-pkt') {
+      if (mapIframe && mapIframe.contentWindow) {
+        mapIframe.contentWindow.postMessage(e.data, '*');
+      }
+    } else if (e.data.type === 'mlv-scrub-time') {
+      if (vizIframe && vizIframe.contentWindow) {
+        vizIframe.contentWindow.postMessage(e.data, '*');
+      }
+    }
+  });
+
+  // ── Resize handle ──────────────────────────────────
+  (function setupResize() {
+    const handle = document.getElementById('resize-handle');
+    const vizWrap = document.getElementById('viz-wrap');
+    const eventsPanel = document.getElementById('events-panel');
+    const vizIframe = document.getElementById('viz-iframe');
+    const mapIframe = document.getElementById('map-iframe');
+    let startY, startVizH, startEvtH;
+
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault();
+      startY = e.clientY;
+      startVizH = vizWrap.offsetHeight;
+      startEvtH = eventsPanel.offsetHeight;
+      handle.classList.add('active');
+      // Cover iframes so mousemove isn't swallowed by them while dragging
+      if (vizIframe) vizIframe.style.pointerEvents = 'none';
+      if (mapIframe) mapIframe.style.pointerEvents = 'none';
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onDrag);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    function onDrag(e) {
+      const dy = e.clientY - startY;
+      const newVizH = Math.max(150, startVizH + dy);
+      const newEvtH = Math.max(60, startEvtH - dy);
+      vizWrap.style.flex = 'none';
+      vizWrap.style.height = newVizH + 'px';
+      eventsPanel.style.height = newEvtH + 'px';
+    }
+
+    function onUp() {
+      handle.classList.remove('active');
+      if (vizIframe) vizIframe.style.pointerEvents = '';
+      if (mapIframe) mapIframe.style.pointerEvents = '';
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onDrag);
+      document.removeEventListener('mouseup', onUp);
+      // Save ratio to localStorage
+      try {
+        localStorage.setItem('ia-viz-ratio', vizWrap.offsetHeight / (vizWrap.offsetHeight + eventsPanel.offsetHeight));
+      } catch (e) {}
+    }
+
+    // Restore saved ratio
+    try {
+      const saved = parseFloat(localStorage.getItem('ia-viz-ratio'));
+      if (saved && saved > 0.1 && saved < 0.95) {
+        const center = document.querySelector('.ia-center');
+        // Wait for layout to be ready
+        requestAnimationFrame(() => {
+          const available = center.offsetHeight - document.querySelector('.ia-topbar').offsetHeight
+            - handle.offsetHeight - document.querySelector('.ia-post').offsetHeight
+            - document.querySelector('.ia-cmdbar').offsetHeight;
+          if (available > 0) {
+            vizWrap.style.flex = 'none';
+            vizWrap.style.height = Math.round(available * saved) + 'px';
+            eventsPanel.style.height = Math.round(available * (1 - saved)) + 'px';
+          }
+        });
+      }
+    } catch (e) {}
+  })();
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    if (sessionClosed) return;
+    if (e.key === 's' || e.key === 'S') {
+      e.preventDefault();
+      document.getElementById('btn-step').click();
+    } else if (e.key === 'n' || e.key === 'N') {
+      e.preventDefault();
+      document.getElementById('btn-next').click();
+    }
+  });
+})();
+</script>
+</body>
+</html>
