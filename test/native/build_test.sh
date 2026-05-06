@@ -44,4 +44,22 @@ test_with_arg test_jsonconfig "$SCRIPT_DIR/sample_config.json" \
 run test_timerwheel "$SCRIPT_DIR/test_timerwheel.cpp" \
     "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp"
 
+LUA_CFLAGS="$(pkg-config --cflags lua5.4)"
+LUA_LIBS="$(pkg-config --libs lua5.4)"
+
+run test_sim_controller "$SCRIPT_DIR/test_sim_controller.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
+
 echo "[ok] all tests passed"
