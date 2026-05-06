@@ -12,6 +12,7 @@ from typing import ClassVar
 class Settings:
     DATA_DIR: Path
     ORCHESTRATOR_PATH: Path
+    LUS_CWD: Path
     MAX_CONCURRENT_SIMS: int
     MAX_INTERACTIVE_SESSIONS: int
     INTERACTIVE_IDLE_TIMEOUT_S: int
@@ -27,9 +28,14 @@ class Settings:
                 "ORCHESTRATOR_PATH",
                 here.parent / "build" / "orchestrator" / "lus",
             )).resolve()
+            # lus resolves relative Lua script paths from cwd (e.g., a config
+            # with `script: "scenarios/dv_dual_sf.lua"` only finds the file if
+            # cwd is the repo root). Pass this as `cwd=` when launching lus.
+            lus_cwd = Path(os.environ.get("LUS_CWD", here.parent)).resolve()
             cls._instance = cls(
                 DATA_DIR=data_dir,
                 ORCHESTRATOR_PATH=orch,
+                LUS_CWD=lus_cwd,
                 MAX_CONCURRENT_SIMS=int(os.environ.get("MAX_CONCURRENT_SIMS", os.cpu_count() or 4)),
                 MAX_INTERACTIVE_SESSIONS=int(os.environ.get("MAX_INTERACTIVE_SESSIONS", 4)),
                 INTERACTIVE_IDLE_TIMEOUT_S=int(os.environ.get("INTERACTIVE_IDLE_TIMEOUT_S", 300)),
