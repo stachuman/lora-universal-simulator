@@ -46,8 +46,13 @@ void nodeReady(unsigned long time_ms, const char* node, const char* role,
 
 // Generic radio events. `data` is the raw on-air bytes; the logger only
 // uses them for the FNV fingerprint and an optional hex dump (tx only).
+// `label` and `info` are optional script-supplied annotations (passed via
+// self:tx({label=, info=}) in Lua). When non-null and non-empty they are
+// emitted as fields in the NDJSON. The simulator never decodes packet
+// bytes; these strings are how scripts expose protocol semantics.
 void tx(unsigned long time_ms, const char* node,
-        const uint8_t* data, int len, uint32_t airtime_ms);
+        const uint8_t* data, int len, uint32_t airtime_ms,
+        const char* label = nullptr, const char* info = nullptr);
 void rx(unsigned long time_ms, const char* from, const char* to,
         float snr, float rssi,
         const uint8_t* data, int len, uint32_t airtime_ms = 0);

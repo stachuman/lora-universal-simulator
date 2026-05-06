@@ -163,11 +163,15 @@ void ScriptedNode::api_tx(std::string bytes, sol::optional<sol::table> opts) {
         // for ergonomic Lua call-sites (`{ preamble = 16 }`).
         sol::optional<int> pre      = o["preamble_sym"];
         if (!pre) pre               = o["preamble"];
+        sol::optional<std::string> label = o["label"];
+        sol::optional<std::string> info  = o["info"];
         if (sf)    p.sf           = *sf;
         if (bw_hz) p.bw_hz        = *bw_hz;
         if (cr)    p.cr           = *cr;
         if (pwr)   p.power_dbm    = *pwr;
         if (pre)   p.preamble_sym = *pre;
+        if (label) p.label        = std::move(*label);
+        if (info)  p.info         = std::move(*info);
     }
     _pending_txs.push_back(std::move(p));
 }

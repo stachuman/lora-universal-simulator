@@ -593,7 +593,9 @@ void SimController::registerTransmissionsForStep() {
                              _nodes[i]->name().c_str(),
                              reinterpret_cast<const uint8_t*>(p.bytes.data()),
                              static_cast<int>(p.bytes.size()),
-                             airtime);
+                             airtime,
+                             p.label.empty() ? nullptr : p.label.c_str(),
+                             p.info.empty()  ? nullptr : p.info.c_str());
 
                 for (int r = 0; r < n; ++r) {
                     if (r == i) continue;
@@ -711,7 +713,9 @@ void SimController::registerTransmissionsForStep() {
                          _nodes[i]->name().c_str(),
                          reinterpret_cast<const uint8_t*>(f.bytes.data()),
                          static_cast<int>(f.bytes.size()),
-                         airtime);
+                         airtime,
+                         p.label.empty() ? nullptr : p.label.c_str(),
+                         p.info.empty()  ? nullptr : p.info.c_str());
 
             _in_flight.push_back(std::move(f));
 

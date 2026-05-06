@@ -154,17 +154,43 @@ void nodeReady(unsigned long time_ms, const char* node, const char* role,
 }
 
 void tx(unsigned long time_ms, const char* node,
-        const uint8_t* data, int len, uint32_t airtime_ms) {
+        const uint8_t* data, int len, uint32_t airtime_ms,
+        const char* label, const char* info) {
     char hex[512 * 2 + 1];
     char pkt[9];
     if (len > 512) len = 512;
     to_hex(hex, data, len);
     packetHashHex(pkt, data, len);
+
+    // Build optional ",\"label\":\"...\",\"info\":\"...\"" suffix.
+    char extra[768];
+    extra[0] = '\0';
+    char* ep = extra;
+    auto appendField = [&](const char* key, const char* value) {
+        if (!value || !*value) return;
+        // Conservative escape: only " and \ — sufficient for the kinds of
+        // strings scripts produce (short labels and printf-formatted infos).
+        // Anything more exotic would need full JSON escaping.
+        size_t room = (extra + sizeof(extra)) - ep;
+        int n = snprintf(ep, room, ",\"%s\":\"", key);
+        if (n < 0 || (size_t)n >= room) return;
+        ep += n;
+        for (const char* s = value; *s && (size_t)(extra + sizeof(extra) - ep) > 4; ++s) {
+            if (*s == '"' || *s == '\\') { *ep++ = '\\'; *ep++ = *s; }
+            else if ((unsigned char)*s < 0x20) { /* drop control chars */ }
+            else { *ep++ = *s; }
+        }
+        if ((size_t)(extra + sizeof(extra) - ep) > 1) *ep++ = '"';
+    };
+    appendField("label", label);
+    appendField("info", info);
+    *ep = '\0';
+
     char buf[4096];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"tx\",\"time_ms\":%lu,\"node\":\"%s\",\"pkt\":\"%s\","
-        "\"hex\":\"%s\",\"airtime_ms\":%u}\n",
-        time_ms, node, pkt, hex, (unsigned)airtime_ms);
+        "\"hex\":\"%s\",\"airtime_ms\":%u%s}\n",
+        time_ms, node, pkt, hex, (unsigned)airtime_ms, extra);
     emitLine(buf);
 }
 

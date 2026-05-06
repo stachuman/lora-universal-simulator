@@ -254,11 +254,11 @@ together with the timeout logic.
 
 All frames start with a 1-byte type tag:
 
-| Tag | Frame | Layout |
-|---|---|---|
-| `'B'` | Beacon | `B`, src(1), n(1), entries × n × {dest(1), next(1), score_i8(1), hops(1)} |
+| Tag   | Frame  | Layout                                                                          |
+| ----- | ------ | ------------------------------------------------------------------------------- |
+| `'B'` | Beacon | `B`, src(1), n(1), entries × n × {dest(1), next(1), score_i8(1), hops(1)}       |
 | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), data_sf(1) |
-| `'C'` | CTS    | `C`, src(1), msg_id_lo(1), msg_id_hi(1) |
+| `'C'` | CTS    | `C`, src(1), msg_id_lo(1), msg_id_hi(1)                                         |
 | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), payload(n) |
 
 `origin` is the originating node id (carried unchanged by forwarders).

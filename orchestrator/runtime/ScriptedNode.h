@@ -43,6 +43,13 @@ struct PendingTx {
     int cr = -1;            // -1 = use radio default
     int power_dbm = -127;   // -127 = use default
     int preamble_sym = -1;  // -1 = use radio default
+    // Optional script-supplied annotations stamped on the tx event NDJSON.
+    // Empty = not set; visualizers should treat the tx as unlabelled.
+    // The simulator never decodes packet bytes itself (it can't, the wire
+    // format is up to the script), so these are how scripts expose their
+    // own protocol semantics to the timeline / map views.
+    std::string label;      // short tag, e.g., "RTS", "CTS", "DATA"
+    std::string info;       // detail string, e.g., "dst=dave via bob msg=1"
 };
 
 class ScriptedNode {

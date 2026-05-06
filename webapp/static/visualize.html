@@ -416,6 +416,12 @@ async function loadViewport() {
         S.cachedEvents = data.events;
         S.cachedFrom = from;
         S.cachedTo = to;
+        // pkt -> tx event index, for propagating label/info to rx/drop bars
+        // sharing the same packet hash.
+        S.txByPkt = {};
+        for (const ev of S.cachedEvents) {
+            if (ev.type === 'tx' && ev.pkt) S.txByPkt[ev.pkt] = ev;
+        }
     }
 }
 
@@ -815,7 +821,10 @@ function drawEvents() {
                 }
             }
 
-            // Label on TX bar: pkt_type + route (or pkt hash if no room)
+            // Label on TX bar: prefer the script-supplied tag (set via
+            // self:tx({label="..."})); fall back to legacy pkt_type, then
+            // a truncated pkt hash. Scripts are encouraged to provide
+            // a short, meaningful label.
             if (showLabels && boxW > 20) {
                 ctx.font = '9px monospace';
                 ctx.fillStyle = '#fff';
@@ -823,7 +832,9 @@ function drawEvents() {
                 ctx.textBaseline = 'middle';
                 const maxChars = Math.floor(boxW / 5.5);
                 let label;
-                if (ev.pkt_type && maxChars >= 3) {
+                if (ev.label && maxChars >= 3) {
+                    label = ev.label;
+                } else if (ev.pkt_type && maxChars >= 3) {
                     label = ev.pkt_type;
                     if (ev.route && maxChars >= label.length + 2) label += '/' + ev.route;
                 } else if (ev.pkt) {
@@ -869,6 +880,23 @@ function drawEvents() {
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
                 ctx.fillText(ev.snr.toFixed(1), xEnd + 2, boxY);
+            }
+
+            // Inherit the script-supplied label from the matching tx event
+            // (joined by pkt) so the receiver lane shows the same semantic
+            // tag as the sender.
+            if (showLabels && boxW > 20 && ev.pkt && S.txByPkt) {
+                const txEv = S.txByPkt[ev.pkt];
+                if (txEv && txEv.label) {
+                    const maxChars = Math.floor(boxW / 5.5);
+                    if (maxChars >= 3) {
+                        ctx.font = '9px monospace';
+                        ctx.fillStyle = '#15803d';
+                        ctx.textAlign = 'left';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(txEv.label, boxX + 2, boxY + boxH / 2);
+                    }
+                }
             }
 
             // Draw arrow from sender to receiver if both visible. Anchor at
@@ -1573,8 +1601,9 @@ function closeSidebar() {
 function showEventDetail(ev) {
     openSidebar();
     // Field display order for lus events
-    const FIELD_ORDER = ['type', 'time_ms', 'node', 'from', 'to', 'snr', 'rssi',
-                         'packet_sf', 'rx_sf', 'pkt', 'hex', 'emit_type', 'msg', 'data'];
+    const FIELD_ORDER = ['type', 'time_ms', 'node', 'from', 'to', 'label', 'info',
+                         'snr', 'rssi', 'packet_sf', 'rx_sf', 'pkt', 'hex',
+                         'emit_type', 'msg', 'data'];
     let html = `<h3>${ev.type}</h3>`;
     html += `<div class="field"><span class="key">time: </span><span class="val">${formatTime(ev.time_ms)}</span></div>`;
 

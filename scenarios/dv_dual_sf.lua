@@ -142,7 +142,11 @@ local function beacon_fire(self)
     local n = rt_count(self.rt)
     self:emit("beacon_tx", { n_entries = n })
     self:log(string.format("beacon_tx (rt has %d entries)", n))
-    self:tx(frame, { sf = self.routing_sf })
+    self:tx(frame, {
+      sf    = self.routing_sf,
+      label = "BCN",
+      info  = string.format("rt=%d", n),
+    })
   else
     self:log("beacon_tx skipped (busy in data exchange)")
   end
@@ -269,7 +273,11 @@ function on_recv(self, frame, meta)
     self:emit("cts_tx", { to = r.src, msg_id = r.msg_id })
     self:log(string.format("cts_tx -> %s msg_id=%d (on SF%d)",
       name_of(self, r.src), r.msg_id, self.data_sf))
-    self:tx(cts, { sf = self.data_sf })
+    self:tx(cts, {
+      sf    = self.data_sf,
+      label = "CTS",
+      info  = string.format("to=%s msg=%d", name_of(self, r.src), r.msg_id),
+    })
     return
   end
 
@@ -300,7 +308,16 @@ function on_recv(self, frame, meta)
     self:log(string.format("data_tx -> %s msg_id=%d payload=%q (then back to SF%d for routing)",
       name_of(self, self.pending_tx.next), self.pending_tx.msg_id,
       self.pending_tx.payload, self.routing_sf))
-    self:tx(d, { sf = self.data_sf })
+    self:tx(d, {
+      sf    = self.data_sf,
+      label = "DATA",
+      info  = string.format("origin=%s dst=%s next=%s msg=%d payload=%q",
+        name_of(self, self.pending_tx.origin),
+        name_of(self, self.pending_tx.dst),
+        name_of(self, self.pending_tx.next),
+        self.pending_tx.msg_id,
+        self.pending_tx.payload),
+    })
     self:set_rx_sf(self.routing_sf)
     self.pending_tx = nil
     return
@@ -360,7 +377,13 @@ function on_recv(self, frame, meta)
         })
         self:log(string.format("rts_tx -> %s msg_id=%d (forwarding) -> retuning RX to SF%d",
           name_of(self, route.next_hop), mid, self.data_sf))
-        self:tx(rts, { sf = self.routing_sf })
+        self:tx(rts, {
+          sf    = self.routing_sf,
+          label = "RTS-fwd",
+          info  = string.format("origin=%s dst=%s next=%s msg=%d data_sf=%d",
+            name_of(self, d.origin), name_of(self, d.dst),
+            name_of(self, route.next_hop), mid, self.data_sf),
+        })
         self:set_rx_sf(self.data_sf)
         self:emit("retune_for_cts", { sf = self.data_sf })
       end
@@ -393,7 +416,12 @@ function on_command(self, cmd_str)
   self:emit("rts_tx", { origin = self.id, dst = dst_id, next = route.next_hop, msg_id = mid })
   self:log(string.format("rts_tx -> %s msg_id=%d (originate) -> retuning RX to SF%d",
     name_of(self, route.next_hop), mid, self.data_sf))
-  self:tx(frame, { sf = self.routing_sf })
+  self:tx(frame, {
+    sf    = self.routing_sf,
+    label = "RTS",
+    info  = string.format("dst=%s next=%s msg=%d data_sf=%d payload=%q",
+      dst_name, name_of(self, route.next_hop), mid, self.data_sf, text),
+  })
 
   self:set_rx_sf(self.data_sf)
   self:emit("retune_for_cts", { sf = self.data_sf })
