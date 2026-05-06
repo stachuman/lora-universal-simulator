@@ -188,6 +188,21 @@ All callbacks are optional except `on_init` (a script that doesn't define `on_in
 | `self:log(...)` | Concatenate args and emit a `script_log` event on this node |
 | `self:emit(type_str, data_table)` | Emit a custom NDJSON event (`type` field is `"script:" .. type_str`) |
 | `self:peers()` | DEBUG ONLY. Returns a list of node ids physically reachable from this node. **Don't use in protocol logic** — a real radio can't see this. |
+| `self:set_rx_sf(sf)` | Retune the receiver to a single SF (clamped to [5,12]). Models real-hardware register-write retune. |
+| `self:set_rx_sf_set(t)` | Retune to a multi-SF set (Lua array of integers). Empty/all-invalid table is ignored. |
+
+**`sim:` namespace** (global table for scripts driving / inspecting the sim):
+
+| Method | Behavior |
+|---|---|
+| `sim:time()` | Current sim time, ms |
+| `sim:step(ms?)` | Advance one step (or `ms` if given) — for sim-driver scripts |
+| `sim:run(ms?)` | Run for `ms` (or to `cfg.duration_ms`) |
+| `sim:next()` | Run until at least one new event lands |
+| `sim:cmd(node_name, text)` | Dispatch a command to a node, return its reply |
+| `sim:nodes()` | List all nodes: `[{id, name, script}, ...]` |
+| `sim:events(n?)` | Last `n` (default 10) events as Lua tables |
+| `sim:link_snr(from_name, to_name)` | Static link SNR in dB, or nil if no link configured |
 
 ### 7.3 Initial state
 
@@ -318,10 +333,19 @@ If the smoke test fails (>5 minutes), the LuaJIT swap is the first remediation; 
 | `simulation.radio.bw` | 250.0 | 7.8..500.0 | LoRa bandwidth (kHz) |
 | `simulation.radio.cr` | 5 | 5..8 | LoRa coding rate denominator (4/5..4/8) |
 | `MAX_PENDING_TIMERS_PER_NODE` | 64 | compile-time | Bound on the per-node timer min-heap |
+| `nodes[i].sf_rx_set` | `[node.sf]` | array of SFs in [5,12] | RX SF set per node. Default single-SF matches real Semtech hardware. Opt into multi-SF (`[7..12]`) for paper-reproduction. Out-of-range entries warn-and-clamp. |
+| `nodes[i].lat`, `nodes[i].lon` | unset | WGS84 degrees | Geographic position. With `simulation.path_loss`, distance-derived SNR/RSSI populates the link matrix. |
+| `simulation.path_loss.model` | unset | `"log_distance"` | Enables path-loss-based link computation. |
+| `simulation.path_loss.alpha` | 3.0 | 2.0..4.5 | Path-loss exponent (free-space=2, urban LoRa~3..3.5) |
+| `simulation.path_loss.sigma_db` | 0.0 | ≥0 | Log-normal shadowing stddev. 0 = deterministic. |
+| `simulation.path_loss.ref_distance_m` | 1.0 | >0 | Reference distance d₀ for the model |
+| `simulation.path_loss.ref_loss_db` | 40.0 | any | Loss at d₀ (calibration anchor) |
+| `simulation.path_loss.noise_floor_db` | -120.0 | any | Receiver noise floor for SNR derivation |
+| `simulation.path_loss.tx_power_dbm` | 14.0 | any | Transmit power for SNR derivation |
 
-Per-link knobs (snr, rssi, bidir, snr_std_dev, snr_coherence_ms, loss) inherit from `meshcore_real_sim`'s schema unchanged.
+Per-link knobs (snr, rssi, bidir, snr_std_dev, snr_coherence_ms, loss) inherit from `meshcore_real_sim`'s schema unchanged. Explicit `topology.links` entries override path-loss output for the same pair.
 
-Per-tx overrides via `self:tx(bytes, opts)`: `{sf, bw, cr, power_dbm}`.
+Per-tx overrides via `self:tx(bytes, opts)`: `{sf, bw, cr, power_dbm, preamble_sym}`.
 
 ---
 

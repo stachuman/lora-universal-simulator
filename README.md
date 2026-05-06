@@ -4,6 +4,17 @@ Host-side network simulator for LoRa-mesh protocol research. Each node's
 behavior is defined in Lua; the simulator provides radio physics, topology,
 and an event stream.
 
+Topology can be specified declaratively two ways:
+- **Static link matrix**: `topology.links[]` with explicit SNR/RSSI per pair
+- **Geographic deployment**: per-node `lat`/`lon` plus a `simulation.path_loss`
+  block (log-distance + log-normal shadowing). Link SNR/RSSI is computed from
+  positions at sim init and exposed to scripts via `sim:link_snr(from, to)`.
+
+Single-SF reception is the default (matches real Semtech hardware). Configs
+opt into idealized multi-SF reception per node via `nodes[i].sf_rx_set`.
+Scripts can retune at runtime with `self:set_rx_sf(sf)` for announce-and-tune
+protocols.
+
 See `docs/superpowers/specs/2026-05-05-lora-universal-simulator-design.md`
 for the design.
 

@@ -15,6 +15,23 @@ AN1200.85). Opt into idealized multi-SF reception (e.g. `[7..12]`) for
 paper-reproduction (Centelles et al. 2024) or future scanner-repeater
 experiments. SF-mismatch packets emit `drop_sf_mismatch`.
 
+## R.1.8 note: dynamic SF retune (`self:set_rx_sf`)
+
+Scripts can retune the receiver's SF set at runtime: `self:set_rx_sf(sf)`
+for single-SF and `self:set_rx_sf_set({sf, ...})` for multi-SF. The
+modem doesn't reboot — change takes effect for subsequent packets.
+Models the announce-and-tune pattern where one node tells listeners to
+switch SF for follow-up traffic.
+
+## R.2 note: path-loss + lat/lon topology
+
+Per-node `lat`/`lon` plus a `simulation.path_loss` block (log-distance
+model with optional log-normal shadowing) computes the link SNR/RSSI
+matrix at sim init. Mixed mode: explicit `topology.links` entries
+override the path-loss output for the same pair. Adaptive scripts can
+poll the static link SNR via `sim:link_snr(from_name, to_name)` —
+returns dB or nil if no link exists.
+
 ## Documented in T13's report
 
 ### 1. LBT gating before TX scheduling
