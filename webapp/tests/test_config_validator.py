@@ -67,3 +67,74 @@ def test_unknown_top_level_rejected(minimal_lus_config):
     cfg["unknown_field"] = 42
     parsed, errors = validate(cfg)
     assert parsed is None  # extra="forbid" rejects
+
+
+def test_meshcore_requires_plugins_rejected(minimal_lus_config):
+    cfg = dict(minimal_lus_config)
+    cfg["_requires_plugins"] = ["fw_mc"]
+    parsed, errors = validate(cfg)
+    assert parsed is None
+    assert any("_requires_plugins" in e and "MeshCore-specific" in e for e in errors)
+
+
+def test_cr_low_values_accepted(minimal_lus_config):
+    """C++ side accepts any cr > 0; schema must not reject Semtech 1..4 encoding."""
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["radio"] = dict(cfg["simulation"]["radio"], cr=1)
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.simulation.radio.cr == 1
+
+
+def test_radio_extra_fields_accepted(minimal_lus_config):
+    """capture_locked_db, capture_unlocked_db, snr_coherence_ms are read by C++."""
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["radio"] = dict(
+        cfg["simulation"]["radio"],
+        capture_locked_db=8.0,
+        capture_unlocked_db=4.0,
+        snr_coherence_ms=200.0,
+    )
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.simulation.radio.capture_locked_db == 8.0
+
+
+def test_radio_hardware_nested_block_accepted(minimal_lus_config):
+    """C++ reads radio.hardware.{rx_to_tx_delay_ms, tx_to_rx_delay_ms} (nested)."""
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["radio"] = dict(
+        cfg["simulation"]["radio"],
+        hardware={"rx_to_tx_delay_ms": 1, "tx_to_rx_delay_ms": 2},
+    )
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.simulation.radio.hardware.rx_to_tx_delay_ms == 1
+
+
+def test_simulation_seed_and_epoch_accepted(minimal_lus_config):
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"], seed=42, epoch_start=100)
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.simulation.seed == 42
+
+
+def test_step_ms_zero_rejected(minimal_lus_config):
+    """C++ rejects step_ms=0; Python schema must too."""
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"], step_ms=0)
+    parsed, errors = validate(cfg)
+    assert parsed is None
+
+
+def test_command_lua_variant_accepted(minimal_lus_config):
+    """C++ supports {at_ms, lua} commands; schema must accept them."""
+    cfg = dict(minimal_lus_config)
+    cfg["commands"] = [{"at_ms": 100, "lua": "print('hi')"}]
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.commands[0].lua == "print('hi')"

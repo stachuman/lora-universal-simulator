@@ -23,25 +23,40 @@ class PathLossModel(BaseModel):
     tx_power_dbm: float
 
 
+class RadioHardware(BaseModel):
+    """Per-radio hardware turnaround delays (rx<->tx mode switching)."""
+    model_config = ConfigDict(extra="forbid")
+
+    rx_to_tx_delay_ms: Optional[int] = Field(default=None, ge=0)
+    tx_to_rx_delay_ms: Optional[int] = Field(default=None, ge=0)
+
+
 class RadioConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sf: int = Field(ge=5, le=12)
     bw: int  # kHz
-    cr: int = Field(ge=5, le=8)
+    # cr: lus accepts any positive integer (universal sanity check only;
+    # see core/topology/JsonConfig.cpp validator). Different sources use
+    # different encodings (Semtech 1..4 for CR4/5..CR4/8, or 5..8).
+    cr: int = Field(ge=1)
     cad_miss_prob: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     cad_reliable_snr: Optional[float] = None
     cad_marginal_snr: Optional[float] = None
-    rx_to_tx_delay_ms: Optional[int] = Field(default=None, ge=0)
-    tx_to_rx_delay_ms: Optional[int] = Field(default=None, ge=0)
+    capture_locked_db: Optional[float] = Field(default=None, ge=0.0)
+    capture_unlocked_db: Optional[float] = Field(default=None, ge=0.0)
+    snr_coherence_ms: Optional[float] = Field(default=None, ge=0.0)
+    hardware: Optional[RadioHardware] = None
 
 
 class SimulationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     duration_ms: int = Field(gt=0)
-    step_ms: int = Field(default=1)
+    step_ms: int = Field(default=1, ge=1)
     warmup_ms: int = Field(default=0, ge=0)
+    seed: Optional[int] = Field(default=None, ge=0)
+    epoch_start: Optional[int] = Field(default=None, ge=0)
     radio: RadioConfig
     path_loss: Optional[PathLossModel] = None
 
@@ -56,7 +71,7 @@ class NodeConfig(BaseModel):
     lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     sf: Optional[int] = Field(default=None, ge=5, le=12)
     bw: Optional[int] = None  # kHz
-    cr: Optional[int] = Field(default=None, ge=5, le=8)
+    cr: Optional[int] = Field(default=None, ge=1)  # see RadioConfig.cr note
     sf_rx_set: Optional[List[int]] = None
 
 
@@ -80,11 +95,15 @@ class Topology(BaseModel):
 
 
 class CommandEntry(BaseModel):
+    """Either {at_ms, node, command} (dispatch to a node's on_command) or
+    {at_ms, lua} (run a Lua snippet — see core/topology/JsonConfig.cpp).
+    Validator below enforces that exactly one of the two pairings is used."""
     model_config = ConfigDict(extra="forbid")
 
     at_ms: int = Field(ge=0)
-    node: str
-    command: str
+    node: Optional[str] = None
+    command: Optional[str] = None
+    lua: Optional[str] = None
 
 
 class ExpectEntry(BaseModel):
