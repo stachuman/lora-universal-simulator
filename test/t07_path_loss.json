@@ -1,0 +1,35 @@
+{
+  "_name": "t07_path_loss",
+  "_desc": "Three nodes deployed via lat/lon. Path-loss model determines link SNR. alice-bob ~100m -> SNR ~40 dB, strong link. alice-charlie ~5.56km -> SNR ~-12.4 dB: SF7 fails (drop_weak vs threshold -7.5), SF12 succeeds (vs threshold -20). sigma_db=0 keeps the test deterministic.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance",
+      "alpha": 3.0,
+      "sigma_db": 0.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 20.0
+    }
+  },
+  "nodes": [
+    { "name": "alice",   "script": "examples/sf_picker.lua", "config": {}, "lat": 41.3900, "lon": 2.1600, "sf_rx_set": [7, 12] },
+    { "name": "bob",     "script": "examples/sf_picker.lua", "config": {}, "lat": 41.3909, "lon": 2.1600, "sf_rx_set": [7, 12] },
+    { "name": "charlie", "script": "examples/sf_picker.lua", "config": {}, "lat": 41.4400, "lon": 2.1600, "sf_rx_set": [7, 12] }
+  ],
+  "topology": { "links": [] },
+  "commands": [
+    { "at_ms":  5000, "node": "alice", "command": "send_sf 7  short-link"  },
+    { "at_ms": 15000, "node": "alice", "command": "send_sf 7  long-link"   },
+    { "at_ms": 25000, "node": "alice", "command": "send_sf 12 long-link"   }
+  ],
+  "expect": [
+    { "type": "event_count_min", "event_type": "rx",        "node": "bob",     "min": 1 },
+    { "type": "event_count_min", "event_type": "drop_weak", "node": "charlie", "min": 1 },
+    { "type": "event_count_min", "event_type": "rx",        "node": "charlie", "min": 1 }
+  ]
+}

@@ -78,6 +78,7 @@ run test_sim_controller "$SCRIPT_DIR/test_sim_controller.cpp" \
     "$REPO_ROOT/core/radio/SimRadio.cpp" \
     "$REPO_ROOT/core/link/LinkModel.cpp" \
     "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
     "$REPO_ROOT/core/physics/CollisionModel.cpp" \
     "$REPO_ROOT/core/physics/LbtModel.cpp" \
     "$REPO_ROOT/core/events/EventLog.cpp" \

@@ -30,7 +30,9 @@
 
 #include "core/clock/VirtualClock.h"
 #include "core/events/EventLog.h"
+#include "core/link/Geo.h"
 #include "core/link/LinkModel.h"
+#include "core/link/PathLossModel.h"
 #include "core/physics/CollisionModel.h"
 #include "core/physics/LbtModel.h"
 #include "core/radio/SimRadio.h"
@@ -146,6 +148,56 @@ void SimController::initialize() {
 
     // ---- Link model ---------------------------------------------------------
     _links = std::make_unique<MatrixLinkModel>(n);
+
+    // Path-loss baseline: when simulation.path_loss.present, compute
+    // SNR/RSSI from haversine distance for every directed (i, j) pair
+    // where both endpoints have lat/lon. This populates the link
+    // matrix BEFORE the explicit topology.links loop, so any explicit
+    // entries below override the path-loss-derived per-pair values
+    // (useful for tests that want surgical link tuning on top of
+    // automated defaults). Sigma is sampled once per directed link
+    // here; per-step variation is the LinkFadingState's job (R.1.5).
+    if (_cfg.simulation.path_loss.present) {
+        PathLossConfig plc;
+        plc.model          = _cfg.simulation.path_loss.model;
+        plc.alpha          = _cfg.simulation.path_loss.alpha;
+        plc.sigma_db       = _cfg.simulation.path_loss.sigma_db;
+        plc.ref_distance_m = _cfg.simulation.path_loss.ref_distance_m;
+        plc.ref_loss_db    = _cfg.simulation.path_loss.ref_loss_db;
+        plc.noise_floor_db = _cfg.simulation.path_loss.noise_floor_db;
+        plc.tx_power_dbm   = _cfg.simulation.path_loss.tx_power_dbm;
+        PathLossModel pl(plc, _rng);
+
+        int missing_loc_count = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!_cfg.nodes[i].has_location) {
+                ++missing_loc_count;
+                continue;
+            }
+            for (int j = 0; j < n; ++j) {
+                if (i == j) continue;
+                if (!_cfg.nodes[j].has_location) continue;
+                const double d = lus::haversineDistanceMeters(
+                    _cfg.nodes[i].lat, _cfg.nodes[i].lon,
+                    _cfg.nodes[j].lat, _cfg.nodes[j].lon);
+                const auto sig = pl.sample(d);
+                _links->setLink(i, j, sig.snr_db, sig.rssi_dbm,
+                                /*snr_std_dev=*/static_cast<float>(
+                                    _cfg.simulation.path_loss.sigma_db),
+                                /*loss=*/0.0f);
+            }
+        }
+        if (missing_loc_count > 0) {
+            std::fprintf(stderr,
+                "[lus] warning: %d node(s) missing lat/lon - no path-loss "
+                "links computed for them\n",
+                missing_loc_count);
+        }
+    }
+
+    // Explicit topology.links entries apply AFTER the path-loss baseline
+    // (when present), overriding per-pair values. When path_loss is
+    // absent, this is the only source of link configuration.
     for (const auto& l : _cfg.topology.links) {
         auto fit = _name_to_id.find(l.from);
         auto tit = _name_to_id.find(l.to);
