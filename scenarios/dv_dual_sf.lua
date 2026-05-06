@@ -163,6 +163,10 @@ function on_init(self, config)
   self.routing_sf       = config.routing_sf      or 7
   self.data_sf          = config.data_sf         or 12
   self.beacon_period_ms = config.beacon_period_ms or 5000
+  -- Inter-frame gap between CTS RX and DATA TX (originator side). The
+  -- simulator's set_rx_sf is instantaneous, but real hardware needs a
+  -- handful of µs to settle on the new SF — pad with 5ms by default.
+  self.cts_to_data_gap_ms = config.cts_to_data_gap_ms or 5
 
   self.rt              = {}
   self.next_msg_id     = 1
@@ -257,7 +261,7 @@ function on_recv(self, frame, meta)
     end
 
     self:emit("rts_rx", { from = r.src, origin = r.origin, dst = r.dst, msg_id = r.msg_id })
-    self:log(string.format("rts_rx <- %s (origin=%s dst=%s msg_id=%d) -> retuning RX to SF%d",
+    self:log(string.format("rts_rx <- %s (origin=%s dst=%s msg_id=%d) -> retuning RX to SF%d for incoming DATA",
       name_of(self, r.src), name_of(self, r.origin), name_of(self, r.dst), r.msg_id, self.data_sf))
     -- Remember the RTS context so we can match the incoming DATA.
     self.pending_rx = {
@@ -266,15 +270,21 @@ function on_recv(self, frame, meta)
       dst     = r.dst,
       msg_id  = r.msg_id,
     }
+    -- Retune RX to data_sf NOW so by the time the DATA frame arrives the
+    -- modem is well-settled on the new SF. CTS itself goes on routing_sf
+    -- (per-tx SF override), so this RX retune doesn't affect CTS TX.
     self:set_rx_sf(self.data_sf)
     self:emit("retune_for_data", { sf = self.data_sf })
 
     local cts = pack_cts(self.id, r.msg_id)
     self:emit("cts_tx", { to = r.src, msg_id = r.msg_id })
-    self:log(string.format("cts_tx -> %s msg_id=%d (on SF%d)",
-      name_of(self, r.src), r.msg_id, self.data_sf))
+    self:log(string.format("cts_tx -> %s msg_id=%d (on routing SF%d)",
+      name_of(self, r.src), r.msg_id, self.routing_sf))
+    -- CTS rides on routing_sf (short, ~25ms airtime) instead of data_sf
+    -- (~446ms at SF12). Originator's RX is still on routing_sf so it
+    -- receives the CTS without retune. Big throughput win per hop.
     self:tx(cts, {
-      sf    = self.data_sf,
+      sf    = self.routing_sf,
       label = "CTS",
       info  = string.format("to=%s msg=%d", name_of(self, r.src), r.msg_id),
     })
@@ -288,38 +298,37 @@ function on_recv(self, frame, meta)
     if c.msg_id ~= self.pending_tx.msg_id then return end
 
     self:emit("cts_rx", { from = c.src, msg_id = c.msg_id })
-    self:log(string.format("cts_rx <- %s msg_id=%d -> sending DATA on SF%d",
-      name_of(self, c.src), c.msg_id, self.data_sf))
-    local d = pack_data(
-      self.pending_tx.origin,
-      self.id,
-      self.pending_tx.dst,
-      self.pending_tx.next,
-      self.pending_tx.msg_id,
-      self.pending_tx.payload
-    )
-    self:emit("data_tx", {
-      origin = self.pending_tx.origin,
-      dst    = self.pending_tx.dst,
-      next   = self.pending_tx.next,
-      msg_id = self.pending_tx.msg_id,
-      len    = #self.pending_tx.payload,
-    })
-    self:log(string.format("data_tx -> %s msg_id=%d payload=%q (then back to SF%d for routing)",
-      name_of(self, self.pending_tx.next), self.pending_tx.msg_id,
-      self.pending_tx.payload, self.routing_sf))
-    self:tx(d, {
-      sf    = self.data_sf,
-      label = "DATA",
-      info  = string.format("origin=%s dst=%s next=%s msg=%d payload=%q",
-        name_of(self, self.pending_tx.origin),
-        name_of(self, self.pending_tx.dst),
-        name_of(self, self.pending_tx.next),
-        self.pending_tx.msg_id,
-        self.pending_tx.payload),
-    })
-    self:set_rx_sf(self.routing_sf)
-    self.pending_tx = nil
+    -- Inter-frame gap before DATA TX. The simulator's set_rx_sf is
+    -- instantaneous (sub-µs register write modeled as zero), but real
+    -- hardware needs a few hundred microseconds to settle on the new
+    -- SF. A small delay here gives the receiver guaranteed margin.
+    -- Configurable via on_init: self.cts_to_data_gap_ms (default 5ms).
+    local gap = self.cts_to_data_gap_ms or 5
+    self:log(string.format("cts_rx <- %s msg_id=%d -> waiting %dms then sending DATA on SF%d",
+      name_of(self, c.src), c.msg_id, gap, self.data_sf))
+    -- Capture the snapshot so the timer fire still has the right
+    -- pending_tx context if anything mutates it (e.g., a forward dance
+    -- starting concurrently — shouldn't happen in scenario A, but be safe).
+    local px = self.pending_tx
+    self:after(gap, function()
+      local d = pack_data(px.origin, self.id, px.dst, px.next, px.msg_id, px.payload)
+      self:emit("data_tx", {
+        origin = px.origin, dst = px.dst, next = px.next,
+        msg_id = px.msg_id, len = #px.payload,
+      })
+      self:log(string.format("data_tx -> %s msg_id=%d payload=%q (alice's RX stays on routing SF%d)",
+        name_of(self, px.next), px.msg_id, px.payload, self.routing_sf))
+      self:tx(d, {
+        sf    = self.data_sf,
+        label = "DATA",
+        info  = string.format("origin=%s dst=%s next=%s msg=%d payload=%q",
+          name_of(self, px.origin), name_of(self, px.dst),
+          name_of(self, px.next), px.msg_id, px.payload),
+      })
+      -- Originator never retuned RX (CTS came back on routing_sf), so
+      -- no set_rx_sf needed here. Just clear the in-flight marker.
+      self.pending_tx = nil
+    end)
     return
   end
 
@@ -384,8 +393,8 @@ function on_recv(self, frame, meta)
             name_of(self, d.origin), name_of(self, d.dst),
             name_of(self, route.next_hop), mid, self.data_sf),
         })
-        self:set_rx_sf(self.data_sf)
-        self:emit("retune_for_cts", { sf = self.data_sf })
+        -- Forwarder stays on routing_sf RX — CTS will come back on
+        -- routing_sf (not data_sf as in the older protocol). No retune.
       end
     end
     return
@@ -414,8 +423,8 @@ function on_command(self, cmd_str)
 
   local frame = pack_rts(self.id, self.id, dst_id, route.next_hop, mid, self.data_sf)
   self:emit("rts_tx", { origin = self.id, dst = dst_id, next = route.next_hop, msg_id = mid })
-  self:log(string.format("rts_tx -> %s msg_id=%d (originate) -> retuning RX to SF%d",
-    name_of(self, route.next_hop), mid, self.data_sf))
+  self:log(string.format("rts_tx -> %s msg_id=%d (originate, RX stays on routing SF%d for CTS)",
+    name_of(self, route.next_hop), mid, self.routing_sf))
   self:tx(frame, {
     sf    = self.routing_sf,
     label = "RTS",
@@ -423,8 +432,8 @@ function on_command(self, cmd_str)
       dst_name, name_of(self, route.next_hop), mid, self.data_sf, text),
   })
 
-  self:set_rx_sf(self.data_sf)
-  self:emit("retune_for_cts", { sf = self.data_sf })
+  -- Originator stays on routing_sf RX. CTS will come back on routing_sf
+  -- (short airtime, no SF mismatch); only the DATA leg uses data_sf.
 
   return string.format("sent RTS msg_id=%d to %s via %d", mid, dst_name, route.next_hop)
 end
