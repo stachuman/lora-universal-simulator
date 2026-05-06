@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import Settings
-from server.routers import interactive, simulations
+from server.routers import interactive, simulations, topologies, topo_creator
 from server.services.event_index import EventIndexCache
 from server.services.interactive_manager import InteractiveSessionManager
 from server.services.sim_manager import SimManager
@@ -25,7 +25,7 @@ from server.services.sim_manager import SimManager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings.get()
-    for sub in ("simulations", "interactive"):
+    for sub in ("simulations", "interactive", "topologies"):
         (settings.DATA_DIR / sub).mkdir(parents=True, exist_ok=True)
     app.state.sim_manager = SimManager(
         data_dir=settings.DATA_DIR,
@@ -52,6 +52,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 app.include_router(simulations.router, prefix="/api/sims", tags=["sims"])
 app.include_router(interactive.router, prefix="/api/interactive", tags=["interactive"])
+app.include_router(topologies.router, prefix="/api/topologies", tags=["topologies"])
+app.include_router(topo_creator.router, prefix="/api/topo-creator", tags=["topo-creator"])
 
 # Static mount — served from webapp/static/.
 _static = pathlib.Path(__file__).resolve().parent.parent / "static"
