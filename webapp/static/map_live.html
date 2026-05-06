@@ -984,7 +984,7 @@ function replayFrame(wallTs) {
   if (replayCursor > replayEndMs) replayCursor = replayEndMs;
 
   // Fire all events whose time_ms <= replayCursor that haven't been fired yet
-  while (replayNextIdx < allEvents.length && allEvents[replayNextIdx].time_ms <= replayCursor) {
+  while (replayNextIdx < allEvents.length && fireMs(allEvents[replayNextIdx]) <= replayCursor) {
     fireEvent(allEvents[replayNextIdx]);
     replayNextIdx++;
   }
@@ -1003,8 +1003,21 @@ function replayFrame(wallTs) {
   }
 }
 
+// rx/drop/collision events stamp time_ms at packet-completion time
+// (= TX-start + airtime_ms). For visualization, the receiver should be
+// "lit up" the moment the sender starts transmitting (signal propagation
+// is essentially instantaneous), so fire those events at TX-start. Tag
+// each event with a _fire_ms so the replay cursor uses the right time.
+const RX_LIKE = new Set(['rx', 'drop_weak', 'drop_sf_mismatch',
+                         'drop_halfduplex', 'collision']);
+
+function fireMs(ev) {
+  if (RX_LIKE.has(ev.type)) return (ev.time_ms || 0) - (ev.airtime_ms || 0);
+  return ev.time_ms || 0;
+}
+
 function startReplay(events, endMs) {
-  allEvents    = events.slice().sort((a, b) => (a.time_ms || 0) - (b.time_ms || 0));
+  allEvents    = events.slice().sort((a, b) => fireMs(a) - fireMs(b));
   replayEndMs  = endMs || 60000;
   replayCursor = 0;
   replayNextIdx = 0;

@@ -764,8 +764,10 @@ function drawEvents() {
 
     for (const ev of events) {
         const t = ev.time_ms;
-        const t_end = t + (ev.airtime_ms || 0);
-        if (t_end < S.viewFrom || t > S.viewTo) continue;
+        const at = ev.airtime_ms || 0;
+        // Conservative clip: tx events span [t, t+at]; rx-like events span
+        // [t-at, t]. Union [t-at, t+at] is safe for both.
+        if (t + at < S.viewFrom || t - at > S.viewTo) continue;
 
         const etype = ev.type;
         const x = msToX(t);
@@ -834,8 +836,14 @@ function drawEvents() {
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
             const airtime = ev.airtime_ms || 50;
-            const x2 = msToX(t + airtime);
-            const boxW = Math.max(2, x2 - x);
+            // rx event time_ms is the END of reception (delivery to on_recv).
+            // Signal propagation is essentially instantaneous, so the receiver
+            // was busy from when the sender started TX = time_ms - airtime_ms.
+            // Draw the bar to span [TX-start, RX-delivery] on the receiver lane.
+            const xStart = msToX(t - airtime);
+            const xEnd = msToX(t);
+            const boxX = xStart;
+            const boxW = Math.max(2, xEnd - xStart);
             const boxH = S.laneH / 2 - 2;
             const boxY = y + S.laneH / 2;
 
@@ -843,33 +851,35 @@ function drawEvents() {
             ctx.strokeStyle = isTraced ? COLORS.trace_highlight : COLORS.rx;
             ctx.lineWidth = isTraced ? 2 : 1.5;
             ctx.globalAlpha = isTraced ? 0.9 : 0.85;
-            ctx.strokeRect(x, boxY, boxW, boxH);
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
 
             // Light fill for visibility
             ctx.fillStyle = isTraced ? COLORS.trace_highlight : COLORS.rx;
             ctx.globalAlpha = isTraced ? 0.2 : 0.15;
-            ctx.fillRect(x, boxY, boxW, boxH);
+            ctx.fillRect(boxX, boxY, boxW, boxH);
             ctx.globalAlpha = 1;
             ctx.lineWidth = 1;
 
-            // SNR label next to RX bar
+            // SNR label next to RX bar (anchored at end of bar = delivery time).
             if (showSnr && ev.snr !== undefined) {
                 ctx.font = '8px monospace';
                 ctx.fillStyle = '#16a34a';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'top';
-                ctx.fillText(ev.snr.toFixed(1), x + boxW + 2, boxY);
+                ctx.fillText(ev.snr.toFixed(1), xEnd + 2, boxY);
             }
 
-            // Draw arrow from sender to receiver if both visible
+            // Draw arrow from sender to receiver if both visible. Anchor at
+            // the START of the RX bar (= TX-start time) so the arrow line
+            // sits at the moment of signal arrival, not at delivery.
             if (isTraced) {
                 const yFrom = nodeToY(ev.from);
                 if (yFrom !== null) {
                     ctx.strokeStyle = '#a1620766';
                     ctx.setLineDash([3, 3]);
                     ctx.beginPath();
-                    ctx.moveTo(x, yFrom + S.laneH / 2);
-                    ctx.lineTo(x, y + S.laneH / 2);
+                    ctx.moveTo(xStart, yFrom + S.laneH / 2);
+                    ctx.lineTo(xStart, y + S.laneH / 2);
                     ctx.stroke();
                     ctx.setLineDash([]);
                 }
@@ -925,26 +935,29 @@ function drawEvents() {
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
             const airtime = ev.airtime_ms || 50;
-            const x2 = msToX(t + airtime);
-            const boxW = Math.max(2, x2 - x);
+            // Same timing semantics as rx: time_ms is end-of-reception.
+            const xStart = msToX(t - airtime);
+            const xEnd = msToX(t);
+            const boxX = xStart;
+            const boxW = Math.max(2, xEnd - xStart);
             const boxH = S.laneH / 2 - 2;
             const boxY = y + S.laneH / 2;
 
             // Solid red fill — clearly "failed"
             ctx.fillStyle = isTraced ? '#dc2626' : '#b91c1c';
             ctx.globalAlpha = isTraced ? 0.5 : 0.4;
-            ctx.fillRect(x, boxY, boxW, boxH);
+            ctx.fillRect(boxX, boxY, boxW, boxH);
 
             // Diagonal hatch lines across the bar
             ctx.save();
             ctx.beginPath();
-            ctx.rect(x, boxY, boxW, boxH);
+            ctx.rect(boxX, boxY, boxW, boxH);
             ctx.clip();
             ctx.strokeStyle = isTraced ? '#dc2626' : '#b91c1c';
             ctx.lineWidth = 1;
             ctx.globalAlpha = isTraced ? 0.8 : 0.6;
             const step = 6;
-            for (let lx = x - boxH; lx < x + boxW + boxH; lx += step) {
+            for (let lx = boxX - boxH; lx < boxX + boxW + boxH; lx += step) {
                 ctx.beginPath();
                 ctx.moveTo(lx, boxY + boxH);
                 ctx.lineTo(lx + boxH, boxY);
@@ -957,17 +970,21 @@ function drawEvents() {
             const y = nodeToY(ev.to || ev.node);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
+            // Anchor the marker at TX-start (= time_ms - airtime_ms) — that's
+            // when the receiver actually saw the in-air signal that ended up
+            // dropped. The simulator stamps these events at delivery time.
+            const xMark = msToX(t - (ev.airtime_ms || 0));
             if (isTraced) {
                 ctx.fillStyle = (COLORS[etype] || '#ff8888') + '44';
                 ctx.beginPath();
-                ctx.arc(x, y + S.laneH - 4, 8, 0, Math.PI * 2);
+                ctx.arc(xMark, y + S.laneH - 4, 8, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.fillStyle = COLORS[etype] || '#ff8888';
-                ctx.fillRect(x - 3, y + S.laneH - 7, 6, 6);
+                ctx.fillRect(xMark - 3, y + S.laneH - 7, 6, 6);
             } else {
                 ctx.fillStyle = COLORS[etype] || '#ff8888';
                 ctx.globalAlpha = 0.6;
-                ctx.fillRect(x - 1, y + S.laneH - 5, 3, 3);
+                ctx.fillRect(xMark - 1, y + S.laneH - 5, 3, 3);
                 ctx.globalAlpha = 1;
             }
         } else if (etype === 'cmd_reply' || etype === 'script_log' || etype === 'script_emit') {
