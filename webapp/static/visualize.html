@@ -798,13 +798,19 @@ function drawCursorLine(h) {
     const x = msToX(S.cursorMs);
     if (x < S.labelW || x > canvas.width) return;
 
-    ctx.strokeStyle = '#7c3aed';   // vibrant purple — distinct from red NOW line and green TX bars
-    ctx.lineWidth = 2;
+    // Subtle dashed line so it doesn't obscure data behind it. The
+    // labeled triangle at the top (drawCursorLabel) carries the
+    // "where am I" weight; the line just hints at the column.
+    ctx.strokeStyle = '#7c3aed';   // vibrant purple — distinct from red NOW line
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.4;
+    ctx.setLineDash([3, 4]);
     ctx.beginPath();
     ctx.moveTo(x, S.headerH);
     ctx.lineTo(x, h);
     ctx.stroke();
-    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
 }
 
 function drawCursorLabel() {
