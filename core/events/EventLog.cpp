@@ -228,7 +228,7 @@ void cmdReply(unsigned long time_ms, const char* node,
 
 void collision(unsigned long time_ms, const char* from, const char* to,
                float snr, float rssi,
-               const uint8_t* data, int len,
+               const uint8_t* data, int len, uint32_t airtime_ms,
                int sf, int bw_hz,
                const char* interferer, float interferer_snr, float snr_margin) {
     char pkt[9];
@@ -237,18 +237,18 @@ void collision(unsigned long time_ms, const char* from, const char* to,
     if (interferer) {
         snprintf(buf, sizeof(buf),
             "{\"type\":\"collision\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\","
+            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\",\"airtime_ms\":%u,"
             "\"sf\":%d,\"bw_hz\":%d,"
             "\"interferer\":\"%s\",\"interferer_snr\":%.1f,\"snr_margin\":%.1f}\n",
-            time_ms, from, to, snr, rssi, pkt,
+            time_ms, from, to, snr, rssi, pkt, (unsigned)airtime_ms,
             sf, bw_hz,
             interferer, interferer_snr, snr_margin);
     } else {
         snprintf(buf, sizeof(buf),
             "{\"type\":\"collision\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\","
+            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\",\"airtime_ms\":%u,"
             "\"sf\":%d,\"bw_hz\":%d}\n",
-            time_ms, from, to, snr, rssi, pkt,
+            time_ms, from, to, snr, rssi, pkt, (unsigned)airtime_ms,
             sf, bw_hz);
     }
     emitLine(buf);
@@ -304,7 +304,7 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
                     float snr, float rssi,
-                    const uint8_t* data, int len,
+                    const uint8_t* data, int len, uint32_t airtime_ms,
                     int bw_hz) {
     char pkt[9];
     packetHashHex(pkt, data, len);
@@ -313,10 +313,10 @@ void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
         "{\"type\":\"drop_sf_mismatch\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
         "\"packet_sf\":%d,\"rx_sf\":%d,"
         "\"snr_db\":%.2f,\"rssi_dbm\":%.2f,"
-        "\"pkt\":\"%s\",\"bw_hz\":%d}\n",
+        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"bw_hz\":%d}\n",
         time_ms, from, to, packet_sf, rx_sf,
         snr, rssi,
-        pkt, bw_hz);
+        pkt, (unsigned)airtime_ms, bw_hz);
     emitLine(buf);
 }
 

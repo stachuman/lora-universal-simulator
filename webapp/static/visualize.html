@@ -1053,8 +1053,45 @@ function drawEvents() {
             const sz = isTraced ? 8 : 5;
             const cy = y + S.laneH / 2 + 2;
 
+            // Box spanning the whole airtime (= TX-start to time_ms).
+            // The receiver was demodulating during this whole period
+            // before the collision verdict was known at end-of-airtime.
+            const airtime = ev.airtime_ms || 0;
+            if (airtime > 0) {
+                const xStart = msToX(t - airtime);
+                const xEnd = x;
+                const boxX = xStart;
+                const boxW = Math.max(2, xEnd - xStart);
+                const boxH = S.laneH / 2 - 2;
+                const boxY = y + S.laneH / 2;
+
+                ctx.fillStyle = isTraced ? '#dc2626' : COLORS.collision;
+                ctx.globalAlpha = isTraced ? 0.4 : 0.25;
+                ctx.fillRect(boxX, boxY, boxW, boxH);
+
+                // Diagonal hatch — same pattern as drop_halfduplex but
+                // in collision orange so the user can tell them apart.
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(boxX, boxY, boxW, boxH);
+                ctx.clip();
+                ctx.strokeStyle = isTraced ? '#dc2626' : COLORS.collision;
+                ctx.lineWidth = 1;
+                ctx.globalAlpha = isTraced ? 0.7 : 0.5;
+                const step = 6;
+                for (let lx = boxX - boxH; lx < boxX + boxW + boxH; lx += step) {
+                    ctx.beginPath();
+                    ctx.moveTo(lx, boxY + boxH);
+                    ctx.lineTo(lx + boxH, boxY);
+                    ctx.stroke();
+                }
+                ctx.restore();
+                ctx.globalAlpha = 1;
+                ctx.lineWidth = 1;
+            }
+
             if (isTraced) {
-                // Bright glow circle behind the X
+                // Bright glow circle behind the X (still useful punctuation)
                 ctx.fillStyle = '#dc262644';
                 ctx.beginPath();
                 ctx.arc(x, cy, sz + 4, 0, Math.PI * 2);
@@ -1065,6 +1102,8 @@ function drawEvents() {
                 ctx.fill();
             }
 
+            // X mark at TX-end (= the moment the collision verdict
+            // landed). Reads as "this is where the failure was decided."
             ctx.strokeStyle = isTraced ? '#dc2626' : COLORS.collision;
             ctx.lineWidth = isTraced ? 3 : 1.5;
             ctx.globalAlpha = isTraced ? 1 : 0.85;
@@ -1132,45 +1171,71 @@ function drawEvents() {
             const y = nodeToY(ev.to || ev.node, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
-            // Anchor the marker at TX-start (= time_ms - airtime_ms) — that's
-            // when the receiver actually saw the in-air signal that ended up
-            // dropped. The simulator stamps these events at delivery time.
-            const xMark = msToX(t - (ev.airtime_ms || 0));
-            // drop_sf_mismatch is now SNR-gated (only emitted on receivers
-            // that WOULD have decoded at the correct SF), so it represents
-            // a meaningful "wrong-SF on a reachable node" event — render
-            // it bigger than the noisy-by-nature drop_weak.
+            // Anchor at TX-start (= time_ms - airtime_ms) — the moment
+            // the receiver first saw the in-air signal.
+            const airtime = ev.airtime_ms || 0;
+            const xMark = msToX(t - airtime);
             const isMismatch = (etype === 'drop_sf_mismatch');
-            if (isTraced) {
+
+            if (isMismatch && airtime > 0) {
+                // drop_sf_mismatch is now SNR-gated (only emitted on
+                // receivers that WOULD have decoded at the correct SF).
+                // Render as an airtime-spanning box so the user sees
+                // "this whole period was wasted on a wrong-SF packet"
+                // — same pattern as drop_halfduplex but in pink.
+                const xEnd = msToX(t);
+                const boxX = xMark;
+                const boxW = Math.max(2, xEnd - xMark);
+                const boxH = S.laneH / 2 - 2;
+                const boxY = y + S.laneH / 2;
+
+                ctx.fillStyle = COLORS.drop_sf_mismatch;
+                ctx.globalAlpha = isTraced ? 0.45 : 0.3;
+                ctx.fillRect(boxX, boxY, boxW, boxH);
+
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(boxX, boxY, boxW, boxH);
+                ctx.clip();
+                ctx.strokeStyle = COLORS.drop_sf_mismatch;
+                ctx.lineWidth = 1;
+                ctx.globalAlpha = isTraced ? 0.75 : 0.55;
+                const step = 6;
+                for (let lx = boxX - boxH; lx < boxX + boxW + boxH; lx += step) {
+                    ctx.beginPath();
+                    ctx.moveTo(lx, boxY + boxH);
+                    ctx.lineTo(lx + boxH, boxY);
+                    ctx.stroke();
+                }
+                ctx.restore();
+                ctx.globalAlpha = 1;
+                ctx.lineWidth = 1;
+
+                // SNR badge above the box (only when zoomed in enough).
+                if (typeof ev.snr_db === 'number'
+                    && (S.viewTo - S.viewFrom) < 30000 && boxW >= 18) {
+                    ctx.font = '8px monospace';
+                    ctx.fillStyle = COLORS.drop_sf_mismatch;
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(ev.snr_db.toFixed(1), boxX + 2, boxY - 5);
+                }
+            } else if (isTraced) {
+                // Traced drop_weak — small but visible marker.
                 ctx.fillStyle = (COLORS[etype] || '#ff8888') + '44';
                 ctx.beginPath();
                 ctx.arc(xMark, y + S.laneH - 4, 8, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.fillStyle = COLORS[etype] || '#ff8888';
                 ctx.fillRect(xMark - 3, y + S.laneH - 7, 6, 6);
-            } else if (isMismatch) {
-                // Larger 5x5 marker, full alpha — this is now a
-                // "would-have-decoded-at-correct-SF" event, worth seeing.
-                ctx.fillStyle = COLORS[etype] || '#ff8888';
-                ctx.fillRect(xMark - 2, y + S.laneH - 6, 5, 5);
             } else {
-                // drop_weak — keep the small unobtrusive marker since it's
-                // emitted for every below-threshold reachable receiver.
+                // drop_weak — keep the small unobtrusive marker; emitted
+                // for every below-threshold reachable receiver and would
+                // flood the view if expanded to a box.
                 ctx.fillStyle = COLORS[etype] || '#ff8888';
                 ctx.globalAlpha = 0.6;
                 ctx.fillRect(xMark - 1, y + S.laneH - 5, 3, 3);
                 ctx.globalAlpha = 1;
-            }
-            // Compact SNR badge next to the marker — only when zoomed in
-            // enough to be readable, and only for sf_mismatch (the
-            // "interesting" case the user wants to inspect).
-            if (isMismatch && typeof ev.snr_db === 'number'
-                && (S.viewTo - S.viewFrom) < 30000) {
-                ctx.font = '8px monospace';
-                ctx.fillStyle = COLORS[etype] || '#ff8888';
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(ev.snr_db.toFixed(1), xMark + 4, y + S.laneH - 4);
             }
         } else if (etype === 'cmd_reply' || etype === 'script_log' || etype === 'script_emit') {
             const y = nodeToY(ev.node, ev);

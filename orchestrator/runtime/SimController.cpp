@@ -481,6 +481,7 @@ void SimController::deliverReceptionsForStep() {
                     snr_at_rcv, lp.rssi,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                     static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
                     tx.sf, tx.bw_hz,
                     worst_interferer >= 0 ? _nodes[worst_interferer]->name().c_str() : nullptr,
                     worst_interferer_snr,
@@ -512,6 +513,7 @@ void SimController::deliverReceptionsForStep() {
                     snr_at_rcv, lp.rssi,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                     static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
                     tx.bw_hz);
                 continue;
             }

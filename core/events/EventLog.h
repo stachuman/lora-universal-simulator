@@ -61,7 +61,7 @@ void rx(unsigned long time_ms, const char* from, const char* to,
 
 void collision(unsigned long time_ms, const char* from, const char* to,
                float snr, float rssi,
-               const uint8_t* data, int len,
+               const uint8_t* data, int len, uint32_t airtime_ms,
                int sf, int bw_hz,
                const char* interferer = nullptr,
                float interferer_snr = 0.0f,
@@ -92,7 +92,7 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
                     float snr, float rssi,
-                    const uint8_t* data, int len,
+                    const uint8_t* data, int len, uint32_t airtime_ms,
                     int bw_hz);
 
 // TX failure events
