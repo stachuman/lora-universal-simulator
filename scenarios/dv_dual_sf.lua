@@ -224,6 +224,44 @@
 --   • Beacon advertise alt too (would double beacon size; tradeoff).
 --
 -- ============================================================================
+-- F1 mitigation: receiver-blind-window awareness via passive CTS overhearing
+-- ============================================================================
+--
+-- The data plane has an asymmetry: when relay R post-CTS-tx retunes to
+-- data_sf to receive DATA, R is deaf on routing_sf for the duration of
+-- (cts_to_data_gap + DATA airtime). Concurrent senders RTSing R during
+-- this window land as drop_sf_mismatch — silent at runtime, no NACK, so
+-- the sender wastes rts_max_retries before rts_giveup.
+--
+-- Mitigation: every node maintains self.blind_until[node_id] →
+-- absolute_ms, populated by overhearing every CTS frame on routing_sf
+-- (whether addressed to us or not). meta.src on the on_recv callback
+-- gives us the CTS-sender's id; the CTS payload carries chosen_data_sf
+-- so we can compute the upper-bound blind window:
+--   blind_window = cts_to_data_gap_ms
+--                + airtime(chosen_data_sf, max DATA frame)
+--
+-- Three call sites consult the table before TX'ing an RTS:
+--   • issue_send       (proactive — first attempt)
+--   • tx_rts_retry     (proactive — every retry)
+--   • rts_timeout_fire (reactive — when timeout fires, re-check)
+--
+-- When the next-hop is blind, the decision is:
+--   • have alt route + alt not yet tried + alt not also blind
+--                                          → switch to alt (free budget)
+--   • else                                  → defer until blind window ends
+--
+-- Plus exponential backoff on rts_timeout_ms (×2 per attempt, capped at
+-- ×RTS_TIMEOUT_BACKOFF_CAP) so the existing retry budget covers a full
+-- receiver blind window even when the CTS itself is lost in flight and
+-- the overhearing mechanism never fires.
+--
+-- New emits: blind_observed (every CTS overheard whose chosen_data_sf
+-- extends our recorded blind window for that sender), tx_blind_defer
+-- (every defer fired), tx_blind_alt (every alt-switch from blind state,
+-- distinct from NACK-driven path_switch).
+--
+-- ============================================================================
 -- Findings & open improvements (notes for future work)
 -- ============================================================================
 --
@@ -236,6 +274,13 @@
 --     routing_sf. Result: rts_giveup at the second originator after
 --     rts_max_retries.
 --
+--     STATUS: addressed via passive CTS overhearing — see "F1 mitigation"
+--     section above. Residual case: CTS lost in flight (overhearing
+--     mechanism never fires). Partially covered by exponential
+--     rts_timeout backoff (I-section), giving the receiver's
+--     pending_rx_expiry time to fire and clear, after which a late
+--     retry succeeds.
+--
 -- F2. Retry budget conflates two failure modes
 --     rts_max_retries (default 3) is consumed by both (a) "CTS didn't come
 --     back" — i.e., RTS reached but no response — and (b) on_radio_busy
@@ -245,12 +290,18 @@
 --     them exhausts the budget quickly under load and gives rts_giveup
 --     semantics on what should be a "wait a bit" condition.
 --
+--     STATUS: I1 (separate retry budgets) still future work.
+--
 -- F3. rts_timeout is dimensioned for one-shot RTS+CTS, not for "wait for
 --     the network to free up"
 --     With short SFs (SF8 routing → ~44ms RTS, SF9 data → ~78ms CTS) the
 --     rts_timeout is ~122ms. Three retries cover ~366ms — much shorter
 --     than a 4-hop SF9 flight (~hundreds of ms × 4 hops). When the chosen
 --     next-hop is mid-relay, this budget always expires first.
+--
+--     STATUS: partially addressed by the exponential rts_timeout
+--     backoff added with the F1 mitigation. Cumulative wait now
+--     scales (122 → 244 → 488ms cap) instead of staying flat.
 --
 -- I1. Separate retry budgets for the two failure modes (addresses F2)
 --     • rts_max_retries (cts-timeout retries) stays bounded — a true CTS
@@ -280,6 +331,9 @@
 --     real protocol-design choices — see the routing-topic block below
 --     for the discussion.
 --
+--     STATUS: superseded by both NACK (already implemented) and the
+--     F1 mitigation's passive blind_until table.
+--
 -- I4. Drop the "if pending_rx ~= nil" rejection path in favor of a queued
 --     forward-as-receiver
 --     Currently rts_rejected_busy is fatal-on-air. With the script-side
@@ -289,6 +343,11 @@
 --     come back well after the RTS, requiring much longer rts_timeout on
 --     the originator side. Couples cleanly with I3's busy NACK: the
 --     receiver could send "busy, try again in N ms" instead of silent.
+--
+--     STATUS: superseded by NACK; the queue-extension path is no
+--     longer needed because NACK already gives senders a busy-feedback
+--     signal and the F1 blind_until lets them avoid the deaf-hop
+--     entirely.
 --
 -- ---------- wire format helpers (private to this file) ----------------------
 
