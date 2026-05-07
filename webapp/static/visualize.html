@@ -148,6 +148,13 @@ const S = {
     raysMode: false,
     tracePkt: null,
     traceEvents: [],
+    // Flight trace: same machinery as tracePkt but matched by the
+    // (origin, payload) tuple that scripts emit on every flight-related
+    // script_emit. Lights up the whole RTS-CTS-DATA-ACK chain across all
+    // hops including retries (rts_retry, path_switch, NACK, etc.) — i.e.
+    // every event tagged with the same originator + payload bytes.
+    traceFlight: null,            // { origin: int, payload: string } | null
+    traceFlightEventSet: null,    // Set of references to matching script_emit events
     traceHopDepth: null,
     hoveredEvent: null,
     selectedEvent: null,
@@ -337,9 +344,11 @@ if (INTERACTIVE_ID) {
         render();
         syncScrollbar();
         updateFollowIndicator();
-        // Auto-refresh trace to pick up new relay hops
+        // Auto-refresh trace to pick up new relay hops / new flight events
         if (S.tracePkt) {
             await tracePkt(S.tracePkt);
+        } else if (S.traceFlight) {
+            await traceFlight(S.traceFlight.origin, S.traceFlight.payload);
         }
     });
 }
@@ -427,11 +436,17 @@ async function loadViewport() {
         if (S.viewFrom >= S.cachedFrom && S.viewTo <= S.cachedTo && S.cachedEvents.length > 0) {
             return;
         }
-        // Fetch with margin for smooth panning
+        // Fetch with margin for smooth panning. max= is bumped well
+        // above the server's 20k default so we don't silently subsample
+        // events for dense sims (e.g. s02 at ~1100 events/s × 90s
+        // margin-extended span = ~100k events; default would drop 80%).
+        // Density mode (span > 60s, handled above) is the right answer
+        // for truly large spans; here we want full fidelity.
         const margin = span * 0.5;
         const from = Math.max(0, Math.floor(S.viewFrom - margin));
         const to = Math.ceil(S.viewTo + margin);
-        const data = await fetchJSON(`${API_PREFIX}/events?from=${from}&to=${to}`);
+        const data = await fetchJSON(
+            `${API_PREFIX}/events?from=${from}&to=${to}&max=500000`);
         S.cachedEvents = data.events;
         S.cachedFrom = from;
         S.cachedTo = to;
@@ -517,12 +532,32 @@ function subRowFor(ev) {
 // If ev is provided, the sub-row offset for that event's (sf, bw_hz) is added.
 // Without ev, returns the top of the node group (sub-row 0).
 function nodeToY(name, ev) {
-    const idx = S.nodeIndex[name];
+    // tx/rx events use the canonical string name ("alice"); script_log /
+    // script_emit / cmd_reply use the integer registration id (lus assigns
+    // 0..N-1 in JSON-config order, which matches S.nodes[i] order). Accept
+    // both shapes here so script_emit diamonds render on the right lane.
+    let idx;
+    if (typeof name === 'number') {
+        idx = (name >= 0 && name < S.nodes.length) ? name : undefined;
+    } else {
+        idx = S.nodeIndex[name];
+    }
     if (idx === undefined) return null;
     const subRowCount = Math.max(1, S.subRows.length);
     const nodeLaneH = S.laneH * subRowCount;
     const subRowIdx = ev ? subRowFor(ev) : 0;
     return S.headerH + idx * nodeLaneH + subRowIdx * S.laneH - S.scrollY;
+}
+
+// Coerce a possibly-integer node identifier to the canonical string name.
+// Used by the hit-test path so a click on a script_emit diamond can
+// be tied back to S.nodes[laneIdx].name.
+function nodeIdToName(nodeRef) {
+    if (typeof nodeRef === 'number') {
+        if (nodeRef >= 0 && nodeRef < S.nodes.length) return S.nodes[nodeRef].name;
+        return null;
+    }
+    return nodeRef;
 }
 
 function updateMaxScrollY() {
@@ -655,8 +690,17 @@ function render() {
         drawEvents();
     }
 
-    // Draw trace overlay
-    if (S.tracePkt && S.traceEvents.length) {
+    // Flight trace polyline always shows when a flight is active —
+    // independent of the rays toggle. Rays (per-packet TX→RX) still
+    // gate on raysMode; the polyline is the higher-level flow view.
+    if (S.traceFlight && S.traceEvents.length) {
+        drawFlightPolyline();
+    }
+
+    // Draw trace overlay (rays for both pkt-trace and flight-trace use the
+    // same TX→RX matching logic; drawTrace runs whenever there are traced
+    // events to anchor)
+    if (S.traceEvents.length && (S.tracePkt || S.traceFlight)) {
         drawTrace();
     }
 
@@ -1259,10 +1303,14 @@ function drawEvents() {
         } else if (etype === 'cmd_reply' || etype === 'script_log' || etype === 'script_emit') {
             const y = nodeToY(ev.node, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
-            ctx.fillStyle = COLORS[etype] || '#cccccc';
-            ctx.globalAlpha = 0.8;
-            // Diamond
-            const sz = 3;
+            const isFlightTraced = S.traceFlightEventSet
+                && S.traceFlightEventSet.has(ev);
+            ctx.fillStyle = isFlightTraced
+                ? COLORS.trace_highlight
+                : (COLORS[etype] || '#cccccc');
+            ctx.globalAlpha = isFlightTraced ? 1.0 : 0.8;
+            // Diamond — bigger when on the traced flight so it stands out
+            const sz = isFlightTraced ? 5 : 3;
             const cy = y + S.laneH / 2;
             ctx.beginPath();
             ctx.moveTo(x, cy - sz);
@@ -1271,6 +1319,12 @@ function drawEvents() {
             ctx.lineTo(x - sz, cy);
             ctx.closePath();
             ctx.fill();
+            if (isFlightTraced) {
+                ctx.strokeStyle = '#a16207';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                ctx.lineWidth = 1;
+            }
             ctx.globalAlpha = 1;
         } else if (etype === 'tx_deferred') {
             const y = nodeToY(ev.node, ev);
@@ -1289,6 +1343,53 @@ function drawEvents() {
             ctx.globalAlpha = 1;
         }
     }
+}
+
+// Connect every event of the currently-traced flight with a single polyline
+// in chronological order. The path zigzags between node lanes — RTS at the
+// originator, CTS-rx back at the originator, DATA-tx, then chains onward to
+// the next forwarder, etc. — giving a single visual narrative of the
+// flight's journey across the mesh. Skipped if a flight isn't being traced
+// or fewer than 2 events exist.
+function drawFlightPolyline() {
+    if (!S.traceFlight) return;
+    if (!S.traceEvents || S.traceEvents.length < 2) return;
+
+    const sorted = [...S.traceEvents].sort((a, b) => a.time_ms - b.time_ms);
+    const pts = [];
+    for (const ev of sorted) {
+        const x = msToX(ev.time_ms);
+        const y = nodeToY(ev.node, ev);
+        if (y === null) continue;
+        pts.push({ x: x, y: y + S.laneH / 2 });
+    }
+    if (pts.length < 2) return;
+
+    // Polyline (orange, semi-transparent) sitting above the bars but below
+    // the per-packet rays so both layers stay legible.
+    ctx.save();
+    ctx.strokeStyle = '#ea580c';
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+    }
+    ctx.stroke();
+
+    // Small filled circles at each waypoint so the path's nodes are easy
+    // to count even when zoomed out.
+    ctx.fillStyle = '#ea580c';
+    ctx.globalAlpha = 0.85;
+    for (const p of pts) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
 }
 
 function drawTrace() {
@@ -1550,7 +1651,19 @@ canvas.addEventListener('click', async (e) => {
 
     const hit = findEventAt(e.offsetX, e.offsetY);
     if (hit) {
-        if (hit.pkt) {
+        // Prefer flight trace when the event carries a (origin, payload)
+        // tuple — that's the script-emit-side flight identifier we added
+        // for end-to-end visualisation. Falls through to pkt trace for
+        // wire-level events without origin/payload.
+        const d = hit.data || {};
+        if (hit.type === 'script_emit'
+            && d.origin !== undefined && d.payload !== undefined) {
+            if (!S.traceMode) {
+                S.traceMode = true;
+                document.getElementById('btn-trace-mode').classList.add('active');
+            }
+            await traceFlight(d.origin, d.payload);
+        } else if (hit.pkt) {
             if (!S.traceMode) {
                 S.traceMode = true;
                 document.getElementById('btn-trace-mode').classList.add('active');
@@ -1634,6 +1747,8 @@ function findEventAt(mx, my) {
         if (ev.type === 'rx' || ev.type === 'collision' || ev.type.startsWith('drop')) {
             evNode = ev.to;
         }
+        // Coerce integer node id → name (script_emit uses int).
+        evNode = nodeIdToName(evNode);
         if (evNode !== targetNode) continue;
         // Filter by sub-row: only match events in the clicked sub-row
         if (subRowFor(ev) !== subRowIdx) continue;
@@ -1768,12 +1883,106 @@ async function tracePkt(pkt) {
     render();
 }
 
+// Trace every event tied to the same end-to-end flight (one origin, one
+// payload). Walks the cached events looking for script_emits whose data
+// carries (origin, payload), then collects the wire-level pkts those
+// emissions produced (via timestamp + node + label match against tx
+// events) so the existing isTraced/ray rendering picks them up too.
+async function traceFlight(origin, payload) {
+    S.traceFlight = { origin: origin, payload: payload };
+    S.tracePkt = null;
+    if (window.parent !== window) {
+        try { window.parent.postMessage({
+            type: 'mlv-trace-flight', origin: origin, payload: payload,
+        }, '*'); } catch (_) { /* ignore */ }
+    }
+
+    // 1) Match script_emits whose data has this exact (origin, payload).
+    //    Pre-DATA receiver events (rts_rx, cts_tx, nack_tx, ...) carry
+    //    only origin (no payload yet); they're not strictly "in this
+    //    flight" — they could belong to any of this origin's flights —
+    //    so we leave them out of the strict match. Future work: walk
+    //    msg_id chains at each node to fold them in.
+    const flightEmits = [];
+    for (const ev of S.cachedEvents) {
+        if (ev.type !== 'script_emit') continue;
+        const d = ev.data || {};
+        if (d.origin !== origin) continue;
+        if (d.payload !== payload) continue;
+        flightEmits.push(ev);
+    }
+
+    // 2) For each flight script_emit that's a "tx-side" event, find the
+    //    nearest tx event at the same node + same time and harvest its
+    //    pkt hash. That's how the existing isTraced/ray rendering finds
+    //    these on-air frames.
+    const TX_SIDE_LABELS = {
+        rts_tx: ['RTS', 'RTS-fwd'],
+        rts_retry: ['RTS-rty'],
+        cts_tx: ['CTS', 'CTS-dup'],
+        data_tx: ['DATA'],
+        ack_tx: ['ACK', 'K-dup'],
+        nack_tx: ['NACK'],
+    };
+    const pkts = new Set();
+    for (const emit of flightEmits) {
+        const labels = TX_SIDE_LABELS[emit.emit_type];
+        if (!labels) continue;
+        const emitNodeName = nodeIdToName(emit.node);
+        // Same-node tx event within ±1 ms of the script_emit, label-matched
+        for (const ev of S.cachedEvents) {
+            if (ev.type !== 'tx') continue;
+            if (ev.node !== emitNodeName) continue;
+            if (Math.abs(ev.time_ms - emit.time_ms) > 1) continue;
+            if (!labels.includes(ev.label)) continue;
+            if (ev.pkt) pkts.add(ev.pkt);
+            break;
+        }
+    }
+
+    // Reuse the pkt-trace machinery for highlighting wire-level events.
+    S.tracePkts = pkts;
+    S.traceFlightEventSet = new Set(flightEmits);
+    S.traceEvents = flightEmits;
+    S.deepTrace = null;
+    S.traceHopDepth = null;
+
+    // Auto-switch to trace sort order
+    const orderSelect = document.getElementById('node-order');
+    if (orderSelect && orderSelect.value !== 'trace') {
+        S.preTraceOrder = orderSelect.value;
+        orderSelect.value = 'trace';
+    }
+    sortNodes();
+
+    showFlightDetail(origin, payload, flightEmits, pkts);
+    render();
+}
+
+function showFlightDetail(origin, payload, emits, pkts) {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    sidebar.style.width = '320px';
+    const originName = (origin >= 0 && origin < S.nodes.length)
+        ? S.nodes[origin].name : ('#' + origin);
+    let html = `<div class="event-detail">`;
+    html += `<h3>Flight</h3>`;
+    html += `<div class="field"><span class="key">origin: </span>${escHtml(originName)} (id ${origin})</div>`;
+    html += `<div class="field"><span class="key">payload: </span>${escHtml(payload)}</div>`;
+    html += `<div class="field"><span class="key">events: </span>${emits.length} script_emit, ${pkts.size} on-air pkt(s)</div>`;
+    html += `<button onclick="clearTrace()" style="margin-top:8px;">Clear flight trace</button>`;
+    html += `</div>`;
+    sidebar.innerHTML = html;
+}
+
 function clearTrace() {
     S.tracePkt = null;
     S.traceEvents = [];
     S.tracePkts = null;
     S.deepTrace = null;
     S.traceHopDepth = null;
+    S.traceFlight = null;
+    S.traceFlightEventSet = null;
 
     // Restore previous sort order if we auto-switched to trace
     const orderSelect = document.getElementById('node-order');
