@@ -1,11 +1,13 @@
 {
   "_name": "s01_dv_dual_sf",
-  "_desc": "Distance-vector routing on SF7; data on SF12 via per-hop dual-SF dance. 4-node line, deterministic path-loss. drop_sf_mismatch bounds reflect bystanders overhearing SF12 frames they can't decode (SF12 reach > adjacent on this topology); per-node counts (from+to): alice=7, bob=7, charlie=6, dave=8. Bound 15 ≈ 2x max-observed catches order-of-magnitude regressions while tolerating timing fluctuations.",
+  "_desc": "Distance-vector routing on SF7; data on SF12 via per-hop dual-SF dance. 15-node random mesh in a 5x5 km area (Barcelona-ish), deterministic path-loss. SF7 reach ~2.42 km / SF12 reach ~6.31 km at alpha=3. SF7-routing diameter is 4 hops; primary send n05 -> n13 (6.13 km, 4 hops); concurrent send n06 -> n15 (5.07 km, 4 hops) deliberately overlaps to stress concurrent-flight handling — the protocol's known failure mode and the next iteration target.",
   "simulation": {
     "duration_ms": 60000,
     "step_ms": 1,
     "warmup_ms": 0,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 },
     "path_loss": {
       "model": "log_distance",
       "alpha": 3.0,
@@ -17,35 +19,44 @@
     }
   },
   "nodes": [
-    { "name": "alice",   "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
-      "lat": 41.3900, "lon": 2.1600 },
-    { "name": "bob",     "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
-      "lat": 41.4035, "lon": 2.1600 },
-    { "name": "charlie", "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
-      "lat": 41.4170, "lon": 2.1600 },
-    { "name": "dave",    "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000 },
-      "lat": 41.4305, "lon": 2.1600 }
+    { "name": "n01", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3835, "lon": 2.1809 },
+    { "name": "n02", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4119, "lon": 2.1453 },
+    { "name": "n03", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3998, "lon": 2.1570 },
+    { "name": "n04", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4068, "lon": 2.1773 },
+    { "name": "n05", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3817, "lon": 2.1317 },
+    { "name": "n06", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4118, "lon": 2.1301 },
+    { "name": "n07", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3975, "lon": 2.1733 },
+    { "name": "n08", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3786, "lon": 2.1625 },
+    { "name": "n09", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4198, "lon": 2.1529 },
+    { "name": "n10", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3872, "lon": 2.1553 },
+    { "name": "n11", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3788, "lon": 2.1433 },
+    { "name": "n12", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4152, "lon": 2.1634 },
+    { "name": "n13", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4222, "lon": 2.1816 },
+    { "name": "n14", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.3995, "lon": 2.1318 },
+    { "name": "n15", "script": "scenarios/dv_dual_sf.lua", "config": { "routing_sf": 8, "allowed_data_sfs": [6,7,9], "beacon_period_ms": 5000 }, "lat": 41.4001, "lon": 2.1889 }
   ],
   "topology": { "links": [] },
   "commands": [
-    { "at_ms": 31000, "node": "alice", "command": "send dave hello-world" }
+    { "at_ms": 45000, "node": "n05", "command": "send n13 hello-world" },
+    { "at_ms": 46000, "node": "n06", "command": "send n15 hello-second" }
   ],
   "expect": [
-    { "type": "script_emit_contains", "node": "alice",   "emit_type": "rt_full",   "value": "\"peers\":3" },
-    { "type": "script_emit_contains", "node": "bob",     "emit_type": "rt_full",   "value": "\"peers\":3" },
-    { "type": "script_emit_contains", "node": "charlie", "emit_type": "rt_full",   "value": "\"peers\":3" },
-    { "type": "script_emit_contains", "node": "dave",    "emit_type": "rt_full",   "value": "\"peers\":3" },
-    { "type": "script_emit_contains", "node": "alice",   "emit_type": "rts_tx",    "value": "\"next\":1" },
-    { "type": "script_emit_contains", "node": "bob",     "emit_type": "rts_tx",    "value": "\"next\":2" },
-    { "type": "script_emit_contains", "node": "charlie", "emit_type": "rts_tx",    "value": "\"next\":3" },
-    { "type": "script_emit_contains", "node": "dave",    "emit_type": "delivered", "value": "hello-world" },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "alice",   "min": 0, "max": 15 },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob",     "min": 0, "max": 15 },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "charlie", "min": 0, "max": 15 },
-    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "dave",    "min": 0, "max": 15 }
+    { "type": "script_emit_contains", "node": "n01", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n02", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n03", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n04", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n05", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n06", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n07", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n08", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n09", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n10", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n11", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n12", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n13", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n14", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n15", "emit_type": "rt_full", "value": "\"peers\":14" },
+    { "type": "script_emit_contains", "node": "n05", "emit_type": "rts_tx",  "value": "\"origin\":4" },
+    { "type": "script_emit_contains", "node": "n13", "emit_type": "delivered", "value": "hello-world" }
   ]
 }

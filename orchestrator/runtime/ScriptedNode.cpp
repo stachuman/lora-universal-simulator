@@ -3,6 +3,7 @@
 
 #include "core/events/EventLog.h"
 #include "core/events/JsonToSol.h"
+#include "core/physics/LbtModel.h"
 #include "orchestrator/runtime/LuaHost.h"
 
 #include <sstream>
@@ -110,15 +111,18 @@ void ScriptedNode::onInit(const nlohmann::json& config) {
 
 void ScriptedNode::onRecv(std::string_view bytes, float snr, float rssi,
                           int link_id, uint64_t sim_ms) {
+    if (!_initialized) return;   // radio off until on_init has fired
     _host.callOnRecv(_id, bytes, snr, rssi, link_id, sim_ms);
 }
 
 std::string ScriptedNode::onCommand(std::string_view cmd_str) {
+    if (!_initialized) return "ERROR: node not initialized yet";
     return _host.callOnCommand(_id, cmd_str);
 }
 
-void ScriptedNode::onRadioBusy() {
-    _host.callOnRadioBusy(_id);
+void ScriptedNode::onRadioBusy(const RadioBusyInfo& info) {
+    if (!_initialized) return;
+    _host.callOnRadioBusy(_id, info);
 }
 
 // -----------------------------------------------------------------------------
@@ -155,23 +159,30 @@ void ScriptedNode::api_tx(std::string bytes, sol::optional<sol::table> opts) {
     p.bytes = std::move(bytes);
     if (opts) {
         sol::table o = *opts;
-        sol::optional<int> sf       = o["sf"];
-        sol::optional<int> bw_hz    = o["bw"];     // wire-format key is "bw" (Hz)
-        sol::optional<int> cr       = o["cr"];
-        sol::optional<int> pwr      = o["power_dbm"];
-        // preamble_sym is the canonical name; "preamble" is accepted as an alias
-        // for ergonomic Lua call-sites (`{ preamble = 16 }`).
-        sol::optional<int> pre      = o["preamble_sym"];
-        if (!pre) pre               = o["preamble"];
-        sol::optional<std::string> label = o["label"];
-        sol::optional<std::string> info  = o["info"];
-        if (sf)    p.sf           = *sf;
-        if (bw_hz) p.bw_hz        = *bw_hz;
-        if (cr)    p.cr           = *cr;
-        if (pwr)   p.power_dbm    = *pwr;
-        if (pre)   p.preamble_sym = *pre;
-        if (label) p.label        = std::move(*label);
-        if (info)  p.info         = std::move(*info);
+        // sol2 quirk: `sol::optional<int> = o["missing_key"]` returns an
+        // ENGAGED optional with value 0 (lua_nil → int as 0). That silently
+        // overrides PendingTx's sentinels and was clobbering preamble_sym to
+        // 0 → clamped to 6 → every airtime computed with preamble=6 instead
+        // of the radio's configured default 16. Probe the type explicitly to
+        // distinguish absent from a literal 0.
+        auto get_int = [&o](const char* key, int sentinel) -> int {
+            sol::object obj = o.get<sol::object>(key);
+            return obj.is<int>() ? obj.as<int>() : sentinel;
+        };
+        auto get_str = [&o](const char* key) -> std::string {
+            sol::object obj = o.get<sol::object>(key);
+            return obj.is<std::string>() ? obj.as<std::string>() : std::string();
+        };
+        p.sf           = get_int("sf",            -1);
+        p.bw_hz        = get_int("bw",            -1);    // wire-format key is "bw" (Hz)
+        p.cr           = get_int("cr",            -1);
+        p.power_dbm    = get_int("power_dbm",     -127);
+        // preamble_sym is the canonical name; "preamble" is accepted as an
+        // alias for ergonomic Lua call-sites (`{ preamble = 16 }`).
+        p.preamble_sym = get_int("preamble_sym",  -1);
+        if (p.preamble_sym < 0) p.preamble_sym = get_int("preamble", -1);
+        p.label        = get_str("label");
+        p.info         = get_str("info");
     }
     _pending_txs.push_back(std::move(p));
 }
@@ -263,4 +274,14 @@ void ScriptedNode::api_set_rx_sf_set(sol::table sf_set) {
         if (sf >= 5 && sf <= 12) result.push_back(sf);
     }
     if (!result.empty()) *_sf_rx_set = std::move(result);
+}
+
+uint64_t ScriptedNode::api_channel_busy_until() const {
+    if (!_lbt) return 0;
+    return _lbt->busyUntil(_id);
+}
+
+uint64_t ScriptedNode::api_tx_in_flight() const {
+    if (!_tx_in_flight_until) return 0;
+    return *_tx_in_flight_until;
 }

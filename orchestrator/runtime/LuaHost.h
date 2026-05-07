@@ -28,6 +28,7 @@
 
 class ScriptedNode;
 class SimController;
+struct RadioBusyInfo;
 
 class LuaHost {
 public:
@@ -55,7 +56,7 @@ public:
     void callOnRecv(int node_id, std::string_view bytes,
                     float snr, float rssi, int link_id, uint64_t sim_ms);
     std::string callOnCommand(int node_id, std::string_view cmd_str);
-    void callOnRadioBusy(int node_id);
+    void callOnRadioBusy(int node_id, const RadioBusyInfo& info);
 
     // Called by the timer wheel when a registered timer fires. Looks up
     // _LUS.nodes[node_id].timers[handle] and invokes it with `self`.

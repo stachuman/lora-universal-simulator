@@ -95,6 +95,12 @@ public:
 
 private:
     // Internal per-tick body (extracted from old runSimulation):
+    // Fire on_init for any node whose staged startup offset has elapsed.
+    // Called at the top of each step before processCommandsAtStep so that
+    // a node initialized this tick is fully alive before any of its
+    // commands or rx deliveries are processed in the same step.
+    void processStartupAtStep();
+
     void processCommandsAtStep();
     void deliverReceptionsForStep();
     void tickTimersForStep();
@@ -144,6 +150,21 @@ private:
     // deliverReceptionsForStep before the SNR-threshold gate to drop
     // off-band packets with drop_sf_mismatch.
     std::vector<std::vector<int>>        _node_sf_rx_set;
+
+    // Per-node "TX in flight until" slot. Set to InFlight.end_ms when an
+    // InFlight is pushed for sender i; cleared to 0 when the InFlight is
+    // compacted out at end_ms. Read by ScriptedNode::api_tx_in_flight via
+    // a borrowed pointer (assigned once via attachTxInFlightSlot — outer
+    // vector is sized via assign() below and never reallocates).
+    std::vector<uint64_t>                _node_tx_in_flight_until;
+
+    // Per-node sim-time at which on_init fires. Drawn uniformly from
+    // [0, simulation.node_startup_jitter_ms] using _rng (so reproducible
+    // per seed). Nodes with offset 0 init synchronously at SimController
+    // init time as before; the rest are fired during step() once
+    // _now_ms >= their offset. When jitter is 0 (the default), no rand
+    // draws are made and all offsets stay 0 — bit-identical to legacy.
+    std::vector<uint64_t>                _node_init_at_ms;
 
     // Per-link fading state. Indexed `sender * n + receiver` (directed:
     // n*n entries, not symmetric n*(n-1)/2). Directed lets the forward

@@ -52,6 +52,19 @@ struct PendingTx {
     std::string info;       // detail string, e.g., "dst=dave via bob msg=1"
 };
 
+// Reason + context bundle passed to on_radio_busy(self, info) in Lua. Built
+// by SimController at the deferral site so the script knows which packet was
+// dropped, why, and how long the obstacle is expected to last. Renamed the
+// PendingTx-annotation field to `tx_info` to avoid info.info on the Lua side.
+struct RadioBusyInfo {
+    std::string reason;        // "channel_busy" | "self_tx_in_flight"
+    int         len      = 0;  // bytes of the deferred PendingTx
+    int         sf       = -1; // SF the deferred TX would have used
+    std::string label;         // PendingTx::label, echoed back
+    std::string tx_info;       // PendingTx::info, echoed back (renamed for Lua)
+    uint64_t    busy_until_ms = 0;  // absolute simtime when free
+};
+
 class ScriptedNode {
 public:
     ScriptedNode(int id, std::string name,
@@ -63,7 +76,7 @@ public:
     void onRecv(std::string_view bytes, float snr, float rssi,
                 int link_id, uint64_t sim_ms);
     std::string onCommand(std::string_view cmd_str);
-    void onRadioBusy();
+    void onRadioBusy(const RadioBusyInfo& info);
 
     // Called by the main loop each step:
     void tickTimers(uint64_t sim_ms);
@@ -81,15 +94,32 @@ public:
     sol::table api_peers();
     void     api_set_rx_sf(int sf);                      // single-SF retune
     void     api_set_rx_sf_set(sol::table sf_set);       // multi-SF retune (opt-in)
+    uint64_t api_channel_busy_until() const;             // LBT busy_until or 0
+    uint64_t api_tx_in_flight() const;                   // own pending TX end_ms or 0
 
     int                id()   const { return _id; }
     const std::string& name() const { return _name; }
+
+    // Set by SimController after onInit returns (whether at t=0 or via
+    // jitter-staged timer). Once true, onRecv / onCommand / onRadioBusy
+    // dispatch through to the script.
+    void markInitialized()  { _initialized = true; }
+    bool isInitialized() const { return _initialized; }
 
     // Called by SimController during init to point this node at its slot in
     // SimController::_node_sf_rx_set. The pointed-to vector is stable for the
     // lifetime of the controller (the outer vector is sized once via
     // assign(n, {}) and never reallocates).
     void attachSfRxSet(std::vector<int>* slot) { _sf_rx_set = slot; }
+
+    // Per-node slot updated by SimController: set to the TX end_ms when an
+    // InFlight is pushed for this sender, cleared to 0 when the InFlight is
+    // compacted out. Read by api_tx_in_flight (no allocation, no scan).
+    void attachTxInFlightSlot(uint64_t* slot) { _tx_in_flight_until = slot; }
+
+    // Pointer to the LbtModel owned by SimController. Borrowed; SimController
+    // outlives ScriptedNode. Used by api_channel_busy_until.
+    void attachLbtModel(class LbtModel* lbt) { _lbt = lbt; }
 
 private:
     int               _id;
@@ -101,7 +131,15 @@ private:
     std::mt19937&     _sim_rng;
     TimerWheel        _timers;
     std::vector<PendingTx> _pending_txs;
+    // Set true once on_init has fired. Models real-hardware boot — until
+    // the script has finished its init, the radio is "off" so onRecv
+    // (and the on_command / on_radio_busy callbacks) are dropped silently.
+    // Toggled by SimController via markInitialized() when the staged
+    // on_init returns. Default false so jitter-staged nodes start dark.
+    bool              _initialized = false;
     std::vector<int>* _sf_rx_set = nullptr;  // borrowed; set via attachSfRxSet
+    uint64_t*         _tx_in_flight_until = nullptr;  // borrowed; SimController owns
+    class LbtModel*   _lbt = nullptr;                  // borrowed; SimController owns
     // Note: timer callbacks are stored Lua-side under _LUS.nodes[id].timers[handle].
     // We don't keep them in C++ to avoid double-bookkeeping.
 };

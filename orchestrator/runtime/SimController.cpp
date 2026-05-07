@@ -228,6 +228,7 @@ void SimController::initialize() {
     // Resolve per-node sf_rx_set: empty config -> [node.sf] (single-SF,
     // matches real Semtech LoRa hardware). See SimController.h note.
     _node_sf_rx_set.assign(static_cast<size_t>(n), {});
+    _node_tx_in_flight_until.assign(static_cast<size_t>(n), 0ULL);
     for (int i = 0; i < n; ++i) {
         if (_cfg.nodes[i].sf_rx_set.empty()) {
             const int node_sf = _cfg.nodes[i].sf;  // already merged with globals
@@ -258,6 +259,8 @@ void SimController::initialize() {
         // reallocates, so &_node_sf_rx_set[i] stays valid for the lifetime
         // of this controller.
         _nodes[i]->attachSfRxSet(&_node_sf_rx_set[i]);
+        _nodes[i]->attachTxInFlightSlot(&_node_tx_in_flight_until[i]);
+        // _lbt is constructed below; defer the LBT attach until then.
     }
 
     // Register + load scripts (must precede onInit so `self` is populated).
@@ -303,12 +306,38 @@ void SimController::initialize() {
         }
     }
 
-    // on_init pass; emit node_ready after each on_init returns. Universal
-    // sim has no firmware/pub_key concept, so we pass an empty key and
-    // use the script-side `role` config field (or "script" as a generic
-    // fallback) for the role label.
+    // Per-node startup offsets. Default 0 (synchronous init at t=0); if
+    // simulation.node_startup_jitter_ms > 0, draw each from [0, jitter]
+    // using _rng. The jitter==0 path makes ZERO _rng draws so existing
+    // scenarios stay bit-identical.
+    _node_init_at_ms.assign(static_cast<size_t>(n), 0);
+    if (_cfg.simulation.node_startup_jitter_ms > 0) {
+        std::uniform_int_distribution<int> jdist(
+            0, _cfg.simulation.node_startup_jitter_ms);
+        for (int i = 0; i < n; ++i) {
+            _node_init_at_ms[i] = static_cast<uint64_t>(jdist(_rng));
+        }
+    }
+
+    // Fire on_init at t=0 for nodes whose offset is 0; the rest are
+    // deferred to processStartupAtStep, which fires them once _now_ms
+    // catches up to their offset. node_ready is emitted at the actual
+    // init time (not always 0), so external observers see the staggered
+    // boot. Until on_init fires, ScriptedNode::onRecv/onCommand/onRadioBusy
+    // early-return — modeling a powered-off radio.
     for (int i = 0; i < n; ++i) {
-        _nodes[i]->onInit(_cfg.nodes[i].config);
+        if (_node_init_at_ms[i] != 0) continue;
+        // Inject simulation-level fields so the script can read them in
+        // on_init without per-node duplication (e.g. dv_dual_sf.lua reads
+        // _sim_warmup_ms to switch between fast learning-phase beacons
+        // and slow operational beacons). Underscore prefix marks these
+        // as runtime-injected, not user-configured.
+        nlohmann::json cfg = _cfg.nodes[i].config.is_object()
+                              ? _cfg.nodes[i].config
+                              : nlohmann::json::object();
+        cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
+        _nodes[i]->onInit(cfg);
+        _nodes[i]->markInitialized();
         std::string role = "script";
         const auto& nc = _cfg.nodes[i].config;
         if (nc.is_object()) {
@@ -350,6 +379,12 @@ void SimController::initialize() {
                   _cfg.simulation.radio.cad_marginal_snr},
         _cfg.simulation.seed ^ 0xCAFEBABEull);
 
+    // Hand each ScriptedNode a borrowed pointer to the LBT model so
+    // self:channel_busy_until() can answer without going through SimController.
+    for (int i = 0; i < n; ++i) {
+        _nodes[i]->attachLbtModel(_lbt.get());
+    }
+
     // Collision config from radio block.
     _coll_cfg = CollisionConfig{};
     _coll_cfg.capture_locked_db   = _cfg.simulation.radio.capture_locked_db;
@@ -358,6 +393,42 @@ void SimController::initialize() {
 
     _now_ms = 0;
     _initialized = true;
+}
+
+void SimController::processStartupAtStep() {
+    const uint64_t now = _now_ms;
+    const int n = static_cast<int>(_nodes.size());
+    for (int i = 0; i < n; ++i) {
+        if (_nodes[i]->isInitialized()) continue;
+        if (_node_init_at_ms[i] > now) continue;
+
+        // Same _sim_* injection as the synchronous-init path above —
+        // keep both paths in sync so jitter-staged nodes see the same
+        // simulation-level fields.
+        nlohmann::json cfg = _cfg.nodes[i].config.is_object()
+                              ? _cfg.nodes[i].config
+                              : nlohmann::json::object();
+        cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
+        _nodes[i]->onInit(cfg);
+        _nodes[i]->markInitialized();
+
+        std::string role = "script";
+        const auto& nc = _cfg.nodes[i].config;
+        if (nc.is_object()) {
+            auto it = nc.find("role");
+            if (it != nc.end() && it->is_string()) {
+                role = it->get<std::string>();
+            }
+        }
+        EventLog::nodeReady(static_cast<unsigned long>(now),
+                            _cfg.nodes[i].name.c_str(),
+                            role.c_str(),
+                            /*pub_key=*/nullptr, /*key_len=*/0,
+                            _cfg.nodes[i].has_location,
+                            _cfg.nodes[i].lat,
+                            _cfg.nodes[i].lon,
+                            /*firmware=*/nullptr);
+    }
 }
 
 void SimController::processCommandsAtStep() {
@@ -593,6 +664,22 @@ void SimController::deliverReceptionsForStep() {
         }
     }
 
+    // Clear the per-sender tx-in-flight slot for any entry whose airtime
+    // ended this step, so self:tx_in_flight() returns 0 again. Done before
+    // the erase so we still see the ended entries.
+    for (const auto& f : _in_flight) {
+        if (f.end_ms <= now &&
+            f.sender_id >= 0 &&
+            (size_t)f.sender_id < _node_tx_in_flight_until.size()) {
+            // Only clear if this is the slot's current value — guards against
+            // a node that registered a new TX immediately after this one
+            // ended (slot would already point at the newer end_ms).
+            if (_node_tx_in_flight_until[(size_t)f.sender_id] == f.end_ms) {
+                _node_tx_in_flight_until[(size_t)f.sender_id] = 0;
+            }
+        }
+    }
+
     // Compact in_flight: remove ended entries.
     _in_flight.erase(
         std::remove_if(_in_flight.begin(), _in_flight.end(),
@@ -694,12 +781,57 @@ void SimController::registerTransmissionsForStep() {
             for (const auto& other : _in_flight) {
                 if (other.sender_id == i) { self_tx_in_flight = true; break; }
             }
+            // LoRa physical packet size limit (8-bit length register on
+            // SX126x/SX1276 → 255 bytes max for the *entire* on-air frame,
+            // not just the app-level payload). Anything bigger is unphysical
+            // — the chip would refuse to TX, or RX would garble. Drop here
+            // and surface as tx_oversized so scripts/tests see it instead
+            // of getting a silent over-the-wire frame that real hardware
+            // would never produce. Per-sim configurable via
+            // simulation.radio.max_packet_bytes.
+            if ((int)p.bytes.size() > _cfg.simulation.radio.max_packet_bytes) {
+                EventLog::txOversized(static_cast<unsigned long>(now),
+                                      _nodes[i]->name().c_str(),
+                                      static_cast<int>(p.bytes.size()),
+                                      _cfg.simulation.radio.max_packet_bytes,
+                                      sf,
+                                      p.label.empty() ? nullptr : p.label.c_str(),
+                                      p.info.empty()  ? nullptr : p.info.c_str());
+                RadioBusyInfo bi;
+                bi.reason        = "oversized";
+                bi.len           = static_cast<int>(p.bytes.size());
+                bi.sf            = sf;
+                bi.label         = p.label;
+                bi.tx_info       = p.info;
+                bi.busy_until_ms = 0;   // not a wait — the frame is rejected outright
+                _nodes[i]->onRadioBusy(bi);
+                continue;
+            }
+
             if (self_tx_in_flight) {
+                // Find this sender's still-in-flight TX so we can report
+                // its end_ms as busy_until_ms. There's only ever one such
+                // entry (a node already deferred can't push another).
+                uint64_t busy_until = 0;
+                for (const auto& f : _in_flight) {
+                    if (f.sender_id == i && f.end_ms > now) {
+                        busy_until = f.end_ms;
+                        break;
+                    }
+                }
+                RadioBusyInfo bi;
+                bi.reason        = "self_tx_in_flight";
+                bi.len           = static_cast<int>(p.bytes.size());
+                bi.sf            = sf;
+                bi.label         = p.label;
+                bi.tx_info       = p.info;
+                bi.busy_until_ms = busy_until;
                 EventLog::txDeferred(static_cast<unsigned long>(now),
                                      _nodes[i]->name().c_str(),
-                                     static_cast<int>(p.bytes.size()),
-                                     "self_tx_in_flight");
-                _nodes[i]->onRadioBusy();
+                                     bi.len, bi.reason.c_str(),
+                                     bi.sf, bi.label.c_str(), bi.tx_info.c_str(),
+                                     static_cast<unsigned long>(bi.busy_until_ms));
+                _nodes[i]->onRadioBusy(bi);
                 continue;
             }
 
@@ -710,11 +842,19 @@ void SimController::registerTransmissionsForStep() {
             // on_radio_busy and skip the InFlight push entirely. The
             // script chooses retry policy.
             if (_lbt->isChannelBusy(i, now)) {
+                RadioBusyInfo bi;
+                bi.reason        = "channel_busy";
+                bi.len           = static_cast<int>(p.bytes.size());
+                bi.sf            = sf;
+                bi.label         = p.label;
+                bi.tx_info       = p.info;
+                bi.busy_until_ms = _lbt->busyUntil(i);
                 EventLog::txDeferred(static_cast<unsigned long>(now),
                                      _nodes[i]->name().c_str(),
-                                     static_cast<int>(p.bytes.size()),
-                                     "channel_busy");
-                _nodes[i]->onRadioBusy();
+                                     bi.len, bi.reason.c_str(),
+                                     bi.sf, bi.label.c_str(), bi.tx_info.c_str(),
+                                     static_cast<unsigned long>(bi.busy_until_ms));
+                _nodes[i]->onRadioBusy(bi);
                 continue;
             }
 
@@ -792,6 +932,11 @@ void SimController::registerTransmissionsForStep() {
 
             _in_flight.push_back(std::move(f));
 
+            // Update this sender's tx-in-flight slot so self:tx_in_flight()
+            // reports the airtime end. Cleared in the compaction loop above
+            // when the InFlight is removed at end_ms.
+            _node_tx_in_flight_until[(size_t)i] = _in_flight.back().end_ms;
+
             // Notify LBT for every observer that can hear this sender, so
             // their next TX-time isChannelBusy() check sees this airtime.
             // Gated by shouldNotifyBusy(): the CAD-miss roll determines
@@ -835,6 +980,7 @@ StepResult SimController::step(uint64_t advance_ms) {
 
     const int events_before = static_cast<int>(EventLog::events().size());
 
+    processStartupAtStep();
     processCommandsAtStep();
     deliverReceptionsForStep();
     tickTimersForStep();

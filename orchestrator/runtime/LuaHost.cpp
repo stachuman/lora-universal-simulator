@@ -78,6 +78,10 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node) {
             [node](sol::object /*self*/, int sf) { node->api_set_rx_sf(sf); });
         self.set_function("set_rx_sf_set",
             [node](sol::object /*self*/, sol::table t) { node->api_set_rx_sf_set(t); });
+        self.set_function("channel_busy_until",
+            [node](sol::object /*self*/) { return node->api_channel_busy_until(); });
+        self.set_function("tx_in_flight",
+            [node](sol::object /*self*/) { return node->api_tx_in_flight(); });
     }
 }
 
@@ -274,12 +278,19 @@ std::string LuaHost::callOnCommand(int node_id, std::string_view cmd_str) {
     return "";
 }
 
-void LuaHost::callOnRadioBusy(int node_id) {
+void LuaHost::callOnRadioBusy(int node_id, const RadioBusyInfo& info) {
     sol::object fn_obj = _node_registry[node_id]["script"]["on_radio_busy"];
     if (!fn_obj.is<sol::function>()) return;
     sol::function fn = fn_obj;
     sol::table self = _node_registry[node_id]["self"];
-    sol::protected_function_result r = fn.call(self);
+    sol::table tbl = _lua.create_table();
+    tbl["reason"]        = info.reason;
+    tbl["len"]           = info.len;
+    tbl["sf"]            = info.sf;
+    tbl["label"]         = info.label;
+    tbl["tx_info"]       = info.tx_info;
+    tbl["busy_until_ms"] = info.busy_until_ms;
+    sol::protected_function_result r = fn.call(self, tbl);
     if (!r.valid()) {
         sol::error err = r;
         throw std::runtime_error(std::string("on_radio_busy: ") + err.what());
