@@ -987,6 +987,17 @@ function fireEventsUpTo(targetMs) {
   }
 }
 
+// Single end-of-stream finalizer used by the rAF tick reaching endMs and
+// by both Next-button branches that arrive at endMs. Keeping the
+// state-flips in one place prevents drift between paths.
+function finalizeEndOfStream() {
+  statusEl.textContent = 'Replay complete';
+  btnPause.textContent = '▶ Replay';
+  btnNext.disabled = true;
+  replayPaused = true;
+  if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
+}
+
 function replayFrame(wallTs) {
   if (replayPaused) { lastRafTs = wallTs; rafHandle = requestAnimationFrame(replayFrame); return; }
 
@@ -1006,11 +1017,7 @@ function replayFrame(wallTs) {
   if (replayCursor < replayEndMs) {
     rafHandle = requestAnimationFrame(replayFrame);
   } else {
-    statusEl.textContent = 'Replay complete';
-    btnPause.textContent = '▶ Replay';
-    btnNext.disabled = true;
-    replayPaused = true;
-    rafHandle = null;
+    finalizeEndOfStream();
   }
 }
 
@@ -1108,16 +1115,19 @@ function onNextEvent() {
     // No more interesting events — flush to the end.
     replayCursor = replayEndMs;
     fireEventsUpTo(replayEndMs);
-    statusEl.textContent = 'Replay complete';
-    btnPause.textContent = '▶ Replay';
-    btnNext.disabled = true;
-    replayPaused = true;
-    if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
+    finalizeEndOfStream();
   } else {
     replayCursor = fireMs(allEvents[j]);
     fireEventsUpTo(replayCursor);
-    replayPaused = true;
-    btnPause.textContent = '▶ Resume';
+    // If the matched event sits exactly at end-of-stream, finalize so
+    // status / button state reflect "Replay complete" immediately
+    // (without waiting for the user to click Resume).
+    if (replayCursor >= replayEndMs) {
+      finalizeEndOfStream();
+    } else {
+      replayPaused = true;
+      btnPause.textContent = '▶ Resume';
+    }
   }
 
   // Update counters + time display.

@@ -31,3 +31,8 @@ async def test_map_live_has_next_button():
     assert "fireEventsUpTo" in html, "fireEventsUpTo helper missing"
     # Iframe sync postMessage
     assert "mlv-scrub-time" in html, "iframe scrub-time postMessage missing"
+    # Click handler is wired (cheap regression guard against accidental removal)
+    assert "btnNext.addEventListener('click', onNextEvent)" in html, \
+        "Next button click handler not wired"
+    # End-of-stream finalizer dedups three call-sites
+    assert "finalizeEndOfStream" in html, "finalizeEndOfStream helper missing"
