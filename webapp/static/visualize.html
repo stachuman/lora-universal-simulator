@@ -37,7 +37,27 @@ body { font-family: 'SF Mono', 'Consolas', 'Menlo', monospace; font-size: 12px; 
 canvas { display: block; }
 #tooltip { position: absolute; display: none; background: #ffffffee; border: 1px solid #d1d5db; padding: 6px 10px; border-radius: 4px; font-size: 11px; pointer-events: none; z-index: 20; max-width: 400px; white-space: pre-wrap; color: #2a2a3e; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
 #time-display { position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%); background: #ffffffcc; padding: 4px 12px; border-radius: 4px; font-size: 13px; color: #2563eb; z-index: 5; pointer-events: none; border: 1px solid #d1d5db; }
-#loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #9ca3af; font-size: 16px; }
+#loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: #ffffffee; border: 1px solid #d1d5db; border-radius: 6px;
+    padding: 14px 22px; font-size: 14px; color: #2a2a3e; z-index: 30;
+    display: flex; align-items: center; gap: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+    pointer-events: none;
+}
+#loading::before {
+    content: ''; display: inline-block;
+    width: 16px; height: 16px;
+    border: 2px solid #d1d5db; border-top-color: #2563eb; border-radius: 50%;
+    animation: lus-spin 0.8s linear infinite;
+}
+@keyframes lus-spin { to { transform: rotate(360deg); } }
+#loading.busy-fetch {
+    /* Smaller pill in the bottom-right for re-fetches during pan/zoom
+       so it doesn't block the data the user is trying to look at. */
+    top: auto; left: auto; bottom: 50px; right: 16px; transform: none;
+    padding: 6px 12px; font-size: 11px;
+}
 #scrollbar { display: flex; align-items: center; gap: 6px; padding: 4px 12px; background: #ffffff; border-top: 1px solid #d1d5db; flex-shrink: 0; }
 #scrollbar input[type=range] { flex: 1; height: 16px; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; }
 #scrollbar input[type=range]::-webkit-slider-runnable-track { height: 6px; background: #d1d5db; border-radius: 3px; }
@@ -232,6 +252,8 @@ async function fetchJSON(url) {
 }
 
 async function init() {
+    loading.textContent = 'Loading sim metadata…';
+    loading.style.display = '';
     S.meta = await fetchJSON(`${API_PREFIX}/meta`);
     document.getElementById('info-text').textContent =
         `${S.meta.nodes.length} nodes, ${S.meta.event_count} events, ` +
@@ -258,9 +280,10 @@ async function init() {
         S.viewTo = Math.min(S.meta.time_min + 30000, S.meta.time_max);
     }
 
-    loading.style.display = 'none';
+    loading.textContent = 'Loading events…';
     resize();
     await loadViewport();
+    loading.style.display = 'none';
     render();
 
     // Interactive mode: start polling for new events
@@ -422,8 +445,36 @@ function sortNodes() {
     nodes.forEach((n, i) => S.nodeIndex[n.name] = i);
 }
 
+// Show a small busy pill on every fetch — the pill reflects "we're
+// loading new events for the new viewport." Multi-call safe via a
+// counter so concurrent pan+zoom doesn't flicker.
+let _viewportFetchDepth = 0;
+let _viewportFetchTimer = null;
+function _viewportFetchStart(label) {
+    _viewportFetchDepth++;
+    if (_viewportFetchTimer) return;
+    // Delay before showing — fetches that finish in <120ms shouldn't
+    // flash the indicator.
+    _viewportFetchTimer = setTimeout(() => {
+        if (_viewportFetchDepth > 0) {
+            loading.textContent = label;
+            loading.classList.add('busy-fetch');
+            loading.style.display = '';
+        }
+    }, 120);
+}
+function _viewportFetchEnd() {
+    _viewportFetchDepth = Math.max(0, _viewportFetchDepth - 1);
+    if (_viewportFetchDepth > 0) return;
+    if (_viewportFetchTimer) { clearTimeout(_viewportFetchTimer); _viewportFetchTimer = null; }
+    loading.style.display = 'none';
+    loading.classList.remove('busy-fetch');
+}
+
 async function loadViewport() {
     const span = S.viewTo - S.viewFrom;
+    _viewportFetchStart(span > 60000 ? 'Loading density…' : 'Loading events…');
+    try {
     // Use density mode for large spans
     if (span > 60000) {
         const bucketMs = Math.max(100, Math.round(span / canvas.width));
@@ -458,6 +509,9 @@ async function loadViewport() {
         }
     }
     computeSubRowLayout();
+    } finally {
+        _viewportFetchEnd();
+    }
 }
 
 // ── Rendering ──────────────────────────────────────────────────
@@ -1583,11 +1637,15 @@ canvas.addEventListener('mousedown', (e) => {
     S.dragScrollY = S.scrollY;
 });
 
-canvas.addEventListener('mousemove', async (e) => {
+// Throttle mousemove handling to rAF (~60 Hz). Without this, dense
+// browsers fire mousemove >100×/sec and each tick triggers a render
+// of 20k+ events plus a hit-test scan — felt laggy on big sims.
+let _mmRafPending = false;
+let _mmLatest = null;
+async function _handleMouseMove(e) {
     if (S.dragging) {
         const dx = e.offsetX - S.dragStartX;
         const dy = e.offsetY - S.dragStartY;
-        // Only start actual drag after threshold to avoid micro-shifts on click
         if (!S.dragMoved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
         S.dragMoved = true;
         canvas.style.cursor = 'grabbing';
@@ -1605,13 +1663,25 @@ canvas.addEventListener('mousemove', async (e) => {
         updateMaxScrollY();
         S.scrollY = Math.max(0, Math.min(S.scrollY, S.maxScrollY));
 
-        await loadViewport();
+        // Render first from current cache so the drag stays responsive,
+        // THEN await any cache refill in the background. The next rAF
+        // re-render picks up new events; if the user keeps dragging we
+        // coalesce naturally.
         render();
+        loadViewport().then(() => { render(); }).catch(() => {});
         return;
     }
-
-    // Hover detection
     updateHover(e.offsetX, e.offsetY);
+}
+canvas.addEventListener('mousemove', (e) => {
+    _mmLatest = { offsetX: e.offsetX, offsetY: e.offsetY };
+    if (_mmRafPending) return;
+    _mmRafPending = true;
+    requestAnimationFrame(() => {
+        _mmRafPending = false;
+        const ev = _mmLatest;
+        if (ev) _handleMouseMove(ev);
+    });
 });
 
 canvas.addEventListener('mouseup', () => {
