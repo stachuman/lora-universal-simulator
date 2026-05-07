@@ -57,6 +57,10 @@ class SimulationConfig(BaseModel):
     warmup_ms: int = Field(default=0, ge=0)
     seed: Optional[int] = Field(default=None, ge=0)
     epoch_start: Optional[int] = Field(default=None, ge=0)
+    # Per-node startup-time jitter: each node delays its on_init by a
+    # random offset in [0, node_startup_jitter_ms] from the seeded RNG.
+    # Parsed in core/topology/JsonConfig.cpp; see SimController::start.
+    node_startup_jitter_ms: int = Field(default=0, ge=0)
     radio: RadioConfig
     path_loss: Optional[PathLossModel] = None
 
