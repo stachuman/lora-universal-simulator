@@ -442,19 +442,35 @@ void SimController::deliverReceptionsForStep() {
                               _rng);
             const float snr_at_rcv = lp.snr + fade_offset;
 
-            // Order: collision → weak signal → loss → deliver.
-            // Collision wins over weak signal (a packet is collided
-            // regardless of whether it would otherwise have been
-            // decodable), and weak-signal drops happen before the
-            // stochastic loss roll so the verdict is deterministic
-            // for tests that pin SF and link SNR.
+            // SF-dependent SNR threshold for the packet's SF. We
+            // compute this once per (tx, rcv) pair and use it to gate
+            // every "would-have-heard" verdict below. See
+            // SimRadio::getSnrThreshold(int sf) (R.1.2) and
+            // Semtech AN1200.22 Table 13 for the per-SF demodulator
+            // floors. The threshold uses the PACKET's SF, not the
+            // receiver's configured one — a single-channel LoRa
+            // modem tunes to the packet's SF on each preamble.
+            const float thr = SimRadio::getSnrThreshold(tx.sf);
+            const bool would_decode = (snr_at_rcv >= thr);
+
+            // Collision and sf_mismatch are gated by would_decode:
+            // for a far-away receiver where the signal is below the
+            // demodulator floor, the modem never sees the packet at
+            // all (no event). drop_weak below is the legitimate
+            // "wouldn't have heard" event when SF matches.
+            //
+            // Order: collision → sf_mismatch → drop_weak → drop_loss
+            //        → drop_halfduplex → rx.
 
             // Collision check is resolved at TX-start time
             // (see registerTransmissionsForStep below — bidirectional
             // evaluateCollision matching upstream's behaviour). We
-            // just consult the per-receiver flag here.
+            // consult the per-receiver flag here. Skip silently if
+            // the rcv was below threshold — both the packet and the
+            // interferer were too weak to have been heard.
             if (rcv < static_cast<int>(tx.collided_at_rcv.size()) &&
                 tx.collided_at_rcv[rcv]) {
+                if (!would_decode) continue;  // off-net, silent
                 const int   worst_interferer     = tx.interferer_at_rcv[rcv];
                 const float worst_interferer_snr = tx.interferer_snr_at_rcv[rcv];
                 const float snr_margin = snr_at_rcv - worst_interferer_snr;
@@ -479,8 +495,12 @@ void SimController::deliverReceptionsForStep() {
             // this receiver's sf_rx_set, the modem never sees it.
             // The default sf_rx_set is [node.sf] (single-SF); configs
             // can opt into multi-SF reception by listing more entries.
+            // We emit drop_sf_mismatch only for receivers that would
+            // have decoded the packet at the correct SF; otherwise
+            // they're effectively off-net and silent.
             const auto& rx_set = _node_sf_rx_set[rcv];
             if (std::find(rx_set.begin(), rx_set.end(), tx.sf) == rx_set.end()) {
+                if (!would_decode) continue;  // off-net, silent
                 // -1 in the rx_sf field flags a multi-SF / scanner
                 // receiver; otherwise emit the single configured SF.
                 const int rx_sf_field = (rx_set.size() == 1) ? rx_set[0] : -1;
@@ -489,21 +509,16 @@ void SimController::deliverReceptionsForStep() {
                     _nodes[tx.sender_id]->name().c_str(),
                     _nodes[rcv]->name().c_str(),
                     tx.sf, rx_sf_field,
+                    snr_at_rcv, lp.rssi,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                     static_cast<int>(tx.bytes.size()),
                     tx.bw_hz);
                 continue;
             }
 
-            // SF-dependent SNR threshold gate. A single-channel LoRa
-            // receiver dynamically tunes to the packet's SF on each
-            // preamble, so the decoding threshold lookup must use
-            // the PACKET's SF rather than the receiver's currently-
-            // configured one. See SimRadio::getSnrThreshold(int sf)
-            // (R.1.2) for the static overload and Semtech AN1200.22
-            // Table 13 for the per-SF demodulator floors.
-            const float thr = SimRadio::getSnrThreshold(tx.sf);
-            if (snr_at_rcv < thr) {
+            // SF matches and we haven't collided. drop_weak captures
+            // "right SF, signal below threshold."
+            if (!would_decode) {
                 EventLog::dropWeak(
                     static_cast<unsigned long>(now),
                     _nodes[tx.sender_id]->name().c_str(),

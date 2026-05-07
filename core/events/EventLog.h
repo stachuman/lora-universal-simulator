@@ -85,8 +85,13 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
 // `bw_hz` is the packet's bandwidth — added alongside packet_sf for
 // sub-row routing in the frontend. No separate `sf` field is emitted
 // (packet_sf already carries it).
+// `snr_db` / `rssi_dbm` are the link's quality at this receiver — only
+// emitted because we now gate this event on "would-have-decoded-at-
+// the-correct-SF", so the values are diagnostically useful (the user
+// knows the rx WOULD have heard, and at what link quality).
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
+                    float snr, float rssi,
                     const uint8_t* data, int len,
                     int bw_hz);
 

@@ -1136,6 +1136,11 @@ function drawEvents() {
             // when the receiver actually saw the in-air signal that ended up
             // dropped. The simulator stamps these events at delivery time.
             const xMark = msToX(t - (ev.airtime_ms || 0));
+            // drop_sf_mismatch is now SNR-gated (only emitted on receivers
+            // that WOULD have decoded at the correct SF), so it represents
+            // a meaningful "wrong-SF on a reachable node" event — render
+            // it bigger than the noisy-by-nature drop_weak.
+            const isMismatch = (etype === 'drop_sf_mismatch');
             if (isTraced) {
                 ctx.fillStyle = (COLORS[etype] || '#ff8888') + '44';
                 ctx.beginPath();
@@ -1143,11 +1148,29 @@ function drawEvents() {
                 ctx.fill();
                 ctx.fillStyle = COLORS[etype] || '#ff8888';
                 ctx.fillRect(xMark - 3, y + S.laneH - 7, 6, 6);
+            } else if (isMismatch) {
+                // Larger 5x5 marker, full alpha — this is now a
+                // "would-have-decoded-at-correct-SF" event, worth seeing.
+                ctx.fillStyle = COLORS[etype] || '#ff8888';
+                ctx.fillRect(xMark - 2, y + S.laneH - 6, 5, 5);
             } else {
+                // drop_weak — keep the small unobtrusive marker since it's
+                // emitted for every below-threshold reachable receiver.
                 ctx.fillStyle = COLORS[etype] || '#ff8888';
                 ctx.globalAlpha = 0.6;
                 ctx.fillRect(xMark - 1, y + S.laneH - 5, 3, 3);
                 ctx.globalAlpha = 1;
+            }
+            // Compact SNR badge next to the marker — only when zoomed in
+            // enough to be readable, and only for sf_mismatch (the
+            // "interesting" case the user wants to inspect).
+            if (isMismatch && typeof ev.snr_db === 'number'
+                && (S.viewTo - S.viewFrom) < 30000) {
+                ctx.font = '8px monospace';
+                ctx.fillStyle = COLORS[etype] || '#ff8888';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(ev.snr_db.toFixed(1), xMark + 4, y + S.laneH - 4);
             }
         } else if (etype === 'cmd_reply' || etype === 'script_log' || etype === 'script_emit') {
             const y = nodeToY(ev.node, ev);

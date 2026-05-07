@@ -303,6 +303,7 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
 
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
+                    float snr, float rssi,
                     const uint8_t* data, int len,
                     int bw_hz) {
     char pkt[9];
@@ -310,10 +311,12 @@ void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
     char buf[2048];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"drop_sf_mismatch\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"packet_sf\":%d,\"rx_sf\":%d,\"pkt\":\"%s\","
-        "\"bw_hz\":%d}\n",
-        time_ms, from, to, packet_sf, rx_sf, pkt,
-        bw_hz);
+        "\"packet_sf\":%d,\"rx_sf\":%d,"
+        "\"snr_db\":%.2f,\"rssi_dbm\":%.2f,"
+        "\"pkt\":\"%s\",\"bw_hz\":%d}\n",
+        time_ms, from, to, packet_sf, rx_sf,
+        snr, rssi,
+        pkt, bw_hz);
     emitLine(buf);
 }
 
