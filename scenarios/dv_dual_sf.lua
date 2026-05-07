@@ -573,6 +573,57 @@ local RETRY_ELIGIBLE = {
 }
 local TX_DEFER_MAX_RETRIES = 3
 
+-- Exponential backoff cap on rts_timeout. The timeout doubles per retry
+-- attempt and saturates at this multiple of the base. With s01's
+-- SF8 base (~122 ms) the timeouts walk 122, 244, 488, 488, ... covering
+-- ~3.3 s across rts_max_retries=8 — well past the ~250 ms blind window
+-- for SF9 data and the ~1.5 s worst case for SF12 data.
+local RTS_TIMEOUT_BACKOFF_CAP = 4
+
+local function rts_timeout_for_attempt(base_ms, attempt_idx)
+  local mult = 1
+  for _ = 1, attempt_idx do
+    mult = mult * 2
+    if mult >= RTS_TIMEOUT_BACKOFF_CAP then
+      mult = RTS_TIMEOUT_BACKOFF_CAP
+      break
+    end
+  end
+  return base_ms * mult
+end
+
+-- F1 mitigation: blind_until tracks when each 1-hop neighbour will
+-- finish its data_sf RX window (deaf on routing_sf). Populated by
+-- overhearing CTS frames; consulted before issuing or retrying RTS.
+-- Returns (is_blind: bool, remaining_ms: int). Opportunistically prunes
+-- expired entries so the table stays bounded.
+local function is_blind(self, node_id)
+  local until_ms = self.blind_until[node_id]
+  if until_ms == nil then return false, 0 end
+  local now = self:now()
+  if until_ms <= now then
+    self.blind_until[node_id] = nil
+    return false, 0
+  end
+  return true, until_ms - now
+end
+
+-- Decision helper used at issue_send / tx_rts_retry / rts_timeout_fire.
+-- Returns one of:
+--   "ok"                -- proceed with current next_hop
+--   "alt", new_next_hop -- caller should switch to alt route + re-tx
+--   "defer", delay_ms   -- caller should re-schedule after delay_ms
+local function classify_blind(self, dst_id, current_next_hop, alt_already_tried)
+  local blind, remaining = is_blind(self, current_next_hop)
+  if not blind then return "ok" end
+  local entry = self.rt[dst_id]
+  local alt = entry and entry.alt or nil
+  if alt and (not alt_already_tried) and (not is_blind(self, alt.next_hop)) then
+    return "alt", alt.next_hop
+  end
+  return "defer", remaining + 1
+end
+
 -- Stash + send. Saves the frame so on_radio_busy can re-issue it after
 -- info.busy_until_ms (the runtime drops the deferred PendingTx — see
 -- SimController defer sites). Stash is keyed by label so concurrent
@@ -1184,6 +1235,7 @@ function on_init(self, config)
   self.pending_rx      = nil
   self.rt_full_emitted = false
   self.tx_stash         = {}    -- label → {bytes, opts, retries_left} for on_radio_busy
+  self.blind_until      = {}    -- {node_id → absolute_ms} for F1 mitigation
   self.rts_timeout_handle      = nil  -- so on_recv "C" can cancel
   self.ack_timeout_handle      = nil  -- so on_recv "K" can cancel
   self.pending_rx_expiry_handle = nil  -- so on_recv "D" can cancel
