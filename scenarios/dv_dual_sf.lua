@@ -672,12 +672,16 @@ end
 --   "ok"                -- proceed with current next_hop
 --   "alt", new_next_hop -- caller should switch to alt route + re-tx
 --   "defer", delay_ms   -- caller should re-schedule after delay_ms
-local function classify_blind(self, dst_id, current_next_hop, alt_already_tried)
+-- previous_hop, when non-nil (forwarder context), is the upstream node we
+-- received the DATA from — never alt-switch back through it (that would
+-- create a 2-hop loop).
+local function classify_blind(self, dst_id, current_next_hop, alt_already_tried, previous_hop)
   local blind, remaining = is_blind(self, current_next_hop)
   if not blind then return "ok" end
   local entry = self.rt[dst_id]
   local alt = entry and entry.alt or nil
-  if alt and (not alt_already_tried) and (not is_blind(self, alt.next_hop)) then
+  if alt and (not alt_already_tried) and (not is_blind(self, alt.next_hop))
+     and alt.next_hop ~= previous_hop then
     return "alt", alt.next_hop
   end
   return "defer", remaining + 1
@@ -868,7 +872,8 @@ local function tx_rts_retry(self, reason)
 
   -- F1 mitigation: if next-hop is now known-blind, defer the retry or
   -- switch to alt. Reset retries budget on alt-switch (fresh path).
-  local action_b, val_b = classify_blind(self, px.dst, px.next, px.alt_tried)
+  local action_b, val_b = classify_blind(self, px.dst, px.next, px.alt_tried,
+                                          px.previous_hop)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
@@ -933,7 +938,8 @@ local function rts_timeout_fire(self, captured_msg_id)
   local action_b, val_b = classify_blind(self,
                                           self.pending_tx.dst,
                                           self.pending_tx.next,
-                                          self.pending_tx.alt_tried)
+                                          self.pending_tx.alt_tried,
+                                          self.pending_tx.previous_hop)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
@@ -1138,7 +1144,7 @@ end
 -- goes on the wire. user_text is what the user / visualizer sees in
 -- emit data. origin_seq is the 16-bit per-origin counter (set at
 -- on_command for new sends, preserved across forwards).
-issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq)
+issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop)
   local entry = self.rt[dst_id]
   if not entry then
     self:emit("send_no_route", {
@@ -1152,7 +1158,9 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
   -- F1 mitigation: if the chosen next-hop is currently blind on
   -- routing_sf (we overheard its CTS), either alt-switch or defer
   -- the issue. Defer re-queues at the head so ordering is preserved.
-  local action_b, val_b = classify_blind(self, dst_id, primary_next, false)
+  -- previous_hop (forwarder context) prevents alt-switching back to
+  -- the upstream node that just gave us the DATA — that would loop.
+  local action_b, val_b = classify_blind(self, dst_id, primary_next, false, previous_hop)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = origin, payload = user_text, origin_seq = origin_seq,
@@ -1164,6 +1172,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     table.insert(self.tx_queue, 1, {
       origin = origin, dst_id = dst_id, dst_name = dst_name,
       payload = payload, user_text = user_text, origin_seq = origin_seq,
+      previous_hop = previous_hop,
     })
     self:after(val_b, function() become_free(self) end)
     return
@@ -1188,6 +1197,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     retries_left = self.rts_max_retries,
     alt_tried    = (action_b == "alt"),  -- pre-set if F1 blind-alt fired
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
+    previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
   }
   local rts = pack_rts(origin, self.id, dst_id, primary_next, mid,
                        self.allowed_sf_bitmap)
@@ -1224,7 +1234,7 @@ become_free = function(self)
     dst = item.dst_id, depth = #self.tx_queue,
   })
   issue_send(self, item.origin, item.dst_id, item.dst_name,
-             item.payload, item.user_text, item.origin_seq)
+             item.payload, item.user_text, item.origin_seq, item.previous_hop)
 end
 
 -- ---------- script lifecycle ------------------------------------------------
@@ -1897,6 +1907,7 @@ function on_recv(self, frame, meta)
       payload    = self.pending_tx.payload,        -- full bytes
       user_text  = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
+      previous_hop = self.pending_tx.previous_hop,
     })
     self:emit("tx_requeued", {
       origin = self.pending_tx.origin,
@@ -2002,6 +2013,7 @@ function on_recv(self, frame, meta)
     -- check (which would defer the forward-RTS via on_radio_busy retry —
     -- correct but wasteful; this is real-hardware behaviour anyway).
     local d_origin     = d.origin
+    local d_src        = d.src              -- predecessor (for forward loop guard)
     local d_dst        = d.dst
     local d_payload    = d.payload          -- full bytes for re-forwarding
     local d_user_text  = user_text
@@ -2043,6 +2055,7 @@ function on_recv(self, frame, meta)
           payload    = d_payload,             -- full bytes (preserves the seq header)
           user_text  = d_user_text,
           origin_seq = d_origin_seq,
+          previous_hop = d_src,               -- forward loop guard
         })
         self:emit("forward_queued", {
           origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
@@ -2051,7 +2064,7 @@ function on_recv(self, frame, meta)
         return
       end
       issue_send(self, d_origin, d_dst, dst_name,
-                 d_payload, d_user_text, d_origin_seq)
+                 d_payload, d_user_text, d_origin_seq, d_src)
     end)
     return
   end
