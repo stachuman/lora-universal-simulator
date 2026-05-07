@@ -158,6 +158,12 @@ const S = {
     cachedEvents: [],
     densityCache: null,
 
+    // Sub-row layout for SF/BW orthogonality. Computed once per
+    // events-load by computeSubRowLayout(). Empty -> single-row
+    // fallback (legacy events without sf/bw_hz).
+    subRows: [],          // [{sf, bw_hz}, ...]  ordered ascending by sf, then bw_hz
+    subRowIndex: new Map(),  // "sf|bw_hz" -> index into subRows
+
     // Playback cursor — set by mlv-cursor-time / mlv-scrub-time postMessage
     // from the parent map_live.html. null = no cursor (standalone view or
     // before the first message arrives).
@@ -428,6 +434,7 @@ async function loadViewport() {
             if (ev.type === 'tx' && ev.pkt) S.txByPkt[ev.pkt] = ev;
         }
     }
+    computeSubRowLayout();
 }
 
 // ── Rendering ──────────────────────────────────────────────────
@@ -470,14 +477,50 @@ function clampViewport() {
     }
 }
 
-function nodeToY(name) {
+// Pre-scan cached events for unique (sf, bw_hz) tuples. Called whenever
+// new events arrive (i.e. after loadViewport refills S.cachedEvents).
+// The result is stable across re-renders within a sim.
+function computeSubRowLayout() {
+    const seen = new Map();
+    for (const ev of S.cachedEvents) {
+        if (typeof ev.sf !== 'number' || typeof ev.bw_hz !== 'number') continue;
+        const key = ev.sf + '|' + ev.bw_hz;
+        if (!seen.has(key)) seen.set(key, { sf: ev.sf, bw_hz: ev.bw_hz });
+    }
+    // Sort: SF ascending, BW ascending within SF
+    const arr = Array.from(seen.values())
+        .sort((a, b) => (a.sf - b.sf) || (a.bw_hz - b.bw_hz));
+    S.subRows = arr;
+    S.subRowIndex = new Map(arr.map((r, i) => [r.sf + '|' + r.bw_hz, i]));
+}
+
+// Map an event to its sub-row index. Returns 0 for events without
+// sf/bw_hz (legacy fallback) or with an SF/BW combo not seen during
+// the layout pre-scan.
+function subRowFor(ev) {
+    if (S.subRows.length === 0) return 0;
+    if (typeof ev.sf !== 'number' || typeof ev.bw_hz !== 'number') return 0;
+    const key = ev.sf + '|' + ev.bw_hz;
+    const idx = S.subRowIndex.get(key);
+    return (idx == null) ? 0 : idx;
+}
+
+// Returns the pixel Y of the TOP of the sub-row for a given node name.
+// If ev is provided, the sub-row offset for that event's (sf, bw_hz) is added.
+// Without ev, returns the top of the node group (sub-row 0).
+function nodeToY(name, ev) {
     const idx = S.nodeIndex[name];
     if (idx === undefined) return null;
-    return S.headerH + idx * S.laneH - S.scrollY;
+    const subRowCount = Math.max(1, S.subRows.length);
+    const nodeLaneH = S.laneH * subRowCount;
+    const subRowIdx = ev ? subRowFor(ev) : 0;
+    return S.headerH + idx * nodeLaneH + subRowIdx * S.laneH - S.scrollY;
 }
 
 function updateMaxScrollY() {
-    const totalH = S.nodes.length * S.laneH;
+    const subRowCount = Math.max(1, S.subRows.length);
+    const nodeLaneH = S.laneH * subRowCount;
+    const totalH = S.nodes.length * nodeLaneH;
     const visibleH = canvas.height - S.headerH;
     S.maxScrollY = Math.max(0, totalH - visibleH);
     S.scrollY = Math.min(S.scrollY, S.maxScrollY);
@@ -507,19 +550,26 @@ function render() {
     ctx.rect(0, S.headerH, w, h - S.headerH);
     ctx.clip();
 
+    const subRowCount = Math.max(1, S.subRows.length);
+    const nodeLaneH = S.laneH * subRowCount;
+
     // Draw lanes (with scrollY offset)
     for (let i = 0; i < nNodes; i++) {
-        const y = S.headerH + i * S.laneH - S.scrollY;
-        if (y + S.laneH < S.headerH) continue;
+        const y = S.headerH + i * nodeLaneH - S.scrollY;
+        if (y + nodeLaneH < S.headerH) continue;
         if (y > h) break;
-        ctx.fillStyle = i % 2 === 0 ? COLORS.lane_bg : COLORS.lane_bg_alt;
-        ctx.fillRect(S.labelW, y, contentW, S.laneH);
+        // Alternate light/dark per node, with sub-row stripes inside
+        for (let s = 0; s < subRowCount; s++) {
+            const subY = y + s * S.laneH;
+            ctx.fillStyle = ((i + s) % 2 === 0) ? COLORS.lane_bg : COLORS.lane_bg_alt;
+            ctx.fillRect(S.labelW, subY, contentW, S.laneH);
+        }
 
-        // Lane border
+        // Lane border at the bottom of the node group
         ctx.strokeStyle = COLORS.lane_border;
         ctx.beginPath();
-        ctx.moveTo(S.labelW, y + S.laneH);
-        ctx.lineTo(w, y + S.laneH);
+        ctx.moveTo(S.labelW, y + nodeLaneH);
+        ctx.lineTo(w, y + nodeLaneH);
         ctx.stroke();
     }
 
@@ -538,17 +588,30 @@ function render() {
     ctx.rect(0, S.headerH, S.labelW, h - S.headerH);
     ctx.clip();
     for (let i = 0; i < nNodes; i++) {
-        const y = S.headerH + i * S.laneH - S.scrollY;
-        if (y + S.laneH < S.headerH) continue;
+        const y = S.headerH + i * nodeLaneH - S.scrollY;
+        if (y + nodeLaneH < S.headerH) continue;
         if (y > h) break;
         const node = S.nodes[i];
         const isCompanion = node.role === 'companion';
+
+        // Node name: centered vertically across the whole node group
         ctx.fillStyle = isCompanion ? '#2563eb' : '#6b7280';
-        ctx.font = '11px monospace';
-        ctx.textAlign = 'right';
+        ctx.font = 'bold 12px monospace';
+        ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        const label = node.name.length > 20 ? node.name.slice(0, 19) + '\u2026' : node.name;
-        ctx.fillText(label, S.labelW - 6, y + S.laneH / 2);
+        ctx.fillText(node.name, 8, y + nodeLaneH / 2);
+
+        // Sub-row labels (one per (sf, bw_hz) tuple)
+        ctx.font = '9px monospace';
+        ctx.fillStyle = '#9ca3af';
+        ctx.textBaseline = 'middle';
+        for (let s = 0; s < subRowCount; s++) {
+            const sub = S.subRows[s];
+            if (!sub) continue;  // single-row fallback, no label
+            const subY = y + s * S.laneH + S.laneH / 2;
+            const label = 'SF' + sub.sf + '/' + Math.round(sub.bw_hz / 1000) + 'k';
+            ctx.fillText(label, 64, subY);
+        }
     }
     ctx.restore();
 
@@ -614,7 +677,8 @@ function render() {
     // Vertical scrollbar indicator (right edge)
     if (S.maxScrollY > 0) {
         const trackH = h - S.headerH;
-        const totalH = S.nodes.length * S.laneH;
+        const _subRowCount = Math.max(1, S.subRows.length);
+        const totalH = S.nodes.length * S.laneH * _subRowCount;
         const thumbH = Math.max(20, trackH * trackH / totalH);
         const thumbY = S.headerH + (S.scrollY / S.maxScrollY) * (trackH - thumbH);
         ctx.fillStyle = '#c4c4c422';
@@ -836,7 +900,7 @@ function drawEvents() {
         const x = msToX(t);
 
         if (etype === 'tx') {
-            const y = nodeToY(ev.node);
+            const y = nodeToY(ev.node, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const airtime = ev.airtime_ms || 50;
             const x2 = msToX(t + airtime);
@@ -900,7 +964,7 @@ function drawEvents() {
                 if (label) ctx.fillText(label, x + 2, y + 2 + boxH / 2);
             }
         } else if (etype === 'rx') {
-            const y = nodeToY(ev.to);
+            const y = nodeToY(ev.to, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
             const airtime = ev.airtime_ms || 50;
@@ -958,7 +1022,7 @@ function drawEvents() {
             // the START of the RX bar (= TX-start time) so the arrow line
             // sits at the moment of signal arrival, not at delivery.
             if (isTraced) {
-                const yFrom = nodeToY(ev.from);
+                const yFrom = nodeToY(ev.from, ev);
                 if (yFrom !== null) {
                     ctx.strokeStyle = '#a1620766';
                     ctx.setLineDash([3, 3]);
@@ -970,7 +1034,7 @@ function drawEvents() {
                 }
             }
         } else if (etype === 'collision') {
-            const y = nodeToY(ev.to);
+            const y = nodeToY(ev.to, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
             const sz = isTraced ? 8 : 5;
@@ -1016,7 +1080,7 @@ function drawEvents() {
                 ctx.fillText('by ' + ev.interferer, x, cy + sz + 2);
             }
         } else if (etype === 'drop_halfduplex') {
-            const y = nodeToY(ev.to);
+            const y = nodeToY(ev.to, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
             const airtime = ev.airtime_ms || 50;
@@ -1052,7 +1116,7 @@ function drawEvents() {
             ctx.globalAlpha = 1;
             ctx.lineWidth = 1;
         } else if (etype === 'drop_weak' || etype === 'drop_sf_mismatch') {
-            const y = nodeToY(ev.to || ev.node);
+            const y = nodeToY(ev.to || ev.node, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
             // Anchor the marker at TX-start (= time_ms - airtime_ms) — that's
@@ -1073,7 +1137,7 @@ function drawEvents() {
                 ctx.globalAlpha = 1;
             }
         } else if (etype === 'cmd_reply' || etype === 'script_log' || etype === 'script_emit') {
-            const y = nodeToY(ev.node);
+            const y = nodeToY(ev.node, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             ctx.fillStyle = COLORS[etype] || '#cccccc';
             ctx.globalAlpha = 0.8;
@@ -1089,7 +1153,7 @@ function drawEvents() {
             ctx.fill();
             ctx.globalAlpha = 1;
         } else if (etype === 'tx_deferred') {
-            const y = nodeToY(ev.node);
+            const y = nodeToY(ev.node, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             // Yellow triangle pointing up
             const sz = 4;
@@ -1131,9 +1195,9 @@ function drawTrace() {
         if (!tx) continue;
 
         const x1 = msToX(tx.time_ms + (tx.airtime_ms || 50));
-        const y1 = nodeToY(tx.node);
+        const y1 = nodeToY(tx.node, tx);
         const x2 = msToX(rx.time_ms);
-        const y2 = nodeToY(rx.to);
+        const y2 = nodeToY(rx.to, rx);
 
         if (y1 === null || y2 === null) continue;
 
@@ -1353,7 +1417,9 @@ canvas.addEventListener('click', async (e) => {
 
     if (e.offsetX < S.labelW) {
         // Clicked on node label — use rendered scrollY
-        const laneIdx = Math.floor((e.offsetY - S.headerH + S.renderedScrollY) / S.laneH);
+        const _subRowCount = Math.max(1, S.subRows.length);
+        const _nodeLaneH = S.laneH * _subRowCount;
+        const laneIdx = Math.floor((e.offsetY - S.headerH + S.renderedScrollY) / _nodeLaneH);
         if (laneIdx >= 0 && laneIdx < S.nodes.length) {
             const n = S.nodes[laneIdx].name;
             showNodeDetail(n);
@@ -1426,14 +1492,16 @@ function findEventAt(mx, my) {
     const vTo = S.renderedViewTo;
     const sY = S.renderedScrollY;
     const ms = vFrom + (mx - S.labelW) / (canvas.width - S.labelW) * (vTo - vFrom);
-    const laneIdx = Math.floor((my - S.headerH + sY) / S.laneH);
+    const subRowCount = Math.max(1, S.subRows.length);
+    const nodeLaneH = S.laneH * subRowCount;
+    const laneIdx = Math.floor((my - S.headerH + sY) / nodeLaneH);
     if (laneIdx < 0 || laneIdx >= S.nodes.length) return null;
     const targetNode = S.nodes[laneIdx].name;
 
-    // Determine if click is in upper half (TX) or lower half (RX) of lane
-    const laneY = S.headerH + laneIdx * S.laneH - sY;
-    const relY = my - laneY;
-    const inUpperHalf = relY < S.laneH / 2;
+    // Determine sub-row and whether click is in upper half (TX) or lower half (RX)
+    const localY = (my - S.headerH + sY) - laneIdx * nodeLaneH;
+    const subRowIdx = Math.floor(localY / S.laneH);
+    const inUpperHalf = (localY - subRowIdx * S.laneH) < S.laneH / 2;
 
     // Search nearby events — TX bars match over their full airtime width
     let best = null;
@@ -1447,6 +1515,8 @@ function findEventAt(mx, my) {
             evNode = ev.to;
         }
         if (evNode !== targetNode) continue;
+        // Filter by sub-row: only match events in the clicked sub-row
+        if (subRowFor(ev) !== subRowIdx) continue;
 
         // Check lane half: TX in upper, RX/collision/drop in lower
         const isTxType = ev.type === 'tx' || ev.type === 'cmd_reply';
@@ -1507,6 +1577,9 @@ function updateHover(mx, my) {
     if (hit.reply) text += `\nreply: ${hit.reply.slice(0, 80)}`;
     if (hit.threshold) text += `\nthreshold: ${hit.threshold.toFixed(1)} dB`;
     if (hit.loss !== undefined) text += `\nloss prob: ${hit.loss.toFixed(2)}`;
+    if (typeof hit.sf === 'number' && typeof hit.bw_hz === 'number') {
+        text += `\nSF${hit.sf} / ${Math.round(hit.bw_hz / 1000)} kHz`;
+    }
 
     tooltip.textContent = text;
     tooltip.style.display = 'block';
@@ -1567,9 +1640,11 @@ async function jumpToEvent(nodeName, timeMs) {
     // Ensure node is visible vertically
     const idx = S.nodeIndex[nodeName];
     if (idx !== undefined) {
-        const targetY = idx * S.laneH;
+        const _subRowCount = Math.max(1, S.subRows.length);
+        const _nodeLaneH = S.laneH * _subRowCount;
+        const targetY = idx * _nodeLaneH;
         const visibleH = canvas.height - S.headerH;
-        if (targetY < S.scrollY || targetY + S.laneH > S.scrollY + visibleH) {
+        if (targetY < S.scrollY || targetY + _nodeLaneH > S.scrollY + visibleH) {
             S.scrollY = Math.max(0, targetY - visibleH / 2);
             updateMaxScrollY();
             S.scrollY = Math.min(S.scrollY, S.maxScrollY);
@@ -1682,6 +1757,20 @@ function showEventDetail(ev) {
             if (val.length > 100) val = val.slice(0, 100) + '\u2026';
             html += `<div class="field"><span class="key">${k}: </span><span class="val">${escHtml(val)}</span></div>`;
         }
+    }
+
+    // RF parameter rows (sf, bw_hz, cr) — formatted explicitly
+    if (typeof ev.sf === 'number') {
+        shown.add('sf');
+        html += `<div class="field"><span class="key">SF </span><span class="val">${ev.sf}</span></div>`;
+    }
+    if (typeof ev.bw_hz === 'number') {
+        shown.add('bw_hz');
+        html += `<div class="field"><span class="key">BW </span><span class="val">${(ev.bw_hz / 1000).toFixed(0)} kHz</span></div>`;
+    }
+    if (typeof ev.cr === 'number') {
+        shown.add('cr');
+        html += `<div class="field"><span class="key">CR </span><span class="val">4/${ev.cr}</span></div>`;
     }
 
     // Remaining fields as raw JSON footer
