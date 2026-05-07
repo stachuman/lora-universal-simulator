@@ -158,6 +158,11 @@ const S = {
     cachedEvents: [],
     densityCache: null,
 
+    // Playback cursor — set by mlv-cursor-time / mlv-scrub-time postMessage
+    // from the parent map_live.html. null = no cursor (standalone view or
+    // before the first message arrives).
+    cursorMs: null,
+
     // Node activity counts (for sorting)
     nodeActivity: {},
 
@@ -582,12 +587,20 @@ function render() {
         drawNowLine(h);
     }
 
+    // Playback cursor — visible whenever the parent has set it via
+    // postMessage. Drawn inside the content clip alongside drawNowLine
+    // so it stays in the lane area.
+    drawCursorLine(h);
+
     ctx.restore();
 
     // Interactive mode: draw "NOW" label in header (outside content clip)
     if (INTERACTIVE_ID && S.meta) {
         drawNowLabel();
     }
+
+    // Playback-cursor label in header (outside content clip).
+    drawCursorLabel();
 
     // Time display
     const centerMs = (S.viewFrom + S.viewTo) / 2;
@@ -702,6 +715,48 @@ function drawNowLine(h) {
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.lineWidth = 1;
+}
+
+// Playback cursor — vertical line at S.cursorMs, drawn when the parent
+// map_live.html is replaying or has stepped via the Next button. Same
+// rendering pattern as drawNowLine but in a contrasting color so it
+// can't be confused with the interactive-mode NOW line.
+function drawCursorLine(h) {
+    if (S.cursorMs == null) return;
+    if (S.cursorMs < S.viewFrom || S.cursorMs > S.viewTo) return;
+    const x = msToX(S.cursorMs);
+    if (x < S.labelW || x > canvas.width) return;
+
+    ctx.strokeStyle = '#7c3aed';   // vibrant purple — distinct from red NOW line and green TX bars
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, S.headerH);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+}
+
+function drawCursorLabel() {
+    if (S.cursorMs == null) return;
+    if (S.cursorMs < S.viewFrom || S.cursorMs > S.viewTo) return;
+    const x = msToX(S.cursorMs);
+    if (x < S.labelW || x > canvas.width) return;
+
+    // Filled triangle pointing down at the top of the content area
+    ctx.fillStyle = '#7c3aed';
+    ctx.beginPath();
+    ctx.moveTo(x, S.headerH);
+    ctx.lineTo(x - 5, S.headerH - 7);
+    ctx.lineTo(x + 5, S.headerH - 7);
+    ctx.closePath();
+    ctx.fill();
+
+    // Time label above the triangle (compact: "12.345s")
+    ctx.font = 'bold 9px monospace';
+    ctx.fillStyle = '#7c3aed';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText((S.cursorMs / 1000).toFixed(3) + 's', x, S.headerH - 8);
 }
 
 function drawNowLabel() {
@@ -1351,7 +1406,14 @@ async function centerViewportOnTime(t) {
 window.addEventListener('message', (e) => {
     if (!e.data || typeof e.data !== 'object') return;
     if (e.data.type === 'mlv-scrub-time' && typeof e.data.t === 'number') {
+        // Recenter viewport AND update playback cursor (jump-style scrub).
+        S.cursorMs = e.data.t;
         centerViewportOnTime(e.data.t);
+    } else if (e.data.type === 'mlv-cursor-time' && typeof e.data.t === 'number') {
+        // Cursor-only update (does NOT recenter — used during normal
+        // playback so the user's manual scrolling isn't fought).
+        S.cursorMs = e.data.t;
+        render();
     }
 });
 

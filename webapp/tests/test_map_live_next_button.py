@@ -36,3 +36,22 @@ async def test_map_live_has_next_button():
         "Next button click handler not wired"
     # End-of-stream finalizer dedups three call-sites
     assert "finalizeEndOfStream" in html, "finalizeEndOfStream helper missing"
+    # Playback-cursor postMessage to the swim-lane iframe
+    assert "mlv-cursor-time" in html, "mlv-cursor-time postMessage missing"
+    assert "postCursorTime" in html, "postCursorTime helper missing"
+
+
+@pytest.mark.asyncio
+async def test_visualize_renders_playback_cursor():
+    """visualize.html must accept mlv-cursor-time / mlv-scrub-time and
+    render a vertical playback-cursor line."""
+    async with LifespanManager(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.get("/static/visualize.html")
+            assert r.status_code == 200, r.text
+            html = r.text
+
+    assert "S.cursorMs" in html, "cursorMs state field missing"
+    assert "mlv-cursor-time" in html, "mlv-cursor-time message handler missing"
+    assert "drawCursorLine" in html, "drawCursorLine function missing"
+    assert "drawCursorLabel" in html, "drawCursorLabel function missing"

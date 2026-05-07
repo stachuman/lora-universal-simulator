@@ -998,6 +998,19 @@ function finalizeEndOfStream() {
   if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
 }
 
+// Throttle: send cursor-time to the swim-lane iframe at ~30 Hz wall-clock,
+// not on every rAF tick. visualize.html's render is canvas-cheap but
+// postMessage adds up at fast playback speeds.
+let lastCursorPostTs = 0;
+const CURSOR_POST_INTERVAL_MS = 33;
+
+function postCursorTime() {
+  if (!tlFrame || !tlFrame.contentWindow) return;
+  try {
+    tlFrame.contentWindow.postMessage({ type: 'mlv-cursor-time', t: replayCursor }, '*');
+  } catch (_) { /* iframe not yet loaded — ignore */ }
+}
+
 function replayFrame(wallTs) {
   if (replayPaused) { lastRafTs = wallTs; rafHandle = requestAnimationFrame(replayFrame); return; }
 
@@ -1014,9 +1027,16 @@ function replayFrame(wallTs) {
   eventCountEl.textContent = replayNextIdx + ' / ' + allEvents.length + ' events';
   updateTimeDisplay();
 
+  // Send cursor position to the swim-lane iframe (throttled).
+  if (wallTs - lastCursorPostTs >= CURSOR_POST_INTERVAL_MS) {
+    postCursorTime();
+    lastCursorPostTs = wallTs;
+  }
+
   if (replayCursor < replayEndMs) {
     rafHandle = requestAnimationFrame(replayFrame);
   } else {
+    postCursorTime();   // ensure final position lands
     finalizeEndOfStream();
   }
 }
@@ -1051,6 +1071,7 @@ function startReplay(events, endMs) {
   replayNextIdx = 0;
   replayPaused  = false;
   lastRafTs     = null;
+  lastCursorPostTs = 0;
 
   resetAllStates();
   removeAllActiveTx();
@@ -1058,7 +1079,9 @@ function startReplay(events, endMs) {
 
   controlsEl.style.display = '';
   btnPause.textContent = '⏸ Pause';
+  btnNext.disabled = false;
   updateTimeDisplay();
+  postCursorTime();   // place cursor at t=0 in the lane view
 
   if (rafHandle) cancelAnimationFrame(rafHandle);
   rafHandle = requestAnimationFrame(replayFrame);
@@ -1070,12 +1093,14 @@ function restartReplay() {
   replayNextIdx = 0;
   replayPaused  = false;
   lastRafTs     = null;
+  lastCursorPostTs = 0;
 
   resetAllStates();
   removeAllActiveTx();
   btnPause.textContent = '⏸ Pause';
   btnNext.disabled = false;
   updateTimeDisplay();
+  postCursorTime();
 
   if (rafHandle) cancelAnimationFrame(rafHandle);
   rafHandle = requestAnimationFrame(replayFrame);
