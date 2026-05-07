@@ -493,13 +493,13 @@
       const result = await postJSON('/api/sims', { config_json });
       const id = result.id;
 
-      // Decide redirect: if any node has lat/lon → map_live, else → simulation status page
-      const hasGeo = config_json.nodes && config_json.nodes.some(n => n.lat != null);
-      if (hasGeo) {
-        window.location.href = '/static/map_live.html?id=' + encodeURIComponent(id);
-      } else {
-        window.location.href = '/static/simulation.html?id=' + encodeURIComponent(id);
-      }
+      // Always land on the per-sim progress page after submit. From there
+      // the user can watch the run complete and click "View Map" /
+      // "View Timeline" once the events file is fully written. Previously
+      // we redirected straight to map_live for geo-enabled sims, but
+      // long-running sims would arrive there with only the first few
+      // hundred ms of events written, making the map view useless.
+      window.location.href = '/static/simulation.html?id=' + encodeURIComponent(id);
     } catch (e) {
       errDiv.textContent = 'Failed to start simulation: ' + e.message;
       errDiv.classList.remove('hidden');
