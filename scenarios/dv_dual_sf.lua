@@ -1539,6 +1539,30 @@ function on_recv(self, frame, meta)
   if tag == "C" then
     local c = parse_cts(frame)
     if not c then return end
+
+    -- F1 mitigation: every CTS — addressed to us or not — tells us its
+    -- sender will be deaf on routing_sf for one DATA-RX window
+    -- (cts_to_data_gap + airtime of the chosen data_sf, max payload).
+    -- Stash that absolute end-time so future RTS attempts toward this
+    -- sender either alt-switch or defer instead of hitting drop_sf_mismatch.
+    if meta.src ~= nil then
+      local now = self:now()
+      local blind_window = self.cts_to_data_gap_ms +
+        airtime_ms(c.chosen_data_sf, self.bw_hz, self.cr,
+                   self.preamble_sym,
+                   DATA_HDR_LEN + self.max_payload_bytes)
+      local end_ms = now + blind_window
+      local prev = self.blind_until[meta.src]
+      if prev == nil or end_ms > prev then
+        self.blind_until[meta.src] = end_ms
+        self:emit("blind_observed", {
+          node           = meta.src,
+          until_ms       = end_ms,
+          chosen_data_sf = c.chosen_data_sf,
+        })
+      end
+    end
+
     if self.pending_tx == nil then return end
     if c.msg_id ~= self.pending_tx.msg_id then return end
 
