@@ -802,6 +802,32 @@ local become_free
 -- already decremented retries_left and confirmed the giveup case.
 local function tx_rts_retry(self, reason)
   local px = self.pending_tx
+
+  -- F1 mitigation: if next-hop is now known-blind, defer the retry or
+  -- switch to alt. Reset retries budget on alt-switch (fresh path).
+  local action_b, val_b = classify_blind(self, px.dst, px.next, px.alt_tried)
+  if action_b == "defer" then
+    self:emit("tx_blind_defer", {
+      origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+      msg_id = px.msg_id, next_hop = px.next, delay_ms = val_b,
+      source = "tx_rts_retry", reason = reason,
+    })
+    self:log(string.format("tx_blind_defer (tx_rts_retry) msg=%d -> %s deferred %dms",
+      px.msg_id, name_of(self, px.next), val_b))
+    self:after(val_b, function() tx_rts_retry(self, reason) end)
+    return
+  elseif action_b == "alt" then
+    self:emit("tx_blind_alt", {
+      origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+      msg_id = px.msg_id, from_next = px.next, to_next = val_b,
+    })
+    self:log(string.format("tx_blind_alt (tx_rts_retry) msg=%d %s -> %s",
+      px.msg_id, name_of(self, px.next), name_of(self, val_b)))
+    px.next = val_b
+    px.alt_tried = true
+    px.retries_left = self.rts_max_retries
+  end
+
   local rts = pack_rts(px.origin, self.id, px.dst, px.next, px.msg_id,
                        self.allowed_sf_bitmap)
   self:emit("rts_retry", {
@@ -834,6 +860,43 @@ local function rts_timeout_fire(self, captured_msg_id)
     self:after(self.rts_busy_retry_ms, function()
       rts_timeout_fire(self, captured_msg_id)
     end)
+    return
+  end
+
+  -- F1 mitigation: receiver may have just become blind (we overheard a
+  -- CTS to a different sender after our RTS-tx and before the timeout).
+  -- Defer or alt-switch instead of wasting a retry attempt against a
+  -- deaf hop.
+  local action_b, val_b = classify_blind(self,
+                                          self.pending_tx.dst,
+                                          self.pending_tx.next,
+                                          self.pending_tx.alt_tried)
+  if action_b == "defer" then
+    self:emit("tx_blind_defer", {
+      origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
+      origin_seq = self.pending_tx.origin_seq,
+      msg_id = captured_msg_id, next_hop = self.pending_tx.next,
+      delay_ms = val_b, source = "rts_timeout",
+    })
+    self:log(string.format("tx_blind_defer (rts_timeout) msg=%d -> %s deferred %dms",
+      captured_msg_id, name_of(self, self.pending_tx.next), val_b))
+    self:after(val_b, function()
+      rts_timeout_fire(self, captured_msg_id)
+    end)
+    return
+  elseif action_b == "alt" then
+    self:emit("tx_blind_alt", {
+      origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
+      origin_seq = self.pending_tx.origin_seq,
+      msg_id = captured_msg_id,
+      from_next = self.pending_tx.next, to_next = val_b,
+    })
+    self:log(string.format("tx_blind_alt (rts_timeout) msg=%d %s -> %s",
+      captured_msg_id, name_of(self, self.pending_tx.next), name_of(self, val_b)))
+    self.pending_tx.next = val_b
+    self.pending_tx.alt_tried = true
+    self.pending_tx.retries_left = self.rts_max_retries
+    tx_rts_retry(self, "blind_alt")
     return
   end
 
@@ -911,8 +974,14 @@ start_rts_timeout = function(self)
     self:cancel(self.rts_timeout_handle)
     self.rts_timeout_handle = nil
   end
+  -- F1 mitigation safety net: exponential backoff per retry attempt.
+  -- attempt_idx = how many retries we've already burned on this msg_id.
+  -- Fresh budget (issue_send / NACK alt / blind alt) → attempt_idx = 0
+  -- → base timeout. Each subsequent retry doubles up to RTS_TIMEOUT_BACKOFF_CAP.
+  local attempt_idx = self.rts_max_retries - self.pending_tx.retries_left
+  local timeout_ms = rts_timeout_for_attempt(self.rts_timeout_ms, attempt_idx)
   local captured_msg_id = self.pending_tx.msg_id
-  self.rts_timeout_handle = self:after(self.rts_timeout_ms, function()
+  self.rts_timeout_handle = self:after(timeout_ms, function()
     self.rts_timeout_handle = nil
     rts_timeout_fire(self, captured_msg_id)
   end)
@@ -1017,6 +1086,33 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     return
   end
   local primary_next = entry.primary.next_hop
+  -- F1 mitigation: if the chosen next-hop is currently blind on
+  -- routing_sf (we overheard its CTS), either alt-switch or defer
+  -- the issue. Defer re-queues at the head so ordering is preserved.
+  local action_b, val_b = classify_blind(self, dst_id, primary_next, false)
+  if action_b == "defer" then
+    self:emit("tx_blind_defer", {
+      origin = origin, payload = user_text, origin_seq = origin_seq,
+      dst = dst_id, next_hop = primary_next, delay_ms = val_b,
+      source = "issue_send",
+    })
+    self:log(string.format("tx_blind_defer (issue_send) -> %s deferred %dms",
+      name_of(self, primary_next), val_b))
+    table.insert(self.tx_queue, 1, {
+      origin = origin, dst_id = dst_id, dst_name = dst_name,
+      payload = payload, user_text = user_text, origin_seq = origin_seq,
+    })
+    self:after(val_b, function() become_free(self) end)
+    return
+  elseif action_b == "alt" then
+    self:emit("tx_blind_alt", {
+      origin = origin, payload = user_text, origin_seq = origin_seq,
+      dst = dst_id, from_next = primary_next, to_next = val_b,
+    })
+    self:log(string.format("tx_blind_alt (issue_send) dst=%s %s -> %s",
+      dst_name, name_of(self, primary_next), name_of(self, val_b)))
+    primary_next = val_b
+  end
   local mid = gen_msg_id(self)
   self.pending_tx = {
     origin       = origin,
@@ -1027,7 +1123,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     user_text    = user_text,      -- for emit + log clarity
     origin_seq   = origin_seq,     -- end-to-end message id (with origin)
     retries_left = self.rts_max_retries,
-    alt_tried    = false,        -- on_recv "N" flips this when we move to alt
+    alt_tried    = (action_b == "alt"),  -- pre-set if F1 blind-alt fired
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
   }
   local rts = pack_rts(origin, self.id, dst_id, primary_next, mid,
