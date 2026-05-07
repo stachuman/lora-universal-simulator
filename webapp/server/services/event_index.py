@@ -7,6 +7,7 @@ protocol-agnostic core retained.
 
 import json
 import logging
+import os
 import threading
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
@@ -307,11 +308,30 @@ class EventIndexCache:
         If the cache is full and a new entry must be loaded, the
         least-recently-used entry is evicted first.  Per-sim_id locks
         prevent duplicate concurrent loads of the same file.
+
+        If the events file has been modified since the cached index was
+        built (sim was still running on first load and has since written
+        more events), the cached entry is evicted and reloaded. Without
+        this, opening map_live during a long sim caches a partial index
+        and re-reads always return the partial view.
         """
+        try:
+            current_mtime_ns = os.stat(events_path).st_mtime_ns
+        except OSError:
+            current_mtime_ns = 0
+
         with self._lock:
             if sim_id in self._cache:
-                self._cache.move_to_end(sim_id)
-                return self._cache[sim_id]
+                cached = self._cache[sim_id]
+                if getattr(cached, "_loaded_mtime_ns", 0) >= current_mtime_ns:
+                    self._cache.move_to_end(sim_id)
+                    return cached
+                # File grew or changed since the index was built — evict.
+                logger.info(
+                    "EventIndexCache: file mtime changed for sim_id=%s; reloading",
+                    sim_id,
+                )
+                del self._cache[sim_id]
             # Get or create a per-sim load lock
             if sim_id not in self._loading:
                 self._loading[sim_id] = threading.Lock()
@@ -322,13 +342,17 @@ class EventIndexCache:
             # Re-check after acquiring load lock — another thread may have loaded it
             with self._lock:
                 if sim_id in self._cache:
-                    self._cache.move_to_end(sim_id)
-                    self._loading.pop(sim_id, None)
-                    return self._cache[sim_id]
+                    cached = self._cache[sim_id]
+                    if getattr(cached, "_loaded_mtime_ns", 0) >= current_mtime_ns:
+                        self._cache.move_to_end(sim_id)
+                        self._loading.pop(sim_id, None)
+                        return cached
+                    del self._cache[sim_id]
 
             logger.info("EventIndexCache: loading sim_id=%s from %s", sim_id, events_path)
             try:
                 index = EventIndex(events_path)
+                index._loaded_mtime_ns = current_mtime_ns
             except Exception:
                 # Ensure the per-sim load lock doesn't stay in _loading forever
                 # if EventIndex construction fails (corrupted NDJSON, I/O error
