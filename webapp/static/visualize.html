@@ -192,10 +192,10 @@ const COLORS = {
     node_ready:       '#15803d',  // green-700
     tx:               '#2563eb',  // blue-600   — sender block
     rx:               '#16a34a',  // green-600  — receiver bar
-    drop_weak:        '#f97316',  // orange-500
-    drop_sf_mismatch: '#f43f5e',  // rose-500
-    drop_halfduplex:  '#be123c',  // rose-700
-    collision:        '#dc2626',  // red-600
+    drop_weak:        '#f97316',  // orange-500 — too weak to decode
+    drop_sf_mismatch: '#ca8a04',  // yellow-600  — receiver on wrong SF (ignored)
+    drop_halfduplex:  '#be123c',  // rose-700   — receiver was transmitting
+    collision:        '#dc2626',  // red-600    — interferer destroyed the packet
     tx_deferred:      '#f59e0b',  // amber-500
     cmd_reply:        '#64748b',  // slate-500
     script_log:       '#b45309',  // amber-700  — visible on light bg
@@ -1668,14 +1668,38 @@ function updateHover(mx, my) {
     const evIdx = S.cachedEvents.indexOf(hit);
     const idxStr = evIdx >= 0 ? ` #${S.cachedFrom > 0 ? '~' : ''}${evIdx}` : '';
 
+    // Human-readable explanation per event type \u2014 answers
+    // "what am I looking at?" without forcing the user to memorize
+    // event names.
+    const TYPE_EXPLANATION = {
+        tx:                'TX \u2014 node transmitted a packet',
+        rx:                'RX \u2014 successfully received',
+        collision:         'RX collided \u2014 interferer destroyed the packet mid-demod',
+        drop_sf_mismatch:  'RX ignored \u2014 receiver tuned to a different SF',
+        drop_halfduplex:   'RX missed \u2014 node was transmitting at the same time',
+        drop_weak:         'RX too weak \u2014 signal below the demod floor at this SF',
+        drop_loss:         'RX dropped \u2014 stochastic link loss',
+        tx_deferred:       'TX deferred \u2014 channel busy or self-TX in flight',
+        script_log:        'script log',
+        script_emit:       'script emit',
+        cmd_reply:         'command reply',
+        node_ready:        'node ready',
+    };
     let text = `${hit.type}${idxStr} @ ${formatTime(hit.time_ms)}`;
+    if (TYPE_EXPLANATION[hit.type]) {
+        text += `\n${TYPE_EXPLANATION[hit.type]}`;
+    }
     if (hit.node) text += `\nnode: ${hit.node}`;
     if (hit.from) text += `\nfrom: ${hit.from}`;
     if (hit.to) text += `\nto: ${hit.to}`;
     if (hit.pkt) text += `\npkt: ${hit.pkt}`;
     if (hit.hex) text += `\nhex: ${hit.hex.slice(0, 32)}${hit.hex.length > 32 ? '\u2026' : ''}`;
-    if (hit.snr !== undefined) text += `\nsnr: ${hit.snr.toFixed(1)} dB`;
-    if (hit.rssi !== undefined) text += `\nrssi: ${hit.rssi.toFixed(1)} dBm`;
+    // SNR/RSSI come under different field names on different events
+    // (snr/rssi on rx + collision; snr_db/rssi_dbm on drop_sf_mismatch).
+    const snr  = (hit.snr  !== undefined) ? hit.snr  : hit.snr_db;
+    const rssi = (hit.rssi !== undefined) ? hit.rssi : hit.rssi_dbm;
+    if (snr  !== undefined && snr  !== null) text += `\nsnr: ${snr.toFixed(1)} dB`;
+    if (rssi !== undefined && rssi !== null) text += `\nrssi: ${rssi.toFixed(1)} dBm`;
     if (hit.interferer) text += `\ninterferer: ${hit.interferer}`;
     if (hit.interferer_snr !== undefined && hit.interferer) text += `\ninterferer_snr: ${hit.interferer_snr.toFixed(1)} dB`;
     if (hit.snr_margin !== undefined && hit.interferer) text += `\nmargin: ${hit.snr_margin.toFixed(1)} dB (needed to survive)`;
@@ -1686,6 +1710,13 @@ function updateHover(mx, my) {
     if (hit.loss !== undefined) text += `\nloss prob: ${hit.loss.toFixed(2)}`;
     if (typeof hit.sf === 'number' && typeof hit.bw_hz === 'number') {
         text += `\nSF${hit.sf} / ${Math.round(hit.bw_hz / 1000)} kHz`;
+    }
+    // drop_sf_mismatch: also surface the mismatch (packet vs receiver SF).
+    if (hit.type === 'drop_sf_mismatch'
+        && typeof hit.packet_sf === 'number'
+        && typeof hit.rx_sf === 'number') {
+        const rxLabel = (hit.rx_sf === -1) ? 'multi-SF scanner' : `SF${hit.rx_sf}`;
+        text += `\npacket SF${hit.packet_sf} \u2192 receiver ${rxLabel}`;
     }
 
     tooltip.textContent = text;
