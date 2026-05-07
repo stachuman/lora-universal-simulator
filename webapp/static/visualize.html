@@ -657,10 +657,13 @@ function render() {
         drawNowLine(h);
     }
 
-    // Playback cursor — visible whenever the parent has set it via
-    // postMessage. Drawn inside the content clip alongside drawNowLine
-    // so it stays in the lane area.
-    drawCursorLine(h);
+    // Playback cursor — only meaningful when embedded as an iframe
+    // with a parent driving playback (e.g. map_live.html). Standalone
+    // visualize.html has no playback context, so skip the cursor
+    // entirely there to avoid a stray triangle / time label.
+    if (IS_IFRAME) {
+        drawCursorLine(h);
+    }
 
     ctx.restore();
 
@@ -670,7 +673,9 @@ function render() {
     }
 
     // Playback-cursor label in header (outside content clip).
-    drawCursorLabel();
+    if (IS_IFRAME) {
+        drawCursorLabel();
+    }
 
     // Time display
     const centerMs = (S.viewFrom + S.viewTo) / 2;
