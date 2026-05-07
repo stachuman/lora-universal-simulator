@@ -1306,7 +1306,13 @@ async function loadSim() {
   }
 
   const nodes = Array.isArray(meta.nodes) ? meta.nodes : [];
-  const endMs = (meta.sim_info && meta.sim_info.end_ms) ? meta.sim_info.end_ms : 60000;
+  // The /meta endpoint returns sim_info under key "sim" (not "sim_info").
+  // sim.end_ms is set when the sim emits sim_end; otherwise we fall back
+  // to time_max (the last-event time the indexer computed) so a sim that
+  // ran for 15 minutes doesn't get clipped to 60s.
+  const endMs = (meta.sim && meta.sim.end_ms)
+              || meta.time_max
+              || 60000;
 
   const ok = renderTopology(nodes);
   if (!ok) {
