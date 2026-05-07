@@ -560,6 +560,11 @@ void SimController::deliverReceptionsForStep() {
             _nodes[rcv]->onRecv(tx.bytes, snr_at_rcv, lp.rssi,
                                 /*link_id=*/0,
                                 /*sim_ms=*/now);
+            // Use the PACKET's sf/bw/cr (= the receiver's at demod time,
+            // since LoRa requires sf+bw match for successful rx). Don't
+            // read from `_radios[rcv]->getSF()` here — the script's
+            // onRecv handler may have retuned the radio (e.g. back to
+            // routing_sf for the next beacon) before we get here.
             EventLog::rx(static_cast<unsigned long>(now),
                          _nodes[tx.sender_id]->name().c_str(),
                          _nodes[rcv]->name().c_str(),
@@ -567,9 +572,7 @@ void SimController::deliverReceptionsForStep() {
                          reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                          static_cast<int>(tx.bytes.size()),
                          static_cast<uint32_t>(tx.end_ms - tx.start_ms),
-                         _radios[rcv]->getSF(),
-                         _radios[rcv]->getBwHz(),
-                         _radios[rcv]->getCR());
+                         tx.sf, tx.bw_hz, tx.cr);
         }
     }
 
@@ -633,6 +636,10 @@ void SimController::registerTransmissionsForStep() {
                     _nodes[r]->onRecv(p.bytes, lp.snr, lp.rssi,
                                       /*link_id=*/0,
                                       /*sim_ms=*/now);
+                    // Use the packet's sf/bw/cr — see comment on the
+                    // matching block in the main rx path. The receiver's
+                    // sf at demod time equals the sender's; reading from
+                    // _radios[r] would capture any post-onRecv retune.
                     EventLog::rx(static_cast<unsigned long>(now),
                                  _nodes[i]->name().c_str(),
                                  _nodes[r]->name().c_str(),
@@ -640,9 +647,7 @@ void SimController::registerTransmissionsForStep() {
                                  reinterpret_cast<const uint8_t*>(p.bytes.data()),
                                  static_cast<int>(p.bytes.size()),
                                  airtime,
-                                 _radios[r]->getSF(),
-                                 _radios[r]->getBwHz(),
-                                 _radios[r]->getCR());
+                                 sf, bw_hz, cr);
                 }
             }
         }
