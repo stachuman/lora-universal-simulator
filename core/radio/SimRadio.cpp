@@ -17,9 +17,9 @@ SimRadio::SimRadio(VirtualClock& clock, int sf, int bw_hz, int cr,
         fprintf(stderr, "SimRadio: bw_hz=%d invalid, defaulting to 125000\n", _bw_hz);
         _bw_hz = 125000;
     }
-    if (_sf < 7 || _sf > 12) {
-        fprintf(stderr, "SimRadio: sf=%d out of range [7,12], clamping\n", _sf);
-        _sf = (_sf < 7) ? 7 : 12;
+    if (_sf < 5 || _sf > 12) {
+        fprintf(stderr, "SimRadio: sf=%d out of range [5,12], clamping\n", _sf);
+        _sf = (_sf < 5) ? 5 : 12;
     }
 }
 
@@ -38,9 +38,9 @@ void SimRadio::setRadioParams(int sf, int bw_hz, int cr) {
     } else {
         _bw_hz = bw_hz;
     }
-    if (sf < 7 || sf > 12) {
-        fprintf(stderr, "SimRadio::setRadioParams: sf=%d out of range [7,12], clamping\n", sf);
-        _sf = (sf < 7) ? 7 : 12;
+    if (sf < 5 || sf > 12) {
+        fprintf(stderr, "SimRadio::setRadioParams: sf=%d out of range [5,12], clamping\n", sf);
+        _sf = (sf < 5) ? 5 : 12;
     } else {
         _sf = sf;
     }
@@ -132,13 +132,19 @@ int SimRadio::recvRaw(uint8_t* bytes, int sz) {
 
 uint32_t SimRadio::getEstAirtimeFor(int len_bytes) {
     // Semtech AN1200.13 -- LoRa on-air time in milliseconds.
+    //
+    // CR convention: this codebase (matching MeshCore + RadioLib) uses
+    // _cr ∈ [5..8] as the multiplier directly (5 = CR4/5, 8 = CR4/8). The
+    // raw Semtech AN1200.13 formula uses CR ∈ [1..4] with a (CR+4) term,
+    // which gives the same multiplier 5..8. Don't double-shift — _cr is
+    // already in multiplier form. JsonConfig validates the [5..8] range.
     double t_sym = getSymbolMs();
     double t_pre = (_preamble_len + 4.25) * t_sym;
 
     int de = (t_sym >= 16.0) ? 1 : 0;
     double num = 8.0 * len_bytes - 4.0 * _sf + 44;
     double den = 4.0 * (_sf - 2 * de);
-    int pay_sym = 8 + (int)std::max(std::ceil(num / den) * (_cr + 4), 0.0);
+    int pay_sym = 8 + (int)std::max(std::ceil(num / den) * _cr, 0.0);
 
     return (uint32_t)(t_pre + pay_sym * t_sym);
 }
@@ -158,11 +164,17 @@ uint32_t SimRadio::getEstAirtimeFor(int len_bytes) {
 // never spuriously drop packets on malformed metadata. Real input
 // validation lives in setRadioParams.
 float SimRadio::getSnrThreshold(int sf) {
+    // Semtech AN1200.22 (CR4/5) demodulator SNR floors. Step is -2.5 dB
+    // per SF; SF5/SF6 extend the same linear pattern downward (each
+    // halving the symbol time vs the SF above). Real SX126x supports
+    // SF5..SF12; out-of-range SF returns a very-tolerant fallback so
+    // callers don't spuriously drop on malformed metadata.
     static const float snr_threshold[] = {
-        -7.5f, -10.0f, -12.5f, -15.0f, -17.5f, -20.0f  // SF7..SF12
+        -2.5f, -5.0f,                                 // SF5..SF6
+        -7.5f, -10.0f, -12.5f, -15.0f, -17.5f, -20.0f // SF7..SF12
     };
-    if (sf < 7 || sf > 12) return -100.0f;
-    return snr_threshold[sf - 7];
+    if (sf < 5 || sf > 12) return -100.0f;
+    return snr_threshold[sf - 5];
 }
 
 float SimRadio::getSnrThreshold() const {

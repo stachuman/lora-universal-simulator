@@ -339,14 +339,32 @@ void txFail(unsigned long time_ms, const char* node, uint32_t count) {
 }
 
 void txDeferred(unsigned long time_ms, const char* node,
-                int len, const char* reason) {
-    char esc_reason[256];
-    json_escape(esc_reason, sizeof(esc_reason), reason ? reason : "");
-    char buf[2048];
+                int len, const char* reason,
+                int sf, const char* label, const char* tx_info,
+                unsigned long busy_until_ms) {
+    char esc_reason[256];  json_escape(esc_reason, sizeof(esc_reason), reason ? reason : "");
+    char esc_label[256];   json_escape(esc_label,  sizeof(esc_label),  label  ? label  : "");
+    char esc_info[1024];   json_escape(esc_info,   sizeof(esc_info),   tx_info ? tx_info : "");
+    char buf[4096];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"tx_deferred\",\"time_ms\":%lu,\"node\":\"%s\","
-        "\"len\":%d,\"reason\":\"%s\"}\n",
-        time_ms, node, len, esc_reason);
+        "\"len\":%d,\"reason\":\"%s\",\"sf\":%d,\"label\":\"%s\","
+        "\"tx_info\":\"%s\",\"busy_until_ms\":%lu}\n",
+        time_ms, node, len, esc_reason, sf, esc_label, esc_info, busy_until_ms);
+    emitLine(buf);
+}
+
+void txOversized(unsigned long time_ms, const char* node,
+                 int len, int max_packet_bytes,
+                 int sf, const char* label, const char* tx_info) {
+    char esc_label[256]; json_escape(esc_label, sizeof(esc_label), label ? label : "");
+    char esc_info[1024]; json_escape(esc_info,  sizeof(esc_info),  tx_info ? tx_info : "");
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"tx_oversized\",\"time_ms\":%lu,\"node\":\"%s\","
+        "\"len\":%d,\"max_packet_bytes\":%d,\"sf\":%d,"
+        "\"label\":\"%s\",\"tx_info\":\"%s\"}\n",
+        time_ms, node, len, max_packet_bytes, sf, esc_label, esc_info);
     emitLine(buf);
 }
 

@@ -1,8 +1,17 @@
 # lora-universal-simulator
 
+The purpose of this simulator is to enable testing different scenarios of LoRa
+mesh network protocols - to be able to quickly change parameters (even on the fly),
+test implementations before putting effort into real low level implementations.
+
+Each node is managed by Lua script - ensuring realistic LoRa radio simulation.
+
+
+
 Host-side network simulator for LoRa-mesh protocol research. Each node's
 behavior is defined in Lua; the simulator provides radio physics, topology,
 and an event stream.
+
 
 Topology can be specified declaratively two ways:
 - **Static link matrix**: `topology.links[]` with explicit SNR/RSSI per pair

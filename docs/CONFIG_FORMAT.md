@@ -77,8 +77,9 @@ Drives the simulator's clock, default radio, and (optionally) the path-loss mode
 | `duration_ms` | int | required | Total simulated time. Sim ends when `now ≥ duration_ms`. |
 | `step_ms` | int | 1 | Simulator clock advance per tick. Currently must be ≥ 1; sub-millisecond requires a future µs-clock refactor. |
 | `warmup_ms` | int | 0 | Duration at the start during which packets deliver instantly (no physics). Useful for converging routing tables before "real" traffic. |
-| `seed` | int | (random) | Seed for the per-sim PRNG (used by `self:rand`, jitter, `sigma_db` shadowing, etc.) |
+| `seed` | int | 42 | Seed for the per-sim PRNG (used by `self:rand`, jitter, `sigma_db` shadowing, link-loss draws, startup-jitter draws, etc.). Pinned by default so reruns are bit-identical. |
 | `epoch_start` | int | 1700000000 | Unix epoch the virtual clock counts from. |
+| `node_startup_jitter_ms` | int | 0 | Per-node `on_init` is staged at a uniform random offset in `[0, node_startup_jitter_ms]` drawn from the seeded PRNG, modeling real-hardware boot variability. Until `on_init` fires, `on_recv` / `on_command` / `on_radio_busy` are dropped silently (radio "off"). `node_ready` event time reflects actual init time. Default 0 = synchronous init at t=0 (legacy). |
 | `radio` | object | required | Default LoRa parameters; per-node overrides allowed. See below. |
 | `path_loss` | object | none | Optional log-distance path-loss model. When present, link SNR/RSSI is computed from per-node `lat`/`lon`. See below. |
 
@@ -88,7 +89,7 @@ Drives the simulator's clock, default radio, and (optionally) the path-loss mode
 |---|---|---|---|---|
 | `sf` | int | required | 5..12 | Default LoRa spreading factor |
 | `bw` | int | required | typically 7..500 | LoRa bandwidth in **kHz** |
-| `cr` | int | required | > 0 | LoRa coding rate denominator. lus only enforces positive; no upper bound. |
+| `cr` | int | required | 5..8 | LoRa coding rate. RadioLib/MeshCore convention: 5 = CR4/5, 6 = CR4/6, 7 = CR4/7, 8 = CR4/8. The value is the airtime-formula multiplier directly (no `+4` shift). Validated at config load. |
 | `cad_miss_prob` | float | 0.0 | 0.0..1.0 | Probability a CAD/LBT check misses a busy channel. `1.0` effectively disables LBT. |
 | `cad_reliable_snr` | float | 0.0 | any | SNR above which CAD is "reliable" (low miss probability). |
 | `cad_marginal_snr` | float | -10.0 | any | SNR below which CAD is "marginal" (≈100% miss). Linear interpolation in between. |
@@ -254,12 +255,23 @@ event has `type` and `time_ms`. Common additional fields below.
 - `drop_sf_mismatch` — RX dropped: receiver's `sf_rx_set` doesn't include the packet's SF. Fields: `from`, `to`, `packet_sf`, `rx_sf`, `pkt`.
 - `drop_halfduplex` — RX dropped because the receiver was transmitting during the incoming packet's airtime. Fields: `from`, `to`, `pkt`, `airtime_ms`.
 - `collision` — RX dropped due to a stronger interferer. Fields: `from`, `to`, `interferer`, `interferer_snr`, `snr_margin`, `pkt`.
-- `tx_deferred` — TX deferred by LBT (`reason=channel_busy`) or by half-duplex (`reason=self_tx_in_flight`). Fields: `node`, `len`, `reason`.
+- `tx_deferred` — TX deferred by LBT (`reason=channel_busy`) or by half-duplex (`reason=self_tx_in_flight`). Fields: `node`, `len`, `reason`, `sf`, `label`, `tx_info`, `busy_until_ms`. `label`/`tx_info` are echoed from the deferred `self:tx({label,info})` annotation; `busy_until_ms` is when the obstacle clears (LBT `_busy_until` for `channel_busy`, own-TX `end_ms` for `self_tx_in_flight`). The same payload is delivered to the script's `on_radio_busy(self, info)` callback.
 
 ### Script events
 - `cmd_reply` — return value of `on_command`. Fields: `node`, `command`, `reply`.
 - `script_log` — `self:log(...)` output. Fields: `node` (integer id), `msg`.
 - `script_emit` — `self:emit(type, data)` output. Fields: `node`, `emit_type`, `data` (object).
+
+#### Flight-tracking convention (debug observability)
+
+Scripts that implement multi-hop flights (e.g. `scenarios/dv_dual_sf.lua`) include two fields in every flight-related `script_emit`'s `data` object so that visualizers and post-hoc analysis can group events end-to-end:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `origin` | int | Originator's node id (preserved across hops). |
+| `payload` | string | The user message bytes (preserved across hops). Omitted at receiver-side events that fire BEFORE the DATA frame arrives (`rts_rx`, `cts_tx`, `rts_rx_dup`, `rts_already_acked`, `nack_tx`) — those frames don't carry the payload. |
+
+The tuple `(origin, payload)` identifies a single end-to-end flight. This is debug-only metadata — it is **not** in the wire format; the script reads `origin` from the RTS/DATA frame and `payload` from the DATA frame (or its own state on the originator side). Real-hardware deployments would include the same data verbatim if the firmware port keeps these `:emit` calls intact.
 - `node_stats` — (Y2 todo) per-node summary at sim end.
 
 ---

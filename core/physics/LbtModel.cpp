@@ -45,3 +45,10 @@ bool LbtModel::isChannelBusy(int observer_node, uint64_t now_ms) const {
     }
     return _busy_until[(size_t)observer_node] > now_ms;
 }
+
+uint64_t LbtModel::busyUntil(int observer_node) const {
+    if (observer_node < 0 || (size_t)observer_node >= _busy_until.size()) {
+        return 0;
+    }
+    return _busy_until[(size_t)observer_node];
+}

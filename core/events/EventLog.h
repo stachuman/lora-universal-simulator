@@ -98,11 +98,24 @@ void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
 // TX failure events
 void txFail(unsigned long time_ms, const char* node, uint32_t count);
 
-// Listen-Before-Talk: a node tried to transmit but the channel was busy
-// (per LbtModel::isChannelBusy). The pending TX is dropped and the script
-// is notified via on_radio_busy; retry policy is left to the script.
+// Listen-Before-Talk / half-duplex: a node tried to transmit but either
+// the channel was busy (LbtModel::isChannelBusy) or its own previous TX
+// is still in flight. The pending TX is dropped and the script is notified
+// via on_radio_busy with the same reason+sf+label+tx_info+busy_until_ms
+// payload. Retry policy is left to the script.
 void txDeferred(unsigned long time_ms, const char* node,
-                int len, const char* reason);
+                int len, const char* reason,
+                int sf, const char* label, const char* tx_info,
+                unsigned long busy_until_ms);
+
+// Script tried to TX a frame larger than simulation.radio.max_packet_bytes
+// (the LoRa wire-frame limit, not the app payload). Physically impossible on
+// real LoRa hardware (8-bit length register tops at 255). The TX is dropped
+// (no InFlight push) and the script is notified via on_radio_busy(reason=
+// "oversized") so it can react.
+void txOversized(unsigned long time_ms, const char* node,
+                 int len, int max_packet_bytes,
+                 int sf, const char* label, const char* tx_info);
 
 // Command/reply round-trip (e.g. orchestrator → node CLI)
 void cmdReply(unsigned long time_ms, const char* node,

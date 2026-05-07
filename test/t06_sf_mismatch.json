@@ -5,6 +5,8 @@
     "duration_ms": 30000,
     "step_ms": 1,
     "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
     "radio": { "sf": 7, "bw": 250, "cr": 5 }
   },
   "nodes": [

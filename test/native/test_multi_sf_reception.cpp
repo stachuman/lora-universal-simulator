@@ -18,7 +18,10 @@
 static void test_static_thresholds_ordered_and_floor_below_paper_value() {
     // Higher SF → lower (more negative) threshold. This is the property the
     // delivery loop relies on: an SF12 packet is decodable at much lower SNR
-    // than an SF7 packet over the same link.
+    // than an SF7 packet over the same link. SF5/SF6 extend the linear
+    // -2.5 dB-per-step pattern at the high-data-rate end.
+    const float t5  = SimRadio::getSnrThreshold(5);
+    const float t6  = SimRadio::getSnrThreshold(6);
     const float t7  = SimRadio::getSnrThreshold(7);
     const float t8  = SimRadio::getSnrThreshold(8);
     const float t9  = SimRadio::getSnrThreshold(9);
@@ -26,6 +29,8 @@ static void test_static_thresholds_ordered_and_floor_below_paper_value() {
     const float t11 = SimRadio::getSnrThreshold(11);
     const float t12 = SimRadio::getSnrThreshold(12);
 
+    assert(t5  > t6);
+    assert(t6  > t7);
     assert(t7  > t8);
     assert(t8  > t9);
     assert(t9  > t10);
@@ -41,9 +46,10 @@ static void test_static_thresholds_ordered_and_floor_below_paper_value() {
 static void test_out_of_range_sf_returns_tolerant_fallback() {
     // Out-of-range SF must return a very-tolerant value so the delivery loop
     // never spuriously drops packets when metadata is malformed. -100 dB is
-    // far below any realistic link's SNR.
+    // far below any realistic link's SNR. Real SX126x supports SF5..SF12;
+    // anything outside that band is the malformed-metadata case.
     assert(SimRadio::getSnrThreshold(0)  <= -100.0f);
-    assert(SimRadio::getSnrThreshold(6)  <= -100.0f);
+    assert(SimRadio::getSnrThreshold(4)  <= -100.0f);
     assert(SimRadio::getSnrThreshold(13) <= -100.0f);
     assert(SimRadio::getSnrThreshold(99) <= -100.0f);
 }

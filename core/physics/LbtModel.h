@@ -67,6 +67,11 @@ public:
     // now_ms. CAD that "missed" earlier never advanced this timestamp.
     bool isChannelBusy(int observer_node, uint64_t now_ms) const;
 
+    // Absolute simtime when the observer's busy window ends, or 0 if no
+    // busy notification has been recorded. Used by the runtime to populate
+    // RadioBusyInfo.busy_until_ms when a TX is deferred.
+    uint64_t busyUntil(int observer_node) const;
+
     int  numNodes() const { return (int)_busy_until.size(); }
 
     // Test/inspection accessor.

@@ -68,6 +68,8 @@ static SimConfig parseJson(const json& j) {
         if (sim.contains("epoch_start")) cfg.simulation.epoch_start = sim["epoch_start"].get<uint32_t>();
         if (sim.contains("warmup_ms"))   cfg.simulation.warmup_ms   = sim["warmup_ms"].get<unsigned long>();
         if (sim.contains("seed"))        cfg.simulation.seed        = sim["seed"].get<uint64_t>();
+        if (sim.contains("node_startup_jitter_ms"))
+            cfg.simulation.node_startup_jitter_ms = sim["node_startup_jitter_ms"].get<int>();
         if (sim.contains("radio")) {
             auto& r = sim["radio"];
             if (r.contains("sf")) cfg.simulation.radio.sf = r["sf"].get<int>();
@@ -76,6 +78,7 @@ static SimConfig parseJson(const json& j) {
             if (r.contains("capture_locked_db"))   cfg.simulation.radio.capture_locked_db   = r["capture_locked_db"].get<float>();
             if (r.contains("capture_unlocked_db")) cfg.simulation.radio.capture_unlocked_db = r["capture_unlocked_db"].get<float>();
             if (r.contains("cad_miss_prob"))       cfg.simulation.radio.cad_miss_prob       = r["cad_miss_prob"].get<float>();
+            if (r.contains("max_packet_bytes"))    cfg.simulation.radio.max_packet_bytes    = r["max_packet_bytes"].get<int>();
             if (r.contains("cad_reliable_snr"))    cfg.simulation.radio.cad_reliable_snr    = r["cad_reliable_snr"].get<float>();
             if (r.contains("cad_marginal_snr"))    cfg.simulation.radio.cad_marginal_snr    = r["cad_marginal_snr"].get<float>();
             if (r.contains("snr_coherence_ms"))    cfg.simulation.radio.snr_coherence_ms    = r["snr_coherence_ms"].get<float>();
@@ -306,6 +309,13 @@ static void validateConfig(const SimConfig& cfg) {
     if (cfg.simulation.radio.cad_miss_prob < 0.0f || cfg.simulation.radio.cad_miss_prob > 1.0f)
         errors.push_back("simulation.radio.cad_miss_prob must be [0.0, 1.0] (got "
                          + std::to_string(cfg.simulation.radio.cad_miss_prob) + ")");
+    if (cfg.simulation.node_startup_jitter_ms < 0)
+        errors.push_back("simulation.node_startup_jitter_ms must be >= 0 (got "
+                         + std::to_string(cfg.simulation.node_startup_jitter_ms) + ")");
+    if (cfg.simulation.radio.max_packet_bytes < 1
+        || cfg.simulation.radio.max_packet_bytes > 65535)
+        errors.push_back("simulation.radio.max_packet_bytes must be in [1, 65535] (got "
+                         + std::to_string(cfg.simulation.radio.max_packet_bytes) + ")");
     if (cfg.simulation.radio.cad_reliable_snr < cfg.simulation.radio.cad_marginal_snr)
         errors.push_back("simulation.radio.cad_reliable_snr ("
                          + std::to_string(cfg.simulation.radio.cad_reliable_snr)
@@ -321,19 +331,19 @@ static void validateConfig(const SimConfig& cfg) {
 
     // Per-node parameters.
     //
-    // The MeshCore source enforced sf in [7,12], cr in [1,4] (its 4/(4+cr)
-    // CR-5 mapping), and bw > 0 in Hz. The universal simulator does not
-    // commit to MeshCore's CR encoding or the SF range of any one chipset,
-    // so we keep only the universal sanity check (positive values). Scripts
-    // / radio backends are responsible for rejecting unsupported values.
+    // CR convention is RadioLib/MeshCore style: cr ∈ [5..8] is the
+    // multiplier directly (5 = CR4/5, 8 = CR4/8). This is also what
+    // SimRadio::getEstAirtimeFor expects post-fix (no +4 shift). Reject
+    // values outside that range so airtimes can't silently be off.
     for (const auto& nd : cfg.nodes) {
         const std::string pfx = "node \"" + nd.name + "\": ";
         if (nd.sf <= 0)
             errors.push_back(pfx + "sf must be > 0 (got " + std::to_string(nd.sf) + ")");
         if (nd.bw <= 0)
             errors.push_back(pfx + "bw must be > 0 (got " + std::to_string(nd.bw) + ")");
-        if (nd.cr <= 0)
-            errors.push_back(pfx + "cr must be > 0 (got " + std::to_string(nd.cr) + ")");
+        if (nd.cr < 5 || nd.cr > 8)
+            errors.push_back(pfx + "cr must be in [5..8] (5=CR4/5, 8=CR4/8); got "
+                             + std::to_string(nd.cr));
         if (nd.tx_fail_prob < 0.0f || nd.tx_fail_prob > 1.0f)
             errors.push_back(pfx + "tx_fail_prob must be [0.0, 1.0] (got "
                              + std::to_string(nd.tx_fail_prob) + ")");

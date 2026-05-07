@@ -147,11 +147,17 @@ private:
     };
     std::vector<LbtWindow> _lbt_windows;
 
-    // LoRa parameters
+    // LoRa parameters. CR convention is RadioLib/MeshCore-style:
+    //   _cr ∈ [5..8] = the multiplier in the AN1200.13 payload-symbol
+    //   formula (5 = CR4/5, 8 = CR4/8). NOT the Semtech 1..4 index;
+    //   getEstAirtimeFor uses _cr directly without a +4 shift. JsonConfig
+    //   validates the [5..8] range at load time.
     int _sf;
     int _bw_hz;
     int _cr;
-    int _preamble_len = 16;  // MeshCore configures SX1262 with preambleLength=16
+    // Default 16 symbols matches MeshCore's SX1262 init (`setPreambleLength(16)`
+    // in CustomLR1110Wrapper.h). Per-tx scripts can override via PendingTx.
+    int _preamble_len = 16;
 
     // Hardware turnaround delays (configured per simulation)
     float _rx_to_tx_delay_ms;

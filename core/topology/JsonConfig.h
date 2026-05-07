@@ -48,6 +48,14 @@ struct SimConfig {
         float capture_locked_db   = 3.0f;
         float capture_unlocked_db = 6.0f;
         float cad_miss_prob       = 0.05f;
+        // Maximum total LoRa packet size in bytes. SX126x / SX1276 hardware
+        // tops out at 255 (8-bit length register) — that's the byte-count
+        // of the *entire* PHY payload going on the air, not just the
+        // application-level payload inside a protocol frame. Anything bigger
+        // is unphysical: the chip would refuse to TX, or RX would garble.
+        // Enforced in SimController; oversized TXes emit `tx_oversized` and
+        // skip the InFlight push.
+        int   max_packet_bytes    = 255;
         float cad_reliable_snr    = 0.0f;
         float cad_marginal_snr    = -15.0f;
         float snr_coherence_ms    = 0.0f;
@@ -81,6 +89,13 @@ struct SimConfig {
         // as a generic field; scripts may choose to consume it or ignore it.
         uint32_t      epoch_start = 1700000000;
         uint64_t      seed        = 42;
+        // Per-node `on_init` is staged at a uniform random offset in
+        // [0, node_startup_jitter_ms] drawn from the seeded RNG, modeling
+        // real-hardware boot-time variability. Default 0 = all nodes init
+        // synchronously at sim time 0 (legacy behavior). The radio is
+        // gated until on_init fires — pre-init packets are silently
+        // dropped script-side.
+        int           node_startup_jitter_ms = 0;
 
         RadioConfig  radio;
         PathLossSpec path_loss;
