@@ -354,8 +354,11 @@ const btnNext       = $('btn-next');
 const timeDisplayEl = $('time-display');
 
 // ── Splitter (resize lane view at the expense of the map) ─────────────
-// Updates body's --tl-height CSS variable on drag. Persists last value
-// in localStorage so the user's preferred split survives reloads.
+// Uses Pointer Events with setPointerCapture so the drag survives the
+// cursor crossing over the iframe (lane view) and the Leaflet map —
+// both of which consume document-level mouse events otherwise.
+// Persists last value in localStorage so the preferred split survives
+// reloads.
 (function setupSplitter() {
   const splitter = document.getElementById('splitter');
   if (!splitter) return;
@@ -364,42 +367,53 @@ const timeDisplayEl = $('time-display');
   // Restore saved height (clamped to a sane range vs. current viewport).
   const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
   if (Number.isFinite(saved) && saved >= 80) {
-    const max = Math.max(80, window.innerHeight - 200);
+    const max = Math.max(80, window.innerHeight - 120);
     document.body.style.setProperty('--tl-height', Math.min(saved, max) + 'px');
   }
 
   let dragging = false;
   let lastTlH = 280;
 
-  splitter.addEventListener('mousedown', (e) => {
-    dragging = true;
-    splitter.classList.add('dragging');
-    document.body.classList.add('mlv-resizing');
-    e.preventDefault();
-  });
+  // Block iframe & map from eating events while dragging by overlaying
+  // an invisible div across the whole window. Cheaper than toggling
+  // pointer-events on multiple elements and works regardless of which
+  // child captures input.
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;'
+                        + 'cursor:row-resize;display:none;background:transparent';
+  document.body.appendChild(overlay);
 
-  document.addEventListener('mousemove', (e) => {
+  function onMove(e) {
     if (!dragging) return;
-    // New timeline height = distance from cursor to bottom of viewport.
     const newH = Math.max(80, Math.min(window.innerHeight - 120,
                                        window.innerHeight - e.clientY));
     document.body.style.setProperty('--tl-height', newH + 'px');
     lastTlH = newH;
-    // Leaflet needs to recompute on container resize; throttle isn't
-    // worth it here — invalidateSize is cheap.
     if (leafletMap) leafletMap.invalidateSize();
-  });
+  }
 
-  document.addEventListener('mouseup', () => {
+  function onUp(e) {
     if (!dragging) return;
     dragging = false;
     splitter.classList.remove('dragging');
-    document.body.classList.remove('mlv-resizing');
+    overlay.style.display = 'none';
+    try { splitter.releasePointerCapture(e.pointerId); } catch (_) {}
     try { localStorage.setItem(STORAGE_KEY, String(lastTlH)); } catch (_) {}
-  });
+  }
 
-  // If the user resizes the window with a tall lane view saved, clamp
-  // so the map doesn't disappear.
+  splitter.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;        // left-click only
+    dragging = true;
+    splitter.classList.add('dragging');
+    overlay.style.display = 'block';
+    try { splitter.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+  splitter.addEventListener('pointermove', onMove);
+  splitter.addEventListener('pointerup', onUp);
+  splitter.addEventListener('pointercancel', onUp);
+
+  // Window resize: clamp the saved height so nothing collapses.
   window.addEventListener('resize', () => {
     const max = Math.max(80, window.innerHeight - 120);
     const cur = parseInt(getComputedStyle(document.body)
