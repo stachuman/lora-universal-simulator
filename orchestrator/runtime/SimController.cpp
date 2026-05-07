@@ -465,6 +465,7 @@ void SimController::deliverReceptionsForStep() {
                     snr_at_rcv, lp.rssi,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                     static_cast<int>(tx.bytes.size()),
+                    tx.sf, tx.bw_hz,
                     worst_interferer >= 0 ? _nodes[worst_interferer]->name().c_str() : nullptr,
                     worst_interferer_snr,
                     snr_margin);
@@ -489,7 +490,8 @@ void SimController::deliverReceptionsForStep() {
                     _nodes[rcv]->name().c_str(),
                     tx.sf, rx_sf_field,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
-                    static_cast<int>(tx.bytes.size()));
+                    static_cast<int>(tx.bytes.size()),
+                    tx.bw_hz);
                 continue;
             }
 
@@ -508,7 +510,8 @@ void SimController::deliverReceptionsForStep() {
                     _nodes[rcv]->name().c_str(),
                     snr_at_rcv, thr,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
-                    static_cast<int>(tx.bytes.size()));
+                    static_cast<int>(tx.bytes.size()),
+                    tx.sf, tx.bw_hz);
                 continue;
             }
 
@@ -522,7 +525,8 @@ void SimController::deliverReceptionsForStep() {
                         _nodes[rcv]->name().c_str(),
                         lp.loss,
                         reinterpret_cast<const uint8_t*>(tx.bytes.data()),
-                        static_cast<int>(tx.bytes.size()));
+                        static_cast<int>(tx.bytes.size()),
+                        tx.sf, tx.bw_hz);
                     continue;
                 }
             }
@@ -547,7 +551,8 @@ void SimController::deliverReceptionsForStep() {
                     _nodes[rcv]->name().c_str(),
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                     static_cast<int>(tx.bytes.size()),
-                    static_cast<uint32_t>(tx.end_ms - tx.start_ms));
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                    tx.sf, tx.bw_hz);
                 continue;
             }
 
@@ -561,7 +566,10 @@ void SimController::deliverReceptionsForStep() {
                          snr_at_rcv, lp.rssi,
                          reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                          static_cast<int>(tx.bytes.size()),
-                         static_cast<uint32_t>(tx.end_ms - tx.start_ms));
+                         static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                         _radios[rcv]->getSF(),
+                         _radios[rcv]->getBwHz(),
+                         _radios[rcv]->getCR());
         }
     }
 
@@ -614,6 +622,7 @@ void SimController::registerTransmissionsForStep() {
                              reinterpret_cast<const uint8_t*>(p.bytes.data()),
                              static_cast<int>(p.bytes.size()),
                              airtime,
+                             sf, bw_hz, cr,
                              p.label.empty() ? nullptr : p.label.c_str(),
                              p.info.empty()  ? nullptr : p.info.c_str());
 
@@ -630,7 +639,10 @@ void SimController::registerTransmissionsForStep() {
                                  lp.snr, lp.rssi,
                                  reinterpret_cast<const uint8_t*>(p.bytes.data()),
                                  static_cast<int>(p.bytes.size()),
-                                 airtime);
+                                 airtime,
+                                 _radios[r]->getSF(),
+                                 _radios[r]->getBwHz(),
+                                 _radios[r]->getCR());
                 }
             }
         }
@@ -752,6 +764,7 @@ void SimController::registerTransmissionsForStep() {
                          reinterpret_cast<const uint8_t*>(f.bytes.data()),
                          static_cast<int>(f.bytes.size()),
                          airtime,
+                         sf, bw_hz, cr,
                          p.label.empty() ? nullptr : p.label.c_str(),
                          p.info.empty()  ? nullptr : p.info.c_str());
 

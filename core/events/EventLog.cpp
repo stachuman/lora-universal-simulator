@@ -155,6 +155,7 @@ void nodeReady(unsigned long time_ms, const char* node, const char* role,
 
 void tx(unsigned long time_ms, const char* node,
         const uint8_t* data, int len, uint32_t airtime_ms,
+        int sf, int bw_hz, int cr,
         const char* label, const char* info) {
     char hex[512 * 2 + 1];
     char pkt[9];
@@ -189,28 +190,26 @@ void tx(unsigned long time_ms, const char* node,
     char buf[4096];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"tx\",\"time_ms\":%lu,\"node\":\"%s\",\"pkt\":\"%s\","
-        "\"hex\":\"%s\",\"airtime_ms\":%u%s}\n",
-        time_ms, node, pkt, hex, (unsigned)airtime_ms, extra);
+        "\"hex\":\"%s\",\"airtime_ms\":%u,"
+        "\"sf\":%d,\"bw_hz\":%d,\"cr\":%d%s}\n",
+        time_ms, node, pkt, hex, (unsigned)airtime_ms,
+        sf, bw_hz, cr, extra);
     emitLine(buf);
 }
 
 void rx(unsigned long time_ms, const char* from, const char* to,
         float snr, float rssi,
-        const uint8_t* data, int len, uint32_t airtime_ms) {
+        const uint8_t* data, int len, uint32_t airtime_ms,
+        int sf, int bw_hz, int cr) {
     char pkt[9];
     packetHashHex(pkt, data, len);
     char buf[4096];
-    if (airtime_ms > 0) {
-        snprintf(buf, sizeof(buf),
-            "{\"type\":\"rx\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\",\"airtime_ms\":%u}\n",
-            time_ms, from, to, snr, rssi, pkt, (unsigned)airtime_ms);
-    } else {
-        snprintf(buf, sizeof(buf),
-            "{\"type\":\"rx\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\"}\n",
-            time_ms, from, to, snr, rssi, pkt);
-    }
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"rx\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
+        "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\",\"airtime_ms\":%u,"
+        "\"sf\":%d,\"bw_hz\":%d,\"cr\":%d}\n",
+        time_ms, from, to, snr, rssi, pkt,
+        (unsigned)airtime_ms, sf, bw_hz, cr);
     emitLine(buf);
 }
 
@@ -230,6 +229,7 @@ void cmdReply(unsigned long time_ms, const char* node,
 void collision(unsigned long time_ms, const char* from, const char* to,
                float snr, float rssi,
                const uint8_t* data, int len,
+               int sf, int bw_hz,
                const char* interferer, float interferer_snr, float snr_margin) {
     char pkt[9];
     packetHashHex(pkt, data, len);
@@ -238,73 +238,82 @@ void collision(unsigned long time_ms, const char* from, const char* to,
         snprintf(buf, sizeof(buf),
             "{\"type\":\"collision\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
             "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\","
+            "\"sf\":%d,\"bw_hz\":%d,"
             "\"interferer\":\"%s\",\"interferer_snr\":%.1f,\"snr_margin\":%.1f}\n",
             time_ms, from, to, snr, rssi, pkt,
+            sf, bw_hz,
             interferer, interferer_snr, snr_margin);
     } else {
         snprintf(buf, sizeof(buf),
             "{\"type\":\"collision\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\"}\n",
-            time_ms, from, to, snr, rssi, pkt);
+            "\"snr\":%.1f,\"rssi\":%.1f,\"pkt\":\"%s\","
+            "\"sf\":%d,\"bw_hz\":%d}\n",
+            time_ms, from, to, snr, rssi, pkt,
+            sf, bw_hz);
     }
     emitLine(buf);
 }
 
 void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
-                    const uint8_t* data, int len, uint32_t airtime_ms) {
+                    const uint8_t* data, int len, uint32_t airtime_ms,
+                    int sf, int bw_hz) {
     char pkt[9];
     packetHashHex(pkt, data, len);
     char buf[2048];
-    if (airtime_ms > 0) {
-        snprintf(buf, sizeof(buf),
-            "{\"type\":\"drop_halfduplex\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"pkt\":\"%s\",\"airtime_ms\":%u}\n",
-            time_ms, from, to, pkt, (unsigned)airtime_ms);
-    } else {
-        snprintf(buf, sizeof(buf),
-            "{\"type\":\"drop_halfduplex\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-            "\"pkt\":\"%s\"}\n",
-            time_ms, from, to, pkt);
-    }
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"drop_halfduplex\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
+        "\"pkt\":\"%s\",\"airtime_ms\":%u,"
+        "\"sf\":%d,\"bw_hz\":%d}\n",
+        time_ms, from, to, pkt, (unsigned)airtime_ms,
+        sf, bw_hz);
     emitLine(buf);
 }
 
 void dropWeak(unsigned long time_ms, const char* from, const char* to,
               float snr, float threshold,
-              const uint8_t* data, int len) {
+              const uint8_t* data, int len,
+              int sf, int bw_hz) {
     char pkt[9];
     packetHashHex(pkt, data, len);
     char buf[2048];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"drop_weak\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"snr\":%.1f,\"threshold\":%.1f,\"pkt\":\"%s\"}\n",
-        time_ms, from, to, snr, threshold, pkt);
+        "\"snr\":%.1f,\"threshold\":%.1f,\"pkt\":\"%s\","
+        "\"sf\":%d,\"bw_hz\":%d}\n",
+        time_ms, from, to, snr, threshold, pkt,
+        sf, bw_hz);
     emitLine(buf);
 }
 
 void dropLoss(unsigned long time_ms, const char* from, const char* to,
               float loss_prob,
-              const uint8_t* data, int len) {
+              const uint8_t* data, int len,
+              int sf, int bw_hz) {
     char pkt[9];
     packetHashHex(pkt, data, len);
     char buf[2048];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"drop_loss\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"loss\":%.3f,\"pkt\":\"%s\"}\n",
-        time_ms, from, to, loss_prob, pkt);
+        "\"loss\":%.3f,\"pkt\":\"%s\","
+        "\"sf\":%d,\"bw_hz\":%d}\n",
+        time_ms, from, to, loss_prob, pkt,
+        sf, bw_hz);
     emitLine(buf);
 }
 
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
-                    const uint8_t* data, int len) {
+                    const uint8_t* data, int len,
+                    int bw_hz) {
     char pkt[9];
     packetHashHex(pkt, data, len);
     char buf[2048];
     snprintf(buf, sizeof(buf),
         "{\"type\":\"drop_sf_mismatch\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"packet_sf\":%d,\"rx_sf\":%d,\"pkt\":\"%s\"}\n",
-        time_ms, from, to, packet_sf, rx_sf, pkt);
+        "\"packet_sf\":%d,\"rx_sf\":%d,\"pkt\":\"%s\","
+        "\"bw_hz\":%d}\n",
+        time_ms, from, to, packet_sf, rx_sf, pkt,
+        bw_hz);
     emitLine(buf);
 }
 

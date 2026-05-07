@@ -19,16 +19,21 @@ int main() {
 
     // Real signatures (from core/events/EventLog.h):
     //   void tx(unsigned long time_ms, const char* node,
-    //           const uint8_t* data, int len, uint32_t airtime_ms);
+    //           const uint8_t* data, int len, uint32_t airtime_ms,
+    //           int sf, int bw_hz, int cr,
+    //           const char* label = nullptr, const char* info = nullptr);
     //   void rx(unsigned long time_ms, const char* from, const char* to,
     //           float snr, float rssi,
-    //           const uint8_t* data, int len, uint32_t airtime_ms = 0);
+    //           const uint8_t* data, int len, uint32_t airtime_ms,
+    //           int sf, int bw_hz, int cr);
     const uint8_t pkt_bytes[] = {0xab, 0xcd};
     EventLog::tx(/*time_ms=*/100, /*node=*/"n0",
-                 pkt_bytes, (int)sizeof(pkt_bytes), /*airtime_ms=*/120);
+                 pkt_bytes, (int)sizeof(pkt_bytes), /*airtime_ms=*/120,
+                 /*sf=*/7, /*bw_hz=*/125000, /*cr=*/5);
     EventLog::rx(/*time_ms=*/220, /*from=*/"n0", /*to=*/"n1",
                  /*snr=*/8.0f, /*rssi=*/-80.0f,
-                 pkt_bytes, (int)sizeof(pkt_bytes), /*airtime_ms=*/120);
+                 pkt_bytes, (int)sizeof(pkt_bytes), /*airtime_ms=*/120,
+                 /*sf=*/7, /*bw_hz=*/125000, /*cr=*/5);
 
     EventLog::logScriptLog(/*node_id=*/0, /*sim_ms=*/300, "hello");
     EventLog::logScriptEmit(/*node_id=*/0, /*sim_ms=*/400,
@@ -47,6 +52,10 @@ int main() {
     assert(s.find("\"to\":\"n1\"") != std::string::npos);
     // The hex dump on tx should contain the raw bytes.
     assert(s.find("\"hex\":\"abcd\"") != std::string::npos);
+    // RF params on tx/rx
+    assert(s.find("\"sf\":7") != std::string::npos);
+    assert(s.find("\"bw_hz\":125000") != std::string::npos);
+    assert(s.find("\"cr\":5") != std::string::npos);
 
     // script_log
     assert(s.find("\"type\":\"script_log\"") != std::string::npos);

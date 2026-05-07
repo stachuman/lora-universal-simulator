@@ -52,33 +52,43 @@ void nodeReady(unsigned long time_ms, const char* node, const char* role,
 // bytes; these strings are how scripts expose protocol semantics.
 void tx(unsigned long time_ms, const char* node,
         const uint8_t* data, int len, uint32_t airtime_ms,
+        int sf, int bw_hz, int cr,
         const char* label = nullptr, const char* info = nullptr);
 void rx(unsigned long time_ms, const char* from, const char* to,
         float snr, float rssi,
-        const uint8_t* data, int len, uint32_t airtime_ms = 0);
+        const uint8_t* data, int len, uint32_t airtime_ms,
+        int sf, int bw_hz, int cr);
 
 void collision(unsigned long time_ms, const char* from, const char* to,
                float snr, float rssi,
                const uint8_t* data, int len,
+               int sf, int bw_hz,
                const char* interferer = nullptr,
                float interferer_snr = 0.0f,
                float snr_margin = 0.0f);
 void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
-                    const uint8_t* data, int len, uint32_t airtime_ms = 0);
+                    const uint8_t* data, int len, uint32_t airtime_ms,
+                    int sf, int bw_hz);
 void dropWeak(unsigned long time_ms, const char* from, const char* to,
               float snr, float threshold,
-              const uint8_t* data, int len);
+              const uint8_t* data, int len,
+              int sf, int bw_hz);
 void dropLoss(unsigned long time_ms, const char* from, const char* to,
               float loss_prob,
-              const uint8_t* data, int len);
+              const uint8_t* data, int len,
+              int sf, int bw_hz);
 
 // SF mismatch — receiver isn't tuned to the packet's spreading factor
 // (single-SF LoRa hardware). `rx_sf` is the receiver's currently
 // configured SF when its sf_rx_set has exactly one entry, or -1 to
 // flag "scanner / multi-SF" receivers.
+// `bw_hz` is the packet's bandwidth — added alongside packet_sf for
+// sub-row routing in the frontend. No separate `sf` field is emitted
+// (packet_sf already carries it).
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
-                    const uint8_t* data, int len);
+                    const uint8_t* data, int len,
+                    int bw_hz);
 
 // TX failure events
 void txFail(unsigned long time_ms, const char* node, uint32_t count);
