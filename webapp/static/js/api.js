@@ -15,7 +15,25 @@ async function fetchJSON(url, options = {}) {
     let detail = resp.statusText;
     try {
       const body = await resp.json();
-      detail = body.detail || body.message || JSON.stringify(body);
+      // FastAPI raises HTTPException(detail=...) where detail can be a
+      // string OR a structured object (e.g. {"errors": [...]} from the
+      // config validator). Stringifying with `||` would yield
+      // `[object Object]` for the object case — handle both shapes.
+      const raw = (body.detail !== undefined) ? body.detail
+                : (body.message !== undefined) ? body.message
+                : body;
+      if (raw == null) {
+        detail = resp.statusText;
+      } else if (typeof raw === 'string') {
+        detail = raw;
+      } else if (Array.isArray(raw)) {
+        detail = raw.map(e => typeof e === 'string' ? e : JSON.stringify(e)).join('; ');
+      } else if (raw && Array.isArray(raw.errors)) {
+        // Common shape from config_validator: {"errors": [...]}.
+        detail = raw.errors.map(e => typeof e === 'string' ? e : JSON.stringify(e)).join('; ');
+      } else {
+        detail = JSON.stringify(raw);
+      }
     } catch (_) { /* ignore parse errors */ }
     throw new Error(`${resp.status}: ${detail}`);
   }
