@@ -1,0 +1,42 @@
+{
+  "_name": "t15_concurrent_relay",
+  "_desc": "F1 reproducer: two senders share a single relay; second sender's RTS would land in the relay's data_sf RX window. With the blind_until mitigation, the second sender either alt-switches or defers (no alt here → defers); both flights deliver. Verifies blind_observed + tx_blind_defer + both delivered. Timings 6100/6200 (100 ms gap) chosen so s2's send at 6200 lands ~17 ms after s2 overhears rly's CTS at ~6183 — squarely inside the blind window. Tighter gaps (e.g., 30 ms) miss the window because s2 issues its RTS before the CTS overhear has populated blind_until.",
+  "simulation": {
+    "duration_ms": 20000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 200,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "s1",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000 } },
+    { "name": "rly", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000 } },
+    { "name": "d1",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000 } },
+    { "name": "s2",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000 } },
+    { "name": "d2",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "s1",  "to": "rly", "snr": 10.0, "rssi": -75.0, "bidir": true },
+      { "from": "rly", "to": "d1",  "snr": 10.0, "rssi": -75.0, "bidir": true },
+      { "from": "s2",  "to": "rly", "snr": 10.0, "rssi": -75.0, "bidir": true },
+      { "from": "rly", "to": "d2",  "snr": 10.0, "rssi": -75.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 6100, "node": "s1", "command": "send d1 first-flight"  },
+    { "at_ms": 6200, "node": "s2", "command": "send d2 second-flight" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "d1", "emit_type": "delivered", "value": "first-flight"  },
+    { "type": "script_emit_contains", "node": "d2", "emit_type": "delivered", "value": "second-flight" },
+    { "type": "script_emit_contains", "node": "s2", "emit_type": "blind_observed", "value": "" },
+    { "type": "script_emit_contains", "node": "s2", "emit_type": "tx_blind_defer", "value": "" }
+  ]
+}
