@@ -54,7 +54,8 @@ public:
     // Callback dispatchers. Each tolerates a missing optional callback (no-op).
     void callOnInit(int node_id, const sol::table& config);
     void callOnRecv(int node_id, std::string_view bytes,
-                    float snr, float rssi, int link_id, uint64_t sim_ms);
+                    float snr, float rssi, int link_id, int src_id,
+                    uint64_t sim_ms);
     std::string callOnCommand(int node_id, std::string_view cmd_str);
     void callOnRadioBusy(int node_id, const RadioBusyInfo& info);
 

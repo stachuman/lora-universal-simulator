@@ -74,7 +74,7 @@ public:
     // Lifecycle: dispatched through LuaHost.
     void onInit(const nlohmann::json& config);
     void onRecv(std::string_view bytes, float snr, float rssi,
-                int link_id, uint64_t sim_ms);
+                int link_id, int src_id, uint64_t sim_ms);
     std::string onCommand(std::string_view cmd_str);
     void onRadioBusy(const RadioBusyInfo& info);
 

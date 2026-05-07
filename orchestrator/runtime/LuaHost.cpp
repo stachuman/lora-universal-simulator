@@ -246,7 +246,8 @@ void LuaHost::callOnInit(int node_id, const sol::table& config) {
 }
 
 void LuaHost::callOnRecv(int node_id, std::string_view bytes,
-                         float snr, float rssi, int link_id, uint64_t sim_ms) {
+                         float snr, float rssi, int link_id, int src_id,
+                         uint64_t sim_ms) {
     sol::object fn_obj = _node_registry[node_id]["script"]["on_recv"];
     if (!fn_obj.is<sol::function>()) return;
     sol::function fn = fn_obj;
@@ -255,6 +256,7 @@ void LuaHost::callOnRecv(int node_id, std::string_view bytes,
     meta["snr"]     = snr;
     meta["rssi"]    = rssi;
     meta["link_id"] = link_id;
+    meta["src"]     = src_id;
     meta["recv_ms"] = sim_ms;
     sol::protected_function_result r = fn.call(self, std::string(bytes), meta);
     if (!r.valid()) {

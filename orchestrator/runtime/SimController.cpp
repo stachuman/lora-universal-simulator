@@ -647,6 +647,7 @@ void SimController::deliverReceptionsForStep() {
             // Deliver to the script.
             _nodes[rcv]->onRecv(tx.bytes, snr_at_rcv, lp.rssi,
                                 /*link_id=*/0,
+                                /*src_id=*/tx.sender_id,
                                 /*sim_ms=*/now);
             // Use the PACKET's sf/bw/cr (= the receiver's at demod time,
             // since LoRa requires sf+bw match for successful rx). Don't
@@ -739,6 +740,7 @@ void SimController::registerTransmissionsForStep() {
                     if (!_links->getLink(i, r, lp)) continue;
                     _nodes[r]->onRecv(p.bytes, lp.snr, lp.rssi,
                                       /*link_id=*/0,
+                                      /*src_id=*/i,
                                       /*sim_ms=*/now);
                     // Use the packet's sf/bw/cr — see comment on the
                     // matching block in the main rx path. The receiver's

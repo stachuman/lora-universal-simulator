@@ -110,9 +110,9 @@ void ScriptedNode::onInit(const nlohmann::json& config) {
 }
 
 void ScriptedNode::onRecv(std::string_view bytes, float snr, float rssi,
-                          int link_id, uint64_t sim_ms) {
+                          int link_id, int src_id, uint64_t sim_ms) {
     if (!_initialized) return;   // radio off until on_init has fired
-    _host.callOnRecv(_id, bytes, snr, rssi, link_id, sim_ms);
+    _host.callOnRecv(_id, bytes, snr, rssi, link_id, src_id, sim_ms);
 }
 
 std::string ScriptedNode::onCommand(std::string_view cmd_str) {
