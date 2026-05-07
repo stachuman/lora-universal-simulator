@@ -275,6 +275,7 @@
   <div class="mlv-controls" id="controls" style="display:none">
     <button id="btn-pause" title="Pause / resume replay">⏸ Pause</button>
     <button id="btn-restart" title="Restart replay from beginning">⏮ Restart</button>
+    <button id="btn-next" title="Jump to next packet-level event (tx, rx, drop, collision, deferred)">⏭ Next</button>
     <span class="sep">|</span>
     <span class="speed-label">Speed:</span>
     <button class="speed-btn" data-speed="1">1×</button>
@@ -317,6 +318,7 @@ const noCoordsEl    = $('no-coords');
 const controlsEl    = $('controls');
 const btnPause      = $('btn-pause');
 const btnRestart    = $('btn-restart');
+const btnNext       = $('btn-next');
 const timeDisplayEl = $('time-display');
 
 // ── Styling helpers ───────────────────────────────────────────────────
@@ -976,6 +978,15 @@ function updateTimeDisplay() {
   timeDisplayEl.textContent = 'now: ' + nowS + 's / ' + endS + 's';
 }
 
+// Fire every queued event whose effective fire-time has been reached.
+// Used both by the rAF replay loop and the Next-event button.
+function fireEventsUpTo(targetMs) {
+  while (replayNextIdx < allEvents.length && fireMs(allEvents[replayNextIdx]) <= targetMs) {
+    fireEvent(allEvents[replayNextIdx]);
+    replayNextIdx++;
+  }
+}
+
 function replayFrame(wallTs) {
   if (replayPaused) { lastRafTs = wallTs; rafHandle = requestAnimationFrame(replayFrame); return; }
 
@@ -986,11 +997,7 @@ function replayFrame(wallTs) {
   replayCursor += dtWall * playbackSpeed;
   if (replayCursor > replayEndMs) replayCursor = replayEndMs;
 
-  // Fire all events whose time_ms <= replayCursor that haven't been fired yet
-  while (replayNextIdx < allEvents.length && fireMs(allEvents[replayNextIdx]) <= replayCursor) {
-    fireEvent(allEvents[replayNextIdx]);
-    replayNextIdx++;
-  }
+  fireEventsUpTo(replayCursor);
 
   // Update counters every frame (cheap enough)
   eventCountEl.textContent = replayNextIdx + ' / ' + allEvents.length + ' events';
@@ -1001,6 +1008,7 @@ function replayFrame(wallTs) {
   } else {
     statusEl.textContent = 'Replay complete';
     btnPause.textContent = '▶ Replay';
+    btnNext.disabled = true;
     replayPaused = true;
     rafHandle = null;
   }
@@ -1013,6 +1021,16 @@ function replayFrame(wallTs) {
 // each event with a _fire_ms so the replay cursor uses the right time.
 const RX_LIKE = new Set(['rx', 'drop_weak', 'drop_sf_mismatch',
                          'drop_halfduplex', 'collision']);
+
+// Packet-level event types that the Next button stops at. Protocol-
+// agnostic — emitted by the C++ runtime regardless of which Lua scenario
+// is running. Excludes script_log / script_emit / cmd_reply (per-protocol)
+// and node_ready / sim_start / sim_end (bookkeeping).
+const NEXT_EVENT_FILTER = new Set([
+  'tx', 'rx', 'collision',
+  'drop_weak', 'drop_sf_mismatch', 'drop_halfduplex', 'drop_loss',
+  'tx_deferred',
+]);
 
 function fireMs(ev) {
   if (RX_LIKE.has(ev.type)) return (ev.time_ms || 0) - (ev.airtime_ms || 0);
@@ -1049,6 +1067,7 @@ function restartReplay() {
   resetAllStates();
   removeAllActiveTx();
   btnPause.textContent = '⏸ Pause';
+  btnNext.disabled = false;
   updateTimeDisplay();
 
   if (rafHandle) cancelAnimationFrame(rafHandle);
@@ -1071,6 +1090,50 @@ btnPause.addEventListener('click', () => {
 });
 
 btnRestart.addEventListener('click', restartReplay);
+
+// ── Next-event button ─────────────────────────────────────────────────
+// Find the next packet-level event (NEXT_EVENT_FILTER), jump the cursor
+// to its fire-time, fire all skipped events along the way, pause, and
+// notify the embedded swim-lane iframe to recenter on the new time.
+function onNextEvent() {
+  if (replayCursor >= replayEndMs) return;  // already at end; button should be disabled
+
+  // Scan from the current event cursor forward for the next match.
+  let j = replayNextIdx;
+  while (j < allEvents.length && !NEXT_EVENT_FILTER.has(allEvents[j].type)) {
+    j++;
+  }
+
+  if (j >= allEvents.length) {
+    // No more interesting events — flush to the end.
+    replayCursor = replayEndMs;
+    fireEventsUpTo(replayEndMs);
+    statusEl.textContent = 'Replay complete';
+    btnPause.textContent = '▶ Replay';
+    btnNext.disabled = true;
+    replayPaused = true;
+    if (rafHandle) { cancelAnimationFrame(rafHandle); rafHandle = null; }
+  } else {
+    replayCursor = fireMs(allEvents[j]);
+    fireEventsUpTo(replayCursor);
+    replayPaused = true;
+    btnPause.textContent = '▶ Resume';
+  }
+
+  // Update counters + time display.
+  eventCountEl.textContent = replayNextIdx + ' / ' + allEvents.length + ' events';
+  updateTimeDisplay();
+
+  // Recenter the swim-lane iframe on the new cursor. visualize.html
+  // listens for {type:'mlv-scrub-time', t} and recenters its viewport.
+  try {
+    if (tlFrame && tlFrame.contentWindow) {
+      tlFrame.contentWindow.postMessage({ type: 'mlv-scrub-time', t: replayCursor }, '*');
+    }
+  } catch (_) { /* iframe not yet loaded — ignore */ }
+}
+
+btnNext.addEventListener('click', onNextEvent);
 
 document.querySelectorAll('.speed-btn').forEach(btn => {
   btn.addEventListener('click', () => {
