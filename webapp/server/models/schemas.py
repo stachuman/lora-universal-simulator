@@ -46,6 +46,8 @@ class RadioConfig(BaseModel):
     capture_locked_db: Optional[float] = Field(default=None, ge=0.0)
     capture_unlocked_db: Optional[float] = Field(default=None, ge=0.0)
     snr_coherence_ms: Optional[float] = Field(default=None, ge=0.0)
+    # max_packet_bytes: PHY frame-size cap. C++ validator demands [1, 65535].
+    max_packet_bytes: Optional[int] = Field(default=None, ge=1, le=65535)
     hardware: Optional[RadioHardware] = None
 
 
@@ -65,6 +67,17 @@ class SimulationConfig(BaseModel):
     path_loss: Optional[PathLossModel] = None
 
 
+class NodeRadioOverride(BaseModel):
+    """Per-node nested radio override (subset of RadioConfig). Flat
+    sf/bw/cr at the node level take precedence over the values here;
+    see core/topology/JsonConfig.cpp:134-142."""
+    model_config = ConfigDict(extra="forbid")
+
+    sf: Optional[int] = Field(default=None, ge=5, le=12)
+    bw: Optional[int] = None  # kHz
+    cr: Optional[int] = Field(default=None, ge=1)
+
+
 class NodeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +90,10 @@ class NodeConfig(BaseModel):
     bw: Optional[int] = None  # kHz
     cr: Optional[int] = Field(default=None, ge=1)  # see RadioConfig.cr note
     sf_rx_set: Optional[List[int]] = None
+    # Per-node radio override (alternative to flat sf/bw/cr).
+    radio: Optional[NodeRadioOverride] = None
+    # Stochastic per-TX failure probability ([0, 1]).
+    tx_fail_prob: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class TopologyLink(BaseModel):
