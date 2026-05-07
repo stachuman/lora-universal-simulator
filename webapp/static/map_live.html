@@ -10,16 +10,45 @@
 <script src="/static/js/api.js"></script>
 <style>
   html, body { height: 100%; margin: 0; }
-  /* 3-row × 1-col grid: header / map / swim-lane timeline iframe */
+  /* 4-row × 1-col grid: header / map / splitter / swim-lane timeline.
+     The splitter is draggable; it resizes the timeline row at the
+     expense of the map row. CSS variable carries the current
+     timeline height; the JS drag handler updates it. */
   body {
+    --tl-height: 280px;
     display: grid;
-    grid-template-rows: auto 1fr 280px;
+    grid-template-rows: auto 1fr 6px var(--tl-height);
     grid-template-areas:
       "header"
       "map"
+      "splitter"
       "timeline";
     overflow: hidden;
   }
+
+  .mlv-splitter {
+    grid-area: splitter;
+    background: var(--border);
+    cursor: row-resize;
+    position: relative;
+    user-select: none;
+    transition: background 0.12s;
+  }
+  .mlv-splitter::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 36px;
+    height: 2px;
+    background: var(--text-muted);
+    border-radius: 1px;
+    opacity: 0.5;
+  }
+  .mlv-splitter:hover { background: var(--accent); }
+  .mlv-splitter.dragging { background: var(--accent); }
+  body.mlv-resizing { cursor: row-resize; }
 
   .mlv-status {
     grid-area: header;
@@ -300,6 +329,9 @@
   </div>
 </div>
 
+<!-- Drag handle between map and lane view -->
+<div class="mlv-splitter" id="splitter" title="Drag to resize"></div>
+
 <!-- Bottom: swim-lane timeline (renders visualize.html for the same sim) -->
 <iframe class="mlv-timeline-frame" id="tl-frame" title="Timeline"></iframe>
 
@@ -320,6 +352,64 @@ const btnPause      = $('btn-pause');
 const btnRestart    = $('btn-restart');
 const btnNext       = $('btn-next');
 const timeDisplayEl = $('time-display');
+
+// ── Splitter (resize lane view at the expense of the map) ─────────────
+// Updates body's --tl-height CSS variable on drag. Persists last value
+// in localStorage so the user's preferred split survives reloads.
+(function setupSplitter() {
+  const splitter = document.getElementById('splitter');
+  if (!splitter) return;
+  const STORAGE_KEY = 'mlv-tl-height';
+
+  // Restore saved height (clamped to a sane range vs. current viewport).
+  const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+  if (Number.isFinite(saved) && saved >= 80) {
+    const max = Math.max(80, window.innerHeight - 200);
+    document.body.style.setProperty('--tl-height', Math.min(saved, max) + 'px');
+  }
+
+  let dragging = false;
+  let lastTlH = 280;
+
+  splitter.addEventListener('mousedown', (e) => {
+    dragging = true;
+    splitter.classList.add('dragging');
+    document.body.classList.add('mlv-resizing');
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    // New timeline height = distance from cursor to bottom of viewport.
+    const newH = Math.max(80, Math.min(window.innerHeight - 120,
+                                       window.innerHeight - e.clientY));
+    document.body.style.setProperty('--tl-height', newH + 'px');
+    lastTlH = newH;
+    // Leaflet needs to recompute on container resize; throttle isn't
+    // worth it here — invalidateSize is cheap.
+    if (leafletMap) leafletMap.invalidateSize();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove('dragging');
+    document.body.classList.remove('mlv-resizing');
+    try { localStorage.setItem(STORAGE_KEY, String(lastTlH)); } catch (_) {}
+  });
+
+  // If the user resizes the window with a tall lane view saved, clamp
+  // so the map doesn't disappear.
+  window.addEventListener('resize', () => {
+    const max = Math.max(80, window.innerHeight - 120);
+    const cur = parseInt(getComputedStyle(document.body)
+                         .getPropertyValue('--tl-height'), 10);
+    if (Number.isFinite(cur) && cur > max) {
+      document.body.style.setProperty('--tl-height', max + 'px');
+      if (leafletMap) leafletMap.invalidateSize();
+    }
+  });
+})();
 
 // ── Styling helpers ───────────────────────────────────────────────────
 function snrColor(snr) {
