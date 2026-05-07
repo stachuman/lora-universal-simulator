@@ -184,6 +184,14 @@ const loading = document.getElementById('loading');
 const sidebar = document.getElementById('sidebar');
 const sidebarContent = document.getElementById('sidebar-content');
 
+// When embedded as map_live.html's bottom-strip iframe, the
+// time-display overlay covers part of the swim-lane area the user
+// wants to inspect. Hide it in iframe mode — the parent already shows
+// time context via its own status bar + the playback cursor label.
+if (IS_IFRAME) {
+    timeDisplay.style.display = 'none';
+}
+
 // Saturated palette tuned for the light lane background (#f0f0f4).
 // Pastel hues wash out almost entirely; these tones keep contrast.
 const COLORS = {
