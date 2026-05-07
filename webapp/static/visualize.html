@@ -594,12 +594,19 @@ function render() {
         const node = S.nodes[i];
         const isCompanion = node.role === 'companion';
 
-        // Node name: centered vertically across the whole node group
+        // Node name: centered vertically across the whole node group.
+        // Truncate when sub-rows are present so the name doesn't overlap
+        // the per-sub-row labels at x=64 (12px bold mono ≈ 7px/char →
+        // 7 chars fits comfortably before the labels start).
         ctx.fillStyle = isCompanion ? '#2563eb' : '#6b7280';
         ctx.font = 'bold 12px monospace';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(node.name, 8, y + nodeLaneH / 2);
+        const maxNameChars = (S.subRows.length > 0) ? 7 : 20;
+        const displayName = node.name.length > maxNameChars
+            ? node.name.slice(0, maxNameChars - 1) + '…'
+            : node.name;
+        ctx.fillText(displayName, 8, y + nodeLaneH / 2);
 
         // Sub-row labels (one per (sf, bw_hz) tuple)
         ctx.font = '9px monospace';
@@ -851,6 +858,12 @@ function drawDensity() {
     const d = S.densityCache;
     if (!d) return;
 
+    // Density mode and sub-rows are mutually exclusive in practice: density
+    // is triggered only when span > 60s (loadViewport sets cachedEvents=[]),
+    // which makes computeSubRowLayout produce S.subRows=[], collapsing
+    // nodeLaneH back to S.laneH. nodeToY(nodeName) without ev therefore
+    // lands on sub-row 0 = the only row. If a future server returns
+    // per-(sf,bw) density buckets, this branch will need explicit handling.
     for (const [nodeName, cats] of Object.entries(d.nodes)) {
         const y = nodeToY(nodeName);
         if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
@@ -1241,7 +1254,7 @@ function drawTrace() {
 
         const rxAirtime = triggerRx.airtime_ms || 50;
         const x1 = msToX(triggerRx.time_ms + rxAirtime);
-        const y = nodeToY(relayTx.node);
+        const y = nodeToY(relayTx.node, relayTx);
         const x2 = msToX(relayTx.time_ms);
         if (y === null) continue;
 
@@ -1285,7 +1298,7 @@ function drawTrace() {
         if (!triggerRx) continue;
 
         const x1 = msToX(triggerRx.time_ms);
-        const y = nodeToY(respTx.node);
+        const y = nodeToY(respTx.node, respTx);
         const x2 = msToX(respTx.time_ms);
         if (y === null) continue;
 

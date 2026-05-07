@@ -27,5 +27,6 @@ async def test_visualize_has_sublane_rendering():
     assert "subRowFor" in html, "subRowFor helper missing"
     # Click sidebar gains CR field
     assert "CR " in html, "CR row missing from click-details panel template"
-    # Hover tooltip suffix
-    assert "/" in html and "kHz" in html, "Hover tooltip BW suffix missing"
+    # Hover tooltip / sidebar must surface SF and BW (kHz)
+    assert "kHz" in html, "BW (kHz) suffix missing from sidebar/tooltip"
+    assert "SF" in html, "SF reference missing from sidebar/tooltip"
