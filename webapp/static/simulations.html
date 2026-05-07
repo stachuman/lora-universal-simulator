@@ -249,7 +249,10 @@
     // Detail view — always available
     parts.push('<a href="/static/simulation.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">' + (sim.status === 'running' ? 'Progress' : 'Details') + '</a>');
 
-    if (sim.status === 'completed') {
+    // Timeline / Map are useful for any sim whose events file exists —
+    // including failed (assertion failures still emit a full event log)
+    // and cancelled (partial event log is still inspectable).
+    if (sim.status === 'completed' || sim.status === 'failed' || sim.status === 'cancelled') {
       parts.push('<a href="/static/visualize.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Timeline</a>');
       parts.push('<a href="/static/map_live.html?id=' + encodeURIComponent(sim.id) + '" class="btn btn-sm">Map</a>');
     }

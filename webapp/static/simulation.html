@@ -576,12 +576,17 @@
         status.textContent = 'Failed';
         pct.textContent = '';
         addLogLine('Simulation failed: ' + (data.error || 'unknown error'), 'error');
+        // Failed sims still have a full event log — let users open the
+        // timeline / map / interactive views to inspect what went wrong.
+        showResultLinks();
       } else if (data.status === 'cancelled') {
         fill.style.width = (data.progress || 0) + '%';
         fill.style.background = 'var(--warning)';
         status.textContent = 'Cancelled';
         pct.textContent = '';
         addLogLine('Simulation was cancelled.', 'error');
+        // Cancelled sims have a partial event log — still inspectable.
+        showResultLinks();
       }
     }
 
@@ -655,6 +660,7 @@
             status.textContent = 'Failed';
             addLogLine('Simulation failed: ' + (data.error || 'unknown error'), 'error');
             updateInfoStatus('failed');
+            showResultLinks();
             cleanup();
           }
 
@@ -663,6 +669,7 @@
             status.textContent = 'Cancelled';
             addLogLine('Simulation was cancelled.', 'error');
             updateInfoStatus('cancelled');
+            showResultLinks();
             cleanup();
           }
         },
