@@ -861,6 +861,10 @@ local become_free
 -- already decremented retries_left and confirmed the giveup case.
 local function tx_rts_retry(self, reason)
   local px = self.pending_tx
+  -- pending_tx can be cleared between when a blind-defer was scheduled
+  -- and when its self:after callback fires (e.g., the ACK arrived during
+  -- the defer window). Bail out gracefully — no flight to retry.
+  if px == nil then return end
 
   -- F1 mitigation: if next-hop is now known-blind, defer the retry or
   -- switch to alt. Reset retries budget on alt-switch (fresh path).
