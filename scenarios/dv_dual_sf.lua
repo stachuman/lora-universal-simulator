@@ -9,7 +9,7 @@
 -- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), sf_bitmap(1), payload_len(1) |
 -- | `'C'` | CTS    | `C`, src(1), msg_id_lo(1), msg_id_hi(1)                                         |
 -- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), payload(n) |
--- | `'K'` | ACK    | `K`, msg_id_lo(1), msg_id_hi(1)                                                 |
+-- | `'K'` | ACK    | `K`, msg_id_lo(1), msg_id_hi(1), snr_4b|reserved_4b(1)                          |
 -- | `'N'` | NACK   | `N`, msg_id_lo(1), msg_id_hi(1), busy_for_ms_lo(1), busy_for_ms_hi(1)           |
 --
 -- RTS's sf_bitmap byte (offset 7) is a per-flight bitmap of allowed data SFs:
@@ -21,9 +21,22 @@
 -- worst-case — important when payloads vary 10–200 bytes, since the
 -- worst-case budget would freeze pending_rx ~2× longer than needed.
 -- CTS's last byte is the receiver's chosen data SF (single value, 5..12),
--- selected from the RTS bitmap based on the link SNR + safety margin.
--- This makes the data-plane SF per-hop adaptive without any wire-format
--- negotiation round-trip beyond the existing RTS/CTS handshake.
+-- selected from the RTS bitmap. The SNR fed into select_data_sf is the
+-- per-neighbour inbound EWMA (`snr_ewma_in[r.src]`), updated at the top
+-- of every on_recv with the most recent meta.snr from that neighbour —
+-- so the SF pick rides on a smoothed ~10-sample estimate instead of a
+-- single noisy snapshot. This makes the data-plane SF per-hop adaptive
+-- without any wire-format negotiation round-trip beyond the existing
+-- RTS/CTS handshake.
+--
+-- ACK's 4th byte's low nibble is a 4-bit SNR bucket (2 dB bins, range
+-- -20..+10 dB) — the receiver's measurement of the just-received DATA's
+-- decode SNR. The originator/forwarder feeds this into a separate
+-- per-neighbour `snr_ewma_out` so it knows how its own outbound DATA
+-- arrives at each neighbour. The high nibble is reserved (currently 0).
+-- Use cases for `_out`: future routing-cost weighting, per-link RTS
+-- bitmap trimming, link-asymmetry detection. SF picks today still read
+-- `_in` only.
 --
 -- DATA's payload(n) bytes carry an APPLICATION-LAYER header followed by the
 -- user text:
@@ -476,6 +489,37 @@ local function parse_beacon(frame)
   return { src = src, entries = entries }
 end
 
+-- Quantize an SNR (dB) to a 4-bit bucket [0..15] for byte-tight ACK
+-- piggyback. 16 buckets, 2 dB per bin, range -20..+10 dB:
+--   bucket  0: snr <= -20 dB
+--   bucket 15: snr >= +10 dB
+-- Range chosen to span LoRa demod thresholds (SF12 = -20, SF7 = -7.5)
+-- with 5 buckets of headroom above SF7 for "easy decode" signal.
+-- The decode helper returns the BIN CENTER so EWMAs/comparisons treat
+-- quantization as fair rounding, not systematic bias toward bin lower edge.
+local function bucket_of_snr_4b(snr_db)
+  local b = math.floor((snr_db + 20) / 2)
+  if b < 0 then b = 0 end
+  if b > 15 then b = 15 end
+  return b
+end
+
+local function snr_of_bucket_4b(bucket)
+  return -19 + bucket * 2  -- -19, -17, ..., +9, +11 (bin centers)
+end
+
+-- Update a per-neighbor SNR EWMA in-place. First sample seeds the EWMA
+-- (no warmup ramp); subsequent samples blend with `alpha`. Default alpha
+-- 0.3 → ~10-sample effective window.
+local function update_snr_ewma(table_, nbr_id, snr_db, alpha)
+  local prev = table_[nbr_id]
+  if prev == nil then
+    table_[nbr_id] = snr_db
+  else
+    table_[nbr_id] = alpha * snr_db + (1 - alpha) * prev
+  end
+end
+
 -- payload_len is the exact byte count the upcoming DATA frame will carry
 -- in its variable-length suffix (origin-seq header + user_text). The
 -- receiver uses it to size pending_rx_expiry to actual airtime instead
@@ -522,15 +566,26 @@ local function parse_cts(frame)
   }
 end
 
-local function pack_ack(msg_id)
+-- ACK now carries the receiver's measurement of the DATA frame's SNR in
+-- the low nibble of the 4th byte (high nibble reserved for future flags).
+-- 4-bit resolution is enough to drive the sender's outbound link-quality
+-- EWMA and route-cost decisions; full-byte SNR would be over-precision
+-- against LoRa's per-symbol SNR variance. snr_db argument is optional —
+-- nil produces a bucket-15 value (no information signal).
+local function pack_ack(msg_id, snr_db)
+  local bucket = (snr_db ~= nil) and bucket_of_snr_4b(snr_db) or 15
   return "K" .. string.char(msg_id % 256)
               .. string.char(math.floor(msg_id / 256) % 256)
+              .. string.char(bucket & 0x0f)   -- high nibble reserved = 0
 end
 
 local function parse_ack(frame)
-  if #frame < 3 or frame:sub(1,1) ~= "K" then return nil end
+  if #frame < 4 or frame:sub(1,1) ~= "K" then return nil end
+  local snr_byte = frame:byte(4)
   return {
-    msg_id = frame:byte(2) + frame:byte(3) * 256,
+    msg_id      = frame:byte(2) + frame:byte(3) * 256,
+    snr_db      = snr_of_bucket_4b(snr_byte & 0x0f),
+    snr_bucket  = snr_byte & 0x0f,
   }
 end
 
@@ -606,7 +661,7 @@ end
 local RTS_LEN = 9       -- 'R' + origin + src + dst + next + msg_id_lo + msg_id_hi + data_sf + payload_len
 local CTS_LEN = 4       -- 'C' + src + msg_id_lo + msg_id_hi
 local DATA_HDR_LEN = 7  -- 'D' + origin + src + dst + next + msg_id_lo + msg_id_hi (payload follows)
-local ACK_LEN = 3       -- 'K' + msg_id_lo + msg_id_hi
+local ACK_LEN = 4       -- 'K' + msg_id_lo + msg_id_hi + snr_4b|reserved_4b
 local NACK_LEN = 5      -- 'N' + msg_id_lo + msg_id_hi + busy_for_ms_lo + busy_for_ms_hi
 
 -- LoRa on-air time in milliseconds (Semtech AN1200.13). This is intentionally
@@ -1699,6 +1754,21 @@ function on_init(self, config)
   self.last_rx_routing_sf_ms     = nil
   self.quiet_threshold_ms        = config.quiet_threshold_ms        or 30000
   self.beacon_silence_jitter_ms  = config.beacon_silence_jitter_ms  or 10000
+
+  -- Per-neighbor SNR EWMA. `snr_ewma_in[nbr_id]` is fed by every successful
+  -- RX from that neighbor — RTS, beacons, CTS-as-listener, etc. Used by
+  -- select_data_sf to pick a data SF off a smoothed signal estimate
+  -- instead of one noisy snapshot. Initial-sample seeds the EWMA, then
+  -- each new sample blends with `snr_ewma_alpha` (default 0.3 → ~10
+  -- effective samples). See update_snr_ewma. `snr_ewma_out[nbr_id]` is
+  -- separately fed by ACK piggyback (the receiver's measurement of OUR
+  -- DATA reception, decoded from the ACK's 4-bit SNR bucket); kept apart
+  -- from `_in` because asymmetric links would otherwise pollute the
+  -- inbound estimate. `_out` is exposed for future routing/RTS-bitmap
+  -- use; SF picks today still read `_in` only.
+  self.snr_ewma_alpha = config.snr_ewma_alpha or 0.3
+  self.snr_ewma_in    = {}
+  self.snr_ewma_out   = {}
   -- Cap the size of each beacon to fit in a single LoRa frame. Header
   -- is 3 bytes ('B' + src + n), each entry is 4 bytes — so for the
   -- 255-byte LoRa max, (255-3)/4 = 63 entries fits theoretically. We
@@ -1867,6 +1937,14 @@ function on_recv(self, frame, meta)
   -- beacon_fire reads this to decide whether to suppress the next beacon.
   -- Updated unconditionally (broadcast OR unicast, beacon OR data plane).
   self.last_rx_routing_sf_ms = self:now()
+  -- Per-neighbor inbound SNR EWMA. Smooths the noisy single-sample SNR
+  -- that select_data_sf would otherwise see, so SF picks ride on a
+  -- ~10-sample running estimate instead of one snapshot. Same EWMA covers
+  -- every frame type (beacon/RTS/CTS/DATA/ACK/NACK) since SNR is a
+  -- physical link property, not frame-type-specific.
+  if meta.src ~= nil and meta.snr ~= nil then
+    update_snr_ewma(self.snr_ewma_in, meta.src, meta.snr, self.snr_ewma_alpha)
+  end
   local tag = frame:sub(1, 1)
 
   if tag == "B" then
@@ -1966,7 +2044,10 @@ function on_recv(self, frame, meta)
       })
       self:log(string.format("rts_already_acked <- %s msg_id=%d -> re-sending ACK",
         name_of(self, r.src), r.msg_id))
-      local ack = pack_ack(r.msg_id)
+      -- Piggyback the current RTS's SNR — this isn't the original DATA's
+      -- SNR (we don't have it any more), but it's a valid fresh sample of
+      -- the same link, so the sender's outbound EWMA still benefits.
+      local ack = pack_ack(r.msg_id, meta.snr)
       tx_with_retry(self, ack, {
         sf    = self.routing_sf,
         label = "K-dup",
@@ -2061,11 +2142,16 @@ function on_recv(self, frame, meta)
       return
     end
 
-    -- Pick a data SF from the RTS's allowed-SF bitmap based on the link
-    -- SNR (rx_snr from radio metadata) and our configured margin. Empty
+    -- Pick a data SF from the RTS's allowed-SF bitmap based on the
+    -- per-neighbor inbound SNR EWMA (smoothed across recent RXes from
+    -- this sender, not just this single RTS). Falls back to the raw
+    -- meta.snr if we have no EWMA yet — but the on_recv top-of-function
+    -- hook just updated `_in[r.src]` with `meta.snr`, so the EWMA is
+    -- always populated for any neighbor we just received from. Empty
     -- bitmap → nothing we can do; silent drop (sender's rts_timeout will
     -- handle it).
-    local chosen_sf = select_data_sf(meta.snr, r.sf_bitmap, self.sf_margin_db)
+    local snr_for_sf = self.snr_ewma_in[r.src] or meta.snr
+    local chosen_sf  = select_data_sf(snr_for_sf, r.sf_bitmap, self.sf_margin_db)
     if chosen_sf == nil then
       self:emit("rts_drop_no_sf", {
         origin = r.origin, from = r.src, msg_id = r.msg_id,
@@ -2079,7 +2165,8 @@ function on_recv(self, frame, meta)
     self:emit("rts_rx", {
       origin = r.origin,    -- payload unknown at RTS phase
       from = r.src, dst = r.dst, msg_id = r.msg_id,
-      sf_bitmap = r.sf_bitmap, chosen_data_sf = chosen_sf, rx_snr = meta.snr,
+      sf_bitmap = r.sf_bitmap, chosen_data_sf = chosen_sf,
+      rx_snr = meta.snr, ewma_snr = snr_for_sf,
     })
     self:log(string.format(
       "rts_rx <- %s (origin=%s dst=%s msg_id=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
@@ -2227,14 +2314,33 @@ function on_recv(self, frame, meta)
       self:cancel(self.ack_timeout_handle)
       self.ack_timeout_handle = nil
     end
+    -- ACK piggyback: receiver included its measurement of OUR DATA's
+    -- decode SNR (4-bit bucket, low nibble of byte 4). Update our
+    -- outbound-EWMA estimate of how this neighbour hears us. Kept
+    -- separate from snr_ewma_in (which tracks the inbound direction
+    -- from RTSes/beacons) so asymmetric links don't pollute the per-
+    -- direction estimates. Today the outbound EWMA is read by no other
+    -- code path — it's instrumentation for upcoming routing/RTS-bitmap
+    -- decisions; without recording it now, the data wouldn't be there
+    -- when those changes land.
+    local ack_src = self.pending_tx.next
+    if ack_src ~= nil and k.snr_db ~= nil then
+      update_snr_ewma(self.snr_ewma_out, ack_src, k.snr_db, self.snr_ewma_alpha)
+      self:emit("ack_snr_feedback", {
+        from = ack_src, msg_id = k.msg_id,
+        data_snr_db = k.snr_db, snr_bucket = k.snr_bucket,
+        ewma_out = self.snr_ewma_out[ack_src],
+      })
+    end
     self:emit("ack_rx", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
       from = self.pending_tx.next, msg_id = k.msg_id,
+      data_snr_db = k.snr_db,
     })
-    self:log(string.format("ack_rx <- %s msg_id=%d -> hop complete",
-      name_of(self, self.pending_tx.next), k.msg_id))
+    self:log(string.format("ack_rx <- %s msg_id=%d data_snr=%.1fdB -> hop complete",
+      name_of(self, self.pending_tx.next), k.msg_id, k.snr_db or 0))
     self.pending_tx = nil
     become_free(self)
     return
@@ -2405,10 +2511,15 @@ function on_recv(self, frame, meta)
     self.pending_rx = nil
 
     self.last_acked_from[d.src] = d.msg_id
-    local ack = pack_ack(d.msg_id)
+    -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
+    -- bucket. Sender uses it to maintain its outbound link-quality EWMA
+    -- to us (which we can't see because we're at the receiving end);
+    -- gives the sender a closed-loop signal for routing decisions and
+    -- (future) per-neighbor RTS bitmap trimming.
+    local ack = pack_ack(d.msg_id, meta.snr)
     self:emit("ack_tx", {
       origin = d.origin, payload = user_text, origin_seq = origin_seq,
-      to = d.src, msg_id = d.msg_id,
+      to = d.src, msg_id = d.msg_id, data_snr = meta.snr,
     })
     self:log(string.format("ack_tx -> %s msg_id=%d (on routing SF%d)",
       name_of(self, d.src), d.msg_id, self.routing_sf))
