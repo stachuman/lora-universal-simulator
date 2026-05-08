@@ -132,6 +132,12 @@ void simEnd(unsigned long time_ms) {
     emitLine(buf);
 }
 
+void warmupEnd(unsigned long time_ms) {
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "{\"type\":\"warmup_end\",\"time_ms\":%lu}\n", time_ms);
+    emitLine(buf);
+}
+
 void nodeReady(unsigned long time_ms, const char* node, const char* role,
                const uint8_t* pub_key, int key_len,
                bool has_location, double lat, double lon,

@@ -38,6 +38,8 @@ void setEventHook(EventHook hook);
 void simStart(unsigned long time_ms, int n_nodes, int step_ms,
               unsigned long warmup_ms = 0, bool hot_start = false);
 void simEnd(unsigned long time_ms);
+// Boundary marker — fires once at sim_time == warmup_ms when warmup_ms > 0.
+void warmupEnd(unsigned long time_ms);
 
 void nodeReady(unsigned long time_ms, const char* node, const char* role,
                const uint8_t* pub_key, int key_len,

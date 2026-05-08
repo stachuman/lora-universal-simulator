@@ -458,6 +458,7 @@ void SimController::initialize() {
     // preamble_lock_symbols stays at upstream's default (6).
 
     _now_ms = 0;
+    _warmup_end_emitted = false;
     _initialized = true;
 }
 
@@ -1259,6 +1260,20 @@ StepResult SimController::step(uint64_t advance_ms) {
         : advance_ms;
 
     const int events_before = static_cast<int>(EventLog::events().size());
+
+    // Boundary marker: emit warmup_end exactly once when _now_ms first
+    // reaches simulation.warmup_ms. Skipped if warmup_ms == 0 (no
+    // boundary). Position: ahead of every other per-step action so any
+    // physics events generated during this same step are ordered after
+    // the boundary marker, which is what readers expect.
+    {
+        const uint64_t warmup_ms =
+            static_cast<uint64_t>(_cfg.simulation.warmup_ms);
+        if (!_warmup_end_emitted && warmup_ms > 0 && _now_ms >= warmup_ms) {
+            EventLog::warmupEnd(static_cast<unsigned long>(warmup_ms));
+            _warmup_end_emitted = true;
+        }
+    }
 
     // Drive the asymmetry-coherence-driven re-sample of per-pair shadows.
     // Per-node offsets stay fixed; only the pair shadow component drifts.
