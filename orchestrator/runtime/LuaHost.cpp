@@ -82,6 +82,12 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node) {
             [node](sol::object /*self*/) { return node->api_channel_busy_until(); });
         self.set_function("tx_in_flight",
             [node](sol::object /*self*/) { return node->api_tx_in_flight(); });
+        self.set_function("airtime_used_ms",
+            [node](sol::object /*self*/, uint64_t window_ms) {
+                return node->api_airtime_used_ms(window_ms);
+            });
+        self.set_function("oldest_tx_end_ms",
+            [node](sol::object /*self*/) { return node->api_oldest_tx_end_ms(); });
     }
 }
 

@@ -82,6 +82,8 @@ static SimConfig parseJson(const json& j) {
             if (r.contains("cad_reliable_snr"))    cfg.simulation.radio.cad_reliable_snr    = r["cad_reliable_snr"].get<float>();
             if (r.contains("cad_marginal_snr"))    cfg.simulation.radio.cad_marginal_snr    = r["cad_marginal_snr"].get<float>();
             if (r.contains("snr_coherence_ms"))    cfg.simulation.radio.snr_coherence_ms    = r["snr_coherence_ms"].get<float>();
+            if (r.contains("duty_cycle"))          cfg.simulation.radio.duty_cycle          = r["duty_cycle"].get<float>();
+            if (r.contains("duty_cycle_window_ms")) cfg.simulation.radio.duty_cycle_window_ms = r["duty_cycle_window_ms"].get<unsigned long>();
             if (r.contains("hardware")) {
                 auto& hw = r["hardware"];
                 if (hw.contains("rx_to_tx_delay_ms")) cfg.simulation.radio.rx_to_tx_delay_ms = hw["rx_to_tx_delay_ms"].get<float>();
@@ -324,6 +326,12 @@ static void validateConfig(const SimConfig& cfg) {
     if (cfg.simulation.radio.snr_coherence_ms < 0.0f)
         errors.push_back("simulation.radio.snr_coherence_ms must be >= 0 (got "
                          + std::to_string(cfg.simulation.radio.snr_coherence_ms) + ")");
+    if (cfg.simulation.radio.duty_cycle <= 0.0f
+        || cfg.simulation.radio.duty_cycle > 1.0f)
+        errors.push_back("simulation.radio.duty_cycle must be in (0, 1] (got "
+                         + std::to_string(cfg.simulation.radio.duty_cycle) + ")");
+    if (cfg.simulation.radio.duty_cycle_window_ms == 0)
+        errors.push_back("simulation.radio.duty_cycle_window_ms must be > 0");
 
     // Build node name set for cross-validation.
     std::set<std::string> node_names;

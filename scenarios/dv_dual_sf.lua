@@ -114,17 +114,50 @@
 -- Retries (per-hop):
 --   rts_timeout_fire — CTS didn't arrive within rts_timeout_ms:
 --     • pending_rx set  → reschedule self after rts_busy_retry_ms
---     • retries_left>0  → tx_rts_retry("cts_timeout"), restart
+--     • retries_left>0  → after rand(0, retry_jitter_ms): tx_rts_retry
+--                          ("cts_timeout"). The random backoff prevents
+--                          synchronized re-fires across nodes whose CTSes
+--                          collided in the same window.
 --     • retries_left==0 → emit rts_giveup, clear pending_tx, become_free
 --   ack_timeout_fire — ACK didn't arrive within DATA_air + ACK_air:
 --     • pending_rx set  → reschedule self after rts_busy_retry_ms
---     • retries_left>0  → tx_rts_retry("ack_timeout"), restart
+--     • retries_left>0  → after rand(0, retry_jitter_ms): tx_rts_retry
+--                          ("ack_timeout"). Same random backoff as cts.
 --     • retries_left==0 → emit data_ack_giveup, clear pending_tx, become_free
 --   pending_rx_expiry_fire — DATA didn't arrive after CTS:
 --     • clear pending_rx, retune to routing_sf, emit data_rx_timeout, become_free
---   tx_rts_retry: re-tx RTS with same msg_id and re-arm rts_timeout. The
---   receiver's rts_already_acked / rts_rx_dup paths handle whatever state
---   it's in (still expecting DATA, or already acked).
+--   tx_rts_retry: re-tx RTS with same msg_id (via tx_initiating, so still
+--   LBT-gated) and re-arm rts_timeout. The receiver's rts_already_acked /
+--   rts_rx_dup paths handle whatever state it's in (still expecting DATA,
+--   or already acked).
+--
+-- TX policy classes (three categories with different timing constraints):
+--
+--   1. RESPONSE-DIRECTED  (CTS, DATA, ACK) — peer's timer (rts_timeout /
+--      ack_timeout / pending_rx_expiry) is already running and was sized
+--      to the *minimum* round-trip airtime. Any LBT defer here pushes us
+--      past the peer's deadline, burning a retry. So these go straight
+--      through tx_with_retry; the simulator's reactive radio_busy stash
+--      is the only safety net.
+--
+--   2. INITIATING-DIRECTED  (RTS, NACK) — sender owns the schedule.
+--      Routed through tx_initiating, which pre-checks
+--      self:channel_busy_until() and, if busy, schedules the actual emit
+--      at busy_until + rand(0, retry_jitter_ms). Reduces head-on collisions
+--      on tight links and decorrelates retry storms across nodes whose
+--      timers fire on the same step. Bounded by rts_max_retries on the
+--      RTS side; a missing NACK just means the peer keeps retrying RTS.
+--
+--   3. FLOOD  (Beacon) — no specific peer waiting; lost beacons are
+--      recovered by the next periodic / triggered fire. Routed through
+--      tx_flood, which LBT-defers up to flood_lbt_max_defer_ms and drops
+--      the page (tx_flood_skipped emit) past that threshold — a stale
+--      routing announcement isn't worth queueing when a fresher one will
+--      fire shortly.
+--
+--   Knobs on self: lbt_enabled (default true), retry_jitter_ms (default
+--   = one RTS-airtime, scales with BW/SF), flood_lbt_max_defer_ms
+--   (default = one beacon's airtime).
 --
 -- Airtime + dynamic timeouts:
 --   airtime_ms(sf, bw_hz, cr, preamble_sym, len) — Semtech AN1200.13 in Lua
@@ -687,6 +720,36 @@ local function classify_blind(self, dst_id, current_next_hop, alt_already_tried,
   return "defer", remaining + 1
 end
 
+-- Duty-cycle pre-check. Returns (ok, wait_ms). When ok=true, the TX may
+-- proceed; the runtime's airtime log will absorb it. When ok=false, the
+-- caller should self:after(wait_ms, retry_callback) and re-check on fire.
+-- The runtime also hard-blocks via on_radio_busy(reason="duty_cycle_exceeded")
+-- as a safety net; this pre-check exists so the script defers proactively
+-- instead of waiting for the round-trip and retrying via on_radio_busy.
+-- Pre-check uses the same data the runtime uses, queried via the
+-- self:airtime_used_ms / self:oldest_tx_end_ms primitives — composes for free.
+local function check_duty_cycle(self, this_airtime_ms)
+  if not self.duty_cycle or self.duty_cycle <= 0
+     or not self.duty_cycle_window_ms or self.duty_cycle_window_ms <= 0 then
+    return true, 0   -- disabled
+  end
+  local used = self:airtime_used_ms(self.duty_cycle_window_ms)
+  if used + this_airtime_ms <= self.duty_cycle_budget_ms then
+    return true, 0
+  end
+  -- Over budget. Compute when the oldest in-window entry falls out
+  -- (oldest_end_ms + window_ms). That's the earliest moment a fresh TX
+  -- of any size could fit — under-estimate when severely over budget,
+  -- script will recheck on retry.
+  local oldest = self:oldest_tx_end_ms()
+  local now = self:now()
+  local wait_ms = (oldest > 0)
+                  and (oldest + self.duty_cycle_window_ms - now)
+                  or self.duty_cycle_window_ms
+  if wait_ms < 1 then wait_ms = 1 end   -- guarantee forward progress
+  return false, wait_ms, used
+end
+
 -- Stash + send. Saves the frame so on_radio_busy can re-issue it after
 -- info.busy_until_ms (the runtime drops the deferred PendingTx — see
 -- SimController defer sites). Stash is keyed by label so concurrent
@@ -700,7 +763,133 @@ local function tx_with_retry(self, bytes, opts)
       retries_left = TX_DEFER_MAX_RETRIES,
     }
   end
+  -- Pre-check duty cycle. If over budget, defer via self:after — the
+  -- on_radio_busy retry path handles the late retry too (runtime
+  -- hard-block fires the same way), but pre-checking saves the wasted
+  -- runtime round-trip and surfaces a clean telemetry event.
+  local sf_used = opts.sf or self.routing_sf
+  local airtime = airtime_ms(sf_used, self.bw_hz, self.cr,
+                              self.preamble_sym, #bytes)
+  local ok, wait_ms, used_ms = check_duty_cycle(self, airtime)
+  if not ok then
+    self:emit("duty_cycle_blocked", {
+      label      = label,
+      airtime_ms = airtime,
+      used_ms    = used_ms,
+      budget_ms  = self.duty_cycle_budget_ms,
+      window_ms  = self.duty_cycle_window_ms,
+      wait_ms    = wait_ms,
+      source     = "tx_with_retry",
+    })
+    self:after(wait_ms, function() tx_with_retry(self, bytes, opts) end)
+    return
+  end
   self:tx(bytes, opts)
+end
+
+-- ---------- TX policy classes -----------------------------------------------
+-- Three policy classes for outgoing frames:
+--
+--   1. RESPONSE-DIRECTED  (CTS, DATA, ACK)
+--      The peer's timer (rts_timeout, ack_timeout, pending_rx_expiry) is
+--      already running and was sized to the *minimum* round-trip airtime.
+--      Any LBT defer here pushes us past the peer's timeout → flight burns
+--      a retry. So these go straight through tx_with_retry; the simulator's
+--      reactive radio_busy stash is the only safety net.
+--
+--   2. INITIATING-DIRECTED  (RTS, NACK)
+--      Sender owns the schedule. We can defer freely — RTS retries are
+--      bounded by rts_max_retries; NACK is informational and a missing one
+--      just means the peer keeps retrying RTS (which we'll catch next
+--      time). Pre-checks self:channel_busy_until() and, if busy, schedules
+--      the actual emit at busy_until + rand(0, retry_jitter_ms). Reduces
+--      the head-on-collision rate on tight links and decorrelates retry
+--      storms across nodes whose timers fire on the same step.
+--
+--   3. FLOOD  (Beacon)
+--      No specific peer is waiting; lost beacons are recovered by the next
+--      periodic / triggered fire. Pre-checks the channel like (2). If the
+--      busy window exceeds flood_lbt_max_defer_ms, the page is dropped
+--      entirely (tx_flood_skipped) — no point queueing a stale routing
+--      announcement when a fresher one will fire shortly.
+--
+-- All three still set pending_tx (where applicable) BEFORE the actual emit,
+-- so peer NACK / busy-replies still match the right msg_id; the LBT defer
+-- only delays when the bits hit the air.
+
+-- Used by INITIATING-DIRECTED frames (RTS, NACK). LBT-gated, but only as
+-- a SINGLE politeness wait — at saturated load (s03 @ 62.5 kHz) the
+-- channel-busy window never clears, so a "wait until clear" loop just
+-- locks pending_tx forever. Real LoRa CSMA-CA behaves the same way:
+-- sense once, defer briefly, then commit even if still busy. Implemented
+-- via opts.__lbt_done so the recursive after-callback skips the re-check.
+-- Optional `after_tx` fires the instant the bytes are handed to the radio
+-- — RTS callers use this to start rts_timeout from the *actual* TX time,
+-- otherwise the timer can fire mid-defer and burn a retry for nothing.
+local function tx_initiating(self, bytes, opts, after_tx)
+  if self.lbt_enabled and not opts.__lbt_done then
+    local busy_until = self:channel_busy_until() or 0
+    if busy_until > self:now() then
+      opts.__lbt_done = true
+      local delay = self:rand(1, self.retry_jitter_ms + 1)
+      self:emit("tx_lbt_defer", {
+        label = opts.label, kind = "initiating",
+        defer_ms = delay, busy_until_ms = busy_until,
+      })
+      self:after(delay, function() tx_initiating(self, bytes, opts, after_tx) end)
+      return
+    end
+  end
+  tx_with_retry(self, bytes, opts)
+  if after_tx then after_tx() end
+end
+
+-- Used by FLOOD frames (beacons). Same LBT pre-check as initiating, but
+-- with a max-defer cap: if the channel will be busy longer than
+-- flood_lbt_max_defer_ms, drop this page (tx_flood_skipped emit). The
+-- next periodic / triggered fire rotates the offset and re-broadcasts.
+local function tx_flood(self, bytes, opts)
+  -- Duty-cycle pre-check. Beacons are FLOOD-class — non-critical; if we'd
+  -- breach budget, drop this page and rely on the next periodic /
+  -- triggered fire. Matches the existing flood_lbt_max_defer_ms drop
+  -- semantics: stale routing info is worse than a missed beacon.
+  do
+    local sf_used = opts.sf or self.routing_sf
+    local airtime = airtime_ms(sf_used, self.bw_hz, self.cr,
+                                self.preamble_sym, #bytes)
+    local ok, wait_ms, used_ms = check_duty_cycle(self, airtime)
+    if not ok then
+      self:emit("duty_cycle_blocked", {
+        label = opts.label, airtime_ms = airtime,
+        used_ms = used_ms, budget_ms = self.duty_cycle_budget_ms,
+        window_ms = self.duty_cycle_window_ms, wait_ms = wait_ms,
+        source = "tx_flood", action = "skip",
+      })
+      return false
+    end
+  end
+  if self.lbt_enabled then
+    local now        = self:now()
+    local busy_until = self:channel_busy_until() or 0
+    local wait       = busy_until - now
+    if wait > self.flood_lbt_max_defer_ms then
+      self:emit("tx_flood_skipped", {
+        label = opts.label, busy_for_ms = wait,
+      })
+      return false
+    end
+    if wait > 0 then
+      local delay = wait + self:rand(0, self.retry_jitter_ms + 1)
+      self:emit("tx_lbt_defer", {
+        label = opts.label, kind = "flood",
+        defer_ms = delay, busy_until_ms = busy_until,
+      })
+      self:after(delay, function() self:tx(bytes, opts) end)
+      return true
+    end
+  end
+  self:tx(bytes, opts)
+  return true
 end
 
 -- ---------- routing helpers --------------------------------------------------
@@ -711,13 +900,36 @@ local function rt_count(rt)
   return c
 end
 
--- Strict-better comparison on routes: higher score wins; on ties, fewer
--- hops wins; on full tie, returns false (caller decides). Used by rt_merge
--- to decide promote vs alt-install.
-local function route_strictly_better(a, b)
-  if a.score > b.score then return true end
-  if a.score < b.score then return false end
-  return a.hops < b.hops
+-- Strict-better comparison on routes. Two-tier ordering:
+--   1. Viability: a route's chain-min SNR (`score`) must clear the routing-
+--      plane demod threshold + margin to be considered "decodable end-to-
+--      end" on the control plane. A viable route always beats a non-viable
+--      one regardless of hops — a 1-hop link that can't actually decode is
+--      worse than an 8-hop chain whose every link can.
+--   2. Within the same viability tier: fewer hops wins, score breaks ties.
+--      Hops-first matches standard DV ordering (RIP/OSPF/AODV) and LoRa-
+--      mesh reality — each hop is another full RTS/CTS/DATA/ACK exchange,
+--      so a longer path is materially more failure-prone even at a
+--      marginally better per-link SNR.
+-- Returns false on full tie (caller decides via slot/n2_hop logic).
+local function route_strictly_better(a, b, viab_db)
+  local av = a.score >= viab_db
+  local bv = b.score >= viab_db
+  if av and not bv then return true end
+  if bv and not av then return false end
+  if av and bv then
+    -- both viable: hops-first, score breaks ties (RIP/OSPF/AODV order)
+    if a.hops < b.hops then return true end
+    if a.hops > b.hops then return false end
+    return a.score > b.score
+  else
+    -- both non-viable: score-first (least-worst link), hops breaks ties.
+    -- Hops-first here would prefer a 1-hop dead link over a 2-hop slightly-
+    -- less-dead path; that's worse, so flip the order in this tier.
+    if a.score > b.score then return true end
+    if a.score < b.score then return false end
+    return a.hops < b.hops
+  end
 end
 
 -- K=2 DV merge. Caller has already filtered cand for hop-cap and
@@ -730,7 +942,7 @@ end
 --   "alt_install"     — cand beats existing alt (or there was none) and
 --                        differs from primary's next_hop; cand → alt
 --   "no_change"       — cand can't displace anything
-local function rt_merge(rt, dest_id, cand)
+local function rt_merge(rt, dest_id, cand, viab_db)
   local entry = rt[dest_id]
   if entry == nil then
     rt[dest_id] = { primary = cand, alt = nil }
@@ -742,7 +954,7 @@ local function rt_merge(rt, dest_id, cand)
     -- Same next-hop: refresh primary if cand is better. We don't bother
     -- demoting a "stale primary" to alt in this case — it'd be a
     -- same-next_hop alt, which is redundant.
-    if route_strictly_better(cand, P) then
+    if route_strictly_better(cand, P, viab_db) then
       entry.primary = cand
       return "primary_refresh"
     end
@@ -754,7 +966,7 @@ local function rt_merge(rt, dest_id, cand)
   end
 
   -- Different next-hop than primary
-  if route_strictly_better(cand, P) then
+  if route_strictly_better(cand, P, viab_db) then
     entry.alt     = P     -- demote previous primary (next_hop differs by branch)
     entry.primary = cand
     return "promote"
@@ -763,7 +975,7 @@ local function rt_merge(rt, dest_id, cand)
   -- cand can't beat primary. Try as alt (must differ from primary's next_hop,
   -- which it does by branch).
   local A = entry.alt
-  if A == nil or route_strictly_better(cand, A) then
+  if A == nil or route_strictly_better(cand, A, viab_db) then
     entry.alt = cand
     return "alt_install"
   end
@@ -905,15 +1117,14 @@ local function tx_rts_retry(self, reason)
   })
   self:log(string.format("rts_retry -> %s msg_id=%d (retries_left=%d reason=%s)",
     name_of(self, px.next), px.msg_id, px.retries_left, reason))
-  self:tx(rts, {
+  tx_initiating(self, rts, {
     sf    = self.routing_sf,
     label = "RTS-rty",
     info  = string.format("retry next=%s msg=%d retries_left=%d reason=%s",
       name_of(self, px.next), px.msg_id, px.retries_left, reason),
-  })
+  }, function() start_rts_timeout(self) end)
   -- RX stays on routing_sf — both CTS and NACK are control-plane responses
   -- on routing_sf now, no retune needed until DATA is about to TX.
-  start_rts_timeout(self)
 end
 
 -- Fires after rts_timeout_ms with no CTS. Decides retry vs giveup vs
@@ -986,7 +1197,22 @@ local function rts_timeout_fire(self, captured_msg_id)
   end
 
   self.pending_tx.retries_left = self.pending_tx.retries_left - 1
-  tx_rts_retry(self, "cts_timeout")
+  -- Random backoff before re-firing the RTS. Without this, every node
+  -- whose CTS got clobbered in the same collision will retry on the same
+  -- step (rts_timeout = exact RTS+CTS airtime, deterministic), so the
+  -- collision repeats. self:rand(0, retry_jitter_ms) decorrelates retries
+  -- across nodes by up to one RTS-airtime worth of slack.
+  local captured = captured_msg_id
+  local jitter = self:rand(0, self.retry_jitter_ms + 1)
+  if jitter == 0 then
+    tx_rts_retry(self, "cts_timeout")
+  else
+    self:after(jitter, function()
+      if self.pending_tx ~= nil and self.pending_tx.msg_id == captured then
+        tx_rts_retry(self, "cts_timeout")
+      end
+    end)
+  end
   -- (rts_retry emit happens inside tx_rts_retry — adds origin/payload there)
 end
 
@@ -1028,7 +1254,18 @@ local function ack_timeout_fire(self, captured_msg_id)
   end
 
   self.pending_tx.retries_left = self.pending_tx.retries_left - 1
-  tx_rts_retry(self, "ack_timeout")
+  -- Same random backoff as cts_timeout — see comment there.
+  local captured = captured_msg_id
+  local jitter = self:rand(0, self.retry_jitter_ms + 1)
+  if jitter == 0 then
+    tx_rts_retry(self, "ack_timeout")
+  else
+    self:after(jitter, function()
+      if self.pending_tx ~= nil and self.pending_tx.msg_id == captured then
+        tx_rts_retry(self, "ack_timeout")
+      end
+    end)
+  end
 end
 
 -- Schedule a CTS-wait timeout for the currently in-flight pending_tx.
@@ -1210,15 +1447,14 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
   self:log(string.format("rts_tx -> %s msg_id=%d origin=%s seq=%d (sf_bitmap=0x%02x)",
     name_of(self, primary_next), mid, name_of(self, origin), origin_seq,
     self.allowed_sf_bitmap))
-  self:tx(rts, {
+  tx_initiating(self, rts, {
     sf    = self.routing_sf,
     label = label,
     info  = string.format("origin=%s dst=%s next=%s msg=%d seq=%d sf_bitmap=0x%02x payload=%q",
       name_of(self, origin), dst_name, name_of(self, primary_next),
       mid, origin_seq, self.allowed_sf_bitmap, user_text),
-  })
+  }, function() start_rts_timeout(self) end)
   -- RX stays on routing_sf — CTS and NACK both ride on routing_sf now.
-  start_rts_timeout(self)
 end
 
 -- Drain one queued send if we're free. Called at every state-cleanup
@@ -1260,12 +1496,11 @@ local function send_beacon_page(self, kind)
   self:log(string.format("beacon_tx kind=%s page=%d/%d offset %d→%d",
     kind, page_n, total, self.beacon_offset, new_offset))
   self.beacon_offset = new_offset
-  self:tx(frame, {
+  return tx_flood(self, frame, {
     sf    = self.routing_sf,
     label = "BCN",
     info  = string.format("rt=%d/%d off=%d kind=%s", page_n, total, self.beacon_offset, kind),
   })
-  return true
 end
 
 local function beacon_fire(self)
@@ -1314,6 +1549,15 @@ function on_init(self, config)
   self.allowed_data_sfs = config.allowed_data_sfs or { 12 }
   self.sf_margin_db     = config.sf_margin_db    or 5.0
   self.allowed_sf_bitmap = sf_set_to_bitmap(self.allowed_data_sfs)
+  -- Viability floor for rt entries: a route is "viable" iff its chain-min
+  -- SNR clears the routing-plane (RTS/CTS/ACK ride on routing_sf) demod
+  -- threshold + sf_margin_db. route_strictly_better treats viable routes
+  -- as strictly preferred over non-viable ones; within each group it's
+  -- hops-first. A non-viable rt entry is still kept (better than no entry —
+  -- the data SF can fall back to a slower one if the routing-plane SNR is
+  -- borderline) but never preferred over an actually-decodable path.
+  self.routing_snr_floor_db = (SF_DEMOD_THRESHOLD[self.routing_sf] or -15.0)
+                              + self.sf_margin_db
   -- Two beacon periods: a fast one used during warmup so the network
   -- learns its routes quickly (in real LoRa deployment this represents
   -- the early hours of network bring-up — we compress that here), and a
@@ -1344,12 +1588,24 @@ function on_init(self, config)
   self.beacon_max_bytes   = config.beacon_max_bytes   or 200
   self.beacon_max_entries = math.max(1,
     math.floor((self.beacon_max_bytes - 3) / 4))
-  -- Radio params for airtime calculation. Defaults match the simulator's
-  -- runtime defaults (250 kHz, CR4/5, 16-symbol preamble — same as
-  -- MeshCore SX1262 init). Override per-node via config block when needed.
-  self.bw_hz            = config.bw_hz           or 250000
-  self.cr               = config.cr              or 5
+  -- Radio params for airtime calculation. The runtime injects per-node
+  -- resolved values via `_sim_bw_hz` and `_sim_cr` so the script's
+  -- airtime math matches what the radio actually does (otherwise s03's
+  -- 62.5 kHz BW would compute timeouts against 250 kHz airtime — 4× too
+  -- short). User config keys (bw_hz / cr) still win if explicitly set.
+  -- Final fallbacks match MeshCore SX1262 defaults.
+  self.bw_hz            = config.bw_hz           or config._sim_bw_hz or 250000
+  self.cr               = config.cr              or config._sim_cr    or 5
   self.preamble_sym     = config.preamble_sym    or 16
+  -- Regulatory duty cycle. Default 1% / 1h matches ETSI EN 300 220
+  -- (Europe 868 MHz ISM sub-band g1). The runtime hard-blocks TXes that
+  -- breach this; this script also self-regulates pre-TX so we defer
+  -- proactively rather than wait for the runtime block + on_radio_busy
+  -- retry round trip. Per-node override via config.duty_cycle / window;
+  -- inherited from radio block via _sim_duty_cycle / _sim_..._window_ms.
+  self.duty_cycle           = config.duty_cycle           or config._sim_duty_cycle           or 0.01
+  self.duty_cycle_window_ms = config.duty_cycle_window_ms or config._sim_duty_cycle_window_ms or 3600000
+  self.duty_cycle_budget_ms = math.floor(self.duty_cycle * self.duty_cycle_window_ms)
   -- Inter-frame gap between CTS RX and DATA TX (originator side). The
   -- simulator's set_rx_sf is instantaneous, but real hardware needs a
   -- handful of µs to settle on the new SF — pad with 5ms by default.
@@ -1368,6 +1624,30 @@ function on_init(self, config)
      + airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN))
   self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
   self.rts_max_retries    = config.rts_max_retries    or 8
+  -- TX-policy controls (see "TX policy classes" section above).
+  --   lbt_enabled            — pre-check channel_busy_until before TX of
+  --                            initiating-directed (RTS / NACK) and flood
+  --                            (beacons). Disable for benchmarking the raw
+  --                            collision baseline.
+  --   retry_jitter_ms        — bound for random backoff added to (a) RTS
+  --                            retries on cts_timeout / ack_timeout and (b)
+  --                            LBT-deferred sends. Default = one RTS-airtime
+  --                            so it scales naturally at 62.5 vs 250 kHz.
+  --   flood_lbt_max_defer_ms — if the channel will be busy for longer than
+  --                            this, drop the beacon page entirely (the next
+  --                            periodic / triggered fire rotates to the
+  --                            next page anyway, so queueing a stale page
+  --                            is wasteful). Default = airtime(routing_sf,
+  --                            beacon_max_bytes) — i.e. one beacon-air's
+  --                            worth; if we'd wait longer than the page we
+  --                            were going to send, just skip.
+  self.lbt_enabled        = config.lbt_enabled
+  if self.lbt_enabled == nil then self.lbt_enabled = true end
+  self.retry_jitter_ms    = config.retry_jitter_ms    or
+    airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN)
+  self.flood_lbt_max_defer_ms = config.flood_lbt_max_defer_ms or
+    airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym,
+               self.beacon_max_bytes)
   -- Maximum payload byte length the protocol carries; sets pending_rx_expiry
   -- (we don't know the actual payload yet, so we budget the max). Tighten in
   -- config if you've capped your payloads, loosen if you allow longer ones.
@@ -1476,7 +1756,7 @@ function on_recv(self, frame, meta)
     -- primary) to avoid spamming on every refresh round.
     do
       local cand = { next_hop = b.src, score = meta.snr, hops = 1, last_seen_ms = now }
-      local action = rt_merge(self.rt, b.src, cand)
+      local action = rt_merge(self.rt, b.src, cand, self.routing_snr_floor_db)
       if action == "new" or action == "promote" then
         self:emit("rt_update", { dest = b.src, next = b.src, score = meta.snr, hops = 1, slot = "primary" })
         self:log(string.format("rt[%s] direct → primary, snr=%.1f dB hops=1",
@@ -1511,7 +1791,7 @@ function on_recv(self, frame, meta)
             hops     = combined_hops,
             last_seen_ms = now,
           }
-          local action = rt_merge(self.rt, e.dest, cand)
+          local action = rt_merge(self.rt, e.dest, cand, self.routing_snr_floor_db)
           if action == "new" or action == "promote" then
             self:emit("rt_update", {
               dest = e.dest, next = b.src,
@@ -1610,7 +1890,7 @@ function on_recv(self, frame, meta)
       self:log(string.format("nack_tx -> %s msg_id=%d busy_for=%dms (busy with pending_rx from %s/%d)",
         name_of(self, r.src), r.msg_id, busy_for,
         name_of(self, self.pending_rx.from), self.pending_rx.msg_id))
-      tx_with_retry(self, nack, {
+      tx_initiating(self, nack, {
         sf    = self.routing_sf,
         label = "NACK",
         info  = string.format("to=%s msg=%d busy_for=%dms reason=pending_rx",
@@ -1641,7 +1921,7 @@ function on_recv(self, frame, meta)
       })
       self:log(string.format("nack_tx -> %s msg_id=%d busy_for=%dms (busy with pending_tx msg=%d)",
         name_of(self, r.src), r.msg_id, busy_for, self.pending_tx.msg_id))
-      tx_with_retry(self, nack, {
+      tx_initiating(self, nack, {
         sf    = self.routing_sf,
         label = "NACK",
         info  = string.format("to=%s msg=%d busy_for=%dms reason=pending_tx",
@@ -1853,6 +2133,27 @@ function on_recv(self, frame, meta)
     self:log(string.format("nack_rx <- %s msg_id=%d busy_for=%dms",
       name_of(self, self.pending_tx.next), n.msg_id, n.busy_for_ms))
 
+    -- Mark the NACK sender as blind for the busy_for_ms window. F1 already
+    -- populates blind_until from overheard CTS; NACK is even more
+    -- authoritative ("I am busy") so it belongs here too. Without this,
+    -- once we requeue + drain, classify_blind has no reason to defer the
+    -- next attempt to the same neighbour and the pair locks into a NACK
+    -- ping-pong (RTS → NACK → requeue → RTS → NACK → …) at ~RTS-air
+    -- cadence with zero progress.
+    if n.busy_for_ms and n.busy_for_ms > 0 then
+      local from_id = self.pending_tx.next
+      local end_ms  = self:now() + n.busy_for_ms
+      local prev    = self.blind_until[from_id]
+      if prev == nil or end_ms > prev then
+        self.blind_until[from_id] = end_ms
+        self:emit("blind_observed", {
+          node     = from_id,
+          until_ms = end_ms,
+          reason   = "nack",
+        })
+      end
+    end
+
     -- Decide what to do. Three strategies, in order of preference:
     --   (a) try the alt path if we have one and haven't tried it yet
     --   (b) if busy_for_ms is short, wait it out on the same path
@@ -1860,7 +2161,12 @@ function on_recv(self, frame, meta)
     --       send, or DV beacons may converge to a new primary
     local entry = self.rt[self.pending_tx.dst]
     local alt = entry and entry.alt or nil
-    local can_try_alt = alt ~= nil and (not self.pending_tx.alt_tried)
+    -- Don't path-switch into the upstream we just got this DATA from —
+    -- that immediately forms a 2-cycle (forwarder → upstream → forwarder
+    -- → … until dup_drop kills it). Same guard as classify_blind uses
+    -- on the originating side; here it covers the NACK-driven switch.
+    local alt_is_upstream = (alt ~= nil and alt.next_hop == self.pending_tx.previous_hop)
+    local can_try_alt = alt ~= nil and (not self.pending_tx.alt_tried) and (not alt_is_upstream)
 
     if can_try_alt then
       local prev_next = self.pending_tx.next

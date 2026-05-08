@@ -285,3 +285,27 @@ uint64_t ScriptedNode::api_tx_in_flight() const {
     if (!_tx_in_flight_until) return 0;
     return *_tx_in_flight_until;
 }
+
+void ScriptedNode::recordTxAirtime(uint64_t end_ms, uint32_t airtime_ms) {
+    _tx_airtime_log.push_back({end_ms, airtime_ms});
+}
+
+uint64_t ScriptedNode::airtimeUsedInWindow(uint64_t now, uint64_t window_ms) {
+    if (window_ms == 0) return 0;
+    const uint64_t cutoff = (now > window_ms) ? (now - window_ms) : 0;
+    while (!_tx_airtime_log.empty() && _tx_airtime_log.front().end_ms <= cutoff) {
+        _tx_airtime_log.pop_front();
+    }
+    uint64_t sum = 0;
+    for (const auto& e : _tx_airtime_log) sum += e.airtime_ms;
+    return sum;
+}
+
+uint64_t ScriptedNode::api_airtime_used_ms(uint64_t window_ms) const {
+    return const_cast<ScriptedNode*>(this)->airtimeUsedInWindow(_clock.getMillis(), window_ms);
+}
+
+uint64_t ScriptedNode::oldestTxEndMs() const {
+    if (_tx_airtime_log.empty()) return 0;
+    return _tx_airtime_log.front().end_ms;
+}

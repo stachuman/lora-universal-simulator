@@ -63,6 +63,20 @@ struct SimConfig {
         // SX1262-style hardware turnaround delays.
         float rx_to_tx_delay_ms = 1.0f;
         float tx_to_rx_delay_ms = 5.0f;
+
+        // Regulatory duty cycle. Default 1% / 1h matches ETSI EN 300 220
+        // (European 868 MHz ISM sub-band g1). 0 < duty_cycle <= 1, sliding
+        // window > 0. The runtime tracks per-node TX airtime in a sliding
+        // window of `duty_cycle_window_ms`; if a fresh TX would push the
+        // window's airtime sum past `duty_cycle * window_ms`, it is
+        // deferred via on_radio_busy(reason="duty_cycle_exceeded"). Lua
+        // scripts may also self-regulate using the same window via
+        // self:airtime_used_ms() — both layers compose. Per-node override
+        // via nodes[].config.duty_cycle / duty_cycle_window_ms (also
+        // injected as _sim_duty_cycle / _sim_duty_cycle_window_ms for
+        // scripts that want the inherited default).
+        float         duty_cycle           = 0.01f;
+        unsigned long duty_cycle_window_ms = 3600000UL;
     };
 
     // Optional log-distance path-loss block. When `present` is true the

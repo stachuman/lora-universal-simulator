@@ -25,6 +25,7 @@
 #include "orchestrator/runtime/TimerWheel.h"
 
 #include <cstdint>
+#include <deque>
 #include <ostream>
 #include <random>
 #include <string>
@@ -96,6 +97,25 @@ public:
     void     api_set_rx_sf_set(sol::table sf_set);       // multi-SF retune (opt-in)
     uint64_t api_channel_busy_until() const;             // LBT busy_until or 0
     uint64_t api_tx_in_flight() const;                   // own pending TX end_ms or 0
+    // Sum of TX airtime in the last `window_ms` ms. Used by scripts that
+    // self-regulate against duty-cycle limits. 0 if window_ms <= 0.
+    uint64_t api_airtime_used_ms(uint64_t window_ms) const;
+    // end_ms of the oldest currently-in-window TX log entry, or 0 if no
+    // entries exist. Lets Lua compute exact wait time before headroom is
+    // freed (oldest_end_ms + window_ms is when it falls out of the window).
+    uint64_t api_oldest_tx_end_ms() const { return oldestTxEndMs(); }
+    // SimController calls this to record a completed TX dispatch in the
+    // per-node sliding-window log. Called immediately after the TX is
+    // pushed to the InFlight queue (so end_ms is the canonical TX end time).
+    void recordTxAirtime(uint64_t end_ms, uint32_t airtime_ms);
+    // Helper for the runtime's own duty-cycle hard-block check. Returns
+    // current sum airtime within `window_ms` ending at `now`. Prunes
+    // expired entries as a side effect.
+    uint64_t airtimeUsedInWindow(uint64_t now, uint64_t window_ms);
+    // Earliest end_ms of any entry currently in the log (post-prune).
+    // 0 if log is empty. Used by the runtime to compute when a deferred
+    // duty-cycle-blocked TX could earliest fit.
+    uint64_t oldestTxEndMs() const;
 
     int                id()   const { return _id; }
     const std::string& name() const { return _name; }
@@ -140,6 +160,12 @@ private:
     std::vector<int>* _sf_rx_set = nullptr;  // borrowed; set via attachSfRxSet
     uint64_t*         _tx_in_flight_until = nullptr;  // borrowed; SimController owns
     class LbtModel*   _lbt = nullptr;                  // borrowed; SimController owns
+    // Sliding-window TX airtime log for duty-cycle accounting. Each entry
+    // is (end_ms, airtime_ms). Pruned lazily on read. Bounded in size by
+    // the duty-cycle window (1h default = 36 s of cumulative airtime
+    // ÷ shortest TX ≈ a few thousand entries worst case — fine).
+    struct TxAirtimeRec { uint64_t end_ms; uint32_t airtime_ms; };
+    mutable std::deque<TxAirtimeRec> _tx_airtime_log;
     // Note: timer callbacks are stored Lua-side under _LUS.nodes[id].timers[handle].
     // We don't keep them in C++ to avoid double-bookkeeping.
 };

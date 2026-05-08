@@ -96,6 +96,10 @@ Drives the simulator's clock, default radio, and (optionally) the path-loss mode
 | `snr_coherence_ms` | float | 0.0 | ≥ 0 | OU-style fading coherence time. `0` = i.i.d. shadowing per packet. |
 | `capture_locked_db` | float | 6.0 | ≥ 0 | dB margin under which a stronger ongoing signal *captures* (preserves) over a weaker new arrival. |
 | `capture_unlocked_db` | float | 4.0 | ≥ 0 | dB margin for not-yet-locked captures. |
+| `duty_cycle` | float | 0.01 | (0, 1] | Fraction of `duty_cycle_window_ms` allowed as cumulative TX airtime. Default 1% matches ETSI EN 300 220 (European 868 MHz ISM sub-band g1). |
+| `duty_cycle_window_ms` | uint64 | 3600000 | > 0 | Length of the sliding window the duty-cycle limit is enforced over, in ms. Default 1 h matches ETSI. Test scenarios commonly tighten this to a few seconds to exercise the mechanism in short runs. |
+
+The runtime tracks per-node TX airtime in a sliding window of `duty_cycle_window_ms`. If a fresh TX would push the window's airtime sum past `duty_cycle * window_ms`, it is deferred via `on_radio_busy(reason="duty_cycle_exceeded")` — same mechanism as LBT defers. Lua scripts may also self-regulate using the same window via `self:airtime_used_ms(window_ms)` and `self:oldest_tx_end_ms()` (both backed by the runtime's tracker). The `dv_dual_sf.lua` protocol does this pre-TX in `tx_with_retry` and `tx_flood`, emitting `duty_cycle_blocked` for telemetry. Per-node override via `nodes[].config.duty_cycle` and `nodes[].config.duty_cycle_window_ms`; the radio-block defaults are also injected into each node's config table as `_sim_duty_cycle` / `_sim_duty_cycle_window_ms` so scripts that want the inherited default can fall back to those.
 
 #### `simulation.radio.hardware` (optional)
 

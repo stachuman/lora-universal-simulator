@@ -336,6 +336,10 @@ void SimController::initialize() {
                               ? _cfg.nodes[i].config
                               : nlohmann::json::object();
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
+        cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw * 1000;  // bw is kHz in JSON
+        cfg["_sim_cr"]        = _cfg.nodes[i].cr;
+        cfg["_sim_duty_cycle"]           = _cfg.simulation.radio.duty_cycle;
+        cfg["_sim_duty_cycle_window_ms"] = _cfg.simulation.radio.duty_cycle_window_ms;
         _nodes[i]->onInit(cfg);
         _nodes[i]->markInitialized();
         std::string role = "script";
@@ -409,6 +413,10 @@ void SimController::processStartupAtStep() {
                               ? _cfg.nodes[i].config
                               : nlohmann::json::object();
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
+        cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw * 1000;  // bw is kHz in JSON
+        cfg["_sim_cr"]        = _cfg.nodes[i].cr;
+        cfg["_sim_duty_cycle"]           = _cfg.simulation.radio.duty_cycle;
+        cfg["_sim_duty_cycle_window_ms"] = _cfg.simulation.radio.duty_cycle_window_ms;
         _nodes[i]->onInit(cfg);
         _nodes[i]->markInitialized();
 
@@ -860,6 +868,65 @@ void SimController::registerTransmissionsForStep() {
                 continue;
             }
 
+            // Regulatory duty-cycle hard-block. Models a real LoRa modem
+            // that refuses TX when its sliding-window airtime budget is
+            // exhausted (ETSI EN 300 220 default 1% / 1h). Lua scripts
+            // are expected to self-regulate via self:airtime_used_ms()
+            // first; this is the safety net that prevents budget breach
+            // for scripts that don't. busy_until_ms = the earliest time
+            // a fresh TX of this airtime could fit — i.e., when enough
+            // of the oldest entries have aged out of the window.
+            {
+                float dc = _cfg.simulation.radio.duty_cycle;
+                unsigned long dc_window = _cfg.simulation.radio.duty_cycle_window_ms;
+                const auto& nc = _cfg.nodes[i].config;
+                if (nc.is_object()) {
+                    auto it = nc.find("duty_cycle");
+                    if (it != nc.end() && it->is_number())
+                        dc = it->get<float>();
+                    auto wit = nc.find("duty_cycle_window_ms");
+                    if (wit != nc.end() && wit->is_number_unsigned())
+                        dc_window = wit->get<unsigned long>();
+                }
+                if (dc > 0.0f && dc <= 1.0f && dc_window > 0) {
+                    const uint64_t budget_ms =
+                        static_cast<uint64_t>(static_cast<double>(dc) * dc_window);
+                    const uint64_t used = _nodes[i]->airtimeUsedInWindow(now, dc_window);
+                    if (used + airtime > budget_ms) {
+                        // Walk the log oldest-first; the earliest moment a
+                        // window of `airtime` ms fits is when enough head
+                        // entries have aged so that (used - aged_out + airtime)
+                        // <= budget_ms. We approximate by waiting for the
+                        // single oldest entry to age — sufficient in steady
+                        // state and an underestimate when severely over.
+                        // The scripts will recheck on retry.
+                        uint64_t busy_until = now;
+                        // The oldest in-window entry's end_ms + window_ms is
+                        // when it falls out of the window — earliest moment
+                        // any new airtime could fit (under-estimate when
+                        // severely over budget; scripts recheck on retry).
+                        const uint64_t oldest = _nodes[i]->oldestTxEndMs();
+                        if (oldest > 0) {
+                            busy_until = oldest + dc_window;
+                        }
+                        RadioBusyInfo bi;
+                        bi.reason        = "duty_cycle_exceeded";
+                        bi.len           = static_cast<int>(p.bytes.size());
+                        bi.sf            = sf;
+                        bi.label         = p.label;
+                        bi.tx_info       = p.info;
+                        bi.busy_until_ms = busy_until;
+                        EventLog::txDeferred(static_cast<unsigned long>(now),
+                                             _nodes[i]->name().c_str(),
+                                             bi.len, bi.reason.c_str(),
+                                             bi.sf, bi.label.c_str(), bi.tx_info.c_str(),
+                                             static_cast<unsigned long>(bi.busy_until_ms));
+                        _nodes[i]->onRadioBusy(bi);
+                        continue;
+                    }
+                }
+            }
+
             // TODO(Y2): plumb through SimRadio::startSendRaw so half-
             // duplex/LBT bookkeeping fires; for v1 we synthesise the
             // InFlight directly.
@@ -938,6 +1005,12 @@ void SimController::registerTransmissionsForStep() {
             // reports the airtime end. Cleared in the compaction loop above
             // when the InFlight is removed at end_ms.
             _node_tx_in_flight_until[(size_t)i] = _in_flight.back().end_ms;
+
+            // Record this TX in the per-node sliding-window airtime log so
+            // both self:airtime_used_ms() (Lua) and the duty-cycle hard-block
+            // (above) see the cumulative usage. Done unconditionally — every
+            // accepted TX counts toward the budget regardless of label.
+            _nodes[i]->recordTxAirtime(_in_flight.back().end_ms, airtime);
 
             // Notify LBT for every observer that can hear this sender, so
             // their next TX-time isChannelBusy() check sees this airtime.
