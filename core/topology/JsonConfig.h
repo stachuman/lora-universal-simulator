@@ -61,9 +61,41 @@ struct SimConfig {
         float cad_marginal_snr    = -15.0f;
         float snr_coherence_ms    = 0.0f;
 
-        // SX1262-style hardware turnaround delays.
+        // SX1262-style hardware turnaround delays. After an RX completes,
+        // the radio cannot TX for rx_to_tx_delay_ms (PA ramp + PLL); after
+        // a TX, cannot RX for tx_to_rx_delay_ms (LNA + PLL relock). Defaults
+        // are conservative-realistic for SX1262 (~150 µs and ~1–2 ms) — at
+        // the simulator's 1 ms granularity we round up.
         float rx_to_tx_delay_ms = 1.0f;
         float tx_to_rx_delay_ms = 5.0f;
+        // Time to retune the receiver to a new SF (PLL relock + sync). Real
+        // SX1262 takes ~200 µs; we round up to 1 ms. Modelled as an "RX
+        // blind window" after self:set_rx_sf(): incoming frames whose
+        // start lands inside the window are dropped (drop_sf_switching).
+        float sf_switch_delay_ms = 1.0f;
+
+        // RX-side preamble miss probability. Real LoRa receivers occasionally
+        // drop preambles even of decodable frames — AGC settling on a strong
+        // adjacent signal, internal FIFO scheduling, transient interference
+        // below the demod floor. Distinct from cad_miss_prob (which is the
+        // LBT-side "did CAD detect the busy window"). Modeled as a per-RX
+        // Bernoulli roll after threshold + probabilistic decode pass; misses
+        // emit drop_preamble_miss. Default 0.02 ≈ 2% — conservative for
+        // SX1262-grade chips at moderate SNR. Set to 0 to disable.
+        float rx_preamble_miss_prob = 0.02f;
+
+        // Probabilistic decode at marginal SNR. Real Semtech chips don't
+        // present a hard cliff at the demod threshold — PER follows a
+        // sigmoid that's ~50 % at threshold and falls off ~3 dB per decade.
+        // Without this, a frame at threshold + epsilon decodes with prob 1
+        // and at threshold − epsilon with prob 0; that masks bugs around
+        // marginal links that real hardware would expose. Modeled as
+        //   PER(margin) = 1 / (1 + exp(margin / decode_margin_steepness_db))
+        // where margin = snr_at_rcv − threshold. Frames below threshold
+        // still drop deterministically (drop_weak); frames above pass the
+        // sigmoid roll. Set to 0 for the legacy hard-cliff behaviour
+        // (analytic tests).
+        float decode_margin_steepness_db = 1.5f;
 
         // Regulatory duty cycle. Default 1% / 1h matches ETSI EN 300 220
         // (European 868 MHz ISM sub-band g1). 0 < duty_cycle <= 1, sliding
@@ -135,6 +167,17 @@ struct SimConfig {
         unsigned long duration_ms = 300000;
         int           step_ms     = 1;
         unsigned long warmup_ms   = 0;
+        // Per-node clock drift sigma in ppm. Real LoRa nodes use crystal
+        // oscillators that drift ±20–50 ppm over temperature; over a
+        // multi-hour run two nodes drift apart by 100s of ms, so any
+        // protocol with tight timing (rts_timeout_ms / pending_rx_expiry)
+        // needs slack the simulator never demands without this. Sampled
+        // once per node at init from N(0, sigma); ScriptedNode::api_now /
+        // api_after scale by (1 + drift_ppm * 1e-6) so the script sees
+        // a slightly skewed clock relative to wall time. Per-node override
+        // via nodes[].clock_drift_ppm (NaN = sample). Set sigma to 0 for
+        // perfectly synchronized clocks (analytic tests).
+        double        clock_drift_ppm_sigma = 25.0;
         // TODO Y2: revisit if MeshCore-coupled. In the source this seeded a
         // simulated RTC for firmware that wanted wall-clock time. Harmless
         // as a generic field; scripts may choose to consume it or ignore it.
@@ -193,6 +236,23 @@ struct SimConfig {
         // hardware where you know the offsets a priori.
         float tx_power_offset_db   = std::numeric_limits<float>::quiet_NaN();
         float rx_offset_db         = std::numeric_limits<float>::quiet_NaN();
+        // Per-node crystal drift in ppm. NaN means "sample from
+        // simulation.clock_drift_ppm_sigma". Set explicitly to pin a
+        // node's clock skew (e.g. one slow + one fast node to stress
+        // protocol timing tolerances).
+        float clock_drift_ppm      = std::numeric_limits<float>::quiet_NaN();
+
+        // Mobility — most nodes don't move (default 0). Set
+        // velocity_mps > 0 + direction_deg to make a specific node
+        // travel at constant speed in a fixed compass heading. Position
+        // is updated each asymmetry_coherence_ms tick (so a 1 m/s walker
+        // shifts ~60 m per update at the default coherence). Path-loss
+        // for pairs involving the moving node is recomputed at each
+        // update — mobile sensors test the routing layer's prune +
+        // triggered-beacon convergence speed under topology change.
+        // direction_deg follows compass convention: 0 = north, 90 = east.
+        float velocity_mps         = 0.0f;
+        float direction_deg        = 0.0f;
     };
     std::vector<NodeDef> nodes;
 

@@ -1,0 +1,41 @@
+{
+  "_name": "t21_mobility",
+  "_desc": "Two static beacons + one mobile node moving north at 10 m/s. asymmetry_coherence_ms=1000 → position updates once per second. Over 60 s the mover travels 600 m north (~0.0054° latitude). Asserts (a) at least 50 node_position events fire from the mover, (b) the static nodes never emit one, (c) the link SNR from the mover changes over the run (verifiable via the rebuild emitting new path-loss-derived SNR — but easiest: just count the position events).",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "clock_drift_ppm_sigma": 0,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "rx_preamble_miss_prob": 0.0,
+      "hardware": { "decode_margin_steepness_db": 0, "sf_switch_delay_ms": 0 }
+    },
+    "path_loss": {
+      "model": "log_distance",
+      "alpha": 3.0,
+      "sigma_db": 0.0,
+      "node_tx_offset_sigma_db": 0,
+      "node_rx_offset_sigma_db": 0,
+      "asymmetry_coherence_ms": 1000,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 14.0
+    }
+  },
+  "nodes": [
+    { "name": "anchor_w", "script": "examples/quiet.lua", "lat": 41.3900, "lon": 2.1600 },
+    { "name": "anchor_e", "script": "examples/quiet.lua", "lat": 41.3900, "lon": 2.1610 },
+    { "name": "mover",    "script": "examples/quiet.lua", "lat": 41.3900, "lon": 2.1605,
+      "velocity_mps": 10.0, "direction_deg": 0 }
+  ],
+  "topology": { "links": [] },
+  "commands": [],
+  "expect": [
+    { "type": "script_emit_contains", "node": "mover", "emit_type": "node_position", "value": "\"velocity_mps\":10" },
+    { "type": "script_emit_contains", "node": "mover", "emit_type": "node_position", "value": "\"lat\":41.394" }
+  ]
+}

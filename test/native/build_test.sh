@@ -66,6 +66,9 @@ run test_timerwheel "$SCRIPT_DIR/test_timerwheel.cpp" \
 run test_path_loss "$SCRIPT_DIR/test_path_loss.cpp" \
     "$REPO_ROOT/core/link/PathLossModel.cpp"
 
+run test_path_loss_asymmetry "$SCRIPT_DIR/test_path_loss_asymmetry.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp"
+
 LUA_CFLAGS="$(pkg-config --cflags lua5.4)"
 LUA_LIBS="$(pkg-config --libs lua5.4)"
 

@@ -1,0 +1,33 @@
+{
+  "_name": "t17_probabilistic_decode",
+  "_desc": "Sender TXes 200 packets at SF7 with link SNR set to exactly the SF7 demod threshold (-7.5 dB). With decode_margin_steepness_db=1.5 the sigmoid PER at margin=0 is 0.5, so we expect ~100 rx and ~100 drop_weak. Loose bounds (60–140 either side) absorb seed-to-seed sampling variance from a single seed run while still proving the curve is firing — without it, a snr=threshold link would either always or never decode.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "clock_drift_ppm_sigma": 0,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "rx_preamble_miss_prob": 0.0,
+      "hardware": { "decode_margin_steepness_db": 1.5, "sf_switch_delay_ms": 0 }
+    }
+  },
+  "nodes": [
+    { "name": "snd", "script": "examples/burst_sender.lua",
+      "config": { "role": "sender", "count": 200, "interval_ms": 100, "sf": 7, "payload_bytes": 8 } },
+    { "name": "rcv", "script": "examples/burst_sender.lua",
+      "config": { "role": "receiver" } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "snd", "to": "rcv", "snr": -7.5, "rssi": -75.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "event_count", "event_type": "rx",        "node": "rcv", "min": 60, "max": 140 },
+    { "type": "event_count", "event_type": "drop_weak", "node": "rcv", "min": 60, "max": 140 }
+  ]
+}

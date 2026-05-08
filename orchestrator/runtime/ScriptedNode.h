@@ -141,7 +141,32 @@ public:
     // outlives ScriptedNode. Used by api_channel_busy_until.
     void attachLbtModel(class LbtModel* lbt) { _lbt = lbt; }
 
+    // Per-node crystal drift in ppm (signed). Set once at init by
+    // SimController. ScriptedNode::api_now scales wall time by
+    // (1 + drift_ppm * 1e-6); api_after divides the requested delay by
+    // the same factor so a "100 ms in node-time" timer fires at
+    // 100 / (1 + drift) ms in wall-time, matching the protocol's
+    // intent under a skewed clock.
+    void setClockDriftPpm(float ppm) { _clock_drift_ppm = ppm; }
+    float clockDriftPpm() const { return _clock_drift_ppm; }
+
+    // SF-retune settling window in ms. Set by SimController at init from
+    // simulation.radio.sf_switch_delay_ms. When the script calls
+    // self:set_rx_sf(...), the radio is "blind" for this duration and
+    // any frame whose preamble arrives during the window is dropped
+    // (drop_rx_blind). 0 disables.
+    void setSfSwitchDelayMs(float ms) { _sf_switch_delay_ms = ms; }
+    float sfSwitchDelayMs() const { return _sf_switch_delay_ms; }
+
+    // Mark the receiver as "blind" for the SF-switch settling window.
+    // Frames whose start_ms lands inside [now, now + sf_switch_delay_ms)
+    // are dropped (drop_sf_switching). Set by api_set_rx_sf and
+    // api_set_rx_sf_set; consulted in deliverReceptionsForStep.
+    void setRxBlindUntil(uint64_t until_ms) { _rx_blind_until_ms = until_ms; }
+    uint64_t rxBlindUntilMs() const { return _rx_blind_until_ms; }
+
 private:
+    void armSfSwitchBlindWindow();
     int               _id;
     std::string       _name;
     LuaHost&          _host;
@@ -160,6 +185,9 @@ private:
     std::vector<int>* _sf_rx_set = nullptr;  // borrowed; set via attachSfRxSet
     uint64_t*         _tx_in_flight_until = nullptr;  // borrowed; SimController owns
     class LbtModel*   _lbt = nullptr;                  // borrowed; SimController owns
+    float             _clock_drift_ppm = 0.0f;         // set by SimController at init
+    uint64_t          _rx_blind_until_ms = 0;          // SF-switch settling window
+    float             _sf_switch_delay_ms = 0.0f;      // ms added by api_set_rx_sf
     // Sliding-window TX airtime log for duty-cycle accounting. Each entry
     // is (end_ms, airtime_ms). Pruned lazily on read. Bounded in size by
     // the duty-cycle window (1h default = 36 s of cumulative airtime

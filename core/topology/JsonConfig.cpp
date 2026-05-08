@@ -88,8 +88,15 @@ static SimConfig parseJson(const json& j) {
                 auto& hw = r["hardware"];
                 if (hw.contains("rx_to_tx_delay_ms")) cfg.simulation.radio.rx_to_tx_delay_ms = hw["rx_to_tx_delay_ms"].get<float>();
                 if (hw.contains("tx_to_rx_delay_ms")) cfg.simulation.radio.tx_to_rx_delay_ms = hw["tx_to_rx_delay_ms"].get<float>();
+                if (hw.contains("sf_switch_delay_ms")) cfg.simulation.radio.sf_switch_delay_ms = hw["sf_switch_delay_ms"].get<float>();
+                if (hw.contains("decode_margin_steepness_db"))
+                    cfg.simulation.radio.decode_margin_steepness_db = hw["decode_margin_steepness_db"].get<float>();
+                if (hw.contains("rx_preamble_miss_prob"))
+                    cfg.simulation.radio.rx_preamble_miss_prob = hw["rx_preamble_miss_prob"].get<float>();
             }
         }
+        if (sim.contains("clock_drift_ppm_sigma"))
+            cfg.simulation.clock_drift_ppm_sigma = sim["clock_drift_ppm_sigma"].get<double>();
         // Optional log-distance path-loss block (Phase R.2). When present,
         // SimController computes per-pair SNR/RSSI from haversine distance
         // between nodes' (lat, lon) and skips pairs lacking lat/lon.
@@ -195,6 +202,12 @@ static SimConfig parseJson(const json& j) {
                 def.tx_power_offset_db = nd["tx_power_offset_db"].get<float>();
             if (nd.contains("rx_offset_db"))
                 def.rx_offset_db = nd["rx_offset_db"].get<float>();
+            if (nd.contains("clock_drift_ppm"))
+                def.clock_drift_ppm = nd["clock_drift_ppm"].get<float>();
+            if (nd.contains("velocity_mps"))
+                def.velocity_mps = nd["velocity_mps"].get<float>();
+            if (nd.contains("direction_deg"))
+                def.direction_deg = nd["direction_deg"].get<float>();
 
             // NOTE: role / firmware / adversarial were stripped (MeshCore-only).
 

@@ -1,0 +1,34 @@
+{
+  "_name": "t20_sf_switch_blind",
+  "_desc": "Sender bursts 200 packets at SF7 every 50ms. Receiver toggles its RX SF every 50ms between SF7 and SF8 — only frames arriving while it's tuned to SF7 should be heard. Each toggle opens a sf_switch_delay_ms blind window, dropping any preamble landing inside (drop_rx_blind). With sf_switch_delay_ms=5 and 200 toggles, expect ~10–60 drop_rx_blind events; rest are either rx (when on SF7) or drop_sf_mismatch (when on SF8). Asserts existence — exact counts depend on phase alignment.",
+  "simulation": {
+    "duration_ms": 25000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "clock_drift_ppm_sigma": 0,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "rx_preamble_miss_prob": 0.0,
+      "hardware": { "decode_margin_steepness_db": 0, "sf_switch_delay_ms": 5 }
+    }
+  },
+  "nodes": [
+    { "name": "snd", "script": "examples/burst_sender.lua",
+      "config": { "role": "sender", "count": 200, "interval_ms": 100, "sf": 7, "payload_bytes": 8 },
+      "sf_rx_set": [7] },
+    { "name": "rcv", "script": "examples/sf_toggle_rx.lua",
+      "config": { "sf_a": 7, "sf_b": 8, "toggle_interval_ms": 50 },
+      "sf_rx_set": [7, 8] }
+  ],
+  "topology": {
+    "links": [
+      { "from": "snd", "to": "rcv", "snr": 20.0, "rssi": -60.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "event_count_min", "event_type": "drop_rx_blind", "node": "rcv", "min": 1 }
+  ]
+}

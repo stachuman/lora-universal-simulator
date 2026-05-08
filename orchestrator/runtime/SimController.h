@@ -149,6 +149,13 @@ private:
 
     std::unordered_map<std::string, int> _name_to_id;
     std::vector<bool>                    _command_fired;
+    // Mutable per-node positions. Initialized from _cfg.nodes[].lat/lon at
+    // initialize(); advanced by rebuildLinksFromPathLoss() at each
+    // asymmetry_coherence_ms tick for nodes with velocity_mps > 0.
+    // Path-loss recompute always reads from here, not from _cfg, so the
+    // const SimConfig stays untouched.
+    std::vector<double>                  _node_lat;
+    std::vector<double>                  _node_lon;
     std::vector<InFlight>                _in_flight;
 
     // Per-node receive-SF set. Defaults to [node.sf] when the JSON config

@@ -254,6 +254,38 @@ void collision(unsigned long time_ms, const char* from, const char* to,
     emitLine(buf);
 }
 
+void dropRxBlind(unsigned long time_ms, const char* from, const char* to,
+                 uint64_t blind_until_ms,
+                 const uint8_t* data, int len, uint32_t airtime_ms,
+                 int sf, int bw_hz) {
+    char pkt[9];
+    packetHashHex(pkt, data, len);
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"drop_rx_blind\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
+        "\"blind_until_ms\":%llu,\"pkt\":\"%s\",\"airtime_ms\":%u,"
+        "\"sf\":%d,\"bw_hz\":%d}\n",
+        time_ms, from, to, (unsigned long long)blind_until_ms,
+        pkt, (unsigned)airtime_ms, sf, bw_hz);
+    emitLine(buf);
+}
+
+void dropPreambleMiss(unsigned long time_ms, const char* from, const char* to,
+                      float miss_prob,
+                      const uint8_t* data, int len, uint32_t airtime_ms,
+                      int sf, int bw_hz) {
+    char pkt[9];
+    packetHashHex(pkt, data, len);
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"drop_preamble_miss\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
+        "\"miss_prob\":%.3f,\"pkt\":\"%s\",\"airtime_ms\":%u,"
+        "\"sf\":%d,\"bw_hz\":%d}\n",
+        time_ms, from, to, miss_prob,
+        pkt, (unsigned)airtime_ms, sf, bw_hz);
+    emitLine(buf);
+}
+
 void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int sf, int bw_hz) {

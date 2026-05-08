@@ -187,16 +187,33 @@ void ScriptedNode::api_tx(std::string bytes, sol::optional<sol::table> opts) {
     _pending_txs.push_back(std::move(p));
 }
 
+// Convert a delay expressed in node-clock-time to wall-clock-time.
+// Script asks "fire in delay_ms node-ms"; node clock runs at
+// (1 + drift) × wall, so node_ms = wall_ms × (1 + drift) → the matching
+// wall delay is delay_ms / (1 + drift). For ±50 ppm and 1 s delay this
+// is a sub-microsecond shift, but it accumulates over multi-hour runs
+// and breaks tight protocol timeouts that assume zero clock skew.
+static inline uint64_t nodeDelayToWallDelay(uint64_t delay_ms, float drift_ppm) {
+    if (drift_ppm == 0.0f || delay_ms == 0) return delay_ms;
+    const double scale = 1.0 + (double)drift_ppm * 1e-6;
+    if (scale <= 0.0) return delay_ms;  // sanity
+    const double wall = (double)delay_ms / scale;
+    if (wall < 0.0) return 0;
+    return (uint64_t)(wall + 0.5);
+}
+
 uint64_t ScriptedNode::api_after(uint64_t delay_ms, sol::function fn) {
-    TimerHandle h = _timers.scheduleAfter(_clock.getMillis(), delay_ms, /*period=*/0);
+    const uint64_t wall_delay = nodeDelayToWallDelay(delay_ms, _clock_drift_ppm);
+    TimerHandle h = _timers.scheduleAfter(_clock.getMillis(), wall_delay, /*period=*/0);
     sol::table timers = _host.lua()["_LUS"]["nodes"][_id]["timers"];
     timers[h] = fn;
     return h;
 }
 
 uint64_t ScriptedNode::api_every(uint64_t period_ms, sol::function fn) {
-    TimerHandle h = _timers.scheduleAfter(_clock.getMillis(), period_ms,
-                                          static_cast<uint32_t>(period_ms));
+    const uint64_t wall_period = nodeDelayToWallDelay(period_ms, _clock_drift_ppm);
+    TimerHandle h = _timers.scheduleAfter(_clock.getMillis(), wall_period,
+                                          static_cast<uint32_t>(wall_period));
     sol::table timers = _host.lua()["_LUS"]["nodes"][_id]["timers"];
     timers[h] = fn;
     return h;
@@ -209,7 +226,14 @@ void ScriptedNode::api_cancel(uint64_t handle) {
 }
 
 uint64_t ScriptedNode::api_now() const {
-    return _clock.getMillis();
+    const uint64_t wall = _clock.getMillis();
+    if (_clock_drift_ppm == 0.0f) return wall;
+    // Script's perceived time = wall × (1 + drift). Drift is small so
+    // this stays monotonic and well-behaved at uint64 precision over
+    // multi-hour runs.
+    const double drifted = (double)wall * (1.0 + (double)_clock_drift_ppm * 1e-6);
+    if (drifted < 0.0) return 0;
+    return (uint64_t)(drifted + 0.5);
 }
 
 int ScriptedNode::api_rand(int lo, int hi) {
@@ -255,11 +279,23 @@ sol::table ScriptedNode::api_peers() {
 // parser. If no SFs survive validation in set_rx_sf_set, the existing set is
 // left untouched — scripts shouldn't be able to deafen a node by passing
 // `{}` or a table of invalid entries.
+// Apply the SF-retune blind window: the radio's PLL takes settling time
+// to relock onto a new SF. During the window any incoming preamble is
+// missed (drop_rx_blind). Pessimistic — extends an already-armed window
+// when a second retune happens before the first settles.
+void ScriptedNode::armSfSwitchBlindWindow() {
+    if (_sf_switch_delay_ms <= 0.0f) return;
+    const uint64_t now = _clock.getMillis();
+    const uint64_t blind_end = now + (uint64_t)(_sf_switch_delay_ms + 0.5f);
+    if (blind_end > _rx_blind_until_ms) _rx_blind_until_ms = blind_end;
+}
+
 void ScriptedNode::api_set_rx_sf(int sf) {
     if (!_sf_rx_set) return;  // not attached yet (shouldn't happen post-init)
     if (sf < 5) sf = 5;
     if (sf > 12) sf = 12;
     *_sf_rx_set = { sf };
+    armSfSwitchBlindWindow();
 }
 
 void ScriptedNode::api_set_rx_sf_set(sol::table sf_set) {
@@ -273,7 +309,10 @@ void ScriptedNode::api_set_rx_sf_set(sol::table sf_set) {
         else                       continue;
         if (sf >= 5 && sf <= 12) result.push_back(sf);
     }
-    if (!result.empty()) *_sf_rx_set = std::move(result);
+    if (!result.empty()) {
+        *_sf_rx_set = std::move(result);
+        armSfSwitchBlindWindow();
+    }
 }
 
 uint64_t ScriptedNode::api_channel_busy_until() const {

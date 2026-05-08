@@ -154,6 +154,14 @@ void SimController::initialize() {
         _name_to_id.emplace(_cfg.nodes[i].name, i);
     }
 
+    // ---- Mutable per-node positions for mobility ----------------------------
+    _node_lat.assign(static_cast<size_t>(n), 0.0);
+    _node_lon.assign(static_cast<size_t>(n), 0.0);
+    for (int i = 0; i < n; ++i) {
+        _node_lat[(size_t)i] = _cfg.nodes[i].lat;
+        _node_lon[(size_t)i] = _cfg.nodes[i].lon;
+    }
+
     // ---- Link model ---------------------------------------------------------
     _links = std::make_unique<MatrixLinkModel>(n);
 
@@ -209,8 +217,8 @@ void SimController::initialize() {
                 if (i == j) continue;
                 if (!_cfg.nodes[j].has_location) continue;
                 const double d = lus::haversineDistanceMeters(
-                    _cfg.nodes[i].lat, _cfg.nodes[i].lon,
-                    _cfg.nodes[j].lat, _cfg.nodes[j].lon);
+                    _node_lat[(size_t)i], _node_lon[(size_t)i],
+                    _node_lat[(size_t)j], _node_lon[(size_t)j]);
                 const auto sig = _path_loss->sampleDirectional(i, j, d);
                 _links->setLink(i, j, sig.snr_db, sig.rssi_dbm,
                                 /*snr_std_dev=*/static_cast<float>(
@@ -288,6 +296,31 @@ void SimController::initialize() {
         _nodes[i]->attachSfRxSet(&_node_sf_rx_set[i]);
         _nodes[i]->attachTxInFlightSlot(&_node_tx_in_flight_until[i]);
         // _lbt is constructed below; defer the LBT attach until then.
+    }
+
+    // Per-node clock drift + SF-switch delay. MUST be set before any
+    // onInit fires because the script's first self:after() call (made
+    // from on_init) reads _clock_drift_ppm to scale the wall delay; if
+    // drift is still 0 at that moment, the very first timer of every
+    // node is misscheduled.
+    {
+        std::normal_distribution<double> drift_dist(
+            0.0, _cfg.simulation.clock_drift_ppm_sigma);
+        for (int i = 0; i < n; ++i) {
+            float ppm = _cfg.nodes[i].clock_drift_ppm;
+            if (std::isnan(ppm)) {
+                ppm = (_cfg.simulation.clock_drift_ppm_sigma > 0.0)
+                          ? static_cast<float>(drift_dist(_rng))
+                          : 0.0f;
+            }
+            _nodes[i]->setClockDriftPpm(ppm);
+            _nodes[i]->setSfSwitchDelayMs(_cfg.simulation.radio.sf_switch_delay_ms);
+            char json[256];
+            std::snprintf(json, sizeof(json),
+                "{\"clock_drift_ppm\":%.2f,\"sf_switch_delay_ms\":%.2f}",
+                ppm, _cfg.simulation.radio.sf_switch_delay_ms);
+            EventLog::logScriptEmit(i, 0, "node_clock_profile", json);
+        }
     }
 
     // Register + load scripts (must precede onInit so `self` is populated).
@@ -415,6 +448,8 @@ void SimController::initialize() {
     for (int i = 0; i < n; ++i) {
         _nodes[i]->attachLbtModel(_lbt.get());
     }
+
+    // (clock-drift / sf-switch setup moved earlier — must precede onInit.)
 
     // Collision config from radio block.
     _coll_cfg = CollisionConfig{};
@@ -638,6 +673,53 @@ void SimController::deliverReceptionsForStep() {
                 continue;
             }
 
+            // Probabilistic decode at marginal SNR. Real Semtech chips
+            // don't present a hard cliff at threshold — PER follows a
+            // sigmoid (~50% at threshold, ~3 dB to halve PER above).
+            // Without this, snr = threshold + epsilon decodes with prob 1
+            // and snr = threshold − epsilon with prob 0; that masks bugs
+            // around marginal links. Disabled by setting steepness to 0
+            // (analytic-test escape hatch).
+            const float steep = _cfg.simulation.radio.decode_margin_steepness_db;
+            if (steep > 0.0f) {
+                const float margin = snr_at_rcv - thr;
+                const float per = 1.0f / (1.0f + std::exp(margin / steep));
+                std::uniform_real_distribution<float> u(0.0f, 1.0f);
+                if (u(_rng) < per) {
+                    EventLog::dropWeak(
+                        static_cast<unsigned long>(now),
+                        _nodes[tx.sender_id]->name().c_str(),
+                        _nodes[rcv]->name().c_str(),
+                        snr_at_rcv, thr,
+                        reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                        static_cast<int>(tx.bytes.size()),
+                        tx.sf, tx.bw_hz);
+                    continue;
+                }
+            }
+
+            // RX-side preamble miss. Even decodable frames are missed by
+            // real RFICs at a few-percent rate — AGC settling on a strong
+            // adjacent signal, FIFO scheduling, transient interference
+            // below the demod floor. Distinct from cad_miss_prob (LBT
+            // side). Default 0.02 = 2 %; set to 0 for analytic tests.
+            const float miss_prob = _cfg.simulation.radio.rx_preamble_miss_prob;
+            if (miss_prob > 0.0f) {
+                std::uniform_real_distribution<float> u(0.0f, 1.0f);
+                if (u(_rng) < miss_prob) {
+                    EventLog::dropPreambleMiss(
+                        static_cast<unsigned long>(now),
+                        _nodes[tx.sender_id]->name().c_str(),
+                        _nodes[rcv]->name().c_str(),
+                        miss_prob,
+                        reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                        static_cast<int>(tx.bytes.size()),
+                        static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                        tx.sf, tx.bw_hz);
+                    continue;
+                }
+            }
+
             // Per-link Bernoulli loss.
             if (lp.loss > 0.0f) {
                 std::uniform_real_distribution<float> u(0.0f, 1.0f);
@@ -652,6 +734,25 @@ void SimController::deliverReceptionsForStep() {
                         tx.sf, tx.bw_hz);
                     continue;
                 }
+            }
+
+            // SF-retune blind window. After self:set_rx_sf(...), the
+            // PLL is relocking and any preamble that arrives during the
+            // settling window is missed by real Semtech hardware. We
+            // approximate by checking the frame's start_ms against the
+            // receiver's _rx_blind_until_ms (set when api_set_rx_sf
+            // fires). Disabled when sf_switch_delay_ms is 0.
+            if (tx.start_ms < _nodes[rcv]->rxBlindUntilMs()) {
+                EventLog::dropRxBlind(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    _nodes[rcv]->rxBlindUntilMs(),
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                    tx.sf, tx.bw_hz);
+                continue;
             }
 
             // Strict half-duplex enforcement: a node can't receive while
@@ -1073,17 +1174,58 @@ void SimController::registerTransmissionsForStep() {
 // topology.links overrides on top (same precedence as initialize()).
 // Called at coherence boundaries when asymmetry_coherence_ms > 0 — slow
 // drift in the per-pair shadow component, modeling foliage / weather.
+// Also advances any mobile nodes (velocity_mps > 0) along their compass
+// heading by the elapsed coherence interval, then recomputes path-loss
+// from the new positions — same one-tick that handles environmental
+// drift now also handles bulk position change. (Cheap: positions update
+// at ~1 Hz in the default 60 s coherence, and Haversine + sampleDirectional
+// scale O(n²) which is fine at our scenario sizes.)
 void SimController::rebuildLinksFromPathLoss() {
     if (!_path_loss || !_links) return;
     const int n = static_cast<int>(_cfg.nodes.size());
+
+    // Advance mobile nodes. dt is the elapsed wall time since the last
+    // rebuild — for the very first call (init time) elapsed is 0 so this
+    // is a no-op; subsequent calls fire at asymmetry_coherence_ms cadence.
+    const uint64_t coherence_ms = _cfg.simulation.path_loss.asymmetry_coherence_ms;
+    if (coherence_ms > 0) {
+        const double dt_s = static_cast<double>(coherence_ms) / 1000.0;
+        for (int i = 0; i < n; ++i) {
+            if (!_cfg.nodes[i].has_location) continue;
+            const float v = _cfg.nodes[i].velocity_mps;
+            if (v <= 0.0f) continue;
+            const double dist_m  = static_cast<double>(v) * dt_s;
+            // Compass heading → ENU bearing: north = 0°, clockwise.
+            // Convert to a small lat/lon delta using the local
+            // ~111 km / degree approximation. Adequate for the meter-
+            // scale movement per tick we expect at LoRa-mesh velocities;
+            // mobile-node simulations covering tens of km would want a
+            // proper geodetic forward step.
+            constexpr double kPi = 3.14159265358979323846;
+            const double bearing_rad = static_cast<double>(_cfg.nodes[i].direction_deg) * kPi / 180.0;
+            const double dnorth_m = dist_m * std::cos(bearing_rad);
+            const double deast_m  = dist_m * std::sin(bearing_rad);
+            const double dlat = dnorth_m / 111320.0;
+            const double dlon = deast_m  /
+                (111320.0 * std::cos(_node_lat[(size_t)i] * kPi / 180.0));
+            _node_lat[(size_t)i] += dlat;
+            _node_lon[(size_t)i] += dlon;
+            char json[256];
+            std::snprintf(json, sizeof(json),
+                "{\"lat\":%.6f,\"lon\":%.6f,\"velocity_mps\":%.2f,\"direction_deg\":%.1f}",
+                _node_lat[(size_t)i], _node_lon[(size_t)i], v, _cfg.nodes[i].direction_deg);
+            EventLog::logScriptEmit(i, _now_ms, "node_position", json);
+        }
+    }
+
     for (int i = 0; i < n; ++i) {
         if (!_cfg.nodes[i].has_location) continue;
         for (int j = 0; j < n; ++j) {
             if (i == j) continue;
             if (!_cfg.nodes[j].has_location) continue;
             const double d = lus::haversineDistanceMeters(
-                _cfg.nodes[i].lat, _cfg.nodes[i].lon,
-                _cfg.nodes[j].lat, _cfg.nodes[j].lon);
+                _node_lat[(size_t)i], _node_lon[(size_t)i],
+                _node_lat[(size_t)j], _node_lon[(size_t)j]);
             const auto sig = _path_loss->sampleDirectional(i, j, d);
             _links->setLink(i, j, sig.snr_db, sig.rssi_dbm,
                             static_cast<float>(_cfg.simulation.path_loss.sigma_db),

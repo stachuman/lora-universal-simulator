@@ -7,10 +7,15 @@
     "warmup_ms": 0,
     "seed": 42,
     "node_startup_jitter_ms": 200,
+    "clock_drift_ppm_sigma": 0,
     "radio": {
       "sf": 8,
       "bw": 250,
-      "cr": 5
+      "cr": 5,
+      "hardware": {
+        "decode_margin_steepness_db": 0,
+        "sf_switch_delay_ms": 0
+      }
     }
   },
   "nodes": [

@@ -1,0 +1,33 @@
+{
+  "_name": "t18_preamble_miss",
+  "_desc": "Sender TXes 500 packets at SF7 over a strong (snr=20) link so the sigmoid PER and drop_weak path are effectively zero — the only legitimate failure mode is rx_preamble_miss_prob = 0.05 (set high vs. the 0.02 default to keep the count comfortably above noise). Expect ~25 drop_preamble_miss out of 500 (range 10–50 to absorb single-seed variance) and ~475 rx (range 450–490).",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "clock_drift_ppm_sigma": 0,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "rx_preamble_miss_prob": 0.05,
+      "hardware": { "decode_margin_steepness_db": 0, "sf_switch_delay_ms": 0 }
+    }
+  },
+  "nodes": [
+    { "name": "snd", "script": "examples/burst_sender.lua",
+      "config": { "role": "sender", "count": 500, "interval_ms": 100, "sf": 7, "payload_bytes": 8 } },
+    { "name": "rcv", "script": "examples/burst_sender.lua",
+      "config": { "role": "receiver" } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "snd", "to": "rcv", "snr": 20.0, "rssi": -60.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "event_count", "event_type": "rx",                  "node": "rcv", "min": 450, "max": 490 },
+    { "type": "event_count", "event_type": "drop_preamble_miss",  "node": "rcv", "min": 10,  "max": 50 }
+  ]
+}

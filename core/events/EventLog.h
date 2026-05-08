@@ -66,6 +66,24 @@ void collision(unsigned long time_ms, const char* from, const char* to,
                const char* interferer = nullptr,
                float interferer_snr = 0.0f,
                float snr_margin = 0.0f);
+// Receiver was in its post-SF-retune blind window when this frame's
+// preamble arrived — real Semtech chips can't decode while the PLL
+// relocks. blind_until_ms is the absolute time the radio becomes
+// receptive again, so a trace can show "frame dropped because rcv was
+// blind for 1 ms more after self:set_rx_sf(data_sf)."
+void dropRxBlind(unsigned long time_ms, const char* from, const char* to,
+                 uint64_t blind_until_ms,
+                 const uint8_t* data, int len, uint32_t airtime_ms,
+                 int sf, int bw_hz);
+
+// Receiver passed threshold + probabilistic decode but the RFIC missed
+// the preamble (AGC settling, FIFO scheduling, transient interference).
+// Bernoulli model parameterised by simulation.radio.rx_preamble_miss_prob.
+void dropPreambleMiss(unsigned long time_ms, const char* from, const char* to,
+                      float miss_prob,
+                      const uint8_t* data, int len, uint32_t airtime_ms,
+                      int sf, int bw_hz);
+
 void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int sf, int bw_hz);
