@@ -253,13 +253,21 @@
 --
 -- Sender-side NACK (on_recv 'N' matching pending_tx.msg_id):
 --   • cancel rts_timeout
---   • can_try_alt = rt[dst].alt exists AND not pending_tx.alt_tried
---     → flip pending_tx.next = alt.next_hop; alt_tried=true; retries_left
---       reset to fresh budget; tx_rts_retry("nack_alt")
---   • else if busy_for_ms ≤ NACK_WAIT_THRESHOLD_MS (200 ms default)
---     → after(busy_for_ms+1, tx_rts_retry("nack_wait"))
---   • else (long wait + no alt)
+--   • mark NACK sender blind for busy_for_ms (so concurrent retries
+--     against the same next-hop defer via classify_blind)
+--   • if busy_for_ms ≤ NACK_WAIT_THRESHOLD_MS (2000 ms default)
+--     → after(busy_for_ms + 1 + rand(0, retry_jitter_ms),
+--             tx_rts_retry("nack_wait"))   -- same next-hop
+--   • else (very long busy)
 --     → push pending_tx back into tx_queue; pending_tx=nil; become_free
+--       (DV may converge or the queue may surface other work meanwhile)
+--
+-- We never path-switch on a NACK. The protocol's NACK carries only
+-- busy_for_ms — a transient receiver-busy signal — so the receiver
+-- freeing up is the natural event we should wait for. Path-switching
+-- on busy NACK is harmful when next == dst (alice busy as originator
+-- ⇒ every alt forwarder also gets NACKed; observed cost was 2 extra
+-- hops on s04 dave→alice flights).
 --
 -- Limitation we live with (dual-SF asymmetry):
 --   When the busy node is on data_sf RX (mid-flight as receiver, after CTS-tx
@@ -2392,45 +2400,30 @@ function on_recv(self, frame, meta)
       end
     end
 
-    -- Decide what to do. Three strategies, in order of preference:
-    --   (a) try the alt path if we have one and haven't tried it yet
-    --   (b) if busy_for_ms is short, wait it out on the same path
-    --   (c) requeue and become_free — the queue might pop a different
-    --       send, or DV beacons may converge to a new primary
-    local entry = self.rt[self.pending_tx.dst]
-    local alt = entry and entry.alt or nil
-    -- Don't path-switch into the upstream we just got this DATA from —
-    -- that immediately forms a 2-cycle (forwarder → upstream → forwarder
-    -- → … until dup_drop kills it). Same guard as classify_blind uses
-    -- on the originating side; here it covers the NACK-driven switch.
-    local alt_is_upstream = (alt ~= nil and alt.next_hop == self.pending_tx.previous_hop)
-    local can_try_alt = alt ~= nil and (not self.pending_tx.alt_tried) and (not alt_is_upstream)
-
-    if can_try_alt then
-      local prev_next = self.pending_tx.next
-      self.pending_tx.next      = alt.next_hop
-      self.pending_tx.alt_tried = true
-      self.pending_tx.retries_left = self.rts_max_retries  -- fresh budget for alt path
-      self:emit("path_switch", {
-        origin = self.pending_tx.origin,
-        payload = self.pending_tx.user_text,
-        origin_seq = self.pending_tx.origin_seq,
-        dst = self.pending_tx.dst, msg_id = self.pending_tx.msg_id,
-        from_next = prev_next, to_next = alt.next_hop,
-      })
-      self:log(string.format("path_switch dst=%s msg_id=%d %s → %s (alt)",
-        name_of(self, self.pending_tx.dst), self.pending_tx.msg_id,
-        name_of(self, prev_next), name_of(self, alt.next_hop)))
-      tx_rts_retry(self, "nack_alt")
-      return
-    end
-
-    local NACK_WAIT_THRESHOLD_MS = 200
+    -- Two strategies, in order of preference:
+    --   (a) wait busy_for_ms then retry the same next-hop
+    --   (b) requeue if busy is too long to wait inline — the queue might
+    --       pop a different send, or DV beacons may converge meanwhile
+    --
+    -- We never path-switch on a NACK. Rationale: this protocol's NACK
+    -- carries only busy_for_ms (a transient receiver-busy signal); there
+    -- is no "no route" / link-quality variant. The receiver freeing up
+    -- is the natural event we should wait for. Path-switching to a
+    -- different forwarder doesn't help — particularly when the next-hop
+    -- IS the destination (alice rejects Ballard's RTS because alice
+    -- is busy as originator; switching to N7TOERPTR just makes
+    -- N7TOERPTR also discover alice is busy). Always-wait-and-retry
+    -- collapses several wasted RTS-CTS-NACK cycles onto a single
+    -- successful exchange once the receiver is free.
+    local NACK_WAIT_THRESHOLD_MS = 2000
     if n.busy_for_ms <= NACK_WAIT_THRESHOLD_MS then
       local captured = self.pending_tx.msg_id
-      local wait_ms = n.busy_for_ms + 1
-      self:log(string.format("nack_wait msg_id=%d for %dms (no alt or alt already tried)",
-        captured, wait_ms))
+      -- Add small jitter on top of busy_for_ms to decorrelate multiple
+      -- senders all NACKed by the same receiver — without it they
+      -- thunder back in unison the moment the receiver frees up.
+      local wait_ms = n.busy_for_ms + 1 + self:rand(0, self.retry_jitter_ms + 1)
+      self:log(string.format("nack_wait msg_id=%d for %dms (busy_for=%d, same next-hop)",
+        captured, wait_ms, n.busy_for_ms))
       self:after(wait_ms, function()
         if self.pending_tx ~= nil and self.pending_tx.msg_id == captured then
           tx_rts_retry(self, "nack_wait")
