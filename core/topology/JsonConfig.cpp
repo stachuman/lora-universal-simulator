@@ -103,6 +103,12 @@ static SimConfig parseJson(const json& j) {
             if (pl.contains("ref_loss_db"))    cfg.simulation.path_loss.ref_loss_db    = pl["ref_loss_db"].get<double>();
             if (pl.contains("noise_floor_db")) cfg.simulation.path_loss.noise_floor_db = pl["noise_floor_db"].get<double>();
             if (pl.contains("tx_power_dbm"))   cfg.simulation.path_loss.tx_power_dbm   = pl["tx_power_dbm"].get<double>();
+            if (pl.contains("node_tx_offset_sigma_db"))
+                cfg.simulation.path_loss.node_tx_offset_sigma_db = pl["node_tx_offset_sigma_db"].get<double>();
+            if (pl.contains("node_rx_offset_sigma_db"))
+                cfg.simulation.path_loss.node_rx_offset_sigma_db = pl["node_rx_offset_sigma_db"].get<double>();
+            if (pl.contains("asymmetry_coherence_ms"))
+                cfg.simulation.path_loss.asymmetry_coherence_ms = pl["asymmetry_coherence_ms"].get<uint64_t>();
             if (cfg.simulation.path_loss.model != "log_distance") {
                 throw std::runtime_error(
                     "config error at simulation.path_loss: model must be "
@@ -181,6 +187,14 @@ static SimConfig parseJson(const json& j) {
 
             if (nd.contains("tx_fail_prob"))
                 def.tx_fail_prob = nd["tx_fail_prob"].get<float>();
+
+            // Per-node asymmetry overrides — pin a node's TX/RX bias for
+            // tests / known-hardware reproductions. NaN (the default)
+            // means "sample from path_loss.node_*_offset_sigma_db".
+            if (nd.contains("tx_power_offset_db"))
+                def.tx_power_offset_db = nd["tx_power_offset_db"].get<float>();
+            if (nd.contains("rx_offset_db"))
+                def.rx_offset_db = nd["rx_offset_db"].get<float>();
 
             // NOTE: role / firmware / adversarial were stripped (MeshCore-only).
 

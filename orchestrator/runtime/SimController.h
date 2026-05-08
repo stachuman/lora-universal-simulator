@@ -19,6 +19,7 @@
 #include "core/clock/VirtualClock.h"
 #include "core/link/LinkFadingState.h"
 #include "core/link/LinkModel.h"
+#include "core/link/PathLossModel.h"
 #include "core/physics/CollisionModel.h"
 #include "core/physics/LbtModel.h"
 #include "core/radio/SimRadio.h"
@@ -134,6 +135,13 @@ private:
     std::mt19937                     _rng;
     std::unique_ptr<MatrixLinkModel> _links;
     std::unique_ptr<LbtModel>        _lbt;
+    std::unique_ptr<PathLossModel>   _path_loss;
+    void rebuildLinksFromPathLoss();
+    // When asymmetry_coherence_ms > 0, the per-pair shadow component of
+    // the path-loss model is re-sampled at this absolute sim-time. Rebuild
+    // every directed link in _links from the new draws + cached per-node
+    // offsets, then re-apply explicit topology.links overrides on top.
+    uint64_t                         _next_pair_shadow_resample_ms = UINT64_MAX;
     CollisionConfig                  _coll_cfg;
 
     std::vector<std::unique_ptr<SimRadio>>     _radios;

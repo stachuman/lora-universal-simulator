@@ -159,22 +159,45 @@ void SimController::initialize() {
 
     // Path-loss baseline: when simulation.path_loss.present, compute
     // SNR/RSSI from haversine distance for every directed (i, j) pair
-    // where both endpoints have lat/lon. This populates the link
-    // matrix BEFORE the explicit topology.links loop, so any explicit
-    // entries below override the path-loss-derived per-pair values
-    // (useful for tests that want surgical link tuning on top of
-    // automated defaults). Sigma is sampled once per directed link
-    // here; per-step variation is the LinkFadingState's job (R.1.5).
+    // where both endpoints have lat/lon, including per-node TX/RX
+    // offsets and per-pair shadow (so SNR(A→B) ≠ SNR(B→A) by default,
+    // matching real LoRa). This populates the link matrix BEFORE the
+    // explicit topology.links loop, so any explicit entries below
+    // override the path-loss-derived per-pair values (useful for tests
+    // that want surgical link tuning on top of automated defaults).
     if (_cfg.simulation.path_loss.present) {
         PathLossConfig plc;
-        plc.model          = _cfg.simulation.path_loss.model;
-        plc.alpha          = _cfg.simulation.path_loss.alpha;
-        plc.sigma_db       = _cfg.simulation.path_loss.sigma_db;
-        plc.ref_distance_m = _cfg.simulation.path_loss.ref_distance_m;
-        plc.ref_loss_db    = _cfg.simulation.path_loss.ref_loss_db;
-        plc.noise_floor_db = _cfg.simulation.path_loss.noise_floor_db;
-        plc.tx_power_dbm   = _cfg.simulation.path_loss.tx_power_dbm;
-        PathLossModel pl(plc, _rng);
+        plc.model                   = _cfg.simulation.path_loss.model;
+        plc.alpha                   = _cfg.simulation.path_loss.alpha;
+        plc.sigma_db                = _cfg.simulation.path_loss.sigma_db;
+        plc.ref_distance_m          = _cfg.simulation.path_loss.ref_distance_m;
+        plc.ref_loss_db             = _cfg.simulation.path_loss.ref_loss_db;
+        plc.noise_floor_db          = _cfg.simulation.path_loss.noise_floor_db;
+        plc.tx_power_dbm            = _cfg.simulation.path_loss.tx_power_dbm;
+        plc.node_tx_offset_sigma_db = _cfg.simulation.path_loss.node_tx_offset_sigma_db;
+        plc.node_rx_offset_sigma_db = _cfg.simulation.path_loss.node_rx_offset_sigma_db;
+        plc.asymmetry_coherence_ms  = _cfg.simulation.path_loss.asymmetry_coherence_ms;
+        _path_loss = std::make_unique<PathLossModel>(plc, _rng);
+        _path_loss->initializeNodes(n);
+
+        // Apply per-node JSON overrides AFTER initializeNodes() (which
+        // sampled from the sigmas). NaN means "leave the sampled value."
+        for (int i = 0; i < n; ++i) {
+            _path_loss->setNodeTxOffset(i, _cfg.nodes[i].tx_power_offset_db);
+            _path_loss->setNodeRxOffset(i, _cfg.nodes[i].rx_offset_db);
+        }
+
+        // Emit one node_link_profile per node so traces are reproducible
+        // (asymmetry is deterministic given the seed) and debuggable —
+        // a "this node has tx_offset = -4 dB" line in the log explains
+        // why its packets routinely fail to land.
+        for (int i = 0; i < n; ++i) {
+            char json[256];
+            std::snprintf(json, sizeof(json),
+                "{\"tx_offset_db\":%.2f,\"rx_offset_db\":%.2f}",
+                _path_loss->nodeTxOffset(i), _path_loss->nodeRxOffset(i));
+            EventLog::logScriptEmit(i, 0, "node_link_profile", json);
+        }
 
         int missing_loc_count = 0;
         for (int i = 0; i < n; ++i) {
@@ -188,7 +211,7 @@ void SimController::initialize() {
                 const double d = lus::haversineDistanceMeters(
                     _cfg.nodes[i].lat, _cfg.nodes[i].lon,
                     _cfg.nodes[j].lat, _cfg.nodes[j].lon);
-                const auto sig = pl.sample(d);
+                const auto sig = _path_loss->sampleDirectional(i, j, d);
                 _links->setLink(i, j, sig.snr_db, sig.rssi_dbm,
                                 /*snr_std_dev=*/static_cast<float>(
                                     _cfg.simulation.path_loss.sigma_db),
@@ -200,6 +223,10 @@ void SimController::initialize() {
                 "[lus] warning: %d node(s) missing lat/lon - no path-loss "
                 "links computed for them\n",
                 missing_loc_count);
+        }
+
+        if (plc.asymmetry_coherence_ms > 0) {
+            _next_pair_shadow_resample_ms = plc.asymmetry_coherence_ms;
         }
     }
 
@@ -1041,6 +1068,42 @@ void SimController::registerTransmissionsForStep() {
     }
 }
 
+// Re-build every directed link in _links from the path-loss model's
+// current per-node offsets and per-pair shadows, then re-apply explicit
+// topology.links overrides on top (same precedence as initialize()).
+// Called at coherence boundaries when asymmetry_coherence_ms > 0 — slow
+// drift in the per-pair shadow component, modeling foliage / weather.
+void SimController::rebuildLinksFromPathLoss() {
+    if (!_path_loss || !_links) return;
+    const int n = static_cast<int>(_cfg.nodes.size());
+    for (int i = 0; i < n; ++i) {
+        if (!_cfg.nodes[i].has_location) continue;
+        for (int j = 0; j < n; ++j) {
+            if (i == j) continue;
+            if (!_cfg.nodes[j].has_location) continue;
+            const double d = lus::haversineDistanceMeters(
+                _cfg.nodes[i].lat, _cfg.nodes[i].lon,
+                _cfg.nodes[j].lat, _cfg.nodes[j].lon);
+            const auto sig = _path_loss->sampleDirectional(i, j, d);
+            _links->setLink(i, j, sig.snr_db, sig.rssi_dbm,
+                            static_cast<float>(_cfg.simulation.path_loss.sigma_db),
+                            0.0f);
+        }
+    }
+    // Re-apply explicit overrides — same precedence as initialize().
+    for (const auto& l : _cfg.topology.links) {
+        auto fit = _name_to_id.find(l.from);
+        auto tit = _name_to_id.find(l.to);
+        if (fit == _name_to_id.end() || tit == _name_to_id.end()) continue;
+        _links->setLink(fit->second, tit->second,
+                        l.snr, l.rssi, l.snr_std_dev, l.loss);
+        if (l.bidir) {
+            _links->setLink(tit->second, fit->second,
+                            l.snr, l.rssi, l.snr_std_dev, l.loss);
+        }
+    }
+}
+
 StepResult SimController::step(uint64_t advance_ms) {
     StepResult result;
     if (!_initialized || _finalized) {
@@ -1054,6 +1117,15 @@ StepResult SimController::step(uint64_t advance_ms) {
         : advance_ms;
 
     const int events_before = static_cast<int>(EventLog::events().size());
+
+    // Drive the asymmetry-coherence-driven re-sample of per-pair shadows.
+    // Per-node offsets stay fixed; only the pair shadow component drifts.
+    if (_path_loss && _now_ms >= _next_pair_shadow_resample_ms) {
+        _path_loss->resamplePairShadows();
+        rebuildLinksFromPathLoss();
+        _next_pair_shadow_resample_ms +=
+            _cfg.simulation.path_loss.asymmetry_coherence_ms;
+    }
 
     processStartupAtStep();
     processCommandsAtStep();

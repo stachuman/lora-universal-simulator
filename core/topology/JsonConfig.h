@@ -24,6 +24,7 @@
 #include "json/json.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -87,11 +88,47 @@ struct SimConfig {
         bool        present        = false;
         std::string model          = "log_distance";
         double      alpha          = 3.0;
-        double      sigma_db       = 0.0;
         double      ref_distance_m = 1.0;
         double      ref_loss_db    = 40.0;
         double      noise_floor_db = -120.0;
         double      tx_power_dbm   = 20.0;
+
+        // Asymmetry / shadowing model. Real LoRa links routinely show
+        // SNR(A→B) ≠ SNR(B→A) — TX-power variability across hardware,
+        // antenna gain differences, and per-direction shadowing all
+        // contribute. Three independent components, each sampled once
+        // at init (and the per-pair shadow optionally re-sampled every
+        // asymmetry_coherence_ms for slow time variation):
+        //
+        //   sigma_db                — per-(sender→receiver) shadow
+        //                             stddev. Captures permanent
+        //                             obstruction differences along the
+        //                             two directions.
+        //   node_tx_offset_sigma_db — per-node TX-power offset stddev.
+        //                             "Node A's PA chain runs hot/cold
+        //                             vs spec." Applies to every flight
+        //                             where this node is the sender.
+        //   node_rx_offset_sigma_db — per-node RX-sensitivity offset
+        //                             stddev. "Node A's LNA / antenna
+        //                             pattern attenuates incoming."
+        //                             Applies to every flight where
+        //                             this node is the receiver.
+        //   asymmetry_coherence_ms  — 0 → static (sample once at init).
+        //                             >0 → re-sample per-pair shadow
+        //                             every coherence_ms. Models slow
+        //                             environmental change (foliage
+        //                             moves, weather, etc.). Per-node
+        //                             offsets stay constant across
+        //                             the run since they represent
+        //                             hardware, not environment.
+        double      sigma_db                = 3.0;
+        double      node_tx_offset_sigma_db = 2.0;
+        double      node_rx_offset_sigma_db = 1.5;
+        // Default 60_000 ms (1 minute) — slow environmental change is the
+        // realistic baseline for LoRa fixed installations (foliage,
+        // weather, slow drift). Set to 0 in scenario JSON for fully
+        // static asymmetry (useful for analytic tests).
+        uint64_t    asymmetry_coherence_ms  = 60000;
     };
 
     struct SimulationConfig {
@@ -148,6 +185,14 @@ struct SimConfig {
         // can hit a startSendRaw failure path). Kept; scripts may surface
         // tx_fail events or ignore them.
         float tx_fail_prob = 0.0f;
+
+        // Per-node asymmetry overrides. NaN means "sample from the
+        // simulation-level path_loss.node_*_offset_sigma_db". Set
+        // explicitly to deterministically pin a node's TX/RX bias —
+        // useful for unit tests and for reproducing field-measured
+        // hardware where you know the offsets a priori.
+        float tx_power_offset_db   = std::numeric_limits<float>::quiet_NaN();
+        float rx_offset_db         = std::numeric_limits<float>::quiet_NaN();
     };
     std::vector<NodeDef> nodes;
 
