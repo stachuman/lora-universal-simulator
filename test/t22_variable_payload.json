@@ -23,13 +23,13 @@
   },
   "nodes": [
     { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000, "max_payload_bytes": 220, "lbt_enabled": false },
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000, "quiet_threshold_ms": 0, "max_payload_bytes": 220, "lbt_enabled": false },
       "lat": 41.3900, "lon": 2.1600 },
     { "name": "relay", "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000, "max_payload_bytes": 220, "lbt_enabled": false },
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000, "quiet_threshold_ms": 0, "max_payload_bytes": 220, "lbt_enabled": false },
       "lat": 41.3905, "lon": 2.1600 },
     { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000, "max_payload_bytes": 220, "lbt_enabled": false },
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9], "beacon_period_ms": 1000, "quiet_threshold_ms": 0, "max_payload_bytes": 220, "lbt_enabled": false },
       "lat": 41.3910, "lon": 2.1600 }
   ],
   "topology": {

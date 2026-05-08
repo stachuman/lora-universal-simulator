@@ -27,7 +27,7 @@
         "allowed_data_sfs": [
           9
         ],
-        "beacon_period_ms": 1000,
+        "beacon_period_ms": 1000, "quiet_threshold_ms": 0,
         "lbt_enabled": false
       }
     },
@@ -39,7 +39,7 @@
         "allowed_data_sfs": [
           9
         ],
-        "beacon_period_ms": 1000,
+        "beacon_period_ms": 1000, "quiet_threshold_ms": 0,
         "lbt_enabled": false
       }
     },
@@ -51,7 +51,7 @@
         "allowed_data_sfs": [
           9
         ],
-        "beacon_period_ms": 1000,
+        "beacon_period_ms": 1000, "quiet_threshold_ms": 0,
         "lbt_enabled": false
       }
     },
@@ -63,7 +63,7 @@
         "allowed_data_sfs": [
           9
         ],
-        "beacon_period_ms": 1000,
+        "beacon_period_ms": 1000, "quiet_threshold_ms": 0,
         "lbt_enabled": false
       }
     },
@@ -75,7 +75,7 @@
         "allowed_data_sfs": [
           9
         ],
-        "beacon_period_ms": 1000,
+        "beacon_period_ms": 1000, "quiet_threshold_ms": 0,
         "lbt_enabled": false
       }
     }

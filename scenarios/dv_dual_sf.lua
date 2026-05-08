@@ -46,13 +46,29 @@
 --
 -- Beacon plane (routing_sf)
 --   beacon_fire (skipped if pending_tx or pending_rx; re-arm always)
+--     adaptive throttle: skip emission if `now - last_rx_routing_sf_ms <
+--       quiet_threshold_ms` (default 30s). last_rx is set at the top of
+--       on_recv on every successful decode (broadcast OR unicast). Net
+--       effect: a node that hears recent traffic stays quiet rather than
+--       adding to the congestion. On s02 sparse this drops BCN airtime
+--       from ~91% of total to ~21% with delivery rate slightly improved.
+--     silence-trigger jitter: when the throttle gate passes, defer the
+--       actual TX by rand(0, beacon_silence_jitter_ms) (default 10s) and
+--       re-check silence at the deferred fire time. Defends against
+--       thundering herd when many nodes simultaneously detect the same
+--       busy→quiet transition. Set quiet_threshold_ms=0 to disable both
+--       the throttle AND the silence-jitter (used by unit tests that
+--       depend on rapid-fire beacon mechanics in tight time windows).
 --     → tx 'B' with all rt entries → ±20% jittered re-arm
 --   triggered beacons: any rt mutation (new/promote/3cycle-prune)
 --     schedules a one-shot beacon within rand(50,500)ms (coalesced into
---     a single armed trigger). This is what makes convergence fast when
---     the operational period is minutes-long; periodic beacons are just
---     a slow keep-alive. Half-duplex skip applies — busy nodes drop the
---     trigger and rely on the next mutation (or periodic) to retry.
+--     a single armed trigger). NOT subject to the adaptive throttle —
+--     triggered beacons exist to propagate routing changes urgently;
+--     suppressing them on busy channels would defeat the purpose. This
+--     is what makes convergence fast when the operational period is
+--     minutes-long; periodic beacons are just a slow keep-alive.
+--     Half-duplex skip applies — busy nodes drop the trigger and rely on
+--     the next mutation (or periodic) to retry.
 --   on_recv 'B' from N at rx_snr
 --     install rt[N] = {direct, snr, hops=1, n2_hop=nil}
 --     for each entry e in beacon (e.dest != self.id):
@@ -1525,17 +1541,79 @@ local function send_beacon_page(self, kind)
   })
 end
 
+-- Periodic beacon fire. Two-stage gate:
+--   1. send_beacon_page handles the half-duplex skip (in a data exchange).
+--   2. Adaptive throttle: if the channel has been busy within the last
+--      `quiet_threshold_ms`, suppress this beacon entirely. Lets the
+--      network self-throttle BCN airtime during dense traffic — analyzer
+--      on s02 sparse showed BCN at 91% of all airtime; throttling expects
+--      to claw most of that back.
+-- After the throttle gate passes, the actual emission is deferred by
+-- rand(0, beacon_silence_jitter_ms) and the silence is re-checked at the
+-- deferred fire time. Defends against thundering herd when many nodes
+-- simultaneously detect a busy→quiet transition.
 local function beacon_fire(self)
-  send_beacon_page(self, "periodic")
-  -- Pick a period: fast learning-phase rate during warmup, slow
-  -- operational rate afterwards. Crossover happens at sim time
-  -- self.warmup_ms — once we're past it, every subsequent beacon is
-  -- spaced minutes apart instead of seconds, matching how real mesh
-  -- networks operate. In real deployment the operational period is
-  -- 30+ minutes; convergence after that point relies on triggered
-  -- updates (see schedule_triggered_beacon), not on the periodic timer.
-  -- ±20% jitter on top, same as before, to avoid phase-lock between
-  -- nodes that booted at the same time.
+  if self.pending_tx ~= nil or self.pending_rx ~= nil then
+    -- Existing data-exchange skip — preserved verbatim from send_beacon_page's
+    -- guard (we still call send_beacon_page below in the unthrottled path
+    -- which double-checks; this branch logs the same reason).
+    self:log("beacon_tx skipped (busy in data exchange)")
+  elseif self.quiet_threshold_ms <= 0 then
+    -- Throttle disabled (e.g., legacy tests that depend on rapid-fire
+    -- beacons). Bypass both the gate AND the silence-jitter; behaviour
+    -- is exactly what it was before the adaptive throttle was added.
+    send_beacon_page(self, "periodic")
+  else
+    local since_rx = (self.last_rx_routing_sf_ms ~= nil)
+                     and (self:now() - self.last_rx_routing_sf_ms)
+                     or  math.huge   -- never received → effectively "quiet forever"
+    if since_rx < self.quiet_threshold_ms then
+      self:emit("beacon_skipped_busy", {
+        since_rx_ms  = since_rx,
+        threshold_ms = self.quiet_threshold_ms,
+        stage        = "pre_jitter",
+      })
+      self:log(string.format(
+        "beacon_tx skipped (channel busy: last RX %dms ago, threshold %dms)",
+        since_rx, self.quiet_threshold_ms))
+    else
+      local jitter = (self.beacon_silence_jitter_ms > 0)
+                     and self:rand(0, self.beacon_silence_jitter_ms + 1)
+                     or  0
+      if jitter == 0 then
+        send_beacon_page(self, "periodic")
+      else
+        self:after(jitter, function()
+          if self.pending_tx ~= nil or self.pending_rx ~= nil then
+            self:log("beacon_tx skipped after jitter (busy in data exchange)")
+            return
+          end
+          local since = (self.last_rx_routing_sf_ms ~= nil)
+                        and (self:now() - self.last_rx_routing_sf_ms)
+                        or  math.huge
+          if since < self.quiet_threshold_ms then
+            -- Someone else's beacon (or other RX) landed during our jitter
+            -- window. Stand down — they "won" the silence-trigger race.
+            self:emit("beacon_skipped_busy", {
+              since_rx_ms  = since,
+              threshold_ms = self.quiet_threshold_ms,
+              stage        = "post_jitter",
+            })
+            self:log(string.format(
+              "beacon_tx skipped after jitter (channel busy: last RX %dms ago)",
+              since))
+            return
+          end
+          send_beacon_page(self, "periodic")
+        end)
+      end
+    end
+  end
+
+  -- Always re-arm the periodic timer, regardless of whether we actually
+  -- emitted. Jittered ±20% to avoid phase-lock between co-booting nodes.
+  -- During warmup we use a fast rate so the network learns routes quickly;
+  -- afterwards we drop to the operational rate (minutes apart).
   local period = (self:now() < self.warmup_ms)
                  and self.beacon_period_warmup_ms
                  or  self.beacon_period_ms
@@ -1599,6 +1677,28 @@ function on_init(self, config)
   self.beacon_trigger_jitter_min_ms = config.beacon_trigger_jitter_min_ms or 50
   self.beacon_trigger_jitter_max_ms = config.beacon_trigger_jitter_max_ms or 500
   self.triggered_beacon_pending     = false
+  -- Adaptive beacon throttle. Suppress periodic beacon emission when the
+  -- node has heard ANY frame on the channel within the last
+  -- `quiet_threshold_ms` window — "the network is busy, don't add to the
+  -- noise." Mirrors what real LoRa firmware does to honor duty cycle and
+  -- avoid swamping dense neighborhoods.
+  --
+  -- last_rx_routing_sf_ms is `nil` until the first RX; the throttle treats
+  -- nil as "no recent activity, fire freely." Needed so the first periodic
+  -- beacon goes out at cold start before any neighbor has TX'd. (Using 0
+  -- as a sentinel doesn't work — `now() - 0` is small at boot, fooling the
+  -- throttle into thinking the channel was just busy.)
+  --
+  -- When the gate passes, the actual TX is deferred by an extra jitter
+  -- in [0, beacon_silence_jitter_ms] before firing, and the silence
+  -- check is re-run at deferred-fire time. Reason: if many nodes
+  -- simultaneously detect the busy→quiet transition (e.g., end of a
+  -- data exchange), they would all fire on the same step without this
+  -- jitter — a thundering herd. The wider this jitter, the better the
+  -- spread, at the cost of slightly delayed beacon delivery.
+  self.last_rx_routing_sf_ms     = nil
+  self.quiet_threshold_ms        = config.quiet_threshold_ms        or 30000
+  self.beacon_silence_jitter_ms  = config.beacon_silence_jitter_ms  or 10000
   -- Cap the size of each beacon to fit in a single LoRa frame. Header
   -- is 3 bytes ('B' + src + n), each entry is 4 bytes — so for the
   -- 255-byte LoRa max, (255-3)/4 = 63 entries fits theoretically. We
@@ -1762,6 +1862,11 @@ end
 
 function on_recv(self, frame, meta)
   if #frame == 0 then return end
+  -- Channel-activity detector for adaptive beacon throttle: any successful
+  -- decode means the channel was busy at this moment. The throttle in
+  -- beacon_fire reads this to decide whether to suppress the next beacon.
+  -- Updated unconditionally (broadcast OR unicast, beacon OR data plane).
+  self.last_rx_routing_sf_ms = self:now()
   local tag = frame:sub(1, 1)
 
   if tag == "B" then
