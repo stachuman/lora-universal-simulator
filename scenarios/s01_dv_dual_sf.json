@@ -57,6 +57,8 @@
     { "type": "script_emit_contains", "node": "n14", "emit_type": "rt_full", "value": "\"peers\":14" },
     { "type": "script_emit_contains", "node": "n15", "emit_type": "rt_full", "value": "\"peers\":14" },
     { "type": "script_emit_contains", "node": "n05", "emit_type": "rts_tx",  "value": "\"origin\":4" },
-    { "type": "script_emit_contains", "node": "n13", "emit_type": "delivered", "value": "hello-world" }
+    { "type": "script_emit_contains", "node": "n13", "emit_type": "delivered", "value": "hello-world"  },
+    { "type": "script_emit_contains", "node": "n15", "emit_type": "delivered", "value": "hello-second" },
+    { "type": "script_emit_contains", "node": "n06", "emit_type": "blind_observed", "value": "" }
   ]
 }

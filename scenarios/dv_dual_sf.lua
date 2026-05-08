@@ -224,6 +224,44 @@
 --   • Beacon advertise alt too (would double beacon size; tradeoff).
 --
 -- ============================================================================
+-- F1 mitigation: receiver-blind-window awareness via passive CTS overhearing
+-- ============================================================================
+--
+-- The data plane has an asymmetry: when relay R post-CTS-tx retunes to
+-- data_sf to receive DATA, R is deaf on routing_sf for the duration of
+-- (cts_to_data_gap + DATA airtime). Concurrent senders RTSing R during
+-- this window land as drop_sf_mismatch — silent at runtime, no NACK, so
+-- the sender wastes rts_max_retries before rts_giveup.
+--
+-- Mitigation: every node maintains self.blind_until[node_id] →
+-- absolute_ms, populated by overhearing every CTS frame on routing_sf
+-- (whether addressed to us or not). meta.src on the on_recv callback
+-- gives us the CTS-sender's id; the CTS payload carries chosen_data_sf
+-- so we can compute the upper-bound blind window:
+--   blind_window = cts_to_data_gap_ms
+--                + airtime(chosen_data_sf, max DATA frame)
+--
+-- Three call sites consult the table before TX'ing an RTS:
+--   • issue_send       (proactive — first attempt)
+--   • tx_rts_retry     (proactive — every retry)
+--   • rts_timeout_fire (reactive — when timeout fires, re-check)
+--
+-- When the next-hop is blind, the decision is:
+--   • have alt route + alt not yet tried + alt not also blind
+--                                          → switch to alt (free budget)
+--   • else                                  → defer until blind window ends
+--
+-- Plus exponential backoff on rts_timeout_ms (×2 per attempt, capped at
+-- ×RTS_TIMEOUT_BACKOFF_CAP) so the existing retry budget covers a full
+-- receiver blind window even when the CTS itself is lost in flight and
+-- the overhearing mechanism never fires.
+--
+-- New emits: blind_observed (every CTS overheard whose chosen_data_sf
+-- extends our recorded blind window for that sender), tx_blind_defer
+-- (every defer fired), tx_blind_alt (every alt-switch from blind state,
+-- distinct from NACK-driven path_switch).
+--
+-- ============================================================================
 -- Findings & open improvements (notes for future work)
 -- ============================================================================
 --
@@ -236,6 +274,13 @@
 --     routing_sf. Result: rts_giveup at the second originator after
 --     rts_max_retries.
 --
+--     STATUS: addressed via passive CTS overhearing — see "F1 mitigation"
+--     section above. Residual case: CTS lost in flight (overhearing
+--     mechanism never fires). Partially covered by exponential
+--     rts_timeout backoff (I-section), giving the receiver's
+--     pending_rx_expiry time to fire and clear, after which a late
+--     retry succeeds.
+--
 -- F2. Retry budget conflates two failure modes
 --     rts_max_retries (default 3) is consumed by both (a) "CTS didn't come
 --     back" — i.e., RTS reached but no response — and (b) on_radio_busy
@@ -245,12 +290,18 @@
 --     them exhausts the budget quickly under load and gives rts_giveup
 --     semantics on what should be a "wait a bit" condition.
 --
+--     STATUS: I1 (separate retry budgets) still future work.
+--
 -- F3. rts_timeout is dimensioned for one-shot RTS+CTS, not for "wait for
 --     the network to free up"
 --     With short SFs (SF8 routing → ~44ms RTS, SF9 data → ~78ms CTS) the
 --     rts_timeout is ~122ms. Three retries cover ~366ms — much shorter
 --     than a 4-hop SF9 flight (~hundreds of ms × 4 hops). When the chosen
 --     next-hop is mid-relay, this budget always expires first.
+--
+--     STATUS: partially addressed by the exponential rts_timeout
+--     backoff added with the F1 mitigation. Cumulative wait now
+--     scales (122 → 244 → 488ms cap) instead of staying flat.
 --
 -- I1. Separate retry budgets for the two failure modes (addresses F2)
 --     • rts_max_retries (cts-timeout retries) stays bounded — a true CTS
@@ -280,6 +331,9 @@
 --     real protocol-design choices — see the routing-topic block below
 --     for the discussion.
 --
+--     STATUS: superseded by both NACK (already implemented) and the
+--     F1 mitigation's passive blind_until table.
+--
 -- I4. Drop the "if pending_rx ~= nil" rejection path in favor of a queued
 --     forward-as-receiver
 --     Currently rts_rejected_busy is fatal-on-air. With the script-side
@@ -289,6 +343,11 @@
 --     come back well after the RTS, requiring much longer rts_timeout on
 --     the originator side. Couples cleanly with I3's busy NACK: the
 --     receiver could send "busy, try again in N ms" instead of silent.
+--
+--     STATUS: superseded by NACK; the queue-extension path is no
+--     longer needed because NACK already gives senders a busy-feedback
+--     signal and the F1 blind_until lets them avoid the deaf-hop
+--     entirely.
 --
 -- ---------- wire format helpers (private to this file) ----------------------
 
@@ -573,6 +632,61 @@ local RETRY_ELIGIBLE = {
 }
 local TX_DEFER_MAX_RETRIES = 3
 
+-- Exponential backoff cap on rts_timeout. The timeout doubles per retry
+-- attempt and saturates at this multiple of the base. With s01's
+-- SF8 base (~122 ms) the timeouts walk 122, 244, 488, 488, ... covering
+-- ~3.3 s across rts_max_retries=8 — well past the ~250 ms blind window
+-- for SF9 data and the ~1.5 s worst case for SF12 data.
+local RTS_TIMEOUT_BACKOFF_CAP = 4
+
+local function rts_timeout_for_attempt(base_ms, attempt_idx)
+  local mult = 1
+  for _ = 1, attempt_idx do
+    mult = mult * 2
+    if mult >= RTS_TIMEOUT_BACKOFF_CAP then
+      mult = RTS_TIMEOUT_BACKOFF_CAP
+      break
+    end
+  end
+  return base_ms * mult
+end
+
+-- F1 mitigation: blind_until tracks when each 1-hop neighbour will
+-- finish its data_sf RX window (deaf on routing_sf). Populated by
+-- overhearing CTS frames; consulted before issuing or retrying RTS.
+-- Returns (is_blind: bool, remaining_ms: int). Opportunistically prunes
+-- expired entries so the table stays bounded.
+local function is_blind(self, node_id)
+  local until_ms = self.blind_until[node_id]
+  if until_ms == nil then return false, 0 end
+  local now = self:now()
+  if until_ms <= now then
+    self.blind_until[node_id] = nil
+    return false, 0
+  end
+  return true, until_ms - now
+end
+
+-- Decision helper used at issue_send / tx_rts_retry / rts_timeout_fire.
+-- Returns one of:
+--   "ok"                -- proceed with current next_hop
+--   "alt", new_next_hop -- caller should switch to alt route + re-tx
+--   "defer", delay_ms   -- caller should re-schedule after delay_ms
+-- previous_hop, when non-nil (forwarder context), is the upstream node we
+-- received the DATA from — never alt-switch back through it (that would
+-- create a 2-hop loop).
+local function classify_blind(self, dst_id, current_next_hop, alt_already_tried, previous_hop)
+  local blind, remaining = is_blind(self, current_next_hop)
+  if not blind then return "ok" end
+  local entry = self.rt[dst_id]
+  local alt = entry and entry.alt or nil
+  if alt and (not alt_already_tried) and (not is_blind(self, alt.next_hop))
+     and alt.next_hop ~= previous_hop then
+    return "alt", alt.next_hop
+  end
+  return "defer", remaining + 1
+end
+
 -- Stash + send. Saves the frame so on_radio_busy can re-issue it after
 -- info.busy_until_ms (the runtime drops the deferred PendingTx — see
 -- SimController defer sites). Stash is keyed by label so concurrent
@@ -751,6 +865,37 @@ local become_free
 -- already decremented retries_left and confirmed the giveup case.
 local function tx_rts_retry(self, reason)
   local px = self.pending_tx
+  -- pending_tx can be cleared between when a blind-defer was scheduled
+  -- and when its self:after callback fires (e.g., the ACK arrived during
+  -- the defer window). Bail out gracefully — no flight to retry.
+  if px == nil then return end
+
+  -- F1 mitigation: if next-hop is now known-blind, defer the retry or
+  -- switch to alt. Reset retries budget on alt-switch (fresh path).
+  local action_b, val_b = classify_blind(self, px.dst, px.next, px.alt_tried,
+                                          px.previous_hop)
+  if action_b == "defer" then
+    self:emit("tx_blind_defer", {
+      origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+      msg_id = px.msg_id, next_hop = px.next, delay_ms = val_b,
+      source = "tx_rts_retry", reason = reason,
+    })
+    self:log(string.format("tx_blind_defer (tx_rts_retry) msg=%d -> %s deferred %dms",
+      px.msg_id, name_of(self, px.next), val_b))
+    self:after(val_b, function() tx_rts_retry(self, reason) end)
+    return
+  elseif action_b == "alt" then
+    self:emit("tx_blind_alt", {
+      origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+      msg_id = px.msg_id, from_next = px.next, to_next = val_b,
+    })
+    self:log(string.format("tx_blind_alt (tx_rts_retry) msg=%d %s -> %s",
+      px.msg_id, name_of(self, px.next), name_of(self, val_b)))
+    px.next = val_b
+    px.alt_tried = true
+    px.retries_left = self.rts_max_retries
+  end
+
   local rts = pack_rts(px.origin, self.id, px.dst, px.next, px.msg_id,
                        self.allowed_sf_bitmap)
   self:emit("rts_retry", {
@@ -783,6 +928,44 @@ local function rts_timeout_fire(self, captured_msg_id)
     self:after(self.rts_busy_retry_ms, function()
       rts_timeout_fire(self, captured_msg_id)
     end)
+    return
+  end
+
+  -- F1 mitigation: receiver may have just become blind (we overheard a
+  -- CTS to a different sender after our RTS-tx and before the timeout).
+  -- Defer or alt-switch instead of wasting a retry attempt against a
+  -- deaf hop.
+  local action_b, val_b = classify_blind(self,
+                                          self.pending_tx.dst,
+                                          self.pending_tx.next,
+                                          self.pending_tx.alt_tried,
+                                          self.pending_tx.previous_hop)
+  if action_b == "defer" then
+    self:emit("tx_blind_defer", {
+      origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
+      origin_seq = self.pending_tx.origin_seq,
+      msg_id = captured_msg_id, next_hop = self.pending_tx.next,
+      delay_ms = val_b, source = "rts_timeout",
+    })
+    self:log(string.format("tx_blind_defer (rts_timeout) msg=%d -> %s deferred %dms",
+      captured_msg_id, name_of(self, self.pending_tx.next), val_b))
+    self:after(val_b, function()
+      rts_timeout_fire(self, captured_msg_id)
+    end)
+    return
+  elseif action_b == "alt" then
+    self:emit("tx_blind_alt", {
+      origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
+      origin_seq = self.pending_tx.origin_seq,
+      msg_id = captured_msg_id,
+      from_next = self.pending_tx.next, to_next = val_b,
+    })
+    self:log(string.format("tx_blind_alt (rts_timeout) msg=%d %s -> %s",
+      captured_msg_id, name_of(self, self.pending_tx.next), name_of(self, val_b)))
+    self.pending_tx.next = val_b
+    self.pending_tx.alt_tried = true
+    self.pending_tx.retries_left = self.rts_max_retries
+    tx_rts_retry(self, "blind_alt")
     return
   end
 
@@ -860,8 +1043,14 @@ start_rts_timeout = function(self)
     self:cancel(self.rts_timeout_handle)
     self.rts_timeout_handle = nil
   end
+  -- F1 mitigation safety net: exponential backoff per retry attempt.
+  -- attempt_idx = how many retries we've already burned on this msg_id.
+  -- Fresh budget (issue_send / NACK alt / blind alt) → attempt_idx = 0
+  -- → base timeout. Each subsequent retry doubles up to RTS_TIMEOUT_BACKOFF_CAP.
+  local attempt_idx = self.rts_max_retries - self.pending_tx.retries_left
+  local timeout_ms = rts_timeout_for_attempt(self.rts_timeout_ms, attempt_idx)
   local captured_msg_id = self.pending_tx.msg_id
-  self.rts_timeout_handle = self:after(self.rts_timeout_ms, function()
+  self.rts_timeout_handle = self:after(timeout_ms, function()
     self.rts_timeout_handle = nil
     rts_timeout_fire(self, captured_msg_id)
   end)
@@ -955,7 +1144,7 @@ end
 -- goes on the wire. user_text is what the user / visualizer sees in
 -- emit data. origin_seq is the 16-bit per-origin counter (set at
 -- on_command for new sends, preserved across forwards).
-issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq)
+issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop)
   local entry = self.rt[dst_id]
   if not entry then
     self:emit("send_no_route", {
@@ -966,6 +1155,36 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     return
   end
   local primary_next = entry.primary.next_hop
+  -- F1 mitigation: if the chosen next-hop is currently blind on
+  -- routing_sf (we overheard its CTS), either alt-switch or defer
+  -- the issue. Defer re-queues at the head so ordering is preserved.
+  -- previous_hop (forwarder context) prevents alt-switching back to
+  -- the upstream node that just gave us the DATA — that would loop.
+  local action_b, val_b = classify_blind(self, dst_id, primary_next, false, previous_hop)
+  if action_b == "defer" then
+    self:emit("tx_blind_defer", {
+      origin = origin, payload = user_text, origin_seq = origin_seq,
+      dst = dst_id, next_hop = primary_next, delay_ms = val_b,
+      source = "issue_send",
+    })
+    self:log(string.format("tx_blind_defer (issue_send) -> %s deferred %dms",
+      name_of(self, primary_next), val_b))
+    table.insert(self.tx_queue, 1, {
+      origin = origin, dst_id = dst_id, dst_name = dst_name,
+      payload = payload, user_text = user_text, origin_seq = origin_seq,
+      previous_hop = previous_hop,
+    })
+    self:after(val_b, function() become_free(self) end)
+    return
+  elseif action_b == "alt" then
+    self:emit("tx_blind_alt", {
+      origin = origin, payload = user_text, origin_seq = origin_seq,
+      dst = dst_id, from_next = primary_next, to_next = val_b,
+    })
+    self:log(string.format("tx_blind_alt (issue_send) dst=%s %s -> %s",
+      dst_name, name_of(self, primary_next), name_of(self, val_b)))
+    primary_next = val_b
+  end
   local mid = gen_msg_id(self)
   self.pending_tx = {
     origin       = origin,
@@ -976,8 +1195,9 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     user_text    = user_text,      -- for emit + log clarity
     origin_seq   = origin_seq,     -- end-to-end message id (with origin)
     retries_left = self.rts_max_retries,
-    alt_tried    = false,        -- on_recv "N" flips this when we move to alt
+    alt_tried    = (action_b == "alt"),  -- pre-set if F1 blind-alt fired
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
+    previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
   }
   local rts = pack_rts(origin, self.id, dst_id, primary_next, mid,
                        self.allowed_sf_bitmap)
@@ -1014,7 +1234,7 @@ become_free = function(self)
     dst = item.dst_id, depth = #self.tx_queue,
   })
   issue_send(self, item.origin, item.dst_id, item.dst_name,
-             item.payload, item.user_text, item.origin_seq)
+             item.payload, item.user_text, item.origin_seq, item.previous_hop)
 end
 
 -- ---------- script lifecycle ------------------------------------------------
@@ -1184,6 +1404,7 @@ function on_init(self, config)
   self.pending_rx      = nil
   self.rt_full_emitted = false
   self.tx_stash         = {}    -- label → {bytes, opts, retries_left} for on_radio_busy
+  self.blind_until      = {}    -- {node_id → absolute_ms} for F1 mitigation
   self.rts_timeout_handle      = nil  -- so on_recv "C" can cancel
   self.ack_timeout_handle      = nil  -- so on_recv "K" can cancel
   self.pending_rx_expiry_handle = nil  -- so on_recv "D" can cancel
@@ -1487,6 +1708,30 @@ function on_recv(self, frame, meta)
   if tag == "C" then
     local c = parse_cts(frame)
     if not c then return end
+
+    -- F1 mitigation: every CTS — addressed to us or not — tells us its
+    -- sender will be deaf on routing_sf for one DATA-RX window
+    -- (cts_to_data_gap + airtime of the chosen data_sf, max payload).
+    -- Stash that absolute end-time so future RTS attempts toward this
+    -- sender either alt-switch or defer instead of hitting drop_sf_mismatch.
+    if meta.src ~= nil then
+      local now = self:now()
+      local blind_window = self.cts_to_data_gap_ms +
+        airtime_ms(c.chosen_data_sf, self.bw_hz, self.cr,
+                   self.preamble_sym,
+                   DATA_HDR_LEN + self.max_payload_bytes)
+      local end_ms = now + blind_window
+      local prev = self.blind_until[meta.src]
+      if prev == nil or end_ms > prev then
+        self.blind_until[meta.src] = end_ms
+        self:emit("blind_observed", {
+          node           = meta.src,
+          until_ms       = end_ms,
+          chosen_data_sf = c.chosen_data_sf,
+        })
+      end
+    end
+
     if self.pending_tx == nil then return end
     if c.msg_id ~= self.pending_tx.msg_id then return end
 
@@ -1662,6 +1907,7 @@ function on_recv(self, frame, meta)
       payload    = self.pending_tx.payload,        -- full bytes
       user_text  = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
+      previous_hop = self.pending_tx.previous_hop,
     })
     self:emit("tx_requeued", {
       origin = self.pending_tx.origin,
@@ -1767,6 +2013,7 @@ function on_recv(self, frame, meta)
     -- check (which would defer the forward-RTS via on_radio_busy retry —
     -- correct but wasteful; this is real-hardware behaviour anyway).
     local d_origin     = d.origin
+    local d_src        = d.src              -- predecessor (for forward loop guard)
     local d_dst        = d.dst
     local d_payload    = d.payload          -- full bytes for re-forwarding
     local d_user_text  = user_text
@@ -1808,6 +2055,7 @@ function on_recv(self, frame, meta)
           payload    = d_payload,             -- full bytes (preserves the seq header)
           user_text  = d_user_text,
           origin_seq = d_origin_seq,
+          previous_hop = d_src,               -- forward loop guard
         })
         self:emit("forward_queued", {
           origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
@@ -1816,7 +2064,7 @@ function on_recv(self, frame, meta)
         return
       end
       issue_send(self, d_origin, d_dst, dst_name,
-                 d_payload, d_user_text, d_origin_seq)
+                 d_payload, d_user_text, d_origin_seq, d_src)
     end)
     return
   end
