@@ -21,6 +21,13 @@ class PathLossModel(BaseModel):
     ref_loss_db: float
     noise_floor_db: float
     tx_power_dbm: float
+    # Per-node TX/RX gain offsets (Gaussian, drawn once per node).
+    # Models hardware variation between units. C++ accepts any double;
+    # we constrain to non-negative since these are stddevs.
+    node_tx_offset_sigma_db: Optional[float] = Field(default=None, ge=0.0)
+    node_rx_offset_sigma_db: Optional[float] = Field(default=None, ge=0.0)
+    # Coherence time for the link asymmetry process (ms).
+    asymmetry_coherence_ms: Optional[int] = Field(default=None, ge=0)
 
 
 class RadioHardware(BaseModel):
@@ -48,6 +55,10 @@ class RadioConfig(BaseModel):
     snr_coherence_ms: Optional[float] = Field(default=None, ge=0.0)
     # max_packet_bytes: PHY frame-size cap. C++ validator demands [1, 65535].
     max_packet_bytes: Optional[int] = Field(default=None, ge=1, le=65535)
+    # Duty-cycle limit per node (0–1) over a rolling window.
+    # C++ validator demands duty_cycle in (0, 1] and window_ms > 0.
+    duty_cycle: Optional[float] = Field(default=None, gt=0.0, le=1.0)
+    duty_cycle_window_ms: Optional[int] = Field(default=None, gt=0)
     hardware: Optional[RadioHardware] = None
 
 
