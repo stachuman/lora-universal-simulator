@@ -193,8 +193,7 @@ private:
     bool     _initialized = false;
     // True once the warmup_end NDJSON event has been emitted for this
     // simulation. Flipped at the top of step() the first time _now_ms
-    // crosses simulation.warmup_ms; reset to false in init() so re-runs
-    // (interactive REPL :reset, fresh webapp runs) replay the boundary.
+    // crosses simulation.warmup_ms.
     bool     _warmup_end_emitted = false;
     bool     _finalized   = false;
     bool     _interrupted = false;
