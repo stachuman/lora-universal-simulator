@@ -152,6 +152,15 @@ class EventIndex:
         if etype == "sim_end":
             self.sim_info["end_ms"] = time_ms
             return
+        if etype == "warmup_end":
+            # Authoritative warmup-boundary marker emitted by the C++
+            # runtime when _now_ms first crosses simulation.warmup_ms.
+            # Surface it on sim_info so visualize.html can place its
+            # overlay using the actual event time rather than the
+            # configured value (the two should be equal but the event
+            # is the source of truth).
+            self.sim_info["warmup_end_ms"] = time_ms
+            return
         if etype == "node_ready":
             name = ev["node"]
             meta = {"name": name, "role": ev.get("role", "script")}
@@ -225,7 +234,7 @@ class EventIndex:
     # range — which can contain these metadata lines wedged between
     # indexed events — so it must drop them on the way out.
     _METADATA_TYPES = frozenset((
-        "sim_start", "sim_end", "node_ready",
+        "sim_start", "sim_end", "warmup_end", "node_ready",
         "sim_summary", "assertions", "node_stats",
     ))
 

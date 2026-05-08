@@ -848,7 +848,13 @@ function drawTimeAxis(contentW) {
 
 function drawWarmupOverlay(h) {
     if (!S.meta || !S.meta.sim) return;
-    const warmup = S.meta.sim.warmup_ms || 0;
+    // Prefer the warmup_end event's actual time_ms (authoritative,
+    // emitted by the C++ runtime when the clock crosses warmup_ms).
+    // Fall back to the configured warmup_ms for older runs / during a
+    // sim that's still pre-boundary.
+    const warmup = (typeof S.meta.sim.warmup_end_ms === 'number')
+                 ? S.meta.sim.warmup_end_ms
+                 : (S.meta.sim.warmup_ms || 0);
     if (warmup <= 0) return;
     if (warmup <= S.viewFrom) return;  // warmup region not visible
 
