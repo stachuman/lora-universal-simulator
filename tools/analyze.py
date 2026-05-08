@@ -221,9 +221,23 @@ def section_path_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> d
     edges = build_link_graph(events_path, names_by_id, since_ms)
 
     # For each delivered message, recover the actual hop chain by walking
-    # rts_tx events for that (origin, origin_seq).
+    # data_tx events for that (origin, origin_seq), then deduping by
+    # (src_node, next_hop) to collapse repeats onto a single hop.
+    #
+    # Why data_tx (not rts_tx): data_tx fires only after the RTS-CTS
+    # handshake succeeds, so it represents a hop that actually carried
+    # the payload. Failed RTS attempts that ended in path-switch (e.g.
+    # destination NACKs the RTS, forwarder switches to a different
+    # next-hop) emit rts_tx but no data_tx — they are not hops, just
+    # exploration cost. Counting them inflates the metric vs. the
+    # observed-link optimal that build_link_graph computes.
+    #
+    # Why dedupe by (src, next): both rts_tx (retries) and data_tx
+    # (DATA retransmits when ACK is lost) fire multiple times per hop.
+    # Deduping by the (src, next) pair collapses every repeat — RTS
+    # retry, DATA retransmit — onto a single hop count.
     delivered = []
-    rts_tx_chain = defaultdict(list)  # (origin, seq) -> list of (t, src_id, next_id)
+    data_tx_chain = defaultdict(list)  # (origin, seq) -> list of (t, src_id, next_id)
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
             continue
@@ -231,11 +245,15 @@ def section_path_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> d
         d = e.get("data", {})
         if et == "delivered":
             delivered.append(e)
-        elif et == "rts_tx":
+        elif et == "data_tx":
             origin = d.get("origin")
             seq = d.get("origin_seq")
             if origin is not None and seq is not None:
-                rts_tx_chain[(origin, seq)].append((e["time_ms"], e["node"], d.get("next")))
+                # data_tx uses "to" for next-hop in dv_dual_sf.lua;
+                # accept "next" as a fallback for any future scripts
+                # that follow the rts_tx field naming.
+                nxt = d.get("to", d.get("next"))
+                data_tx_chain[(origin, seq)].append((e["time_ms"], e["node"], nxt))
 
     deltas = []
     detail = []
@@ -243,14 +261,24 @@ def section_path_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> d
         d = ev["data"]
         origin = d.get("origin")
         seq = d.get("origin_seq")
-        chain = rts_tx_chain.get((origin, seq), [])
+        chain = data_tx_chain.get((origin, seq), [])
         if not chain:
             continue
         chain.sort()
-        actual_hops = len(chain)
+        # Dedupe by (src, next) preserving order — collapses retransmits
+        # onto the single underlying hop.
+        seen = set()
+        unique_chain = []
+        for t, src_id, nxt in chain:
+            key = (src_id, nxt)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_chain.append((t, src_id, nxt))
+        actual_hops = len(unique_chain)
         # First hop's src is the originator; final hop's `next` is the dst.
         src = origin
-        dst = chain[-1][2] if chain else None
+        dst = unique_chain[-1][2] if unique_chain else None
         if src is None or dst is None:
             continue
         opt = shortest_hops(edges, src, dst)
