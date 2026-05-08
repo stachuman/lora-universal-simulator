@@ -6,15 +6,20 @@
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
 -- | `'B'` | Beacon | `B`, src(1), n(1), entries × n × {dest(1), next(1), score_i8(1), hops(1)}       |
--- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), data_sf(1) |
+-- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), sf_bitmap(1), payload_len(1) |
 -- | `'C'` | CTS    | `C`, src(1), msg_id_lo(1), msg_id_hi(1)                                         |
 -- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), payload(n) |
 -- | `'K'` | ACK    | `K`, msg_id_lo(1), msg_id_hi(1)                                                 |
 -- | `'N'` | NACK   | `N`, msg_id_lo(1), msg_id_hi(1), busy_for_ms_lo(1), busy_for_ms_hi(1)           |
 --
--- RTS's last byte is a per-flight bitmap of allowed data SFs:
+-- RTS's sf_bitmap byte (offset 7) is a per-flight bitmap of allowed data SFs:
 --   bit i = SF (5+i) is acceptable for the DATA leg; the receiver picks one.
 --   bit 0 = SF5 (fastest), bit 7 = SF12 (most robust). e.g. 0b01000010 = SF6+SF12.
+-- RTS's payload_len byte (offset 8) is the byte count of the upcoming DATA
+-- payload (origin-seq header + user_text). Lets the receiver size
+-- pending_rx_expiry to actual airtime instead of max_payload_bytes
+-- worst-case — important when payloads vary 10–200 bytes, since the
+-- worst-case budget would freeze pending_rx ~2× longer than needed.
 -- CTS's last byte is the receiver's chosen data SF (single value, 5..12),
 -- selected from the RTS bitmap based on the link SNR + safety margin.
 -- This makes the data-plane SF per-hop adaptive without any wire-format
@@ -455,23 +460,31 @@ local function parse_beacon(frame)
   return { src = src, entries = entries }
 end
 
-local function pack_rts(origin, src, dst, next_hop, msg_id, sf_bitmap)
+-- payload_len is the exact byte count the upcoming DATA frame will carry
+-- in its variable-length suffix (origin-seq header + user_text). The
+-- receiver uses it to size pending_rx_expiry to actual airtime instead
+-- of the worst-case (max_payload_bytes), which mattered when payloads
+-- range 10–200 bytes — real protocols can't afford to budget every
+-- flight at the absolute upper bound.
+local function pack_rts(origin, src, dst, next_hop, msg_id, sf_bitmap, payload_len)
   return "R" .. string.char(origin) .. string.char(src) .. string.char(dst)
               .. string.char(next_hop)
               .. string.char(msg_id % 256)
               .. string.char(math.floor(msg_id / 256) % 256)
               .. string.char(sf_bitmap)
+              .. string.char(payload_len % 256)
 end
 
 local function parse_rts(frame)
-  if #frame < 8 or frame:sub(1,1) ~= "R" then return nil end
+  if #frame < 9 or frame:sub(1,1) ~= "R" then return nil end
   return {
-    origin    = frame:byte(2),
-    src       = frame:byte(3),
-    dst       = frame:byte(4),
-    next      = frame:byte(5),
-    msg_id    = frame:byte(6) + frame:byte(7) * 256,
-    sf_bitmap = frame:byte(8),    -- bit (sf-5) = SF allowed for DATA
+    origin      = frame:byte(2),
+    src         = frame:byte(3),
+    dst         = frame:byte(4),
+    next        = frame:byte(5),
+    msg_id      = frame:byte(6) + frame:byte(7) * 256,
+    sf_bitmap   = frame:byte(8),    -- bit (sf-5) = SF allowed for DATA
+    payload_len = frame:byte(9),    -- 0..255, includes the 2-byte origin-seq hdr
   }
 end
 
@@ -574,7 +587,7 @@ end
 -- Frame-header lengths (excluding payload). Computed from the wire-format
 -- table at top of file so airtime predictions stay precise as we extend the
 -- protocol — bump these if the frame layout changes.
-local RTS_LEN = 8       -- 'R' + origin + src + dst + next + msg_id_lo + msg_id_hi + data_sf
+local RTS_LEN = 9       -- 'R' + origin + src + dst + next + msg_id_lo + msg_id_hi + data_sf + payload_len
 local CTS_LEN = 4       -- 'C' + src + msg_id_lo + msg_id_hi
 local DATA_HDR_LEN = 7  -- 'D' + origin + src + dst + next + msg_id_lo + msg_id_hi (payload follows)
 local ACK_LEN = 3       -- 'K' + msg_id_lo + msg_id_hi
@@ -1108,8 +1121,10 @@ local function tx_rts_retry(self, reason)
     px.retries_left = self.rts_max_retries
   end
 
+  -- payload_len lets the receiver size its pending_rx_expiry to the
+  -- actual DATA airtime instead of max_payload_bytes worst-case.
   local rts = pack_rts(px.origin, self.id, px.dst, px.next, px.msg_id,
-                       self.allowed_sf_bitmap)
+                       self.allowed_sf_bitmap, #px.payload)
   self:emit("rts_retry", {
     origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
     dst = px.dst, next = px.next,
@@ -1358,10 +1373,16 @@ start_pending_rx_expiry = function(self)
   local chosen = self.pending_rx.chosen_data_sf
   local cts_air = airtime_ms(self.routing_sf, self.bw_hz, self.cr,
                               self.preamble_sym, CTS_LEN)
-  local max_data_air = airtime_ms(chosen, self.bw_hz, self.cr,
-                                    self.preamble_sym,
-                                    DATA_HDR_LEN + self.max_payload_bytes)
-  local expiry_ms = cts_air + self.cts_to_data_gap_ms + max_data_air
+  -- Use the actual payload_len carried by RTS (set in pending_rx by the
+  -- RTS handler). Falls back to max_payload_bytes for older callers /
+  -- malformed frames. Sizing the expiry to actual airtime instead of
+  -- worst-case avoids freezing pending_rx for ~2× longer than needed
+  -- when payloads are small (10–50 bytes) — the worst-case budget
+  -- otherwise blocks other flights from being received.
+  local pl = self.pending_rx.payload_len or self.max_payload_bytes
+  local data_air = airtime_ms(chosen, self.bw_hz, self.cr,
+                              self.preamble_sym, DATA_HDR_LEN + pl)
+  local expiry_ms = cts_air + self.cts_to_data_gap_ms + data_air
   self.pending_rx.expiry_ms = expiry_ms   -- stash for NACK busy_for_ms calc
   local captured_msg_id = self.pending_rx.msg_id
   self.pending_rx_expiry_handle = self:after(expiry_ms, function()
@@ -1436,8 +1457,9 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
   }
+  -- payload_len includes the 2-byte origin-seq header — see pack_rts.
   local rts = pack_rts(origin, self.id, dst_id, primary_next, mid,
-                       self.allowed_sf_bitmap)
+                       self.allowed_sf_bitmap, #payload)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   self:emit("rts_tx", {
     origin = origin, payload = user_text, origin_seq = origin_seq,
@@ -1627,8 +1649,12 @@ function on_init(self, config)
   -- TX-policy controls (see "TX policy classes" section above).
   --   lbt_enabled            — pre-check channel_busy_until before TX of
   --                            initiating-directed (RTS / NACK) and flood
-  --                            (beacons). Disable for benchmarking the raw
-  --                            collision baseline.
+  --                            (beacons). DEFAULT OFF: at saturated load
+  --                            (s03 @ 62.5 kHz, where beacon airtime alone
+  --                            exceeds channel capacity) "wait for clear"
+  --                            never returns and just locks pending_tx.
+  --                            Enable for moderately-loaded networks where
+  --                            collision avoidance is the bottleneck.
   --   retry_jitter_ms        — bound for random backoff added to (a) RTS
   --                            retries on cts_timeout / ack_timeout and (b)
   --                            LBT-deferred sends. Default = one RTS-airtime
@@ -1642,7 +1668,7 @@ function on_init(self, config)
   --                            worth; if we'd wait longer than the page we
   --                            were going to send, just skip.
   self.lbt_enabled        = config.lbt_enabled
-  if self.lbt_enabled == nil then self.lbt_enabled = true end
+  if self.lbt_enabled == nil then self.lbt_enabled = false end
   self.retry_jitter_ms    = config.retry_jitter_ms    or
     airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN)
   self.flood_lbt_max_defer_ms = config.flood_lbt_max_defer_ms or
@@ -1955,12 +1981,13 @@ function on_recv(self, frame, meta)
       name_of(self, r.src), name_of(self, r.origin), name_of(self, r.dst),
       r.msg_id, r.sf_bitmap, meta.snr, chosen_sf))
     self.pending_rx = {
-      from      = r.src,
-      origin    = r.origin,
-      dst       = r.dst,
-      msg_id    = r.msg_id,
-      set_at_ms = self:now(),       -- for NACK busy_for_ms calc
-      chosen_data_sf = chosen_sf,   -- DATA leg's SF; receiver retunes after CTS-tx
+      from        = r.src,
+      origin      = r.origin,
+      dst         = r.dst,
+      msg_id      = r.msg_id,
+      set_at_ms   = self:now(),       -- for NACK busy_for_ms calc
+      chosen_data_sf = chosen_sf,     -- DATA leg's SF; receiver retunes after CTS-tx
+      payload_len = r.payload_len,    -- size pending_rx_expiry to actual DATA airtime
     }
     -- Arm the expiry timer so a never-arriving DATA can't freeze us.
     start_pending_rx_expiry(self)
