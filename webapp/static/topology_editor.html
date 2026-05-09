@@ -184,6 +184,7 @@
   <h2 id="page-title">Edit Topology</h2>
   <span class="spacer"></span>
   <button class="btn" id="btn-preview-snr" onclick="previewSNR()">Preview SNR</button>
+  <button class="btn" id="btn-compute-srtm" onclick="computeSrtm()" title="Compute terrain-aware per-link SNR via SRTM elevation + ITM (Longley-Rice). Sync; minutes for &gt;50 nodes.">Compute via SRTM+ITM</button>
   <button class="btn btn-primary" id="btn-save" onclick="saveTopo()">Save</button>
   <button class="btn btn-danger" id="btn-cancel" onclick="window.location.href='/static/topologies.html'">Cancel</button>
 </div>
@@ -596,6 +597,65 @@
       setStatus('SNR preview failed: ' + e.message, true);
     } finally {
       document.getElementById('btn-preview-snr').disabled = false;
+    }
+  };
+
+  // ── Convert SRTM links list -> NxN SNR matrix for redrawMap ───
+  // Pairs missing from links[] are below SNR cutoff or hit SRTM
+  // misses; -Infinity dims them in the heatmap.
+  function linksToMatrix(nodeList, links) {
+    const n = nodeList.length;
+    const idx = {};
+    nodeList.forEach((nd, i) => { idx[nd.name] = i; });
+    const m = Array.from({length: n}, () =>
+                Array.from({length: n}, () => -Infinity));
+    for (let i = 0; i < n; ++i) m[i][i] = Infinity;
+    for (const l of links) {
+      const i = idx[l.from], j = idx[l.to];
+      if (i === undefined || j === undefined) continue;
+      m[i][j] = l.snr;
+      m[j][i] = l.snr;
+    }
+    return m;
+  }
+
+  // ── Compute via SRTM + ITM (terrain-aware) ────────────────
+  window.computeSrtm = async function() {
+    if (nodes.length < 2) {
+      setStatus('Need at least 2 nodes for SRTM compute.', true);
+      return;
+    }
+    const path_loss = collectPathLoss();
+    const itm = {
+      climate: 6,
+      polarization: 1,
+      profile_resolution_m: 90.0,
+      min_snr_db: -20.0,
+      max_links_per_node: 8,
+    };
+    const btn = document.getElementById('btn-compute-srtm');
+    const previewBtn = document.getElementById('btn-preview-snr');
+    const originalLabel = btn.textContent;
+    try {
+      btn.disabled = true;
+      previewBtn.disabled = true;
+      btn.textContent = 'Computing… (~minutes for >50 nodes)';
+      setStatus('Computing terrain-aware SNR via SRTM + ITM…');
+      const result = await postJSON('/api/topo-creator/generate-srtm', {
+        nodes, path_loss, itm,
+      });
+      snrMatrix = linksToMatrix(nodes, result.links);
+      redrawMap();
+      setStatus(
+        `SRTM: kept ${result.n_links_kept}/${result.n_pairs_evaluated} ` +
+        `pairs (${result.n_srtm_misses} SRTM misses)`
+      );
+    } catch (e) {
+      setStatus('SRTM compute failed: ' + e.message, true);
+    } finally {
+      btn.textContent = originalLabel;
+      btn.disabled = false;
+      previewBtn.disabled = false;
     }
   };
 
