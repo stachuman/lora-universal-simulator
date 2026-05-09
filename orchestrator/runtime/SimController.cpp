@@ -496,6 +496,16 @@ void SimController::processLifecycleAtStep() {
     // Deaths: for each currently-alive node whose dies_at_ms has been
     // reached, flip _node_alive, emit node_died, and drop any in-flight
     // TX from that sender so receivers don't see ghost deliveries.
+    //
+    // Note: LBT busy notifications already broadcast to observers at
+    // TX-start time (registerTransmissionsForStep -> notifyChannelBusy)
+    // are not retracted here. Observers will continue treating the
+    // channel as busy until the original TX's would-be end_ms. This is
+    // physically defensible (the receiver locked the preamble before
+    // the transmitter was unplugged; from its POV the channel was busy
+    // for some duration before it noticed the silence) and avoids
+    // having to walk the LBT model from here. If a future test exposes
+    // a behavioral problem, retract via _lbt->clearBusyFor(i) here.
     for (int i = 0; i < n; ++i) {
         const uint64_t dies_at =
             static_cast<uint64_t>(_cfg.nodes[i].dies_at_ms);
@@ -507,6 +517,13 @@ void SimController::processLifecycleAtStep() {
                 std::remove_if(_in_flight.begin(), _in_flight.end(),
                                [i](const InFlight& f) { return f.sender_id == i; }),
                 _in_flight.end());
+            // Clear the per-node "TX in flight until" slot so any later
+            // reader (Lua self:tx_in_flight() via api_tx_in_flight, or
+            // future code paths) sees 0 (idle) rather than a stale
+            // end_ms pointing to a TX we just evaporated.
+            if (i < static_cast<int>(_node_tx_in_flight_until.size())) {
+                _node_tx_in_flight_until[i] = 0;
+            }
         }
     }
 }
@@ -574,7 +591,22 @@ void SimController::processCommandsAtStep() {
             continue;
         }
         const int target = it->second;
-        if (!_node_alive[target]) continue;
+        if (!_node_alive[target]) {
+            // If the target has DIED (dies_at_ms passed), drop the
+            // command rather than retrying every step until duration_ms.
+            // If it hasn't been BORN yet (start_at_ms ahead of now), keep
+            // it queued — the same command should fire when it boots.
+            const uint64_t dies_at =
+                static_cast<uint64_t>(_cfg.nodes[target].dies_at_ms);
+            if (dies_at > 0 && now >= dies_at) {
+                EventLog::cmdReply(static_cast<unsigned long>(now),
+                                   _nodes[target]->name().c_str(),
+                                   cmd.command.c_str(),
+                                   "ERROR: target node has died");
+                _command_fired[k] = true;
+            }
+            continue;
+        }
         std::string reply = _nodes[target]->onCommand(cmd.command);
         EventLog::cmdReply(static_cast<unsigned long>(now),
                            _nodes[target]->name().c_str(),
