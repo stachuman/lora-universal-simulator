@@ -42,7 +42,11 @@ class RadioConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sf: int = Field(ge=5, le=12)
-    bw: int  # kHz
+    # bw: kHz, accepts fractional values (LoRa supports narrow-band
+    # rates 7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5 alongside the
+    # standard 125 / 250 / 500). C++ historically used int; per-tx
+    # event field bw_hz keeps full precision.
+    bw: float = Field(gt=0.0)
     # cr: lus accepts any positive integer (universal sanity check only;
     # see core/topology/JsonConfig.cpp validator). Different sources use
     # different encodings (Semtech 1..4 for CR4/5..CR4/8, or 5..8).
@@ -85,7 +89,7 @@ class NodeRadioOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sf: Optional[int] = Field(default=None, ge=5, le=12)
-    bw: Optional[int] = None  # kHz
+    bw: Optional[float] = Field(default=None, gt=0.0)  # kHz, fractional OK
     cr: Optional[int] = Field(default=None, ge=1)
 
 
@@ -98,7 +102,7 @@ class NodeConfig(BaseModel):
     lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
     lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
     sf: Optional[int] = Field(default=None, ge=5, le=12)
-    bw: Optional[int] = None  # kHz
+    bw: Optional[float] = Field(default=None, gt=0.0)  # kHz, fractional OK
     cr: Optional[int] = Field(default=None, ge=1)  # see RadioConfig.cr note
     sf_rx_set: Optional[List[int]] = None
     # Per-node radio override (alternative to flat sf/bw/cr).
