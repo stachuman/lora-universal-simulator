@@ -5,12 +5,22 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, src(1), n(1), entries × n × {dest(1), next(1), score_i8(1), hops(1)}       |
--- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), sf_bitmap(1), payload_len(1) |
--- | `'C'` | CTS    | `C`, src(1), msg_id_lo(1), msg_id_hi(1)                                         |
--- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), msg_id_lo(1), msg_id_hi(1), payload(n) |
--- | `'K'` | ACK    | `K`, msg_id_lo(1), msg_id_hi(1), snr_4b|reserved_4b(1)                          |
--- | `'N'` | NACK   | `N`, msg_id_lo(1), msg_id_hi(1), busy_for_ms_lo(1), busy_for_ms_hi(1)           |
+-- | `'B'` | Beacon | `B`, [network_id(4)|reserved(4)](1), src(1), n(1), entries × n × {dest(1), next(1), score_i8(1), hops(1)}  →  4+4n B |
+-- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [network_id(4)|msg_id(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
+-- | `'C'` | CTS    | `C`, [msg_id(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
+-- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|msg_id(4)](1), payload(n)  →  6+n B |
+-- | `'K'` | ACK    | `K`, [msg_id(4)|snr_bucket(4)](1)  →  2 B                                       |
+-- | `'N'` | NACK   | `N`, [reserved(4)|msg_id(4)](1), busy_for_ms_lo(1), busy_for_ms_hi(1)  →  4 B  |
+--
+-- All control frames carry a 4-bit msg_id (per-(originator) flight
+-- counter, wraps at 16; dedup tolerated by last_acked_from's 10s TTL).
+-- network_id (4 bits, externally managed) appears in BCN and RTS — the
+-- two frames that gate routing decisions. Receivers reject foreign-
+-- network BCN/RTS before doing any work, preventing duplicate-CTS,
+-- routing-table-pollution, and wasted-flight failure modes during
+-- enhanced RF propagation events. CTS/DATA/ACK/NACK don't carry
+-- network_id because they're matched against pending_tx/pending_rx
+-- state set by an already-validated RTS (the check is implicit).
 --
 -- RTS's sf_bitmap byte (offset 7) is a per-flight bitmap of allowed data SFs:
 --   bit i = SF (5+i) is acceptable for the DATA leg; the receiver picks one.
@@ -446,6 +456,15 @@
 -- bumps the offset every fire so successive beacons cycle through the
 -- whole table. Receivers don't need to track pages — every entry they
 -- hear gets merged via rt_merge as before.
+-- BCN — 4-byte header + n × 4-byte entries:
+--   byte 0 : tag 'B'
+--   byte 1 : network_id (4 hi nibble) | reserved (4 lo nibble)
+--   byte 2 : src (8)
+--   byte 3 : n (8)
+--   entries (4 B each): dest(8) + next(8) + score_i8(8) + hops(8)
+-- network_id (4 bits): same field as RTS. Receivers reject foreign-
+-- network beacons before rt_merge so foreign nodes don't pollute our
+-- routing tables.
 local function pack_beacon(node, max_entries, offset)
   -- Deterministic ordering: sort by dest_id so successive beacons walk
   -- a stable sequence (otherwise pairs() iteration order is undefined
@@ -456,9 +475,10 @@ local function pack_beacon(node, max_entries, offset)
     table.insert(all_dests, dest_id)
   end
   table.sort(all_dests)
+  local nid_byte = (node.network_id & 0xf) << 4
   local total = #all_dests
   if total == 0 then
-    return "B" .. string.char(node.id) .. string.char(0), 0
+    return "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(0), 0
   end
 
   -- Take a contiguous page starting at offset, wrapping around.
@@ -469,7 +489,7 @@ local function pack_beacon(node, max_entries, offset)
     table.insert(page, all_dests[idx])
   end
 
-  local out = "B" .. string.char(node.id) .. string.char(n)
+  local out = "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(n)
   for _, dest_id in ipairs(page) do
     local p = node.rt[dest_id].candidates[1]
     local s = math.floor(p.score + 0.5)
@@ -486,12 +506,13 @@ local function pack_beacon(node, max_entries, offset)
 end
 
 local function parse_beacon(frame)
-  if #frame < 3 or frame:sub(1,1) ~= "B" then return nil end
-  local src = frame:byte(2)
-  local n   = frame:byte(3)
-  if #frame < 3 + 4*n then return nil end
+  if #frame < 4 or frame:sub(1,1) ~= "B" then return nil end
+  local nid = (frame:byte(2) >> 4) & 0xf
+  local src = frame:byte(3)
+  local n   = frame:byte(4)
+  if #frame < 4 + 4*n then return nil end
   local entries = {}
-  local pos = 4
+  local pos = 5
   for _ = 1, n do
     local dest = frame:byte(pos)
     local nxt  = frame:byte(pos + 1)
@@ -501,7 +522,7 @@ local function parse_beacon(frame)
     table.insert(entries, { dest = dest, next = nxt, score = score, hops = hops })
     pos = pos + 4
   end
-  return { src = src, entries = entries }
+  return { network_id = nid, src = src, entries = entries }
 end
 
 -- Quantize an SNR (dB) to a 4-bit bucket [0..15] for byte-tight ACK
@@ -541,66 +562,74 @@ end
 -- of the worst-case (max_payload_bytes), which mattered when payloads
 -- range 10–200 bytes — real protocols can't afford to budget every
 -- flight at the absolute upper bound.
-local function pack_rts(origin, src, dst, next_hop, msg_id, sf_bitmap, payload_len)
+-- RTS — 8 bytes, bit-packed:
+--   byte 0 : tag 'R'
+--   byte 1 : origin (8)
+--   byte 2 : src    (8)
+--   byte 3 : dst    (8)
+--   byte 4 : next   (8)
+--   byte 5 : network_id (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 6 : sf_bitmap (8)
+--   byte 7 : payload_len (8)
+local function pack_rts(network_id, origin, src, dst, next_hop, msg_id, sf_bitmap, payload_len)
+  local b5 = ((network_id & 0xf) << 4) | (msg_id & 0xf)
   return "R" .. string.char(origin) .. string.char(src) .. string.char(dst)
               .. string.char(next_hop)
-              .. string.char(msg_id % 256)
-              .. string.char(math.floor(msg_id / 256) % 256)
+              .. string.char(b5)
               .. string.char(sf_bitmap)
               .. string.char(payload_len % 256)
 end
 
 local function parse_rts(frame)
-  if #frame < 9 or frame:sub(1,1) ~= "R" then return nil end
+  if #frame < 8 or frame:sub(1,1) ~= "R" then return nil end
+  local b5 = frame:byte(6)
   return {
+    network_id  = (b5 >> 4) & 0xf,
     origin      = frame:byte(2),
     src         = frame:byte(3),
     dst         = frame:byte(4),
     next        = frame:byte(5),
-    msg_id      = frame:byte(6) + frame:byte(7) * 256,
-    sf_bitmap   = frame:byte(8),    -- bit (sf-5) = SF allowed for DATA
-    payload_len = frame:byte(9),    -- 0..255, includes the 2-byte origin-seq hdr
+    msg_id      = b5 & 0xf,
+    sf_bitmap   = frame:byte(7),
+    payload_len = frame:byte(8),
   }
 end
 
--- CTS dropped the redundant src field (the rx event already gives sender
--- via radio metadata, and the originator already knows pending_tx.next).
--- In its place: chosen_data_sf, picked by the receiver from the RTS's
--- allowed-SF bitmap based on the link SNR + sf_margin_db.
+-- CTS — 2 bytes, bit-packed:
+--   byte 0 : tag 'C'
+--   byte 1 : msg_id (4 hi nibble) | (chosen_data_sf - 5) (3) | reserved (1)
 local function pack_cts(msg_id, chosen_data_sf)
-  return "C" .. string.char(msg_id % 256)
-              .. string.char(math.floor(msg_id / 256) % 256)
-              .. string.char(chosen_data_sf)
+  local sf_off = (chosen_data_sf - 5) & 0x7
+  local b1 = ((msg_id & 0xf) << 4) | (sf_off << 1)
+  return "C" .. string.char(b1)
 end
 
 local function parse_cts(frame)
-  if #frame < 4 or frame:sub(1,1) ~= "C" then return nil end
+  if #frame < 2 or frame:sub(1,1) ~= "C" then return nil end
+  local b1 = frame:byte(2)
   return {
-    msg_id         = frame:byte(2) + frame:byte(3) * 256,
-    chosen_data_sf = frame:byte(4),
+    msg_id         = (b1 >> 4) & 0xf,
+    chosen_data_sf = ((b1 >> 1) & 0x7) + 5,
   }
 end
 
--- ACK now carries the receiver's measurement of the DATA frame's SNR in
--- the low nibble of the 4th byte (high nibble reserved for future flags).
--- 4-bit resolution is enough to drive the sender's outbound link-quality
--- EWMA and route-cost decisions; full-byte SNR would be over-precision
--- against LoRa's per-symbol SNR variance. snr_db argument is optional —
--- nil produces a bucket-15 value (no information signal).
+-- ACK — 2 bytes, bit-packed:
+--   byte 0 : tag 'K'
+--   byte 1 : msg_id (4 hi nibble) | snr_bucket (4 lo nibble)
 local function pack_ack(msg_id, snr_db)
   local bucket = (snr_db ~= nil) and bucket_of_snr_4b(snr_db) or 15
-  return "K" .. string.char(msg_id % 256)
-              .. string.char(math.floor(msg_id / 256) % 256)
-              .. string.char(bucket & 0x0f)   -- high nibble reserved = 0
+  local b1 = ((msg_id & 0xf) << 4) | (bucket & 0xf)
+  return "K" .. string.char(b1)
 end
 
 local function parse_ack(frame)
-  if #frame < 4 or frame:sub(1,1) ~= "K" then return nil end
-  local snr_byte = frame:byte(4)
+  if #frame < 2 or frame:sub(1,1) ~= "K" then return nil end
+  local b1 = frame:byte(2)
+  local bucket = b1 & 0xf
   return {
-    msg_id      = frame:byte(2) + frame:byte(3) * 256,
-    snr_db      = snr_of_bucket_4b(snr_byte & 0x0f),
-    snr_bucket  = snr_byte & 0x0f,
+    msg_id      = (b1 >> 4) & 0xf,
+    snr_db      = snr_of_bucket_4b(bucket),
+    snr_bucket  = bucket,
   }
 end
 
@@ -631,40 +660,50 @@ local function parse_origin_seq(payload)
   }
 end
 
+-- NACK — 4 bytes:
+--   byte 0 : tag 'N'
+--   byte 1 : reserved (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 2-3 : busy_for_ms (16-bit, lo first)
 local function pack_nack(msg_id, busy_for_ms)
   if busy_for_ms < 0 then busy_for_ms = 0 end
   if busy_for_ms > 65535 then busy_for_ms = 65535 end
-  return "N" .. string.char(msg_id % 256)
-              .. string.char(math.floor(msg_id / 256) % 256)
+  return "N" .. string.char(msg_id & 0xf)
               .. string.char(busy_for_ms % 256)
               .. string.char(math.floor(busy_for_ms / 256) % 256)
 end
 
 local function parse_nack(frame)
-  if #frame < 5 or frame:sub(1,1) ~= "N" then return nil end
+  if #frame < 4 or frame:sub(1,1) ~= "N" then return nil end
   return {
-    msg_id      = frame:byte(2) + frame:byte(3) * 256,
-    busy_for_ms = frame:byte(4) + frame:byte(5) * 256,
+    msg_id      = frame:byte(2) & 0xf,
+    busy_for_ms = frame:byte(3) + frame:byte(4) * 256,
   }
 end
 
+-- DATA — 6-byte header + payload:
+--   byte 0 : tag 'D'
+--   byte 1 : origin (8)
+--   byte 2 : src    (8)
+--   byte 3 : dst    (8)
+--   byte 4 : next   (8)
+--   byte 5 : reserved (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 6+: payload
 local function pack_data(origin, src, dst, next_hop, msg_id, payload)
   return "D" .. string.char(origin) .. string.char(src) .. string.char(dst)
               .. string.char(next_hop)
-              .. string.char(msg_id % 256)
-              .. string.char(math.floor(msg_id / 256) % 256)
+              .. string.char(msg_id & 0xf)
               .. payload
 end
 
 local function parse_data(frame)
-  if #frame < 7 or frame:sub(1,1) ~= "D" then return nil end
+  if #frame < 6 or frame:sub(1,1) ~= "D" then return nil end
   return {
     origin  = frame:byte(2),
     src     = frame:byte(3),
     dst     = frame:byte(4),
     next    = frame:byte(5),
-    msg_id  = frame:byte(6) + frame:byte(7) * 256,
-    payload = frame:sub(8),
+    msg_id  = frame:byte(6) & 0xf,
+    payload = frame:sub(7),
   }
 end
 
@@ -673,11 +712,11 @@ end
 -- Frame-header lengths (excluding payload). Computed from the wire-format
 -- table at top of file so airtime predictions stay precise as we extend the
 -- protocol — bump these if the frame layout changes.
-local RTS_LEN = 9       -- 'R' + origin + src + dst + next + msg_id_lo + msg_id_hi + data_sf + payload_len
-local CTS_LEN = 4       -- 'C' + src + msg_id_lo + msg_id_hi
-local DATA_HDR_LEN = 7  -- 'D' + origin + src + dst + next + msg_id_lo + msg_id_hi (payload follows)
-local ACK_LEN = 4       -- 'K' + msg_id_lo + msg_id_hi + snr_4b|reserved_4b
-local NACK_LEN = 5      -- 'N' + msg_id_lo + msg_id_hi + busy_for_ms_lo + busy_for_ms_hi
+local RTS_LEN = 8       -- 'R' + origin + src + dst + next + (network_id<<4|msg_id) + sf_bitmap + payload_len
+local CTS_LEN = 2       -- 'C' + (msg_id<<4 | (sf-5)<<1 | reserved_1)
+local DATA_HDR_LEN = 6  -- 'D' + origin + src + dst + next + (reserved_4|msg_id_4) (payload follows)
+local ACK_LEN = 2       -- 'K' + (msg_id<<4 | snr_bucket)
+local NACK_LEN = 4      -- 'N' + (reserved_4|msg_id_4) + busy_for_ms_lo + busy_for_ms_hi
 
 -- LoRa on-air time in milliseconds (Semtech AN1200.13). This is intentionally
 -- in Lua (not exposed via a runtime binding) so the same code can be ported
@@ -1126,10 +1165,13 @@ local function maybe_emit_rt_full(self)
 end
 
 local function gen_msg_id(self)
-  -- Pack node id into upper 8 bits to keep ids globally unique-ish for diagnostics.
-  local mid = (self.id * 256 + self.next_msg_id) % 65536
-  self.next_msg_id = self.next_msg_id + 1
-  if self.next_msg_id > 255 then self.next_msg_id = 1 end
+  -- 4-bit per-(originator) flight counter, wraps at 16. The 4-bit RTS
+  -- field can no longer carry the historic node_id<<8 prefix; per-msg
+  -- uniqueness is recoverable from (node, msg_id, time) tuples in event
+  -- logs. Hop-level dedup uses last_acked_from with a TTL to handle
+  -- wraparound at any realistic send rate.
+  local mid = self.next_msg_id & 0xf
+  self.next_msg_id = (self.next_msg_id + 1) & 0xf
   return mid
 end
 
@@ -1256,7 +1298,7 @@ local function tx_rts_retry(self, reason)
 
   -- payload_len lets the receiver size its pending_rx_expiry to the
   -- actual DATA airtime instead of max_payload_bytes worst-case.
-  local rts = pack_rts(px.origin, self.id, px.dst, px.next, px.msg_id,
+  local rts = pack_rts(self.network_id, px.origin, self.id, px.dst, px.next, px.msg_id,
                        self.allowed_sf_bitmap, #px.payload)
   self:emit("rts_retry", {
     origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
@@ -1676,7 +1718,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
   }
   -- payload_len includes the 2-byte origin-seq header — see pack_rts.
-  local rts = pack_rts(origin, self.id, dst_id, primary_next, mid,
+  local rts = pack_rts(self.network_id, origin, self.id, dst_id, primary_next, mid,
                        self.allowed_sf_bitmap, #payload)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   self:emit("rts_tx", {
@@ -1925,8 +1967,9 @@ function on_init(self, config)
   -- driven by self.beacon_offset; rt_merge at receivers fills in entries
   -- as it hears them across rounds.
   self.beacon_max_bytes   = config.beacon_max_bytes   or 200
+  -- Header is 4 bytes ('B' + network_id_byte + src + n); entries 4 bytes each.
   self.beacon_max_entries = math.max(1,
-    math.floor((self.beacon_max_bytes - 3) / 4))
+    math.floor((self.beacon_max_bytes - 4) / 4))
   -- Radio params for airtime calculation. The runtime injects per-node
   -- resolved values via `_sim_bw_hz` and `_sim_cr` so the script's
   -- airtime math matches what the radio actually does (otherwise s03's
@@ -2032,7 +2075,18 @@ function on_init(self, config)
   self.ack_timeout_handle      = nil  -- so on_recv "K" can cancel
   self.pending_rx_expiry_handle = nil  -- so on_recv "D" can cancel
   self.tx_queue          = {}   -- queued user sends, drained at every "free" point
-  self.last_acked_from   = {}   -- {sender_id: msg_id} for RTS-retry dedup after we already acked
+  -- Hop-level RTS-retry dedup. {sender_id → {msg_id, t_ms}}; lookups
+  -- treat entries older than self.last_acked_ttl_ms as missing so the
+  -- 4-bit msg_id wrap (every 16 sends per sender) doesn't false-pos
+  -- at slow send rates. TTL well above any flight-retry window
+  -- (rts_max_retries × rts_timeout ≈ 1.5 s) and well below the wrap
+  -- interval at any plausible per-sender send rate.
+  self.last_acked_from    = {}
+  self.last_acked_ttl_ms  = config.last_acked_ttl_ms or 10000
+  -- 4-bit network identifier — externally managed (admin sets per node).
+  -- Receivers reject foreign-network BCN/RTS at the routing layer
+  -- before doing CTS/DATA work. 0 = default mesh; 1..15 = distinct meshes.
+  self.network_id        = config.network_id or 0
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
   -- (origin_id, origin_seq) tuple and rejects subsequent arrivals of the
@@ -2097,6 +2151,11 @@ function on_recv(self, frame, meta)
   if tag == "B" then
     local b = parse_beacon(frame)
     if not b then return end
+    -- Cross-network filter — drop foreign-network beacons before they
+    -- pollute our routing table. Same field as RTS, same admin-managed
+    -- 4-bit space. Silent drop (no event spam — expected during
+    -- enhanced propagation events).
+    if b.network_id ~= self.network_id then return end
     self:emit("beacon_rx", { src = b.src, n_entries = #b.entries })
 
     local now = self:now()
@@ -2178,13 +2237,22 @@ function on_recv(self, frame, meta)
     local r = parse_rts(frame)
     if not r then return end
     if r.next ~= self.id then return end  -- not for us; silent discard
+    -- Cross-network filter — drop foreign-network RTSes before any CTS
+    -- work. Without this, two networks merging during enhanced RF
+    -- propagation would waste airtime on duplicate CTSes and pollute
+    -- routing decisions.
+    if r.network_id ~= self.network_id then return end
 
     -- Sender is retrying an RTS for a DATA we already received and acked
     -- (their previous ACK was lost in flight). Re-send the ACK directly
     -- — no CTS, no DATA — so they can clear pending_tx without us
     -- reprocessing/duplicating the message. last_acked_from holds the
-    -- most recent acked msg_id per sender.
-    if self.last_acked_from[r.src] == r.msg_id then
+    -- most recent acked msg_id per sender, scoped by TTL so the 4-bit
+    -- msg_id wrap (every 16 sends per sender) doesn't false-positive at
+    -- slow send rates.
+    local cached = self.last_acked_from[r.src]
+    if cached and cached.msg_id == r.msg_id
+       and (self:now() - cached.t_ms) < self.last_acked_ttl_ms then
       self:emit("rts_already_acked", {
         origin = r.origin,    -- payload unknown — RTS frame doesn't carry it
         from = r.src, msg_id = r.msg_id,
@@ -2642,7 +2710,7 @@ function on_recv(self, frame, meta)
     self:set_rx_sf(self.routing_sf)
     self.pending_rx = nil
 
-    self.last_acked_from[d.src] = d.msg_id
+    self.last_acked_from[d.src] = { msg_id = d.msg_id, t_ms = self:now() }
     -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
     -- bucket. Sender uses it to maintain its outbound link-quality EWMA
     -- to us (which we can't see because we're at the receiving end);
