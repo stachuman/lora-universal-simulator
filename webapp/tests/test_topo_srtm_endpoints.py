@@ -90,3 +90,55 @@ async def test_generate_srtm_503_on_srtm_failure(monkeypatch):
             r = await client.post("/api/topo-creator/generate-srtm", json=body)
     assert r.status_code == 503
     assert "SRTM" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_refine_with_srtm_preserves_other_fields(fake_srtm_flat):
+    scenario = {
+        "_name": "test_scenario",
+        "_desc": "preserve check",
+        "simulation": {
+            "duration_ms": 30000, "step_ms": 1, "warmup_ms": 0, "seed": 42,
+            "node_startup_jitter_ms": 0,
+            "radio": {"sf": 8, "bw": 250, "cr": 5},
+            "path_loss": {"frequency_mhz": 868.0, "tx_power_dbm": 14.0},
+        },
+        "nodes": [
+            {"name": "alice", "lat": 47.61, "lon": -122.33,
+             "script": "examples/quiet.lua", "antenna_height_m": 1.5},
+            {"name": "bob", "lat": 47.62, "lon": -122.33,
+             "script": "examples/quiet.lua", "antenna_height_m": 1.5},
+        ],
+        "topology": {"links": [
+            {"from": "alice", "to": "bob", "snr": 1.0, "rssi": -90.0, "bidir": True},
+        ]},
+        "commands": [{"at_ms": 1000, "node": "alice", "command": "send hello"}],
+        "expect": [{"type": "event_count", "event_type": "tx", "min": 1}],
+    }
+    body = {
+        "scenario": scenario,
+        "itm": {"min_snr_db": -50.0},
+    }
+    async with LifespanManager(app):
+        async with AsyncClient(transport=ASGITransport(app=app),
+                               base_url="http://test") as client:
+            r = await client.post("/api/topo-creator/refine-with-srtm", json=body)
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    sc_out = payload["scenario"]
+    # Preserved verbatim:
+    assert sc_out["_name"] == "test_scenario"
+    assert sc_out["_desc"] == "preserve check"
+    assert sc_out["simulation"]["duration_ms"] == 30000
+    assert sc_out["simulation"]["seed"] == 42
+    assert sc_out["commands"] == scenario["commands"]
+    assert sc_out["expect"] == scenario["expect"]
+    # topology.links replaced:
+    new_links = sc_out["topology"]["links"]
+    assert len(new_links) == 1
+    assert new_links[0]["from"] == "alice"
+    assert new_links[0]["to"] == "bob"
+    assert new_links[0]["snr"] != 1.0  # the placeholder was replaced
+    # Counters present:
+    assert payload["n_pairs_evaluated"] == 1
+    assert payload["n_links_kept"] == 1

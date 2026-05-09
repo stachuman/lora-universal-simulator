@@ -187,3 +187,78 @@ def generate_srtm(req: GenerateSrtmRequest):
         "n_links_kept": result["n_links_kept"],
         "n_srtm_misses": result["n_srtm_misses"],
     }
+
+
+class RefineWithSrtmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenario: dict
+    itm: SrtmItmParams = SrtmItmParams()
+
+
+@router.post("/refine-with-srtm")
+def refine_with_srtm(req: RefineWithSrtmRequest):
+    """Recompute topology.links[] from current node lat/lon via SRTM+ITM.
+    Preserves everything else in the scenario (commands, expect,
+    simulation params, node configs)."""
+    try:
+        from server.services.topo_srtm import (
+            compute_link_matrix,
+            get_elevation_data,
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=500,
+            detail=f"topo_srtm service unavailable: {e}")
+
+    sc = req.scenario
+    nodes_in = sc.get("nodes", [])
+    if len(nodes_in) < 2:
+        raise HTTPException(status_code=400,
+            detail="scenario must have at least 2 nodes")
+
+    sim = sc.get("simulation", {})
+    path_loss = sim.get("path_loss", {})
+    radio = sim.get("radio", {})
+    freq_mhz = path_loss.get("frequency_mhz", 868.0)
+    tx_power_dbm = path_loss.get("tx_power_dbm", 14.0)
+    bandwidth_hz = float(radio.get("bw", 62500)) * 1000.0 if radio.get("bw") else 62500.0
+    # Construct the simplified node list compute_link_matrix expects
+    # (name, lat, lon, antenna_height_m).
+    nodes = []
+    for n in nodes_in:
+        if "lat" not in n or "lon" not in n:
+            raise HTTPException(status_code=400,
+                detail=f"node '{n.get('name', '?')}' missing lat/lon")
+        nodes.append({
+            "name": n["name"],
+            "lat": n["lat"],
+            "lon": n["lon"],
+            "antenna_height_m": n.get("antenna_height_m", 1.5),
+        })
+
+    try:
+        srtm_data = get_elevation_data()
+    except Exception as e:
+        raise HTTPException(status_code=503,
+            detail=f"SRTM data fetch failed (offline?): {e}")
+
+    result = compute_link_matrix(
+        nodes=nodes,
+        freq_mhz=freq_mhz, tx_power_dbm=tx_power_dbm,
+        bandwidth_hz=bandwidth_hz, noise_figure_db=6.0,
+        profile_resolution_m=req.itm.profile_resolution_m,
+        min_snr_db=req.itm.min_snr_db,
+        max_links_per_node=req.itm.max_links_per_node,
+        climate=req.itm.climate, polarization=req.itm.polarization,
+        srtm_data=srtm_data,
+    )
+    # Replace topology.links[] in place; preserve everything else.
+    out = dict(sc)
+    out_topology = dict(out.get("topology", {}))
+    out_topology["links"] = result["links"]
+    out["topology"] = out_topology
+    return {
+        "scenario": out,
+        "n_pairs_evaluated": result["n_pairs_evaluated"],
+        "n_links_kept": result["n_links_kept"],
+        "n_srtm_misses": result["n_srtm_misses"],
+    }
