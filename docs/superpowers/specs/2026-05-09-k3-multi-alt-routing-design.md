@@ -2,8 +2,9 @@
 
 Status: design (awaiting user review)
 Author: 2026-05-09 session
-Depends on: `2026-05-09-kill-node-orchestrator-design.md` for the
-test scenario's kill-node primitive.
+Depends on: `2026-05-09-node-lifecycle-orchestrator-design.md` for
+the test scenario's `dies_at_ms` primitive (the cascade test kills
+the primary forwarder mid-flight).
 
 ## Background
 
@@ -166,9 +167,9 @@ proactive blind-window switches.
 
 ## Test
 
-Uses the kill-node feature from the sibling spec.
+Uses the `dies_at_ms` lifecycle feature from the sibling spec.
 
-**Integration scenario** `test/t25_k3_cascade.json`:
+**Integration scenario** `test/t26_k3_cascade.json`:
 - 5 nodes: `alice`, `relay1`, `relay2`, `relay3`, `dave`.
 - Topology: alice has 1-hop links to relay1 (best), relay2, relay3;
   each relay has a 1-hop link to dave; relay-relay links absent.
@@ -198,9 +199,10 @@ to validate the design.
 
 ## Acceptance criteria
 
-- `test/t25_k3_cascade.json` integration test passes.
-- `bash test/run_tests.sh` reports 32/32 (was 30, +1 for kill-node
-  test t24, +1 for cascade test t25).
+- `test/t26_k3_cascade.json` integration test passes.
+- `bash test/run_tests.sh` reports the sibling-spec-adjusted count
+  (current 30 → +2 from sibling sub-project 1's t24 and t25 → +1
+  here for t26 = 33 total).
 - s04_seattle_dense delivery rate doesn't regress (currently 94%).
   Ideally improves further as cascades cover edge cases the busy-
   NACK fix didn't.
