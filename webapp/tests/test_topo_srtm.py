@@ -82,3 +82,49 @@ def test_compute_link_itm_too_few_points_returns_kwx_4():
     r = compute_link_itm([50.0, 50.0], 1.0, 868.0, (1.5, 1.5))
     assert r["kwx"] == 4
     assert r["loss_median_db"] == 0.0
+
+
+class _FakeSrtm:
+    """Mock srtm.GeoElevationData. Returns a callable elevation function
+    so tests can hand-pick the terrain shape."""
+    def __init__(self, elev_fn):
+        self._fn = elev_fn
+
+    def get_elevation(self, lat, lon):
+        return self._fn(lat, lon)
+
+
+def test_intermediate_point_endpoints():
+    from server.services.topo_srtm import intermediate_point
+    a = intermediate_point(40.0, 5.0, 50.0, 10.0, 0.0)
+    b = intermediate_point(40.0, 5.0, 50.0, 10.0, 1.0)
+    assert math.isclose(a[0], 40.0, abs_tol=1e-6)
+    assert math.isclose(a[1], 5.0, abs_tol=1e-6)
+    assert math.isclose(b[0], 50.0, abs_tol=1e-6)
+    assert math.isclose(b[1], 10.0, abs_tol=1e-6)
+
+
+def test_intermediate_point_zero_distance():
+    from server.services.topo_srtm import intermediate_point
+    p = intermediate_point(40.0, 5.0, 40.0, 5.0, 0.5)
+    assert p == (40.0, 5.0)
+
+
+def test_sample_elevation_profile_flat_terrain():
+    from server.services.topo_srtm import sample_elevation_profile
+    srtm = _FakeSrtm(lambda lat, lon: 100.0)
+    profile = sample_elevation_profile(srtm, 47.0, -122.0, 47.5, -122.5, 10)
+    assert profile == [100.0] * 10
+
+
+def test_sample_elevation_profile_returns_none_on_miss():
+    from server.services.topo_srtm import sample_elevation_profile
+    srtm = _FakeSrtm(lambda lat, lon: None)  # always miss
+    profile = sample_elevation_profile(srtm, 47.0, -122.0, 47.5, -122.5, 10)
+    assert profile is None
+
+
+def test_sample_elevation_profile_min_2_points():
+    from server.services.topo_srtm import sample_elevation_profile
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    assert sample_elevation_profile(srtm, 47.0, -122.0, 47.5, -122.5, 1) is None
