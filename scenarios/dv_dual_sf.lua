@@ -293,8 +293,9 @@
 --   • on_radio_busy retries are still LBT-deferral-only — orthogonal.
 --   • last_acked_from short-circuit fires BEFORE the NACK paths so we don't
 --     NACK a sender we already acked; we re-ACK them.
---   • alt_tried clears on successful delivery (pending_tx → nil via on_recv
---     "K"); fresh send via issue_send always sets alt_tried=false.
+--   • alts_tried (set keyed by next_hop id) clears on successful delivery
+--     (pending_tx → nil via on_recv "K"); fresh send via issue_send always
+--     starts with an empty set (modulo F1 blind-skipped primary).
 --
 -- Future tuning hooks (not yet implemented):
 --   • alt freshness expiry: currently alt sticks around as long as no
@@ -812,16 +813,19 @@ end
 -- previous_hop, when non-nil (forwarder context), is the upstream node we
 -- received the DATA from — never alt-switch back through it (that would
 -- create a 2-hop loop).
-local function classify_blind(self, dst_id, current_next_hop, alt_already_tried, previous_hop)
+local function classify_blind(self, dst_id, current_next_hop, alts_tried, previous_hop)
   local blind, remaining = is_blind(self, current_next_hop)
   if not blind then return "ok" end
-  if alt_already_tried then return "defer", remaining + 1 end
   local entry = self.rt[dst_id]
   if not entry then return "defer", remaining + 1 end
-  -- Walk the candidates list (skip the current next_hop and the
-  -- previous_hop loop guard), return the first non-blind alternative.
+  -- Walk the candidates list; skip the current next_hop, the previous_hop
+  -- loop guard, any next_hop already tried (per pending_tx.alts_tried),
+  -- and any candidate currently in a blind window. alts_tried is a
+  -- table-as-set keyed by next_hop id; nil/empty means "nothing tried
+  -- yet" so the first non-blind alt qualifies.
   for _, c in ipairs(entry.candidates) do
     if c.next_hop ~= current_next_hop
+       and not (alts_tried and alts_tried[c.next_hop])
        and c.next_hop ~= previous_hop
        and not is_blind(self, c.next_hop) then
       return "alt", c.next_hop
@@ -1200,7 +1204,7 @@ local function tx_rts_retry(self, reason)
 
   -- F1 mitigation: if next-hop is now known-blind, defer the retry or
   -- switch to alt. Reset retries budget on alt-switch (fresh path).
-  local action_b, val_b = classify_blind(self, px.dst, px.next, px.alt_tried,
+  local action_b, val_b = classify_blind(self, px.dst, px.next, px.alts_tried,
                                           px.previous_hop)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
@@ -1219,8 +1223,8 @@ local function tx_rts_retry(self, reason)
     })
     self:log(string.format("tx_blind_alt (tx_rts_retry) msg=%d %s -> %s",
       px.msg_id, name_of(self, px.next), name_of(self, val_b)))
+    px.alts_tried[px.next] = true   -- mark previous next_hop as tried
     px.next = val_b
-    px.alt_tried = true
     px.retries_left = self.rts_max_retries
   end
 
@@ -1267,7 +1271,7 @@ local function rts_timeout_fire(self, captured_msg_id)
   local action_b, val_b = classify_blind(self,
                                           self.pending_tx.dst,
                                           self.pending_tx.next,
-                                          self.pending_tx.alt_tried,
+                                          self.pending_tx.alts_tried,
                                           self.pending_tx.previous_hop)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
@@ -1291,8 +1295,8 @@ local function rts_timeout_fire(self, captured_msg_id)
     })
     self:log(string.format("tx_blind_alt (rts_timeout) msg=%d %s -> %s",
       captured_msg_id, name_of(self, self.pending_tx.next), name_of(self, val_b)))
+    self.pending_tx.alts_tried[self.pending_tx.next] = true
     self.pending_tx.next = val_b
-    self.pending_tx.alt_tried = true
     self.pending_tx.retries_left = self.rts_max_retries
     tx_rts_retry(self, "blind_alt")
     return
@@ -1521,7 +1525,12 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
   -- the issue. Defer re-queues at the head so ordering is preserved.
   -- previous_hop (forwarder context) prevents alt-switching back to
   -- the upstream node that just gave us the DATA — that would loop.
-  local action_b, val_b = classify_blind(self, dst_id, primary_next, false, previous_hop)
+  local action_b, val_b = classify_blind(self, dst_id, primary_next, nil, previous_hop)
+  -- Captures the original primary if F1 blind-alt fires below; that
+  -- next_hop is then pre-populated into pending_tx.alts_tried so a
+  -- later cascade doesn't bounce back to it before the blind window
+  -- clears.
+  local blind_skipped_primary = nil
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = origin, payload = user_text, origin_seq = origin_seq,
@@ -1544,9 +1553,18 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     })
     self:log(string.format("tx_blind_alt (issue_send) dst=%s %s -> %s",
       dst_name, name_of(self, primary_next), name_of(self, val_b)))
+    blind_skipped_primary = primary_next
     primary_next = val_b
   end
   local mid = gen_msg_id(self)
+  -- alts_tried: set keyed by next_hop id, cleared on successful ACK
+  -- (pending_tx → nil via on_recv "K"). Pre-populate with the original
+  -- primary if F1 blind-alt fired so the cascade doesn't try it again
+  -- before the blind window clears.
+  local initial_alts_tried = {}
+  if blind_skipped_primary ~= nil then
+    initial_alts_tried[blind_skipped_primary] = true
+  end
   self.pending_tx = {
     origin       = origin,
     dst          = dst_id,
@@ -1556,7 +1574,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     user_text    = user_text,      -- for emit + log clarity
     origin_seq   = origin_seq,     -- end-to-end message id (with origin)
     retries_left = self.rts_max_retries,
-    alt_tried    = (action_b == "alt"),  -- pre-set if F1 blind-alt fired
+    alts_tried   = initial_alts_tried,
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
   }
