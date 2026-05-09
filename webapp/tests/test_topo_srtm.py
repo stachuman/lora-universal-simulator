@@ -128,3 +128,67 @@ def test_sample_elevation_profile_min_2_points():
     from server.services.topo_srtm import sample_elevation_profile
     srtm = _FakeSrtm(lambda lat, lon: 50.0)
     assert sample_elevation_profile(srtm, 47.0, -122.0, 47.5, -122.5, 1) is None
+
+
+@itm_skip
+def test_compute_link_matrix_three_nodes_flat_terrain():
+    from server.services.topo_srtm import compute_link_matrix
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    nodes = [
+        {"name": "alice", "lat": 47.61, "lon": -122.33, "antenna_height_m": 1.5},
+        {"name": "bob",   "lat": 47.62, "lon": -122.33, "antenna_height_m": 1.5},
+        {"name": "carol", "lat": 47.63, "lon": -122.33, "antenna_height_m": 1.5},
+    ]
+    r = compute_link_matrix(
+        nodes, freq_mhz=868.0, tx_power_dbm=14.0,
+        bandwidth_hz=62500.0, noise_figure_db=6.0,
+        profile_resolution_m=90.0,
+        min_snr_db=-50.0,  # permissive — keep everything
+        max_links_per_node=8,
+        srtm_data=srtm,
+    )
+    assert r["n_pairs_evaluated"] == 3, "C(3,2) = 3 pairs"
+    assert r["n_srtm_misses"] == 0
+    assert len(r["links"]) == 3
+    names = {(l["from"], l["to"]) for l in r["links"]}
+    assert names == {("alice", "bob"), ("alice", "carol"), ("bob", "carol")}
+    for l in r["links"]:
+        assert l["bidir"] is True
+        assert isinstance(l["snr"], float)
+        assert isinstance(l["rssi"], float)
+        assert l["snr_std_dev"] >= 0
+
+
+def test_compute_link_matrix_srtm_miss_skips_pair():
+    from server.services.topo_srtm import compute_link_matrix
+    srtm = _FakeSrtm(lambda lat, lon: None)  # all misses
+    nodes = [
+        {"name": "alice", "lat": 47.61, "lon": -122.33},
+        {"name": "bob",   "lat": 47.62, "lon": -122.33},
+    ]
+    r = compute_link_matrix(nodes, srtm_data=srtm)
+    assert r["n_pairs_evaluated"] == 1
+    assert r["n_srtm_misses"] == 1
+    assert r["links"] == []
+
+
+def test_compute_link_matrix_max_links_per_node_cap():
+    """Star topology with 5 leaves around 1 hub. With max_links_per_node=2,
+    only 2 of the 4 hub-leaf links survive."""
+    from server.services.topo_srtm import compute_link_matrix
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    nodes = [
+        {"name": "hub",   "lat": 47.610, "lon": -122.330},
+        {"name": "leaf1", "lat": 47.611, "lon": -122.330},
+        {"name": "leaf2", "lat": 47.612, "lon": -122.330},
+        {"name": "leaf3", "lat": 47.613, "lon": -122.330},
+        {"name": "leaf4", "lat": 47.614, "lon": -122.330},
+    ]
+    r = compute_link_matrix(
+        nodes, min_snr_db=-50.0, max_links_per_node=2, srtm_data=srtm,
+    )
+    # hub appears in at most 2 kept links.
+    hub_appearances = sum(
+        1 for l in r["links"] if l["from"] == "hub" or l["to"] == "hub"
+    )
+    assert hub_appearances <= 2, f"hub should be capped at 2, got {hub_appearances}"

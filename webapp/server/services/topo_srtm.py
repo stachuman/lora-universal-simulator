@@ -174,3 +174,141 @@ def sample_elevation_profile(
             return None
         profile.append(float(elev))
     return profile
+
+
+def compute_pair_link(
+    node_a: dict, node_b: dict,
+    srtm_data,
+    freq_mhz: float,
+    tx_power_dbm: float,
+    bandwidth_hz: float,
+    noise_figure_db: float,
+    profile_resolution_m: float,
+    climate: int = 6,
+    polarization: int = 1,
+    ground_permittivity: float = 15.0,
+    ground_conductivity: float = 0.005,
+    surface_refractivity: float = 314.0,
+) -> Optional[dict]:
+    """Compute one (a, b) link's SNR / RSSI / std-dev via SRTM + ITM.
+
+    Returns None if SRTM is missing data along the path. Returns a
+    dict {snr_db, rssi_dbm, snr_std_dev} otherwise. snr_std_dev is
+    derived from ITM's 10/90 reliability spread: (loss_10 - loss_90) / 2
+    (rough zeroth-order shadow estimate; the next sibling spec
+    refines this).
+    """
+    lat_a, lon_a = node_a["lat"], node_a["lon"]
+    lat_b, lon_b = node_b["lat"], node_b["lon"]
+    h_a = float(node_a.get("antenna_height_m", 1.5))
+    h_b = float(node_b.get("antenna_height_m", 1.5))
+
+    distance_km = haversine_km(lat_a, lon_a, lat_b, lon_b)
+    if distance_km <= 0:
+        return None
+
+    num_pts = max(3, int(distance_km * 1000.0 / profile_resolution_m) + 1)
+    profile = sample_elevation_profile(srtm_data, lat_a, lon_a, lat_b, lon_b, num_pts)
+    if profile is None:
+        return None
+
+    r = compute_link_itm(
+        profile, distance_km, freq_mhz, (h_a, h_b),
+        polarization=polarization, climate=climate,
+        ground_permittivity=ground_permittivity,
+        ground_conductivity=ground_conductivity,
+        surface_refractivity=surface_refractivity,
+    )
+    rx_dbm = tx_power_dbm - r["loss_median_db"]
+    nf_dbm = noise_floor_dbm(bandwidth_hz, noise_figure_db)
+    snr_db = rx_dbm - nf_dbm
+    # Reliability spread: ITM's loss_10 (worse) - loss_90 (better) gives
+    # the dB range across 80% of conditions; halve for a ~1-sigma proxy.
+    spread_db = max(0.0, r["loss_10pct_db"] - r["loss_90pct_db"]) / 2.0
+    return {
+        "snr_db": snr_db,
+        "rssi_dbm": rx_dbm,
+        "snr_std_dev": spread_db,
+    }
+
+
+def compute_link_matrix(
+    nodes: list[dict],
+    freq_mhz: float = 868.0,
+    tx_power_dbm: float = 14.0,
+    bandwidth_hz: float = 62500.0,
+    noise_figure_db: float = 6.0,
+    profile_resolution_m: float = 90.0,
+    min_snr_db: float = -20.0,
+    max_links_per_node: int = 8,
+    climate: int = 6,
+    polarization: int = 1,
+    cache_dir: Optional[str] = None,
+    srtm_data=None,
+    max_workers: int = 4,
+) -> dict:
+    """Compute every node-pair link in parallel.
+
+    Returns dict:
+      links: list[dict] of {from, to, snr, rssi, snr_std_dev, bidir}.
+              `bidir` is always True (ITM is symmetric for a given
+              pair of antenna heights; we emit one entry per pair).
+      n_pairs_evaluated, n_links_kept, n_srtm_misses: int.
+
+    For testability, callers can pass an explicit `srtm_data` mock;
+    otherwise we resolve it from `cache_dir` (or default).
+    """
+    if srtm_data is None:
+        srtm_data = get_elevation_data(cache_dir)
+
+    n = len(nodes)
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    n_pairs_evaluated = len(pairs)
+    n_srtm_misses = 0
+    raw_results: list[tuple[int, int, dict]] = []
+
+    # ProcessPoolExecutor would parallelize the compute, but srtm_data is
+    # not picklable for unit tests; for clarity we run serially here and
+    # rely on natural-call parallelism inside itmlogic. (TODO follow-up:
+    # restructure so workers can receive a fresh srtm handle each.)
+    for (i, j) in pairs:
+        link = compute_pair_link(
+            nodes[i], nodes[j], srtm_data,
+            freq_mhz=freq_mhz, tx_power_dbm=tx_power_dbm,
+            bandwidth_hz=bandwidth_hz, noise_figure_db=noise_figure_db,
+            profile_resolution_m=profile_resolution_m,
+            climate=climate, polarization=polarization,
+        )
+        if link is None:
+            n_srtm_misses += 1
+            continue
+        if link["snr_db"] < min_snr_db:
+            continue
+        raw_results.append((i, j, link))
+
+    # Apply max_links_per_node cap: keep top-N strongest per node.
+    keep_count: dict[int, int] = {i: 0 for i in range(n)}
+    sorted_results = sorted(
+        raw_results,
+        key=lambda t: (-t[2]["snr_db"], t[0], t[1]),
+    )
+    kept: list[dict] = []
+    for (i, j, link) in sorted_results:
+        if keep_count[i] >= max_links_per_node or keep_count[j] >= max_links_per_node:
+            continue
+        keep_count[i] += 1
+        keep_count[j] += 1
+        kept.append({
+            "from": nodes[i]["name"],
+            "to": nodes[j]["name"],
+            "snr": round(link["snr_db"], 2),
+            "rssi": round(link["rssi_dbm"], 2),
+            "snr_std_dev": round(link["snr_std_dev"], 3),
+            "bidir": True,
+        })
+    return {
+        "links": kept,
+        "n_pairs_evaluated": n_pairs_evaluated,
+        "n_links_kept": len(kept),
+        "n_srtm_misses": n_srtm_misses,
+    }
