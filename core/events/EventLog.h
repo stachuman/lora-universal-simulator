@@ -41,6 +41,12 @@ void simEnd(unsigned long time_ms);
 // Boundary marker — fires once at sim_time == warmup_ms when warmup_ms > 0.
 void warmupEnd(unsigned long time_ms);
 
+// Lifecycle markers. nodeStarted fires once when a deferred-start
+// node (nodes[].start_at_ms > 0) initializes. nodeDied fires once
+// when a node with nodes[].dies_at_ms > 0 reaches that sim-time.
+void nodeStarted(unsigned long time_ms, const char* node);
+void nodeDied(unsigned long time_ms, const char* node);
+
 void nodeReady(unsigned long time_ms, const char* node, const char* role,
                const uint8_t* pub_key, int key_len,
                bool has_location = false, double lat = 0.0, double lon = 0.0,

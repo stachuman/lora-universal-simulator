@@ -138,6 +138,22 @@ void warmupEnd(unsigned long time_ms) {
     emitLine(buf);
 }
 
+void nodeStarted(unsigned long time_ms, const char* node) {
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"node_started\",\"time_ms\":%lu,\"node\":\"%s\"}\n",
+        time_ms, node ? node : "");
+    emitLine(buf);
+}
+
+void nodeDied(unsigned long time_ms, const char* node) {
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"node_died\",\"time_ms\":%lu,\"node\":\"%s\"}\n",
+        time_ms, node ? node : "");
+    emitLine(buf);
+}
+
 void nodeReady(unsigned long time_ms, const char* node, const char* role,
                const uint8_t* pub_key, int key_len,
                bool has_location, double lat, double lon,
