@@ -86,9 +86,9 @@
 --     install rt[N] = {direct, snr, hops=1, n2_hop=nil}
 --     for each entry e in beacon (e.dest != self.id):
 --       if e.next == self.id (N routes e.dest via me):
---         3-cycle prune — if my own rt[e.dest].primary or .alt has
+--         3-cycle prune — if any of my rt[e.dest].candidates has
 --         n2_hop == N, that slot is part of cycle me→X→N→me; drop it
---         (collapse alt→primary, or remove entry if both slots looped)
+--         (remove entry if all candidates are looped)
 --       else:
 --         cand = {via=N, n2_hop=e.next, score=min(rx_snr, e.score),
 --                 hops=e.hops+1}
@@ -226,18 +226,24 @@
 --
 -- Routing table:
 --   rt[dest_id] = {
---     primary = { next_hop, score, hops, last_seen_ms },
---     alt     = { next_hop, score, hops, last_seen_ms },  -- or nil
+--     candidates = {
+--       { next_hop, score, hops, last_seen_ms, n2_hop },  -- primary (slot 1)
+--       { next_hop, score, hops, last_seen_ms, n2_hop },  -- alt 1   (slot 2)
+--       { next_hop, score, hops, last_seen_ms, n2_hop },  -- alt 2   (slot 3)
+--     },
 --   }
---   primary.next_hop ≠ alt.next_hop (we never store both in the same slot)
+--   #candidates is in [1, MAX_RT_CANDIDATES] (K=3 today). Sorted
+--   descending by score (route_strictly_better comparator). All
+--   candidates[i].next_hop are distinct.
 --
 -- DV merge (rt_merge): for each candidate cand from a beacon-sender:
---   • new dest             → cand → primary
---   • same next_hop as P   → primary refresh in place
---   • beats P              → cand → primary, previous P → alt (different hop)
---   • beats A              → cand → alt
---   • else                 → drop
--- Beacons advertise only primary (single best route per dest, as before).
+--   • match-by-next_hop (any slot) → refresh in place if cand is
+--                                     strictly better; sort
+--   • new next_hop AND #candidates < K → insert + sort
+--   • new next_hop AND #candidates == K
+--                                  → if cand strictly beats worst,
+--                                    replace worst + sort; else drop
+-- Beacons advertise only candidates[1] (single best route per dest).
 --
 -- Receiver-side NACK triggers (in on_recv 'R' with next == self.id):
 --   1. last_acked_from[r.src] == r.msg_id  → re-ACK on routing_sf, return
@@ -464,7 +470,7 @@ local function pack_beacon(node, max_entries, offset)
 
   local out = "B" .. string.char(node.id) .. string.char(n)
   for _, dest_id in ipairs(page) do
-    local p = node.rt[dest_id].primary
+    local p = node.rt[dest_id].candidates[1]
     local s = math.floor(p.score + 0.5)
     if s < -128 then s = -128 end
     if s >  127 then s =  127 end
@@ -676,6 +682,12 @@ local NACK_LEN = 5      -- 'N' + msg_id_lo + msg_id_hi + busy_for_ms_lo + busy_f
 -- in Lua (not exposed via a runtime binding) so the same code can be ported
 -- to firmware later without depending on a host helper.
 --
+-- Maximum number of routes per destination kept in the routing table.
+-- candidates[1] is the current primary; candidates[2..K] are alts
+-- consulted by classify_blind (blind-window mitigation) and the
+-- failure cascade in rts_timeout_fire / ack_timeout_fire.
+local MAX_RT_CANDIDATES = 3
+
 -- Convention notes:
 --   • cr is the RadioLib/MeshCore multiplier (5 = CR4/5, 8 = CR4/8). The
 --     legacy AN1200.13 form uses CR ∈ [1..4] with a (CR+4) shift; we use cr
@@ -803,11 +815,17 @@ end
 local function classify_blind(self, dst_id, current_next_hop, alt_already_tried, previous_hop)
   local blind, remaining = is_blind(self, current_next_hop)
   if not blind then return "ok" end
+  if alt_already_tried then return "defer", remaining + 1 end
   local entry = self.rt[dst_id]
-  local alt = entry and entry.alt or nil
-  if alt and (not alt_already_tried) and (not is_blind(self, alt.next_hop))
-     and alt.next_hop ~= previous_hop then
-    return "alt", alt.next_hop
+  if not entry then return "defer", remaining + 1 end
+  -- Walk the candidates list (skip the current next_hop and the
+  -- previous_hop loop guard), return the first non-blind alternative.
+  for _, c in ipairs(entry.candidates) do
+    if c.next_hop ~= current_next_hop
+       and c.next_hop ~= previous_hop
+       and not is_blind(self, c.next_hop) then
+      return "alt", c.next_hop
+    end
   end
   return "defer", remaining + 1
 end
@@ -1024,59 +1042,74 @@ local function route_strictly_better(a, b, viab_db)
   end
 end
 
--- K=2 DV merge. Caller has already filtered cand for hop-cap and
--- split-horizon. Returns one of:
---   "new"             — first route to this destination (cand → primary)
---   "promote"         — cand beats existing primary; previous primary
---                        becomes alt (only if next_hop differs)
---   "primary_refresh" — cand has same next_hop as primary and is better;
---                        primary's score/hops/last_seen updated in place
---   "alt_install"     — cand beats existing alt (or there was none) and
---                        differs from primary's next_hop; cand → alt
+-- Top-K DV merge (K = MAX_RT_CANDIDATES). Caller has already filtered
+-- cand for hop-cap and split-horizon. Returns one of:
+--   "new"             — first route to this destination
+--   "promote"         — cand became candidates[1] (was new or moved up)
+--   "primary_refresh" — cand has same next_hop as candidates[1] and is
+--                        better; refreshed in place
+--   "alt_install"     — cand landed in candidates[2..K] (was lower or new)
 --   "no_change"       — cand can't displace anything
 local function rt_merge(rt, dest_id, cand, viab_db)
   local entry = rt[dest_id]
   if entry == nil then
-    rt[dest_id] = { primary = cand, alt = nil }
+    rt[dest_id] = { candidates = { cand } }
     return "new"
   end
 
-  local P = entry.primary
-  if cand.next_hop == P.next_hop then
-    -- Same next-hop: refresh primary if cand is better. We don't bother
-    -- demoting a "stale primary" to alt in this case — it'd be a
-    -- same-next_hop alt, which is redundant.
-    if route_strictly_better(cand, P, viab_db) then
-      entry.primary = cand
-      return "primary_refresh"
+  -- Match-by-next_hop: refresh in place if cand strictly better.
+  for i, c in ipairs(entry.candidates) do
+    if c.next_hop == cand.next_hop then
+      if route_strictly_better(cand, c, viab_db) then
+        local was_primary = (i == 1)
+        entry.candidates[i] = cand
+        table.sort(entry.candidates, function(a, b)
+          return route_strictly_better(a, b, viab_db) or
+                 (not route_strictly_better(b, a, viab_db) and a.score > b.score)
+        end)
+        local now_primary = (entry.candidates[1].next_hop == cand.next_hop)
+        if now_primary then
+          return "primary_refresh"
+        elseif was_primary then
+          return "promote"  -- some other candidate is now primary
+        end
+        return "alt_install"
+      end
+      -- Equal/worse but same next_hop: refresh metadata, no order change.
+      c.last_seen_ms = cand.last_seen_ms
+      c.n2_hop       = cand.n2_hop
+      return "no_change"
     end
-    -- Even on equal score/hops, refresh last_seen_ms + n2_hop so age-out
-    -- works and the loop-prune sees the neighbor's most recent claim.
-    P.last_seen_ms = cand.last_seen_ms
-    P.n2_hop       = cand.n2_hop
-    return "no_change"
   end
 
-  -- Different next-hop than primary
-  if route_strictly_better(cand, P, viab_db) then
-    entry.alt     = P     -- demote previous primary (next_hop differs by branch)
-    entry.primary = cand
-    return "promote"
-  end
-
-  -- cand can't beat primary. Try as alt (must differ from primary's next_hop,
-  -- which it does by branch).
-  local A = entry.alt
-  if A == nil or route_strictly_better(cand, A, viab_db) then
-    entry.alt = cand
+  -- New next_hop, room to spare.
+  if #entry.candidates < MAX_RT_CANDIDATES then
+    table.insert(entry.candidates, cand)
+    table.sort(entry.candidates, function(a, b)
+      return route_strictly_better(a, b, viab_db) or
+             (not route_strictly_better(b, a, viab_db) and a.score > b.score)
+    end)
+    if entry.candidates[1].next_hop == cand.next_hop then
+      return "promote"
+    end
     return "alt_install"
   end
-  if A.next_hop == cand.next_hop then
-    -- Same alt next_hop, refresh last_seen + n2_hop (see primary path).
-    A.last_seen_ms = cand.last_seen_ms
-    A.n2_hop       = cand.n2_hop
+
+  -- Full table — replace the worst (last in sorted order) only if cand
+  -- strictly beats it.
+  local worst = entry.candidates[#entry.candidates]
+  if not route_strictly_better(cand, worst, viab_db) then
+    return "no_change"
   end
-  return "no_change"
+  entry.candidates[#entry.candidates] = cand
+  table.sort(entry.candidates, function(a, b)
+    return route_strictly_better(a, b, viab_db) or
+           (not route_strictly_better(b, a, viab_db) and a.score > b.score)
+  end)
+  if entry.candidates[1].next_hop == cand.next_hop then
+    return "promote"
+  end
+  return "alt_install"
 end
 
 local function maybe_emit_rt_full(self)
@@ -1109,50 +1142,41 @@ end
 local schedule_triggered_beacon
 
 -- 3-cycle prune: when a beacon entry says (D, next=self.id), the sender N
--- claims to route D through me. If any of my own rt[D] slots stores
+-- claims to route D through me. If any of my own rt[D] candidates stores
 -- n2_hop == N, that slot is part of a 3-cycle me→X→N→me — invalidate it.
--- Collapses primary↔alt afterwards: if alt survives, it's promoted; if
--- both die, the entry is removed entirely (no route is better than a
--- looped one — packets give up at source instead of wasting airtime).
--- On any actual mutation, schedule a triggered beacon so neighbors
--- discover the change quickly.
+-- Walks the candidates list, dropping any whose n2_hop == sender_id; if
+-- all candidates are pruned, the entry is removed entirely (no route is
+-- better than a looped one — packets give up at source instead of wasting
+-- airtime). On any actual mutation, schedule a triggered beacon so
+-- neighbors discover the change quickly.
 local function rt_prune_cycle(self, dest_id, sender_id)
   local entry = self.rt[dest_id]
   if entry == nil then return end
   local mutated = false
-
-  if entry.primary and entry.primary.n2_hop == sender_id then
-    self:emit("rt_prune", {
-      dest = dest_id, slot = "primary", reason = "3cycle",
-      via = entry.primary.next_hop, n2 = sender_id,
-    })
-    self:log(string.format("rt[%s] primary pruned (3cycle via %s→%s)",
-      name_of(self, dest_id),
-      name_of(self, entry.primary.next_hop), name_of(self, sender_id)))
-    entry.primary = nil
-    mutated = true
+  local kept = {}
+  for i, c in ipairs(entry.candidates) do
+    if c.n2_hop == sender_id then
+      local slot = (i == 1) and "primary" or "alt"
+      self:emit("rt_prune", {
+        dest = dest_id, slot = slot, reason = "3cycle",
+        via = c.next_hop, n2 = sender_id,
+      })
+      self:log(string.format("rt[%s] %s pruned (3cycle via %s→%s)",
+        name_of(self, dest_id), slot,
+        name_of(self, c.next_hop), name_of(self, sender_id)))
+      mutated = true
+    else
+      table.insert(kept, c)
+    end
   end
-  if entry.alt and entry.alt.n2_hop == sender_id then
-    self:emit("rt_prune", {
-      dest = dest_id, slot = "alt", reason = "3cycle",
-      via = entry.alt.next_hop, n2 = sender_id,
-    })
-    self:log(string.format("rt[%s] alt pruned (3cycle via %s→%s)",
-      name_of(self, dest_id),
-      name_of(self, entry.alt.next_hop), name_of(self, sender_id)))
-    entry.alt = nil
-    mutated = true
+  if mutated then
+    if #kept == 0 then
+      self.rt[dest_id] = nil
+    else
+      entry.candidates = kept
+    end
+    schedule_triggered_beacon(self)
   end
-
-  if entry.primary == nil and entry.alt ~= nil then
-    entry.primary = entry.alt
-    entry.alt = nil
-  end
-  if entry.primary == nil then
-    self.rt[dest_id] = nil
-  end
-
-  if mutated then schedule_triggered_beacon(self) end
 end
 
 -- Forward decls so the timeout-fire callbacks can refer to peers in the
@@ -1491,7 +1515,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
       dst_name))
     return
   end
-  local primary_next = entry.primary.next_hop
+  local primary_next = entry.candidates[1].next_hop
   -- F1 mitigation: if the chosen next-hop is currently blind on
   -- routing_sf (we overheard its CTS), either alt-switch or defer
   -- the issue. Defer re-queues at the head so ordering is preserved.
