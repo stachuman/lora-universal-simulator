@@ -116,6 +116,8 @@ static SimConfig parseJson(const json& j) {
                 cfg.simulation.path_loss.node_rx_offset_sigma_db = pl["node_rx_offset_sigma_db"].get<double>();
             if (pl.contains("asymmetry_coherence_ms"))
                 cfg.simulation.path_loss.asymmetry_coherence_ms = pl["asymmetry_coherence_ms"].get<uint64_t>();
+            if (pl.contains("frequency_mhz"))
+                cfg.simulation.path_loss.frequency_mhz = pl["frequency_mhz"].get<double>();
             if (cfg.simulation.path_loss.model != "log_distance") {
                 throw std::runtime_error(
                     "config error at simulation.path_loss: model must be "
@@ -207,6 +209,8 @@ static SimConfig parseJson(const json& j) {
                 def.tx_power_offset_db = nd["tx_power_offset_db"].get<float>();
             if (nd.contains("rx_offset_db"))
                 def.rx_offset_db = nd["rx_offset_db"].get<float>();
+            if (nd.contains("antenna_height_m"))
+                def.antenna_height_m = nd["antenna_height_m"].get<float>();
             if (nd.contains("clock_drift_ppm"))
                 def.clock_drift_ppm = nd["clock_drift_ppm"].get<float>();
             if (nd.contains("velocity_mps"))
@@ -364,6 +368,9 @@ static void validateConfig(const SimConfig& cfg) {
                          + std::to_string(cfg.simulation.radio.duty_cycle) + ")");
     if (cfg.simulation.radio.duty_cycle_window_ms == 0)
         errors.push_back("simulation.radio.duty_cycle_window_ms must be > 0");
+    if (cfg.simulation.path_loss.frequency_mhz <= 0.0)
+        errors.push_back("simulation.path_loss.frequency_mhz must be > 0 (got "
+                         + std::to_string(cfg.simulation.path_loss.frequency_mhz) + ")");
 
     // Per-node lifecycle constraint validation. start/die at 0 means
     // "not scheduled"; if scheduled, must be in (0, duration_ms) and
@@ -392,6 +399,10 @@ static void validateConfig(const SimConfig& cfg) {
                     + std::to_string(nd.start_at_ms)
                     + ") must be < dies_at_ms ("
                     + std::to_string(nd.dies_at_ms) + ")");
+            }
+            if (nd.antenna_height_m < 0.0f) {
+                errors.push_back(ctx + ".antenna_height_m must be >= 0 (got "
+                    + std::to_string(nd.antenna_height_m) + ")");
             }
         }
     }

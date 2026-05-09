@@ -161,6 +161,11 @@ struct SimConfig {
         // weather, slow drift). Set to 0 in scenario JSON for fully
         // static asymmetry (useful for analytic tests).
         uint64_t    asymmetry_coherence_ms  = 60000;
+
+        // Authoring-time only: used by the webapp's SRTM+ITM
+        // topology generator. The runtime path-loss model ignores
+        // this field. Default 868 MHz (EU LoRa).
+        double frequency_mhz = 868.0;
     };
 
     struct SimulationConfig {
@@ -261,6 +266,11 @@ struct SimConfig {
         // SimController via _node_alive + processLifecycleAtStep().
         unsigned long start_at_ms = 0;
         unsigned long dies_at_ms  = 0;
+
+        // Authoring-time only: used by the webapp's SRTM+ITM
+        // topology generator. The runtime physics model ignores
+        // this field.
+        float antenna_height_m = 1.5f;
     };
     std::vector<NodeDef> nodes;
 
