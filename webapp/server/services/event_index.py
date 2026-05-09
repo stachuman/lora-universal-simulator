@@ -235,6 +235,7 @@ class EventIndex:
     # indexed events — so it must drop them on the way out.
     _METADATA_TYPES = frozenset((
         "sim_start", "sim_end", "warmup_end", "node_ready",
+        "node_started", "node_died",
         "sim_summary", "assertions", "node_stats",
     ))
 
