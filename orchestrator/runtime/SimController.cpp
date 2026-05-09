@@ -379,6 +379,20 @@ void SimController::initialize() {
         }
     }
 
+    // Per-node lifecycle. _node_alive[i] is the runtime gate: false
+    // until start_at_ms fires (then node_started + on_init), false
+    // again after dies_at_ms (then node_died). For nodes with
+    // start_at_ms > 0 we override the jitter assignment so on_init
+    // fires precisely at the configured time (jitter doesn't apply).
+    _node_alive.assign(static_cast<size_t>(n), true);
+    for (int i = 0; i < n; ++i) {
+        if (_cfg.nodes[i].start_at_ms > 0) {
+            _node_alive[i] = false;
+            _node_init_at_ms[i] =
+                static_cast<uint64_t>(_cfg.nodes[i].start_at_ms);
+        }
+    }
+
     // Fire on_init at t=0 for nodes whose offset is 0; the rest are
     // deferred to processStartupAtStep, which fires them once _now_ms
     // catches up to their offset. node_ready is emitted at the actual
@@ -462,6 +476,41 @@ void SimController::initialize() {
     _initialized = true;
 }
 
+void SimController::processLifecycleAtStep() {
+    const uint64_t now = _now_ms;
+    const int n = static_cast<int>(_nodes.size());
+
+    // Births: for each not-yet-alive node whose start_at_ms has been
+    // reached, flip _node_alive and emit node_started. The matching
+    // on_init runs in processStartupAtStep (called after this).
+    for (int i = 0; i < n; ++i) {
+        const uint64_t start_at =
+            static_cast<uint64_t>(_cfg.nodes[i].start_at_ms);
+        if (!_node_alive[i] && start_at > 0 && now >= start_at) {
+            _node_alive[i] = true;
+            EventLog::nodeStarted(static_cast<unsigned long>(now),
+                                  _cfg.nodes[i].name.c_str());
+        }
+    }
+
+    // Deaths: for each currently-alive node whose dies_at_ms has been
+    // reached, flip _node_alive, emit node_died, and drop any in-flight
+    // TX from that sender so receivers don't see ghost deliveries.
+    for (int i = 0; i < n; ++i) {
+        const uint64_t dies_at =
+            static_cast<uint64_t>(_cfg.nodes[i].dies_at_ms);
+        if (_node_alive[i] && dies_at > 0 && now >= dies_at) {
+            _node_alive[i] = false;
+            EventLog::nodeDied(static_cast<unsigned long>(now),
+                               _cfg.nodes[i].name.c_str());
+            _in_flight.erase(
+                std::remove_if(_in_flight.begin(), _in_flight.end(),
+                               [i](const InFlight& f) { return f.sender_id == i; }),
+                _in_flight.end());
+        }
+    }
+}
+
 void SimController::processStartupAtStep() {
     const uint64_t now = _now_ms;
     const int n = static_cast<int>(_nodes.size());
@@ -525,6 +574,7 @@ void SimController::processCommandsAtStep() {
             continue;
         }
         const int target = it->second;
+        if (!_node_alive[target]) continue;
         std::string reply = _nodes[target]->onCommand(cmd.command);
         EventLog::cmdReply(static_cast<unsigned long>(now),
                            _nodes[target]->name().c_str(),
@@ -558,8 +608,16 @@ void SimController::deliverReceptionsForStep() {
     for (size_t idx : ended) {
         const InFlight& tx = _in_flight[idx];
 
+        // If the SENDER died after starting this in-flight TX,
+        // processLifecycleAtStep already removed its _in_flight
+        // entries, so we shouldn't see this branch — defensive guard
+        // only.
+        if (!_node_alive[tx.sender_id]) continue;
+
         for (int rcv = 0; rcv < n; ++rcv) {
             if (rcv == tx.sender_id) continue;
+            // Skip dead / unborn receivers — no rx event, no drops.
+            if (!_node_alive[rcv]) continue;
 
             LinkParams lp;
             if (!_links->getLink(tx.sender_id, rcv, lp)) continue;  // no link
@@ -829,6 +887,7 @@ void SimController::tickTimersForStep() {
     const uint64_t now = _now_ms;
     const int n = static_cast<int>(_cfg.nodes.size());
     for (int i = 0; i < n; ++i) {
+        if (!_node_alive[i]) continue;
         _nodes[i]->tickTimers(now);
     }
 }
@@ -849,6 +908,7 @@ void SimController::registerTransmissionsForStep() {
     // physics phase starts.
     if (in_warmup) {
         for (int i = 0; i < n; ++i) {
+            if (!_node_alive[i]) continue;
             for (auto& p : _nodes[i]->drainPendingTxs()) {
                 const int sf    = (p.sf    >= 0) ? p.sf    : _radios[i]->getSF();
                 const int bw_hz = (p.bw_hz >= 0) ? p.bw_hz : _radios[i]->getBwHz();
@@ -873,6 +933,7 @@ void SimController::registerTransmissionsForStep() {
 
                 for (int r = 0; r < n; ++r) {
                     if (r == i) continue;
+                    if (!_node_alive[r]) continue;
                     LinkParams lp;
                     if (!_links->getLink(i, r, lp)) continue;
                     _nodes[r]->onRecv(p.bytes, lp.snr, lp.rssi,
@@ -898,6 +959,7 @@ void SimController::registerTransmissionsForStep() {
     }
 
     for (int i = 0; i < n; ++i) {
+        if (!_node_alive[i]) continue;
         for (auto& p : _nodes[i]->drainPendingTxs()) {
             const int sf    = (p.sf    >= 0) ? p.sf    : _radios[i]->getSF();
             const int bw_hz = (p.bw_hz >= 0) ? p.bw_hz : _radios[i]->getBwHz();
@@ -1293,6 +1355,11 @@ StepResult SimController::step(uint64_t advance_ms) {
             _warmup_end_emitted = true;
         }
     }
+
+    // Lifecycle: node_started / node_died transitions. Runs before the
+    // path-loss / startup / commands / receptions / timers / TX register
+    // pipeline so the rest of the step sees the correct _node_alive state.
+    processLifecycleAtStep();
 
     // Drive the asymmetry-coherence-driven re-sample of per-pair shadows.
     // Per-node offsets stay fixed; only the pair shadow component drifts.

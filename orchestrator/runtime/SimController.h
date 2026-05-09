@@ -97,6 +97,12 @@ public:
 private:
     // Internal per-tick body (extracted from old runSimulation):
     // Fire on_init for any node whose staged startup offset has elapsed.
+    // Lifecycle: handle scheduled deferred starts (start_at_ms) and
+    // scheduled deaths (dies_at_ms). Runs at the top of step() before
+    // any per-step work; toggles _node_alive and emits node_started /
+    // node_died.
+    void processLifecycleAtStep();
+
     // Called at the top of each step before processCommandsAtStep so that
     // a node initialized this tick is fully alive before any of its
     // commands or rx deliveries are processed in the same step.
@@ -195,6 +201,13 @@ private:
     // simulation. Flipped at the top of step() the first time _now_ms
     // crosses simulation.warmup_ms.
     bool     _warmup_end_emitted = false;
+
+    // Per-node lifecycle "is currently alive" flag. Initialized in
+    // initialize(): true if start_at_ms == 0 (alive from t=0) else
+    // false. Flipped to true at start_at_ms (node_started emitted) and
+    // back to false at dies_at_ms (node_died emitted). Each per-step
+    // helper consults this to skip dead / unborn nodes.
+    std::vector<bool> _node_alive;
     bool     _finalized   = false;
     bool     _interrupted = false;
 };
