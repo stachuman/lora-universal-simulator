@@ -109,6 +109,11 @@ class NodeConfig(BaseModel):
     radio: Optional[NodeRadioOverride] = None
     # Stochastic per-TX failure probability ([0, 1]).
     tx_fail_prob: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Lifecycle scheduling. start_at_ms: node fully off until this
+    # sim-time. dies_at_ms: node fully off after this sim-time. Both
+    # validated by the C++ runtime against simulation.duration_ms.
+    start_at_ms: Optional[int] = Field(default=None, ge=1)
+    dies_at_ms: Optional[int] = Field(default=None, ge=1)
 
 
 class TopologyLink(BaseModel):
