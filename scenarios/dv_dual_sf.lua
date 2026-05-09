@@ -1191,6 +1191,32 @@ local start_pending_rx_expiry
 local issue_send
 local become_free
 
+-- Look up the next non-tried, non-blind candidate for this pending_tx
+-- destination. Returns the next_hop id if found, or nil if every
+-- candidate has been tried / is blind / is the upstream we came from.
+-- Used by the failure cascade in rts_timeout_fire and ack_timeout_fire
+-- to walk through K=MAX_RT_CANDIDATES alternatives.
+local function pick_next_cascade_hop(self, px)
+  local entry = self.rt[px.dst]
+  if not entry then return nil end
+  for _, c in ipairs(entry.candidates) do
+    if c.next_hop ~= px.previous_hop
+       and not px.alts_tried[c.next_hop]
+       and not is_blind(self, c.next_hop) then
+      return c.next_hop
+    end
+  end
+  return nil
+end
+
+-- Count entries in a table-as-set (keys are next_hop ids, values true).
+-- Used to populate the path_cascade event's "attempt" field.
+local function set_size(t)
+  local n = 0
+  for _ in pairs(t) do n = n + 1 end
+  return n
+end
+
 -- Re-send the current pending_tx's RTS with the same msg_id. Shared by
 -- rts_timeout_fire (CTS lost) and ack_timeout_fire (DATA-ACK lost): both
 -- recover by re-running the dance from the beginning. Caller must have
@@ -1303,6 +1329,43 @@ local function rts_timeout_fire(self, captured_msg_id)
   end
 
   if self.pending_tx.retries_left <= 0 then
+    -- K=3 failure cascade: mark the current next_hop tried, walk to
+    -- the next non-tried candidate. If found, switch + reset retries.
+    -- Else emit path_cascade_exhausted alongside the legacy rts_giveup
+    -- event and clear pending_tx (true giveup).
+    self.pending_tx.alts_tried[self.pending_tx.next] = true
+    local next_hop = pick_next_cascade_hop(self, self.pending_tx)
+    if next_hop ~= nil then
+      local prev_next = self.pending_tx.next
+      self:emit("path_cascade", {
+        origin     = self.pending_tx.origin,
+        payload    = self.pending_tx.user_text,
+        origin_seq = self.pending_tx.origin_seq,
+        dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+        from_next  = prev_next, to_next = next_hop,
+        attempt    = set_size(self.pending_tx.alts_tried),
+        trigger    = "rts_giveup",
+      })
+      self:log(string.format("path_cascade msg=%d %s -> %s (rts_giveup)",
+        captured_msg_id, name_of(self, prev_next), name_of(self, next_hop)))
+      self.pending_tx.next         = next_hop
+      self.pending_tx.retries_left = self.rts_max_retries
+      tx_rts_retry(self, "cascade_rts")
+      return
+    end
+    -- All K candidates exhausted. Emit the tracking event + the legacy
+    -- giveup event for compatibility, then clear pending_tx.
+    local tried_list = {}
+    for nh, _ in pairs(self.pending_tx.alts_tried) do
+      table.insert(tried_list, nh)
+    end
+    self:emit("path_cascade_exhausted", {
+      origin     = self.pending_tx.origin,
+      payload    = self.pending_tx.user_text,
+      origin_seq = self.pending_tx.origin_seq,
+      dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+      tried      = tried_list, trigger = "rts_giveup",
+    })
     self:emit("rts_giveup", {
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
@@ -1311,8 +1374,8 @@ local function rts_timeout_fire(self, captured_msg_id)
       next       = self.pending_tx.next,
       msg_id     = captured_msg_id,
     })
-    self:log(string.format("rts_giveup msg=%d (max retries exhausted, dst=%s)",
-      captured_msg_id, name_of(self, self.pending_tx.dst)))
+    self:log(string.format("path_cascade_exhausted msg=%d dst=%s tried=%d (rts_giveup)",
+      captured_msg_id, name_of(self, self.pending_tx.dst), #tried_list))
     self.pending_tx = nil
     become_free(self)
     return
@@ -1360,6 +1423,40 @@ local function ack_timeout_fire(self, captured_msg_id)
   end
 
   if self.pending_tx.retries_left <= 0 then
+    -- K=3 failure cascade — same logic as the rts_timeout giveup branch
+    -- but triggered by ack-loss. Walk the candidates list for a
+    -- non-tried alternative; emit path_cascade or path_cascade_exhausted.
+    self.pending_tx.alts_tried[self.pending_tx.next] = true
+    local next_hop = pick_next_cascade_hop(self, self.pending_tx)
+    if next_hop ~= nil then
+      local prev_next = self.pending_tx.next
+      self:emit("path_cascade", {
+        origin     = self.pending_tx.origin,
+        payload    = self.pending_tx.user_text,
+        origin_seq = self.pending_tx.origin_seq,
+        dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+        from_next  = prev_next, to_next = next_hop,
+        attempt    = set_size(self.pending_tx.alts_tried),
+        trigger    = "ack_giveup",
+      })
+      self:log(string.format("path_cascade msg=%d %s -> %s (ack_giveup)",
+        captured_msg_id, name_of(self, prev_next), name_of(self, next_hop)))
+      self.pending_tx.next         = next_hop
+      self.pending_tx.retries_left = self.rts_max_retries
+      tx_rts_retry(self, "cascade_ack")
+      return
+    end
+    local tried_list = {}
+    for nh, _ in pairs(self.pending_tx.alts_tried) do
+      table.insert(tried_list, nh)
+    end
+    self:emit("path_cascade_exhausted", {
+      origin     = self.pending_tx.origin,
+      payload    = self.pending_tx.user_text,
+      origin_seq = self.pending_tx.origin_seq,
+      dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+      tried      = tried_list, trigger = "ack_giveup",
+    })
     self:emit("data_ack_giveup", {
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
@@ -1368,8 +1465,8 @@ local function ack_timeout_fire(self, captured_msg_id)
       next       = self.pending_tx.next,
       msg_id     = captured_msg_id,
     })
-    self:log(string.format("data_ack_giveup msg=%d (max retries exhausted, dst=%s)",
-      captured_msg_id, name_of(self, self.pending_tx.dst)))
+    self:log(string.format("path_cascade_exhausted msg=%d dst=%s tried=%d (ack_giveup)",
+      captured_msg_id, name_of(self, self.pending_tx.dst), #tried_list))
     self.pending_tx = nil
     become_free(self)
     return
