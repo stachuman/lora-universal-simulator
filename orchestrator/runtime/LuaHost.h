@@ -58,6 +58,11 @@ public:
                     uint64_t sim_ms);
     std::string callOnCommand(int node_id, std::string_view cmd_str);
     void callOnRadioBusy(int node_id, const RadioBusyInfo& info);
+    // Dispatch the SX1262-PreambleDetected-equivalent callback. No-op if the
+    // script doesn't define on_preamble_detected. info table carries
+    // {time_ms, from, snr_db}.
+    void callOnPreambleDetected(int node_id, uint64_t time_ms,
+                                int from_id, float snr_db);
 
     // Called by the timer wheel when a registered timer fires. Looks up
     // _LUS.nodes[node_id].timers[handle] and invokes it with `self`.

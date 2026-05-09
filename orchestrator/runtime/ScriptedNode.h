@@ -78,6 +78,16 @@ public:
                 int link_id, int src_id, uint64_t sim_ms);
     std::string onCommand(std::string_view cmd_str);
     void onRadioBusy(const RadioBusyInfo& info);
+    // Mirrors the SX1262 PreambleDetected IRQ: fires when a TX would start
+    // arriving at this receiver while it's tuned to a matching SF, AND the
+    // CAD model decides the radio would have detected the preamble at this
+    // SNR (probabilistic per cad_miss_prob / cad_reliable_snr / cad_marginal_snr).
+    // Fires regardless of whether the rest of the packet decodes — so the
+    // signal stays valid even when per-packet shadow variance pushes
+    // individual frames below the demod floor. `from_id` and `snr_db` are
+    // optional debug context; `time_ms` is the TX start (preamble-arrival)
+    // timestamp.
+    void onPreambleDetected(uint64_t time_ms, int from_id, float snr_db);
 
     // Called by the main loop each step:
     void tickTimers(uint64_t sim_ms);

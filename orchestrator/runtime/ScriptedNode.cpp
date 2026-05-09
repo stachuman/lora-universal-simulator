@@ -125,6 +125,11 @@ void ScriptedNode::onRadioBusy(const RadioBusyInfo& info) {
     _host.callOnRadioBusy(_id, info);
 }
 
+void ScriptedNode::onPreambleDetected(uint64_t time_ms, int from_id, float snr_db) {
+    if (!_initialized) return;
+    _host.callOnPreambleDetected(_id, time_ms, from_id, snr_db);
+}
+
 // -----------------------------------------------------------------------------
 // Timer driving + pending-tx draining
 // -----------------------------------------------------------------------------

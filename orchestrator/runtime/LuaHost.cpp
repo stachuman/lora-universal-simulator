@@ -125,7 +125,8 @@ void LuaHost::loadScript(int node_id, const std::string& path) {
 
     // Copy any defined callbacks into _LUS.nodes[id].script.
     sol::table script_tbl = _node_registry[node_id]["script"];
-    for (const char* name : {"on_init", "on_recv", "on_command", "on_radio_busy"}) {
+    for (const char* name : {"on_init", "on_recv", "on_command", "on_radio_busy",
+                              "on_preamble_detected"}) {
         sol::object fn = env[name];
         if (fn.is<sol::function>()) {
             script_tbl[name] = fn;
@@ -302,6 +303,23 @@ void LuaHost::callOnRadioBusy(int node_id, const RadioBusyInfo& info) {
     if (!r.valid()) {
         sol::error err = r;
         throw std::runtime_error(std::string("on_radio_busy: ") + err.what());
+    }
+}
+
+void LuaHost::callOnPreambleDetected(int node_id, uint64_t time_ms,
+                                     int from_id, float snr_db) {
+    sol::object fn_obj = _node_registry[node_id]["script"]["on_preamble_detected"];
+    if (!fn_obj.is<sol::function>()) return;
+    sol::function fn = fn_obj;
+    sol::table self = _node_registry[node_id]["self"];
+    sol::table tbl = _lua.create_table();
+    tbl["time_ms"] = time_ms;
+    tbl["from"]    = from_id;
+    tbl["snr_db"]  = snr_db;
+    sol::protected_function_result r = fn.call(self, tbl);
+    if (!r.valid()) {
+        sol::error err = r;
+        throw std::runtime_error(std::string("on_preamble_detected: ") + err.what());
     }
 }
 

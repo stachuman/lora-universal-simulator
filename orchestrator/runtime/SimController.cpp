@@ -1165,6 +1165,25 @@ void SimController::registerTransmissionsForStep() {
                 if (!_lbt->shouldNotifyBusy(lp.snr)) continue;
                 _lbt->notifyChannelBusy(observer, i,
                                         just_pushed.end_ms, lp.snr);
+                // SX1262-PreambleDetected equivalent: fire only if the
+                // observer's modem is currently tuned to a SF that includes
+                // the TX's SF. LoRa SFs are quasi-orthogonal at the same BW;
+                // a radio set to SF7 won't see an SF10 preamble. The CAD
+                // gate above (shouldNotifyBusy) already modelled the
+                // probabilistic miss against SNR. Fires regardless of
+                // sync-word match — matches real hardware (PreambleDetected
+                // IRQ is pre-SyncWordValid), and that's the right level for
+                // a "channel about to be polluted by anyone at our SF"
+                // signal that drives beacon-throttling decisions.
+                const auto& rx_set = _node_sf_rx_set[observer];
+                bool sf_match = false;
+                for (int sf : rx_set) {
+                    if (sf == just_pushed.sf) { sf_match = true; break; }
+                }
+                if (sf_match) {
+                    _nodes[observer]->onPreambleDetected(
+                        just_pushed.start_ms, i, lp.snr);
+                }
             }
         }
     }

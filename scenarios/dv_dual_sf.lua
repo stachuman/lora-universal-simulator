@@ -2689,3 +2689,21 @@ function on_radio_busy(self, info)
     self:tx(stash.bytes, stash.opts)
   end)
 end
+
+-- on_preamble_detected fires when a transmission would start arriving at
+-- our radio at our current SF — the SX1262 PreambleDetected IRQ. Crucially,
+-- this fires regardless of whether the rest of the packet decodes, so it's
+-- a faithful "the channel is busy with someone at our SF right now" signal
+-- even when per-packet shadow variance pushes individual frames below the
+-- demod floor. Doesn't filter by sync word — any LoRa traffic at our SF
+-- (other mesh networks, jammers, anything) would collide with our TX
+-- regardless of who sent it.
+--
+-- Wired into the throttle's witness: updating last_rx_routing_sf_ms here
+-- means beacon_fire's "channel-quiet?" check sees real channel activity,
+-- not the decode-success-biased view it had before. Fixes the spiral
+-- where high sigma_db caused decoded RXes to drop, throttle thought the
+-- channel was quiet, fired more beacons that collided.
+function on_preamble_detected(self, info)
+  self.last_rx_routing_sf_ms = info.time_ms
+end
