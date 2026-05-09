@@ -49,10 +49,16 @@ aware per-link SNR/RSSI from node lat/lon via SRTM + ITM:
    else verbatim. Lets a user iterate: tweak commands, then refresh
    the link physics from terrain without re-authoring the rest.
 
-The runtime layered model is preserved: `simulation.path_loss.sigma_db`
-and `asymmetry_coherence_ms` apply on top of the terrain-derived
-`topology.links[].snr`/`rssi` baseline (existing PathLossModel
-already does this — no orchestrator change required).
+This spec produces the *median* SNR/RSSI per link. The variation
+layer that sits on top of the terrain baseline is **deferred to a
+sibling spec** (working title: "Layered runtime variation over
+terrain baseline"). What works today: each `topology.links[]` entry
+already carries an `snr_std_dev` field which the runtime applies as
+per-link shadow. The new SRTM endpoints can populate this from ITM's
+10%-vs-90%-reliability spread as a useful zeroth-order layer, but a
+richer runtime variation model (per-link coherent fading,
+weather-driven slow drift, hill-shadow-aware coherence_ms) is the
+next spec's job.
 
 ## Scope
 
@@ -70,6 +76,12 @@ already does this — no orchestrator change required).
 
 ## Out of scope
 
+- **Variation layer on top of the terrain baseline** — sibling spec.
+  The endpoints here populate `snr_std_dev` per link from ITM's
+  10/90 reliability spread as a starting point, but anything richer
+  (terrain-aware coherence, weather-driven drift, layered shadowing
+  on top of explicit links via `simulation.path_loss.sigma_db`) is
+  the next spec's job.
 - Async / job-queue API. Sync only; documented N² cost (147-node
   Seattle ≈ 10 800 link computations ≈ minutes even parallelized).
   If a user hits it, they fall back to the offline
