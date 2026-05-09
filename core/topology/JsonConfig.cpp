@@ -195,6 +195,11 @@ static SimConfig parseJson(const json& j) {
             if (nd.contains("tx_fail_prob"))
                 def.tx_fail_prob = nd["tx_fail_prob"].get<float>();
 
+            if (nd.contains("start_at_ms"))
+                def.start_at_ms = nd["start_at_ms"].get<unsigned long>();
+            if (nd.contains("dies_at_ms"))
+                def.dies_at_ms  = nd["dies_at_ms"].get<unsigned long>();
+
             // Per-node asymmetry overrides — pin a node's TX/RX bias for
             // tests / known-hardware reproductions. NaN (the default)
             // means "sample from path_loss.node_*_offset_sigma_db".
@@ -359,6 +364,37 @@ static void validateConfig(const SimConfig& cfg) {
                          + std::to_string(cfg.simulation.radio.duty_cycle) + ")");
     if (cfg.simulation.radio.duty_cycle_window_ms == 0)
         errors.push_back("simulation.radio.duty_cycle_window_ms must be > 0");
+
+    // Per-node lifecycle constraint validation. start/die at 0 means
+    // "not scheduled"; if scheduled, must be in (0, duration_ms) and
+    // start < die when both are set.
+    {
+        size_t i = 0;
+        for (const auto& nd : cfg.nodes) {
+            const std::string ctx = "nodes[" + std::to_string(i++) + "]";
+            if (nd.start_at_ms > 0
+                && nd.start_at_ms >= cfg.simulation.duration_ms) {
+                errors.push_back(ctx + ".start_at_ms ("
+                    + std::to_string(nd.start_at_ms)
+                    + ") must be < duration_ms ("
+                    + std::to_string(cfg.simulation.duration_ms) + ")");
+            }
+            if (nd.dies_at_ms > 0
+                && nd.dies_at_ms >= cfg.simulation.duration_ms) {
+                errors.push_back(ctx + ".dies_at_ms ("
+                    + std::to_string(nd.dies_at_ms)
+                    + ") must be < duration_ms ("
+                    + std::to_string(cfg.simulation.duration_ms) + ")");
+            }
+            if (nd.start_at_ms > 0 && nd.dies_at_ms > 0
+                && nd.start_at_ms >= nd.dies_at_ms) {
+                errors.push_back(ctx + ".start_at_ms ("
+                    + std::to_string(nd.start_at_ms)
+                    + ") must be < dies_at_ms ("
+                    + std::to_string(nd.dies_at_ms) + ")");
+            }
+        }
+    }
 
     // Build node name set for cross-validation.
     std::set<std::string> node_names;

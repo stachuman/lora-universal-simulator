@@ -253,6 +253,14 @@ struct SimConfig {
         // direction_deg follows compass convention: 0 = north, 90 = east.
         float velocity_mps         = 0.0f;
         float direction_deg        = 0.0f;
+        // Lifecycle scheduling. 0 = "not scheduled" sentinels (today's
+        // behavior). When start_at_ms > 0, the orchestrator keeps the
+        // node fully off (no rx, tx, scripts, on_init) until that
+        // sim-time. When dies_at_ms > 0, the orchestrator stops the
+        // node fully at that sim-time. Each is enforced by
+        // SimController via _node_alive + processLifecycleAtStep().
+        unsigned long start_at_ms = 0;
+        unsigned long dies_at_ms  = 0;
     };
     std::vector<NodeDef> nodes;
 
