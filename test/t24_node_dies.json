@@ -1,0 +1,31 @@
+{
+  "_name": "t24_node_dies",
+  "_desc": "relay dies at t=5000. ping1 (sent at t=2000) delivers via relay; ping2 (sent at t=10000) cannot reach bob since relay is dead, so alice rts_giveup eventually fires.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/flooder.lua", "config": { "role": "originator" } },
+    { "name": "relay", "script": "examples/flooder.lua", "config": { "role": "forwarder" }, "dies_at_ms": 5000 },
+    { "name": "bob",   "script": "examples/flooder.lua", "config": { "role": "forwarder" } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "relay", "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "relay", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000,  "node": "alice", "command": "send ping1" },
+    { "at_ms": 10000, "node": "alice", "command": "send ping2" }
+  ],
+  "expect": [
+    { "type": "event_count",         "event_type": "node_died", "count": 1 },
+    { "type": "script_emit_contains","node": "bob",   "emit_type": "recv", "value": "ping1" }
+  ]
+}
