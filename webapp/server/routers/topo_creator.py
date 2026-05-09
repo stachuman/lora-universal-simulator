@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from server.services.topo_generator import (
     compute_snr_matrix,
@@ -41,6 +41,9 @@ class PathLossParams(BaseModel):
     node_tx_offset_sigma_db: Optional[float] = 0.0
     node_rx_offset_sigma_db: Optional[float] = 0.0
     asymmetry_coherence_ms: Optional[int] = 0
+    # Authoring-time only — used by the SRTM+ITM topology generator,
+    # not by the runtime path-loss model. Default 868 MHz EU LoRa.
+    frequency_mhz: Optional[float] = Field(default=None, gt=0.0)
 
 
 class PreviewSNRRequest(BaseModel):
@@ -112,3 +115,75 @@ async def generate_random_endpoint(body: GenerateRandomRequest) -> dict:
         seed=body.seed,
     )
     return {"nodes": nodes}
+
+
+# ---------------------------------------------------------------------------
+# SRTM + ITM (Longley-Rice) terrain-aware endpoints
+# ---------------------------------------------------------------------------
+
+class SrtmItmParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    climate: int = Field(default=6, ge=1, le=7)
+    polarization: int = Field(default=1, ge=0, le=1)
+    ground_permittivity: float = 15.0
+    ground_conductivity: float = 0.005
+    surface_refractivity: float = 314.0
+    profile_resolution_m: float = Field(default=90.0, gt=0.0)
+    min_snr_db: float = -20.0
+    max_links_per_node: int = Field(default=8, ge=1, le=64)
+
+
+class GenerateSrtmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    nodes: list[dict] = Field(min_length=2)
+    path_loss: PathLossParams
+    itm: SrtmItmParams = SrtmItmParams()
+    bandwidth_hz: float = 62500.0
+    noise_figure_db: float = 6.0
+
+
+@router.post("/generate-srtm")
+def generate_srtm(req: GenerateSrtmRequest):
+    """Compute terrain-aware per-link SNR/RSSI for a given node list.
+
+    Returns the topology.links payload + summary counts. The caller
+    is responsible for stitching the result into a complete scenario
+    JSON (the editor / creator UIs do this).
+    """
+    # Lazy import — keeps the router importable even when srtm /
+    # itmlogic aren't installed (the request will then 503).
+    try:
+        from server.services.topo_srtm import (
+            compute_link_matrix,
+            get_elevation_data,
+        )
+    except ImportError as e:
+        raise HTTPException(status_code=500,
+            detail=f"topo_srtm service unavailable: {e}")
+
+    try:
+        srtm_data = get_elevation_data()
+    except Exception as e:
+        raise HTTPException(status_code=503,
+            detail=f"SRTM data fetch failed (offline?): {e}")
+
+    freq_mhz = req.path_loss.frequency_mhz or 868.0
+    result = compute_link_matrix(
+        nodes=req.nodes,
+        freq_mhz=freq_mhz,
+        tx_power_dbm=req.path_loss.tx_power_dbm,
+        bandwidth_hz=req.bandwidth_hz,
+        noise_figure_db=req.noise_figure_db,
+        profile_resolution_m=req.itm.profile_resolution_m,
+        min_snr_db=req.itm.min_snr_db,
+        max_links_per_node=req.itm.max_links_per_node,
+        climate=req.itm.climate,
+        polarization=req.itm.polarization,
+        srtm_data=srtm_data,
+    )
+    return {
+        "links": result["links"],
+        "n_pairs_evaluated": result["n_pairs_evaluated"],
+        "n_links_kept": result["n_links_kept"],
+        "n_srtm_misses": result["n_srtm_misses"],
+    }
