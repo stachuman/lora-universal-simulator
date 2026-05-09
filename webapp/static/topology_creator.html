@@ -291,6 +291,19 @@
         <label>tx_power_dbm</label>
         <input id="pl-txpower" type="number" step="0.5" value="14.0">
       </div>
+      <h4 style="margin-top:14px">Realistic-physics extensions</h4>
+      <div class="param-row" title="Per-node TX gain Gaussian (dB). Models hardware variation between units.">
+        <label>node_tx_offset_sigma_db</label>
+        <input id="pl-tx-offset-sigma" type="number" step="0.1" min="0" value="0.0">
+      </div>
+      <div class="param-row" title="Per-node RX gain Gaussian (dB). Same idea, on the receive side.">
+        <label>node_rx_offset_sigma_db</label>
+        <input id="pl-rx-offset-sigma" type="number" step="0.1" min="0" value="0.0">
+      </div>
+      <div class="param-row" title="Coherence time (ms) for the per-link asymmetry process. 0 = static.">
+        <label>asymmetry_coherence_ms</label>
+        <input id="pl-asym-coh" type="number" step="1000" min="0" value="0">
+      </div>
     </div>
 
     <div class="tc-error" id="tc-error"></div>
@@ -337,19 +350,26 @@
 
   // ── Path-loss presets ────────────────────────────────────
   window.applyPreset = function(key) {
+    // Realistic-physics extensions: tx/rx offset sigmas and asymmetry
+    // coherence. Defaults at 0 (deterministic) so the existing
+    // suburban/urban/freespace presets keep their previous behavior.
+    // Users wanting hardware-variation modeling can dial these up.
     const presets = {
-      suburban:  { alpha: 3.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
-      urban:     { alpha: 3.5,  sigma: 4,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
-      freespace: { alpha: 2.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0 },
+      suburban:  { alpha: 3.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0, txOff: 0, rxOff: 0, asymCoh: 0 },
+      urban:     { alpha: 3.5,  sigma: 4,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0, txOff: 0, rxOff: 0, asymCoh: 0 },
+      freespace: { alpha: 2.0,  sigma: 0,   refdist: 1.0, refloss: 40.0, noise: -120.0, tx: 14.0, txOff: 0, rxOff: 0, asymCoh: 0 },
     };
     const p = presets[key];
     if (!p) return;
-    document.getElementById('pl-alpha').value      = p.alpha;
-    document.getElementById('pl-sigma').value      = p.sigma;
-    document.getElementById('pl-refdist').value    = p.refdist;
-    document.getElementById('pl-refloss').value    = p.refloss;
-    document.getElementById('pl-noisefloor').value = p.noise;
-    document.getElementById('pl-txpower').value    = p.tx;
+    document.getElementById('pl-alpha').value          = p.alpha;
+    document.getElementById('pl-sigma').value          = p.sigma;
+    document.getElementById('pl-refdist').value        = p.refdist;
+    document.getElementById('pl-refloss').value        = p.refloss;
+    document.getElementById('pl-noisefloor').value     = p.noise;
+    document.getElementById('pl-txpower').value        = p.tx;
+    document.getElementById('pl-tx-offset-sigma').value = p.txOff;
+    document.getElementById('pl-rx-offset-sigma').value = p.rxOff;
+    document.getElementById('pl-asym-coh').value        = p.asymCoh;
   };
 
   // ── Placement mode toggle ────────────────────────────────
@@ -590,6 +610,9 @@
       ref_loss_db:    parseFloat(document.getElementById('pl-refloss').value),
       noise_floor_db: parseFloat(document.getElementById('pl-noisefloor').value),
       tx_power_dbm:   parseFloat(document.getElementById('pl-txpower').value),
+      node_tx_offset_sigma_db: parseFloat(document.getElementById('pl-tx-offset-sigma').value) || 0,
+      node_rx_offset_sigma_db: parseFloat(document.getElementById('pl-rx-offset-sigma').value) || 0,
+      asymmetry_coherence_ms:  parseInt  (document.getElementById('pl-asym-coh').value, 10)    || 0,
     };
   }
 

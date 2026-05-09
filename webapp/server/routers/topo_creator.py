@@ -33,6 +33,14 @@ class PathLossParams(BaseModel):
     ref_loss_db: float = 40.0
     noise_floor_db: float = -120.0
     tx_power_dbm: float = 14.0
+    # Realistic-physics extensions (mirror SimulationConfig.path_loss).
+    # compute_snr_matrix uses the deterministic core; these don't affect
+    # the preview (they're random per-node/per-link draws), but accepting
+    # them here keeps the round-trip lossless when the editor saves and
+    # re-loads a topology.
+    node_tx_offset_sigma_db: Optional[float] = 0.0
+    node_rx_offset_sigma_db: Optional[float] = 0.0
+    asymmetry_coherence_ms: Optional[int] = 0
 
 
 class PreviewSNRRequest(BaseModel):
