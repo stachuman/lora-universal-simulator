@@ -907,14 +907,15 @@
   };
 
   // ── Collect path-loss params ─────────────────────────────
-  // When SRTM+ITM has populated snrLinks with terrain-aware per-link
-  // SNR values, force model="none" so the runtime uses those values
-  // verbatim. Otherwise the orchestrator's per-pair baseline loop
-  // would clobber them with log-distance estimates from positions.
+  // Always returns the log-distance form. saveTopo decides whether
+  // to include it in the payload: when SRTM+ITM has populated
+  // snrLinks, the path_loss key is OMITTED so the orchestrator uses
+  // the explicit per-link SNRs verbatim instead of re-deriving them.
+  // (The runtime gates the log-distance baseline on path_loss.present;
+  // a missing block produces cleaner JSON than carrying model="none".)
   function collectPathLoss() {
-    const hasExplicitLinks = Array.isArray(snrLinks) && snrLinks.length > 0;
     return {
-      model:          hasExplicitLinks ? 'none' : 'log_distance',
+      model:          'log_distance',
       alpha:          parseFloat(document.getElementById('pl-alpha').value),
       sigma_db:       parseFloat(document.getElementById('pl-sigma').value),
       ref_distance_m: parseFloat(document.getElementById('pl-refdist').value),
@@ -925,6 +926,10 @@
       node_rx_offset_sigma_db: parseFloat(document.getElementById('pl-rx-offset-sigma').value) || 0,
       asymmetry_coherence_ms:  parseInt  (document.getElementById('pl-asym-coh').value, 10)    || 0,
     };
+  }
+
+  function hasExplicitLinks() {
+    return Array.isArray(snrLinks) && snrLinks.length > 0;
   }
 
   // ── Save topology ────────────────────────────────────────
@@ -942,12 +947,11 @@
       return;
     }
 
-    const payload = {
-      name,
-      path_loss: collectPathLoss(),
-      nodes,
-      links: snrLinks,
-    };
+    // Omit path_loss when explicit links are present (computeSrtm
+    // populated snrLinks). See collectPathLoss comment for the
+    // runtime rationale.
+    const payload = { name, nodes, links: snrLinks };
+    if (!hasExplicitLinks()) payload.path_loss = collectPathLoss();
 
     try {
       document.getElementById('btn-save').disabled = true;

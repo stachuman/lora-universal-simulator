@@ -430,16 +430,16 @@
   };
 
   // ── Collect path-loss ────────────────────────────────────
-  // When the editor holds explicit per-link SNR (snrLinks populated by
-  // computeSrtm() or by loading a scenario JSON whose topology.links[]
-  // is non-empty), force model="none" so the orchestrator uses those
-  // values verbatim instead of re-deriving the NxN matrix from node
-  // positions via log-distance. SimController gates PathLossModel
-  // construction + the per-pair baseline loop on model != "none".
+  // Always returns the log-distance form from the input fields. The
+  // save functions decide whether to include the block in the output:
+  // when snrLinks is non-empty (computeSrtm or loaded scenario), they
+  // OMIT path_loss entirely so the orchestrator uses topology.links
+  // verbatim. SimController gates the per-pair baseline loop on
+  // path_loss.present, so a missing block has the same effect as
+  // model="none" but produces cleaner JSON.
   function collectPathLoss() {
-    const hasExplicitLinks = Array.isArray(snrLinks) && snrLinks.length > 0;
     return {
-      model:          hasExplicitLinks ? 'none' : 'log_distance',
+      model:          'log_distance',
       alpha:          parseFloat(document.getElementById('pl-alpha').value),
       sigma_db:       parseFloat(document.getElementById('pl-sigma').value),
       ref_distance_m: parseFloat(document.getElementById('pl-refdist').value),
@@ -450,6 +450,13 @@
       node_rx_offset_sigma_db: parseFloat(document.getElementById('pl-rx-offset-sigma').value) || 0,
       asymmetry_coherence_ms:  parseInt  (document.getElementById('pl-asym-coh').value, 10)    || 0,
     };
+  }
+
+  // True when the editor holds explicit per-link SNR (computeSrtm or
+  // a loaded scenario's topology.links[]). Save flows omit path_loss
+  // in this case — see collectPathLoss comment.
+  function hasExplicitLinks() {
+    return Array.isArray(snrLinks) && snrLinks.length > 0;
   }
 
   // ── SNR color thresholds ────────────────────────────────
@@ -965,23 +972,29 @@
       return;
     }
     const name = document.getElementById('topo-name').value.trim();
-    const path_loss = collectPathLoss();
     const links = snrLinks;
+    // Omit path_loss when explicit per-link SNR is in play (snrLinks
+    // populated via computeSrtm or loaded from a scenario). The C++
+    // runtime gates the log-distance baseline on path_loss.present,
+    // so a missing block ⇒ explicit links used verbatim. Cleaner JSON
+    // than carrying model="none" + ignored numeric params.
+    const includePathLoss = !hasExplicitLinks();
 
     let out;
     if (Object.keys(preservedScenarioFields).length > 0) {
       // Scenario round-trip: rebuild the full document.
       out = { ...preservedScenarioFields };
       out._name = name || preservedScenarioFields._name || 'scenario';
-      // Re-attach path_loss inside simulation.
       const sim = { ...(out.simulation || {}) };
-      sim.path_loss = path_loss;
+      if (includePathLoss) sim.path_loss = collectPathLoss();
+      else                 delete sim.path_loss;
       out.simulation = sim;
       out.nodes = nodes;
       out.topology = { ...(out.topology || {}), links };
     } else {
       // Topology shape.
-      out = { name: name || 'topology', path_loss, nodes, links };
+      out = { name: name || 'topology', nodes, links };
+      if (includePathLoss) out.path_loss = collectPathLoss();
     }
 
     const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
@@ -1004,12 +1017,12 @@
       return;
     }
 
-    const payload = {
-      name,
-      path_loss: collectPathLoss(),
-      nodes,
-      links: snrLinks,
-    };
+    // Same omit-when-explicit-links rule as saveToFile. The topology
+    // API's path_loss field is `dict = Field(default_factory=dict)`,
+    // so a missing key on the wire defaults to {} server-side and
+    // downstream consumers can null-check it.
+    const payload = { name, nodes, links: snrLinks };
+    if (!hasExplicitLinks()) payload.path_loss = collectPathLoss();
 
     try {
       document.getElementById('btn-save').disabled = true;
