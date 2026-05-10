@@ -164,6 +164,18 @@
     box-shadow: none;
   }
 
+  /* Per-direction SNR labels on polylines, shown when "Labels" is on.
+     Smaller + tighter than node labels so they don't crowd the map. */
+  .leaflet-tooltip.te-edge-label {
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border-light);
+    color: var(--text);
+    font-size: 9px; padding: 1px 4px;
+    font-family: var(--font-mono);
+    box-shadow: none;
+    pointer-events: none;
+  }
+
   /* Draggable node icon (replaces L.circleMarker — circleMarker has
      no built-in dragging, so we need a real L.marker + divIcon). */
   .te-node-icon {
@@ -502,6 +514,41 @@
           }
           line.bindTooltip(label, { sticky: true, className: 'te-label' });
           edgeGroup.addLayer(line);
+
+          // Permanent per-direction SNR labels when "Labels" is on.
+          // Each label sits at ~30% of the way from the receiving node
+          // toward the other so the number reads as "SNR THIS node
+          // sees from the other end". Asymmetric pair → two labels;
+          // symmetric (or only-one-direction) → one centered label.
+          if (showLabels) {
+            const lat_i = nodes[i].lat, lon_i = nodes[i].lon;
+            const lat_j = nodes[j].lat, lon_j = nodes[j].lon;
+            const showSplit = has_ij && has_ji && Math.abs(snr_ij - snr_ji) > 0.05;
+            if (showSplit) {
+              // 30% from i (closer to i, shows what i receives = snr_ji)
+              L.tooltip({
+                permanent: true, direction: 'center', className: 'te-edge-label',
+              }).setLatLng([
+                lat_i + 0.30 * (lat_j - lat_i),
+                lon_i + 0.30 * (lon_j - lon_i),
+              ]).setContent(snr_ji.toFixed(1) + ' dB').addTo(edgeGroup);
+              // 30% from j (closer to j, shows what j receives = snr_ij)
+              L.tooltip({
+                permanent: true, direction: 'center', className: 'te-edge-label',
+              }).setLatLng([
+                lat_j + 0.30 * (lat_i - lat_j),
+                lon_j + 0.30 * (lon_i - lon_j),
+              ]).setContent(snr_ij.toFixed(1) + ' dB').addTo(edgeGroup);
+            } else {
+              // Single midpoint label.
+              const s = has_ij ? snr_ij : snr_ji;
+              L.tooltip({
+                permanent: true, direction: 'center', className: 'te-edge-label',
+              }).setLatLng([
+                (lat_i + lat_j) / 2, (lon_i + lon_j) / 2,
+              ]).setContent(s.toFixed(1) + ' dB').addTo(edgeGroup);
+            }
+          }
         }
       }
     }
