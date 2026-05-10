@@ -26,6 +26,13 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 class PathLossParams(BaseModel):
+    # Accepts "log_distance" or "none". The editor sends "none" when it has
+    # explicit per-link SNR (computed via SRTM+ITM or loaded from a scenario)
+    # so the runtime won't re-derive the matrix from positions. The compute
+    # endpoints below (preview-snr, generate-srtm) ignore the model field —
+    # they always use log-distance physics for their own NxN computation —
+    # but accepting "none" keeps the request body consistent with what the
+    # editor's saveTopo flow produces.
     model: str = "log_distance"
     alpha: float = 3.0
     sigma_db: float = 0.0

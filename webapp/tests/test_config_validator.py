@@ -46,6 +46,47 @@ def test_path_loss_block_accepted(minimal_lus_config):
     assert parsed.simulation.path_loss.alpha == 3.0
 
 
+def test_path_loss_model_none_accepted(minimal_lus_config):
+    """model=none opts out of the log-distance baseline; explicit
+    topology.links carry the per-link SNR. Editor emits this shape
+    after computeSrtm or when loading a scenario with explicit links."""
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["path_loss"] = {"model": "none"}
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.simulation.path_loss.model == "none"
+
+
+def test_path_loss_model_none_with_round_tripped_params(minimal_lus_config):
+    """Editor saves the user's last-set log-distance params alongside
+    model=none so toggling back doesn't lose them. Validator accepts."""
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["path_loss"] = {
+        "model": "none",
+        "alpha": 3.0,
+        "sigma_db": 0.0,
+        "ref_distance_m": 1.0,
+        "ref_loss_db": 40.0,
+        "noise_floor_db": -120.0,
+        "tx_power_dbm": 14.0,
+    }
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed.simulation.path_loss.model == "none"
+    assert parsed.simulation.path_loss.alpha == 3.0
+
+
+def test_path_loss_unknown_model_rejected(minimal_lus_config):
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["path_loss"] = {"model": "free_space"}
+    parsed, errors = validate(cfg)
+    assert parsed is None
+    assert any("model" in e for e in errors)
+
+
 def test_lat_lon_accepted(minimal_lus_config):
     cfg = dict(minimal_lus_config)
     cfg["nodes"] = [dict(cfg["nodes"][0], lat=41.39, lon=2.16)]

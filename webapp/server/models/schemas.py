@@ -14,13 +14,17 @@ from pydantic import BaseModel, Field, ConfigDict
 class PathLossModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model: Literal["log_distance"]
-    alpha: float = Field(ge=1.0, le=6.0)
-    sigma_db: float = Field(ge=0.0, le=20.0)
-    ref_distance_m: float = Field(gt=0.0)
-    ref_loss_db: float
-    noise_floor_db: float
-    tx_power_dbm: float
+    # "none" opts out of the log-distance baseline at orchestrator startup
+    # so explicit topology.links[] entries are used verbatim. The other
+    # fields are unused in that case but remain accepted so the editor
+    # can round-trip the user's last-set values when toggling back.
+    model: Literal["log_distance", "none"]
+    alpha: Optional[float] = Field(default=None, ge=1.0, le=6.0)
+    sigma_db: Optional[float] = Field(default=None, ge=0.0, le=20.0)
+    ref_distance_m: Optional[float] = Field(default=None, gt=0.0)
+    ref_loss_db: Optional[float] = None
+    noise_floor_db: Optional[float] = None
+    tx_power_dbm: Optional[float] = None
     # Per-node TX/RX gain offsets (Gaussian, drawn once per node).
     # Models hardware variation between units. C++ accepts any double;
     # we constrain to non-negative since these are stddevs.

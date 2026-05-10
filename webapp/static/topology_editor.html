@@ -427,9 +427,16 @@
   };
 
   // ── Collect path-loss ────────────────────────────────────
+  // When the editor holds explicit per-link SNR (snrLinks populated by
+  // computeSrtm() or by loading a scenario JSON whose topology.links[]
+  // is non-empty), force model="none" so the orchestrator uses those
+  // values verbatim instead of re-deriving the NxN matrix from node
+  // positions via log-distance. SimController gates PathLossModel
+  // construction + the per-pair baseline loop on model != "none".
   function collectPathLoss() {
+    const hasExplicitLinks = Array.isArray(snrLinks) && snrLinks.length > 0;
     return {
-      model:          'log_distance',
+      model:          hasExplicitLinks ? 'none' : 'log_distance',
       alpha:          parseFloat(document.getElementById('pl-alpha').value),
       sigma_db:       parseFloat(document.getElementById('pl-sigma').value),
       ref_distance_m: parseFloat(document.getElementById('pl-refdist').value),

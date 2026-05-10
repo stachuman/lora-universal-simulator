@@ -905,9 +905,14 @@
   };
 
   // ── Collect path-loss params ─────────────────────────────
+  // When SRTM+ITM has populated snrLinks with terrain-aware per-link
+  // SNR values, force model="none" so the runtime uses those values
+  // verbatim. Otherwise the orchestrator's per-pair baseline loop
+  // would clobber them with log-distance estimates from positions.
   function collectPathLoss() {
+    const hasExplicitLinks = Array.isArray(snrLinks) && snrLinks.length > 0;
     return {
-      model:          'log_distance',
+      model:          hasExplicitLinks ? 'none' : 'log_distance',
       alpha:          parseFloat(document.getElementById('pl-alpha').value),
       sigma_db:       parseFloat(document.getElementById('pl-sigma').value),
       ref_distance_m: parseFloat(document.getElementById('pl-refdist').value),
