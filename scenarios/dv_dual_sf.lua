@@ -90,14 +90,29 @@
 --       busy→quiet transition. Set quiet_threshold_ms=0 to disable both
 --       the throttle AND the silence-jitter (used by unit tests that
 --       depend on rapid-fire beacon mechanics in tight time windows).
---     → tx 'B' with all rt entries → ±20% jittered re-arm
+--     differential emission: pack_beacon emits dirty routes (changed
+--       since their last advertisement) BEFORE filling remaining slots
+--       from the sliding-offset rotation. Routes are marked dirty by
+--       rt_merge on "new"/"promote"/"primary_refresh" and by
+--       rt_prune_cycle when the primary is pruned. Dirty flag cleared
+--       once the route is included in an emitted beacon. Steady state
+--       with no churn → no dirty entries → byte-for-byte identical to
+--       the pre-differential rotation. Active state → recent route
+--       changes propagate within ONE beacon period instead of waiting
+--       for the rotation window to come around. Telemetry:
+--       beacon_diff_breakdown emits {dirty_n, stable_n, total_dirty}.
+--     → tx 'B' (dirty entries first, then stable rotation fill) → ±20% jittered re-arm
 --   triggered beacons: any rt mutation (new/promote/3cycle-prune)
 --     schedules a one-shot beacon within rand(50,500)ms (coalesced into
 --     a single armed trigger). NOT subject to the adaptive throttle —
 --     triggered beacons exist to propagate routing changes urgently;
---     suppressing them on busy channels would defeat the purpose. This
---     is what makes convergence fast when the operational period is
---     minutes-long; periodic beacons are just a slow keep-alive.
+--     suppressing them on busy channels would defeat the purpose.
+--     With differential emission, the triggered beacon naturally
+--     carries the freshly-mutated routes in its dirty slots — they
+--     always make the next on-air beacon. This is what makes
+--     convergence fast when the operational period is minutes-long;
+--     periodic beacons are just a slow keep-alive that catches anything
+--     missed by triggered fires.
 --     Half-duplex skip applies — busy nodes drop the trigger and rely on
 --     the next mutation (or periodic) to retry.
 --   on_recv 'B' from N at rx_snr
@@ -501,11 +516,24 @@
 -- network_id (4 bits): same field as RTS. Receivers reject foreign-
 -- network beacons before rt_merge so foreign nodes don't pollute our
 -- routing tables.
+-- Differential pack_beacon — two-tier emission.
+--
+-- Phase 1 (priority): every rt[dest] with .dirty=true (set by rt_merge
+--   on "new" / "promote" / "primary_refresh", and by rt_prune_cycle when
+--   the primary was pruned). Sorted by dest_id for determinism. Capped at
+--   max_entries — overflow waits for the next beacon (no information loss).
+--
+-- Phase 2 (background): the existing sliding-offset rotation fills any
+--   remaining slots, skipping destinations already in the dirty page so
+--   we never duplicate within a single beacon.
+--
+-- After emission: dirty flags for sent routes are cleared. The stable
+-- offset advances ONLY by the number of stable slots used — so when
+-- dirty fills the beacon, stable progress isn't lost.
+--
+-- Steady state with no churn → all flags clean → only Phase 2 runs →
+-- byte-for-byte identical to the pre-differential pack_beacon.
 local function pack_beacon(node, max_entries, offset)
-  -- Deterministic ordering: sort by dest_id so successive beacons walk
-  -- a stable sequence (otherwise pairs() iteration order is undefined
-  -- and the rotation degenerates to "random subset" — that still works
-  -- but takes longer to cover the table on average).
   local all_dests = {}
   for dest_id, _ in pairs(node.rt) do
     table.insert(all_dests, dest_id)
@@ -514,31 +542,70 @@ local function pack_beacon(node, max_entries, offset)
   local nid_byte = (node.network_id & 0xf) << 4
   local total = #all_dests
   if total == 0 then
-    return "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(0), 0
+    return "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(0),
+           0,
+           { dirty_n = 0, stable_n = 0, total_dirty = 0 }
   end
 
-  -- Take a contiguous page starting at offset, wrapping around.
-  local n = math.min(max_entries, total)
-  local page = {}
-  for i = 0, n - 1 do
-    local idx = ((offset + i) % total) + 1
-    table.insert(page, all_dests[idx])
+  -- Phase 1: dirty routes (sorted, deterministic).
+  local dirty_in_order = {}
+  local dirty_set = {}                     -- O(1) skip lookup for Phase 2
+  for _, dest_id in ipairs(all_dests) do
+    if node.rt[dest_id].dirty then
+      table.insert(dirty_in_order, dest_id)
+      dirty_set[dest_id] = true
+    end
   end
+  local total_dirty = #dirty_in_order
+  local dirty_n = math.min(total_dirty, max_entries)
 
-  local out = "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(n)
-  for _, dest_id in ipairs(page) do
+  -- Phase 2: stable rotation — walk from offset, skip dirty, fill remaining.
+  local stable_page = {}
+  local remaining = max_entries - dirty_n
+  local new_offset = offset
+  if remaining > 0 then
+    local idx = offset
+    local steps = 0
+    while #stable_page < remaining and steps < total do
+      local d = all_dests[(idx % total) + 1]
+      if not dirty_set[d] then
+        table.insert(stable_page, d)
+      end
+      idx = idx + 1
+      steps = steps + 1
+    end
+    new_offset = idx % total
+  end
+  local stable_n = #stable_page
+
+  -- Build frame: dirty entries first, then stable.
+  local n_total = dirty_n + stable_n
+  local out = "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(n_total)
+  local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
     local s = math.floor(p.score + 0.5)
     if s < -128 then s = -128 end
     if s >  127 then s =  127 end
-    if s < 0 then s = s + 256 end  -- two's-complement byte
+    if s < 0 then s = s + 256 end
     out = out .. string.char(dest_id)
               .. string.char(p.next_hop)
               .. string.char(s)
               .. string.char(p.hops)
   end
-  -- Return the new offset so the caller can advance for the next fire.
-  return out, (offset + n) % total
+  for i = 1, dirty_n do pack_one(dirty_in_order[i]) end
+  for _, d  in ipairs(stable_page) do pack_one(d) end
+
+  -- Clear dirty for routes that landed in this beacon (those that overflowed
+  -- stay dirty for the next one).
+  for i = 1, dirty_n do
+    node.rt[dirty_in_order[i]].dirty = nil
+  end
+
+  return out, new_offset, {
+    dirty_n     = dirty_n,
+    stable_n    = stable_n,
+    total_dirty = total_dirty,
+  }
 end
 
 local function parse_beacon(frame)
@@ -1129,10 +1196,15 @@ end
 --                        better; refreshed in place
 --   "alt_install"     — cand landed in candidates[2..K] (was lower or new)
 --   "no_change"       — cand can't displace anything
+-- Sets entry.dirty = true on every mutation that changes the route this
+-- node would advertise (i.e., changes candidates[1]). pack_beacon
+-- prioritises dirty entries for the next emission so route changes
+-- propagate within one beacon period instead of waiting for the
+-- sliding-offset rotation to come around.
 local function rt_merge(rt, dest_id, cand, viab_db)
   local entry = rt[dest_id]
   if entry == nil then
-    rt[dest_id] = { candidates = { cand } }
+    rt[dest_id] = { candidates = { cand }, dirty = true }   -- new dest
     return "new"
   end
 
@@ -1148,9 +1220,11 @@ local function rt_merge(rt, dest_id, cand, viab_db)
         end)
         local now_primary = (entry.candidates[1].next_hop == cand.next_hop)
         if now_primary then
+          entry.dirty = true                                  -- primary refresh
           return "primary_refresh"
         elseif was_primary then
-          return "promote"  -- some other candidate is now primary
+          entry.dirty = true                                  -- another took over
+          return "promote"
         end
         return "alt_install"
       end
@@ -1169,6 +1243,7 @@ local function rt_merge(rt, dest_id, cand, viab_db)
              (not route_strictly_better(b, a, viab_db) and a.score > b.score)
     end)
     if entry.candidates[1].next_hop == cand.next_hop then
+      entry.dirty = true                                      -- new candidate became primary
       return "promote"
     end
     return "alt_install"
@@ -1186,6 +1261,7 @@ local function rt_merge(rt, dest_id, cand, viab_db)
            (not route_strictly_better(b, a, viab_db) and a.score > b.score)
   end)
   if entry.candidates[1].next_hop == cand.next_hop then
+    entry.dirty = true                                        -- displaced into primary
     return "promote"
   end
   return "alt_install"
@@ -1235,10 +1311,12 @@ local function rt_prune_cycle(self, dest_id, sender_id)
   local entry = self.rt[dest_id]
   if entry == nil then return end
   local mutated = false
+  local primary_pruned = false
   local kept = {}
   for i, c in ipairs(entry.candidates) do
     if c.n2_hop == sender_id then
       local slot = (i == 1) and "primary" or "alt"
+      if i == 1 then primary_pruned = true end
       self:emit("rt_prune", {
         dest = dest_id, slot = slot, reason = "3cycle",
         via = c.next_hop, n2 = sender_id,
@@ -1256,6 +1334,9 @@ local function rt_prune_cycle(self, dest_id, sender_id)
       self.rt[dest_id] = nil
     else
       entry.candidates = kept
+      -- If we lost the primary, the new candidates[1] is what we'd
+      -- advertise — re-mark dirty so the next beacon carries it.
+      if primary_pruned then entry.dirty = true end
     end
     schedule_triggered_beacon(self)
   end
@@ -1872,23 +1953,37 @@ local function send_beacon_page(self, kind)
     self:log(string.format("beacon_tx skipped (busy in data exchange) kind=%s", kind))
     return false
   end
-  local frame, new_offset = pack_beacon(self,
-                                        self.beacon_max_entries,
-                                        self.beacon_offset)
-  local total = rt_count(self.rt)
-  local page_n = frame:byte(3)    -- entries in this page
+  local frame, new_offset, diff = pack_beacon(self,
+                                              self.beacon_max_entries,
+                                              self.beacon_offset)
+  local total  = rt_count(self.rt)
+  local page_n = frame:byte(4)              -- byte 4 = n (post-network_id-header)
   self:emit("beacon_tx", {
     n_entries = page_n, rt_total = total,
     offset = self.beacon_offset, next_offset = new_offset,
     kind = kind,
   })
-  self:log(string.format("beacon_tx kind=%s page=%d/%d offset %d→%d",
-    kind, page_n, total, self.beacon_offset, new_offset))
+  -- Differential breakdown: how many of the n_entries were dirty (priority)
+  -- vs stable (background rotation), and how many dirty routes overflowed
+  -- this beacon (will surface in the next one).
+  self:emit("beacon_diff_breakdown", {
+    dirty_n     = diff.dirty_n,
+    stable_n    = diff.stable_n,
+    total_dirty = diff.total_dirty,
+    rt_total    = total,
+    kind        = kind,
+  })
+  self:log(string.format(
+    "beacon_tx kind=%s page=%d/%d (dirty=%d stable=%d, overflow=%d) offset %d→%d",
+    kind, page_n, total, diff.dirty_n, diff.stable_n,
+    diff.total_dirty - diff.dirty_n,
+    self.beacon_offset, new_offset))
   self.beacon_offset = new_offset
   return tx_flood(self, frame, {
     sf    = self.routing_sf,
     label = "BCN",
-    info  = string.format("rt=%d/%d off=%d kind=%s", page_n, total, self.beacon_offset, kind),
+    info  = string.format("rt=%d/%d off=%d dirty=%d kind=%s",
+      page_n, total, self.beacon_offset, diff.dirty_n, kind),
   })
 end
 

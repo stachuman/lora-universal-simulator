@@ -440,7 +440,43 @@ schedule_triggered_beacon:
 propagate routing changes urgently; suppressing them on busy channels
 defeats the purpose. Half-duplex skip still applies.
 
-### 6.4 Bounded beacons (paged emission)
+### 6.4 Differential beacons (dirty-first emission)
+
+`pack_beacon` is two-tiered. When emitting:
+
+1. **Phase 1 — dirty routes (priority):** every `rt[dest]` with
+   `.dirty=true` is emitted first, sorted by `dest_id`. The flag is
+   set by `rt_merge` on actions that change the route this node would
+   advertise (`"new"`, `"promote"`, `"primary_refresh"`) and by
+   `rt_prune_cycle` when the primary slot is removed. Cleared once the
+   route is included in a beacon.
+
+2. **Phase 2 — stable rotation (background):** existing sliding-offset
+   walk fills any remaining slots up to `beacon_max_entries`, skipping
+   destinations already in Phase 1 (dedup within a single beacon).
+
+The stable offset only advances by the number of stable slots used.
+When dirty fills the beacon, stable progress isn't lost.
+
+**Steady state with no churn:** every route is clean → Phase 1 is
+empty → only Phase 2 runs → byte-for-byte identical to the
+pre-differential pack_beacon. No regression.
+
+**Active state with churn:** route mutations land in the dirty set and
+are guaranteed to ship in the next beacon. Convergence latency for a
+new route change drops from `O(rotation_window × beacon_period)`
+(could be minutes for large tables) to `O(beacon_period)` (single
+round-trip).
+
+Telemetry: `beacon_diff_breakdown` event fires per beacon with
+`{dirty_n, stable_n, total_dirty, rt_total, kind}`. `total_dirty`
+greater than `dirty_n` means some dirty entries overflowed the page
+and will surface in the next beacon (no information loss).
+
+Wire format unchanged. The receiver doesn't know whether a route was
+dirty or stable — it just merges via existing rt_merge.
+
+### 6.5 Bounded beacons (paged emission)
 
 A full routing table of 100+ destinations exceeds the 255-byte LoRa
 frame limit. `pack_beacon` takes a `max_entries` cap and a sliding
@@ -1040,6 +1076,7 @@ expectations) subscribe by event_type.
 | `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind` |
 | `beacon_rx` | Beacon decoded | `src`, `n_entries` |
 | `beacon_skipped_busy` | Throttle suppressed beacon | `since_rx_ms`, `threshold_ms`, `stage` |
+| `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind` |
 | `rt_update` | Route added/promoted to a slot | `dest`, `next`, `score`, `hops`, `slot` |
 | `rt_prune` | 3-cycle prune dropped a candidate | `dest`, `pruned_via` |
 | `rt_full` | Routing table covers all peers | `peers` |
