@@ -200,6 +200,13 @@
 --   (or data_ack_giveup) emits. Goal: a single stuck destination must
 --   not block deliverable items behind it in the queue.
 --
+--   Adaptive back-pressure: when local tx_queue depth exceeds
+--   cascade_requeue_load_threshold, the effective requeue budget shrinks
+--   1:1 with each additional queued item — so a stressed node sheds
+--   retry load instead of piling on. Drops fire as cascade_load_skip
+--   diagnostically; the terminal emits stay path_cascade_exhausted +
+--   rts_giveup so existing analyzers stay compatible.
+--
 --   ORIGINATOR (on_command "send <dst> <text>"): enqueue + become_free
 --   FORWARDER (on_recv 'D' relay): enqueue + after(ack_air_ms+1, become_free)
 --   issue_send (called by become_free for both): builds RTS, sets
@@ -1589,8 +1596,56 @@ local function try_cascade_requeue(self, trigger)
   local enq = px.enqueue_time_ms or now
   local total_age_ms = now - enq
   local next_count = (px.requeue_count or 0) + 1
+
+  -- Hard caps come first — these are operator-set ceilings nothing can
+  -- override. Below them, the adaptive load gate may also skip.
   if next_count > self.cascade_requeue_max then return false end
   if total_age_ms >= self.cascade_requeue_total_max_ms then return false end
+
+  -- Load-adaptive back-pressure: shrink the effective requeue budget
+  -- when this node's tx_queue is already deep. Each item beyond
+  -- cascade_requeue_load_threshold subtracts 1 from the budget. At
+  -- queue depth = threshold + cascade_requeue_max, the budget hits 0
+  -- and new failures drop immediately instead of being requeued.
+  -- Rationale: cascade-requeue is helpful when capacity is available
+  -- (giving messages multiple chances), but counterproductive when
+  -- the network is overloaded (retries themselves choke the channel,
+  -- so messages that COULD have succeeded under lighter load also
+  -- fail). On s04 60 min we observed exhausted messages consuming
+  -- 30x more channel-time than delivered ones — the "cascade-waste"
+  -- pathology. By tying budget to local queue depth, each node
+  -- self-throttles: when stressed, drop fast and free capacity for
+  -- healthy flights elsewhere. See analyzer section (14) for the
+  -- ratio metric that detects this failure mode.
+  local queue_depth = #self.tx_queue
+  local load_excess = math.max(0,
+    queue_depth - self.cascade_requeue_load_threshold)
+  local effective_max = math.max(0,
+    self.cascade_requeue_max - load_excess)
+  if next_count > effective_max then
+    -- Diagnostic emit distinguishes load-induced drops from hard-cap
+    -- exhaustion. Caller (rts_timeout_fire / ack_timeout_fire) still
+    -- emits the legacy path_cascade_exhausted + rts_giveup so existing
+    -- analyzers stay backward-compatible.
+    self:emit("cascade_load_skip", {
+      origin         = px.origin,
+      payload        = px.user_text,
+      origin_seq     = px.origin_seq,
+      dst            = px.dst,
+      msg_id         = px.msg_id,
+      requeue_count  = next_count,
+      queue_depth    = queue_depth,
+      load_threshold = self.cascade_requeue_load_threshold,
+      effective_max  = effective_max,
+      total_age_ms   = total_age_ms,
+      trigger        = trigger,
+    })
+    self:log(string.format(
+      "cascade_load_skip msg=%d dst=%s queue=%d eff_max=%d/%d (load adaptive drop, trigger=%s)",
+      px.msg_id, name_of(self, px.dst), queue_depth,
+      effective_max, self.cascade_requeue_max, trigger))
+    return false
+  end
   -- Exponential backoff: base * 2^(requeue_count - 1), capped. Using
   -- (next_count - 1) so the first requeue waits exactly base_ms (not
   -- base*2). Math.huge guard not needed because cap clips before overflow.
@@ -2661,10 +2716,29 @@ function on_init(self, config)
   --   cascade_requeue_total_max_ms   — hard wallclock cap on per-message
   --                                     age (default 120s; matches the
   --                                     longest acceptable e2e latency).
+  --   cascade_requeue_load_threshold — adaptive back-pressure (default 2).
+  --                                     Effective max scales down as local
+  --                                     tx_queue depth exceeds this value:
+  --                                     each item beyond threshold drops
+  --                                     the effective requeue budget by 1.
+  --                                     Lets stressed nodes shed retry
+  --                                     load instead of choking the
+  --                                     channel — the network "feels" its
+  --                                     own backpressure. See section (14)
+  --                                     of tools/analyze.py for the
+  --                                     cascade-waste detector this knob
+  --                                     was added to mitigate.
   self.cascade_requeue_max            = config.cascade_requeue_max            or 3
   self.cascade_requeue_base_ms        = config.cascade_requeue_base_ms        or 5000
   self.cascade_requeue_backoff_cap_ms = config.cascade_requeue_backoff_cap_ms or 30000
-  self.cascade_requeue_total_max_ms   = config.cascade_requeue_total_max_ms   or 120000
+  -- Wallclock cap. Successful deliveries on s04 take median 10 s, p95
+  -- 54 s, max 163 s — so a 60 s cap keeps most legitimate slow paths
+  -- alive while killing failed cascades that would otherwise dwell for
+  -- 3-13 min. Together with the load_threshold adaptation below this
+  -- forms a two-axis cap (per-message wallclock + node-local pressure)
+  -- on cascade-requeue dwell time.
+  self.cascade_requeue_total_max_ms   = config.cascade_requeue_total_max_ms   or 60000
+  self.cascade_requeue_load_threshold = config.cascade_requeue_load_threshold or 0
   -- TX-policy controls (see "TX policy classes" section above).
   --   lbt_enabled            — pre-check channel_busy_until before TX of
   --                            initiating-directed (RTS / NACK) and flood
