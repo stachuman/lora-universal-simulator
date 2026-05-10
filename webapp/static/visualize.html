@@ -85,6 +85,9 @@ canvas { display: block; }
     <div class="sep"></div>
     <label>Filter:</label>
     <input id="node-filter" type="text" placeholder="node name..." style="width:120px">
+    <input id="type-filter" type="text" placeholder="event types: tx,rx,..."
+           title="Comma-separated event types to show (empty = all). Prefix a type with ! to hide it instead. Example: tx,rx — show only those; !script_log — hide script_log."
+           style="width:180px">
     <div class="sep"></div>
     <button id="btn-zoom-fit" title="Fit all">Fit</button>
     <button id="btn-trace-mode" title="Click packets to trace">Trace</button>
@@ -138,6 +141,13 @@ const S = {
     nodes: [],           // ordered node list for display
     nodeIndex: {},       // name -> index in nodes[]
     nodeFilter: new Set(),
+    // Event-type filter parsed from the toolbar's #type-filter input.
+    // Empty input = no filter (show all). Comma-separated list:
+    //   - bare types (e.g. `tx,rx`)        → whitelist (only those)
+    //   - prefixed with `!` (e.g. `!script_log`) → blacklist (hide those)
+    // Mixed allow/deny in one input is supported; deny takes priority.
+    typeFilterAllow: null,   // Set<string> | null  (null = no whitelist)
+    typeFilterDeny: new Set(),
 
     // Viewport (in simulation time ms)
     viewFrom: 0,
@@ -1031,6 +1041,7 @@ function drawEvents() {
         // Conservative clip: tx events span [t, t+at]; rx-like events span
         // [t-at, t]. Union [t-at, t+at] is safe for both.
         if (t + at < S.viewFrom || t - at > S.viewTo) continue;
+        if (!eventTypeAllowed(ev.type)) continue;
 
         const etype = ev.type;
         const x = msToX(t);
@@ -1819,6 +1830,7 @@ function findEventAt(mx, my) {
     const tolerance = span * 0.008; // 0.8% of viewport for point events
 
     for (const ev of S.cachedEvents) {
+        if (!eventTypeAllowed(ev.type)) continue;  // honor type filter in hit-test too
         let evNode = ev.node || ev.to || ev.from;
         if (ev.type === 'rx' || ev.type === 'collision' || ev.type.startsWith('drop')) {
             evNode = ev.to;
@@ -2350,6 +2362,35 @@ document.getElementById('node-order').addEventListener('change', () => {
 
 document.getElementById('node-filter').addEventListener('input', () => {
     sortNodes();
+    render();
+});
+
+// ── Event-type filter ──────────────────────────────────────────
+function parseTypeFilter(raw) {
+    const allow = new Set();
+    const deny = new Set();
+    let hasAllow = false;
+    for (const tok of (raw || '').split(',')) {
+        const t = tok.trim();
+        if (!t) continue;
+        if (t.startsWith('!')) {
+            const name = t.slice(1).trim();
+            if (name) deny.add(name);
+        } else {
+            allow.add(t);
+            hasAllow = true;
+        }
+    }
+    S.typeFilterAllow = hasAllow ? allow : null;
+    S.typeFilterDeny = deny;
+}
+function eventTypeAllowed(etype) {
+    if (S.typeFilterDeny.has(etype)) return false;
+    if (S.typeFilterAllow && !S.typeFilterAllow.has(etype)) return false;
+    return true;
+}
+document.getElementById('type-filter').addEventListener('input', (e) => {
+    parseTypeFilter(e.target.value);
     render();
 });
 
