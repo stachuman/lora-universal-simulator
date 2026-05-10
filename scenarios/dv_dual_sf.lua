@@ -2317,33 +2317,75 @@ local function beacon_fire(self)
                      and (self:now() - self.last_rx_routing_sf_ms)
                      or  math.huge   -- never received → effectively "quiet forever"
     -- Max-idle override: if this node hasn't BCN'd in beacon_max_idle_ms,
-    -- bypass the channel-busy throttle and fire anyway. In dense meshes
-    -- the quiet_threshold gate suppresses periodic beacons indefinitely
-    -- (channel never goes quiet for the whole 30s threshold), which
-    -- starves routing tables past the rt_aging_ttl_* TTLs and the network
-    -- collapses around the global TTL boundary. The override guarantees
-    -- a baseline BCN cadence regardless of channel state — set
-    -- beacon_max_idle_ms < rt_aging_ttl_neighbor_ms (1-hop TTL) so
-    -- neighbours' direct-link entries get refreshed before they age out.
-    -- Multi-hop entries (rt_aging_ttl_remote_ms) survive longer rotation
-    -- gaps; see the deployment-tuning block in on_init for the formula.
-    -- Disable by setting beacon_max_idle_ms = 0.
+    -- the channel-busy throttle would otherwise suppress us indefinitely
+    -- in dense meshes (channel never quiets for 30s once 100+ nodes are
+    -- active). Override fires anyway — but with a B+C composite filter
+    -- to avoid synchronized BCN bursts from 138 nodes hitting max_idle
+    -- in lockstep:
+    --
+    --   (B) defer if a neighbour BCN landed within max_idle/3
+    --       — they're carrying the refresh load right now
+    --   (C) skip if our RT has zero dirty entries AND the network
+    --       is actively beaconing — we'd add nothing new
+    --
+    -- The combined filter creates a cascade: first nodes (with dirty
+    -- entries OR no recent neighbour BCN) fire; their BCNs land at
+    -- neighbours which then defer; spread is ~max_idle/3 instead of
+    -- the silence-jitter's ~10s. Heartbeat preserved: dirty=0 nodes
+    -- whose neighbours have ALSO gone silent will fire (both filter
+    -- conditions fail).
+    --
+    -- See deployment-tuning block in on_init for how to scale these
+    -- knobs to hours for real LoRa hardware.
     local force_idle = false
     if self.beacon_max_idle_ms and self.beacon_max_idle_ms > 0 then
       local since_tx = (self.last_beacon_tx_ms ~= nil)
                        and (self:now() - self.last_beacon_tx_ms)
                        or  math.huge
       if since_tx >= self.beacon_max_idle_ms then
-        force_idle = true
-        self:emit("beacon_max_idle_force", {
-          since_tx_ms = since_tx == math.huge and -1 or since_tx,
-          max_idle_ms = self.beacon_max_idle_ms,
-          since_rx_ms = since_rx == math.huge and -1 or since_rx,
-        })
-        self:log(string.format(
-          "beacon_max_idle_force (silent for %dms ≥ %dms; bypassing busy throttle)",
-          since_tx == math.huge and -1 or since_tx,
-          self.beacon_max_idle_ms))
+        -- Override eligible. Apply B+C filter.
+        local since_bcn_rx = (self.last_rx_bcn_ms ~= nil)
+                             and (self:now() - self.last_rx_bcn_ms)
+                             or  math.huge
+        local defer_window_ms = self.beacon_max_idle_ms // 3
+        local dirty_n = 0
+        for _, entry in pairs(self.rt) do
+          if entry.dirty then dirty_n = dirty_n + 1 end
+        end
+        if dirty_n == 0 and since_bcn_rx < defer_window_ms then
+          -- Combined B+C: nothing new to advertise AND a neighbour
+          -- recently beaconed → skip. The next periodic timer fire
+          -- will re-evaluate (and by then either a neighbour BCN has
+          -- aged past defer_window_ms, or we have new dirty entries).
+          self:emit("beacon_max_idle_skip_clean", {
+            since_tx_ms     = since_tx,
+            since_bcn_rx_ms = since_bcn_rx,
+            defer_window_ms = defer_window_ms,
+            dirty_n         = 0,
+          })
+          self:log(string.format(
+            "beacon_max_idle_skip_clean (silent %dms but neighbour BCN %dms ago, dirty=0)",
+            since_tx, since_bcn_rx))
+          -- Fall through to normal throttle path; the throttle will
+          -- skip too (channel busy) so net effect is no BCN this
+          -- cycle. We don't directly return so the existing skip
+          -- emit / log still happens for diagnostics consistency.
+        else
+          force_idle = true
+          self:emit("beacon_max_idle_force", {
+            since_tx_ms     = since_tx == math.huge and -1 or since_tx,
+            max_idle_ms     = self.beacon_max_idle_ms,
+            since_rx_ms     = since_rx == math.huge and -1 or since_rx,
+            since_bcn_rx_ms = since_bcn_rx == math.huge and -1 or since_bcn_rx,
+            dirty_n         = dirty_n,
+          })
+          self:log(string.format(
+            "beacon_max_idle_force (silent for %dms ≥ %dms, dirty=%d, last_bcn_rx=%dms ago)",
+            since_tx == math.huge and -1 or since_tx,
+            self.beacon_max_idle_ms,
+            dirty_n,
+            since_bcn_rx == math.huge and -1 or since_bcn_rx))
+        end
       end
     end
     if since_rx < self.quiet_threshold_ms and not force_idle then
@@ -2370,20 +2412,30 @@ local function beacon_fire(self)
           local since = (self.last_rx_routing_sf_ms ~= nil)
                         and (self:now() - self.last_rx_routing_sf_ms)
                         or  math.huge
-          -- Same max-idle override on the post-jitter re-check: if
-          -- we've been silent past beacon_max_idle_ms, bypass the
-          -- busy gate. force_idle was true at pre-jitter time too,
-          -- so we already know the override fired; recompute since_tx
-          -- here against the (possibly updated) clock so a beacon
-          -- that landed during our jitter window doesn't keep us
-          -- locked into firing.
+          -- Same B+C filter on the post-jitter re-check: a neighbour
+          -- BCN may have landed during our jitter window — if it did
+          -- AND we have nothing new to advertise, defer. force_idle
+          -- was true at pre-jitter time, but recompute since_tx /
+          -- since_bcn_rx here against the (possibly updated) clock.
           local force_idle_post = false
           if self.beacon_max_idle_ms and self.beacon_max_idle_ms > 0 then
             local since_tx = (self.last_beacon_tx_ms ~= nil)
                              and (self:now() - self.last_beacon_tx_ms)
                              or  math.huge
             if since_tx >= self.beacon_max_idle_ms then
-              force_idle_post = true
+              local since_bcn_rx = (self.last_rx_bcn_ms ~= nil)
+                                   and (self:now() - self.last_rx_bcn_ms)
+                                   or  math.huge
+              local defer_window_ms = self.beacon_max_idle_ms // 3
+              local dirty_n = 0
+              for _, entry in pairs(self.rt) do
+                if entry.dirty then dirty_n = dirty_n + 1 end
+              end
+              -- B+C composite: skip the override only if BOTH (network
+              -- is beaconing) AND (we have nothing new). Otherwise force.
+              if not (dirty_n == 0 and since_bcn_rx < defer_window_ms) then
+                force_idle_post = true
+              end
             end
           end
           if since < self.quiet_threshold_ms and not force_idle_post then
@@ -2512,6 +2564,16 @@ function on_init(self, config)
   -- nil-last_rx semantics so cold-start behaviour is preserved).
   self.beacon_max_idle_ms        = config.beacon_max_idle_ms        or 480000
   self.last_beacon_tx_ms         = nil
+  -- Time of the most recent BCN reception from any neighbour (separate
+  -- from last_rx_routing_sf_ms, which is set on every routing-plane RX
+  -- including RTS/CTS/ACK). The override path defers when a neighbour
+  -- BCN was heard within beacon_max_idle_ms / 3 — this turns the
+  -- previously-synchronized override burst (138 nodes all hitting
+  -- max_idle in a 10s silence-jitter window) into a cascade: first
+  -- nodes fire, their BCNs land at neighbours, neighbours see fresh
+  -- last_rx_bcn_ms and defer. Spread becomes ~max_idle/3 instead of
+  -- ~10s, making BCN airtime per-window manageable.
+  self.last_rx_bcn_ms            = nil
 
   -- Per-neighbor SNR EWMA. `snr_ewma_in[nbr_id]` is fed by every successful
   -- RX from that neighbor — RTS, beacons, CTS-as-listener, etc. Used by
@@ -2877,6 +2939,13 @@ function on_recv(self, frame, meta)
     self:emit("beacon_rx", { src = b.src, n_entries = #b.entries })
 
     local now = self:now()
+    -- Track time of last BCN-RX (separate from last_rx_routing_sf_ms,
+    -- which catches every routing-plane RX including RTS/CTS/ACK).
+    -- The max-idle override consults this specifically — when a
+    -- neighbour just beaconed, our routing-info refresh need is
+    -- already covered, so we defer our own override even if the
+    -- generic channel-busy throttle would fire it. See beacon_fire.
+    self.last_rx_bcn_ms = now
 
     -- Track whether anything in our rt actually changed during this beacon
     -- so we can fire a single triggered re-beacon at the end (one trigger
