@@ -1,0 +1,38 @@
+{
+  "_name": "t29_route_aging",
+  "_desc": "3-node line a-b-c. carol dies at t=20000. With small rt_aging_ttl_ms (15000) and frequent aging checks (5000), alice's rt[carol] should age out within ~15-20s of carol's last-heard-from time. Verifies: rt_aged event fires for carol at alice/bob, the dead route gets evicted instead of accumulating retries forever.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 5000,
+    "seed": 42,
+    "node_startup_jitter_ms": 100,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000,
+                  "quiet_threshold_ms": 0, "rt_aging_ttl_ms": 15000,
+                  "rt_aging_check_period_ms": 5000 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000,
+                  "quiet_threshold_ms": 0, "rt_aging_ttl_ms": 15000,
+                  "rt_aging_check_period_ms": 5000 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000,
+                  "quiet_threshold_ms": 0, "rt_aging_ttl_ms": 15000,
+                  "rt_aging_check_period_ms": 5000 },
+      "dies_at_ms": 20000 }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_aged", "value": "" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_aged", "value": "" }
+  ]
+}

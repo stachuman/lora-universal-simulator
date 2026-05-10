@@ -102,7 +102,7 @@
 --       for the rotation window to come around. Telemetry:
 --       beacon_diff_breakdown emits {dirty_n, stable_n, total_dirty}.
 --     → tx 'B' (dirty entries first, then stable rotation fill) → ±20% jittered re-arm
---   triggered beacons: any rt mutation (new/promote/3cycle-prune)
+--   triggered beacons: any rt mutation (new/promote/3cycle-prune/age-out)
 --     schedules a one-shot beacon within rand(50,500)ms (coalesced into
 --     a single armed trigger). NOT subject to the adaptive throttle —
 --     triggered beacons exist to propagate routing changes urgently;
@@ -115,6 +115,17 @@
 --     missed by triggered fires.
 --     Half-duplex skip applies — busy nodes drop the trigger and rely on
 --     the next mutation (or periodic) to retry.
+--   stale-route aging: every rt_aging_check_period_ms (default 60s),
+--     walk rt[]; evict candidates whose last_seen_ms exceeded
+--     rt_aging_ttl_ms (default 10 min = 2× default operational beacon
+--     period). When primary evicted: mark entry.dirty for differential
+--     beacon. When all candidates evicted: drop entry + trigger beacon
+--     (no wire-format way to advertise "deleted route" — receivers'
+--     own aging eventually catches up via the absence of advertisement).
+--     Direct-neighbour last_seen_ms also refreshed on ANY on_recv frame
+--     from that neighbour (not just beacons), so heavy-traffic-throttled
+--     beacons don't false-evict alive direct neighbours. Telemetry:
+--     rt_aged event per evicted candidate.
 --   on_recv 'B' from N at rx_snr
 --     install rt[N] = {direct, snr, hops=1, n2_hop=nil}
 --     for each entry e in beacon (e.dest != self.id):
@@ -1342,6 +1353,59 @@ local function rt_prune_cycle(self, dest_id, sender_id)
   end
 end
 
+-- Stale-route aging. Walk every rt[dest], evict candidates whose
+-- last_seen_ms is older than self.rt_aging_ttl_ms. If primary evicted,
+-- mark entry.dirty so the differential beacon ships the new primary.
+-- If all candidates evicted, drop the entry entirely + schedule a
+-- triggered beacon (no wire-format way to say "I no longer route to X",
+-- but the trigger ensures the rest of our table propagates without
+-- the gone-dest, so neighbours' own aging eventually catches up).
+local function age_out_stale_routes(self)
+  if next(self.rt) == nil then return end
+  local now = self:now()
+  local ttl = self.rt_aging_ttl_ms
+  if ttl <= 0 then return end                    -- aging disabled
+  local any_evicted = false
+  -- Collect dest_ids first (Lua's pairs+modify is OK in 5.3+ but only
+  -- for removal of the current key; we want bulk-safe iteration).
+  local dests = {}
+  for dest_id, _ in pairs(self.rt) do
+    table.insert(dests, dest_id)
+  end
+  for _, dest_id in ipairs(dests) do
+    local entry = self.rt[dest_id]
+    if entry then
+      local kept = {}
+      local primary_evicted = false
+      for i, c in ipairs(entry.candidates) do
+        local age = now - c.last_seen_ms
+        if age < ttl then
+          table.insert(kept, c)
+        else
+          if i == 1 then primary_evicted = true end
+          self:emit("rt_aged", {
+            dest = dest_id, slot = (i == 1) and "primary" or "alt",
+            next_hop = c.next_hop, hops = c.hops,
+            age_ms = age, ttl_ms = ttl,
+          })
+          self:log(string.format(
+            "rt_aged dst=%s %s via %s (age %dms > ttl %dms)",
+            name_of(self, dest_id), (i == 1) and "primary" or "alt",
+            name_of(self, c.next_hop), age, ttl))
+          any_evicted = true
+        end
+      end
+      if #kept == 0 then
+        self.rt[dest_id] = nil
+      elseif #kept < #entry.candidates then
+        entry.candidates = kept
+        if primary_evicted then entry.dirty = true end
+      end
+    end
+  end
+  if any_evicted then schedule_triggered_beacon(self) end
+end
+
 -- Forward decls so the timeout-fire callbacks can refer to peers in the
 -- retry/queue cluster (Lua needs the local in scope first).
 local start_rts_timeout
@@ -2298,6 +2362,19 @@ function on_init(self, config)
   -- Receivers reject foreign-network BCN/RTS at the routing layer
   -- before doing CTS/DATA work. 0 = default mesh; 1..15 = distinct meshes.
   self.network_id        = config.network_id or 0
+  -- Stale-route aging. Per-candidate last_seen_ms is refreshed by
+  -- rt_merge whenever a beacon advertises that exact (dest, next_hop)
+  -- combination, AND for direct-neighbour entries on every on_recv
+  -- frame from that neighbour (so heavy-traffic throttling of beacons
+  -- doesn't false-evict alive direct neighbours). The aging loop runs
+  -- every rt_aging_check_period_ms and evicts candidates whose
+  -- last_seen is older than rt_aging_ttl_ms. Whole entries get dropped
+  -- when their last candidate ages out, with a triggered beacon to
+  -- propagate the change. Defaults: 10 min TTL = 2× default operational
+  -- beacon period (300s); 1 min check period = catches leaks promptly
+  -- without measurable overhead.
+  self.rt_aging_ttl_ms          = config.rt_aging_ttl_ms          or 600000
+  self.rt_aging_check_period_ms = config.rt_aging_check_period_ms or 60000
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
   -- (origin_id, origin_seq) tuple and rejects subsequent arrivals of the
@@ -2359,6 +2436,15 @@ function on_init(self, config)
     self:after(1000, drain_loop)
   end
   self:after(1000, drain_loop)
+
+  -- Periodic stale-route aging — every rt_aging_check_period_ms,
+  -- evict candidates whose last_seen_ms exceeded rt_aging_ttl_ms.
+  -- See age_out_stale_routes for the full mechanism.
+  local function aging_loop()
+    age_out_stale_routes(self)
+    self:after(self.rt_aging_check_period_ms, aging_loop)
+  end
+  self:after(self.rt_aging_check_period_ms, aging_loop)
 end
 
 function on_recv(self, frame, meta)
@@ -2375,6 +2461,22 @@ function on_recv(self, frame, meta)
   -- physical link property, not frame-type-specific.
   if meta.src ~= nil and meta.snr ~= nil then
     update_snr_ewma(self.snr_ewma_in, meta.src, meta.snr, self.snr_ewma_alpha)
+  end
+  -- Per-RX direct-neighbour liveness refresh for stale-route aging:
+  -- any frame from meta.src counts as proof they're alive. Without this,
+  -- direct neighbours whose periodic beacons are throttle-suppressed
+  -- (heavy-traffic scenarios) would age out incorrectly even though
+  -- they're still actively sending RTS/CTS/DATA/ACK. Multi-hop entries
+  -- still refresh only on beacon advertisements (the multi-hop info
+  -- IS stale if not re-advertised, regardless of intermediate-node
+  -- traffic).
+  if meta.src ~= nil and self.rt[meta.src] ~= nil then
+    for _, c in ipairs(self.rt[meta.src].candidates) do
+      if c.next_hop == meta.src and c.hops == 1 then
+        c.last_seen_ms = self:now()
+        break
+      end
+    end
   end
   local tag = frame:sub(1, 1)
 

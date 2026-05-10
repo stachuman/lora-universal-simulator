@@ -476,7 +476,57 @@ and will surface in the next beacon (no information loss).
 Wire format unchanged. The receiver doesn't know whether a route was
 dirty or stable — it just merges via existing rt_merge.
 
-### 6.5 Bounded beacons (paged emission)
+### 6.5 Stale-route aging
+
+Per-candidate `last_seen_ms` is refreshed by `rt_merge` whenever a
+beacon advertises that exact `(dest, next_hop)` combination. A periodic
+aging loop walks `rt[]` every `rt_aging_check_period_ms` (default 60 s)
+and evicts candidates older than `rt_aging_ttl_ms` (default 10 min,
+= 2× default operational beacon period of 5 min).
+
+```
+age_out_stale_routes(self):
+  for each rt[dest]:
+    keep, primary_evicted = filter candidates by (now - last_seen) < ttl
+    if #keep == 0:
+      rt[dest] = nil
+      schedule_triggered_beacon
+    elif primary_evicted:
+      entry.candidates = keep
+      entry.dirty = true     ← differential beacon (§6.4) ships new primary
+    else:
+      entry.candidates = keep   ← only alts evicted, no broadcast needed
+  if any evicted: emit rt_aged + schedule_triggered_beacon
+```
+
+**Direct-neighbour last_seen refresh on ANY RX:** the on_recv top hook
+also refreshes `rt[meta.src].candidates[direct].last_seen_ms` for every
+incoming frame, not just beacons. This prevents direct neighbours from
+being falsely evicted when their periodic beacons are throttle-
+suppressed under heavy traffic — RTS/CTS/DATA/ACK traffic from them
+counts as proof they're alive. Multi-hop entries still age via beacon
+advertisements only (the multi-hop info IS stale if no one is
+re-advertising it).
+
+**Why no explicit "delete" advertisement?** The wire format has no
+"this route is gone" frame. When a node evicts a destination entirely,
+the triggered beacon advertises the rest of the table without the
+gone destination. Neighbours hearing that beacon refresh their other
+routes via this node, and their own aging loop eventually evicts the
+gone destination from their tables (when `last_seen` to it stops
+refreshing). Cascade time across N hops: ~`N × rt_aging_ttl_ms`.
+
+**Configurable behavior:**
+
+| Key | Default | Description |
+|---|---|---|
+| `rt_aging_ttl_ms` | 600000 (10 min) | Candidate expires if not refreshed within this window |
+| `rt_aging_check_period_ms` | 60000 (1 min) | How often the aging scan runs |
+
+Set `rt_aging_ttl_ms = 0` to disable aging (memory leak risk in
+long-lived deployments; useful for tests).
+
+### 6.6 Bounded beacons (paged emission)
 
 A full routing table of 100+ destinations exceeds the 255-byte LoRa
 frame limit. `pack_beacon` takes a `max_entries` cap and a sliding
@@ -1079,6 +1129,7 @@ expectations) subscribe by event_type.
 | `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind` |
 | `rt_update` | Route added/promoted to a slot | `dest`, `next`, `score`, `hops`, `slot` |
 | `rt_prune` | 3-cycle prune dropped a candidate | `dest`, `pruned_via` |
+| `rt_aged` | Stale-route aging evicted a candidate (§6.5) | `dest`, `slot`, `next_hop`, `hops`, `age_ms`, `ttl_ms` |
 | `rt_full` | Routing table covers all peers | `peers` |
 
 ### 13.2 Data plane — handshake
@@ -1184,6 +1235,8 @@ the JSON scenario). Defaults shown.
 | `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
 | `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
+| `rt_aging_ttl_ms` | 600000 | Stale-route eviction threshold — see §6.5 |
+| `rt_aging_check_period_ms` | 60000 | Aging-scan period — see §6.5 |
 
 ### 14.4 Channel access
 
@@ -1257,12 +1310,20 @@ The sender trusts the receiver's announced busy_for_ms. A buggy or
 malicious receiver could announce 65 s (the 16-bit max) and stall the
 sender. No cap today; acceptable in trusted-network settings.
 
-### 15.5 Alt freshness expiry not implemented
+### 15.5 ~~Alt freshness expiry not implemented~~ — RESOLVED
 
-Currently an alt sticks around as long as no better candidate
-replaces it. Stale alts (e.g., 3+ missed beacon rounds) should be
-pruned but aren't. Manifests as occasional cascade attempts to long-
-gone neighbors.
+**Resolved.** §6.5 stale-route aging now evicts candidates whose
+`last_seen_ms` exceeds `rt_aging_ttl_ms` (default 10 min). Both
+primary and alts are subject to the same TTL. Direct neighbours get
+their last_seen refreshed on every on_recv (not just beacons) so
+heavy-traffic-throttled scenarios don't false-evict alive nodes.
+
+The narrower follow-up is **explicit "deleted route" advertisement**
+in the wire format. Today, a node that evicts a destination just
+stops advertising it; neighbours' own aging eventually catches up
+(N hops × ttl). A 1-bit "deleted" flag in beacon entries would
+propagate eviction immediately, but adds wire complexity and isn't
+yet justified by measured cost.
 
 ### 15.6 SF picks under static SNR
 
