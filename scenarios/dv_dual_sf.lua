@@ -65,7 +65,15 @@
 --
 -- on_init
 --   build name↔id maps from sim:nodes(); peer_count = N-1
---   RX defaults to routing_sf; schedule first beacon at rand(0, period)
+--   RX defaults to routing_sf
+--   first-beacon scheduling (cold-start aware):
+--     boot_at < warmup_ms OR warmup_ms == 0 → rand(0, beacon_period_warmup_ms)
+--                                              (mass-boot, jitter to avoid storm)
+--     else (single late joiner past warmup)  → rand(1, 200) ms
+--                                              (cold-start; bootstrap ASAP)
+--   periodic 1s drain timer → try_drain_deferred (TTL pruning + retry
+--                                                  for originator defer queue)
+--   See "Bootstrap UX (cold-start joiners)" section below.
 --
 -- Beacon plane (routing_sf)
 --   beacon_fire (skipped if pending_tx or pending_rx; re-arm always)
