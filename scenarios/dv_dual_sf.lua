@@ -2252,6 +2252,13 @@ local function send_beacon_page(self, kind)
     diff.total_dirty - diff.dirty_n,
     self.beacon_offset, new_offset))
   self.beacon_offset = new_offset
+  -- Track when this node last committed a BCN to air. Consulted by the
+  -- max-idle override (beacon_fire) to break out of long throttle
+  -- windows: in dense channels the quiet_threshold gate suppresses
+  -- periodic beacons indefinitely, starving neighbours' routing tables
+  -- past rt_aging_ttl_ms. The override fires a BCN regardless of
+  -- channel-busy state once this node has been quiet for too long.
+  self.last_beacon_tx_ms = self:now()
   return tx_flood(self, frame, {
     sf    = self.routing_sf,
     label = "BCN",
@@ -2286,7 +2293,35 @@ local function beacon_fire(self)
     local since_rx = (self.last_rx_routing_sf_ms ~= nil)
                      and (self:now() - self.last_rx_routing_sf_ms)
                      or  math.huge   -- never received → effectively "quiet forever"
-    if since_rx < self.quiet_threshold_ms then
+    -- Max-idle override: if this node hasn't BCN'd in beacon_max_idle_ms,
+    -- bypass the channel-busy throttle and fire anyway. In dense meshes
+    -- the quiet_threshold gate suppresses periodic beacons indefinitely
+    -- (channel never goes quiet for the whole 30s threshold), which
+    -- starves routing tables past rt_aging_ttl_ms and the network
+    -- collapses around the global TTL boundary. The override guarantees
+    -- a baseline BCN cadence regardless of channel state — set
+    -- beacon_max_idle_ms < rt_aging_ttl_ms so neighbours' RT entries
+    -- get refreshed before they age out. Disable by setting
+    -- beacon_max_idle_ms = 0.
+    local force_idle = false
+    if self.beacon_max_idle_ms and self.beacon_max_idle_ms > 0 then
+      local since_tx = (self.last_beacon_tx_ms ~= nil)
+                       and (self:now() - self.last_beacon_tx_ms)
+                       or  math.huge
+      if since_tx >= self.beacon_max_idle_ms then
+        force_idle = true
+        self:emit("beacon_max_idle_force", {
+          since_tx_ms = since_tx == math.huge and -1 or since_tx,
+          max_idle_ms = self.beacon_max_idle_ms,
+          since_rx_ms = since_rx == math.huge and -1 or since_rx,
+        })
+        self:log(string.format(
+          "beacon_max_idle_force (silent for %dms ≥ %dms; bypassing busy throttle)",
+          since_tx == math.huge and -1 or since_tx,
+          self.beacon_max_idle_ms))
+      end
+    end
+    if since_rx < self.quiet_threshold_ms and not force_idle then
       self:emit("beacon_skipped_busy", {
         since_rx_ms  = since_rx,
         threshold_ms = self.quiet_threshold_ms,
@@ -2310,7 +2345,23 @@ local function beacon_fire(self)
           local since = (self.last_rx_routing_sf_ms ~= nil)
                         and (self:now() - self.last_rx_routing_sf_ms)
                         or  math.huge
-          if since < self.quiet_threshold_ms then
+          -- Same max-idle override on the post-jitter re-check: if
+          -- we've been silent past beacon_max_idle_ms, bypass the
+          -- busy gate. force_idle was true at pre-jitter time too,
+          -- so we already know the override fired; recompute since_tx
+          -- here against the (possibly updated) clock so a beacon
+          -- that landed during our jitter window doesn't keep us
+          -- locked into firing.
+          local force_idle_post = false
+          if self.beacon_max_idle_ms and self.beacon_max_idle_ms > 0 then
+            local since_tx = (self.last_beacon_tx_ms ~= nil)
+                             and (self:now() - self.last_beacon_tx_ms)
+                             or  math.huge
+            if since_tx >= self.beacon_max_idle_ms then
+              force_idle_post = true
+            end
+          end
+          if since < self.quiet_threshold_ms and not force_idle_post then
             -- Someone else's beacon (or other RX) landed during our jitter
             -- window. Stand down — they "won" the silence-trigger race.
             self:emit("beacon_skipped_busy", {
@@ -2418,6 +2469,21 @@ function on_init(self, config)
   self.last_rx_routing_sf_ms     = nil
   self.quiet_threshold_ms        = config.quiet_threshold_ms        or 30000
   self.beacon_silence_jitter_ms  = config.beacon_silence_jitter_ms  or 10000
+
+  -- Max-idle override: bypass the quiet_threshold gate if this node
+  -- hasn't BCN'd in beacon_max_idle_ms. In dense meshes the channel
+  -- never goes quiet for the throttle's threshold, so periodic beacons
+  -- are suppressed indefinitely — neighbours' RT entries age out at
+  -- rt_aging_ttl_ms (default 10 min) and the network collapses around
+  -- the global TTL boundary. Defaulting to 480000 ms (8 min) leaves
+  -- 2 min of margin under the 10 min default rt_aging_ttl_ms so the
+  -- override fires before routes age out. Set to 0 to disable.
+  --
+  -- last_beacon_tx_ms is `nil` until the first BCN; the override treats
+  -- nil as "never beaconed → fire freely" (matches the throttle's
+  -- nil-last_rx semantics so cold-start behaviour is preserved).
+  self.beacon_max_idle_ms        = config.beacon_max_idle_ms        or 480000
+  self.last_beacon_tx_ms         = nil
 
   -- Per-neighbor SNR EWMA. `snr_ewma_in[nbr_id]` is fed by every successful
   -- RX from that neighbor — RTS, beacons, CTS-as-listener, etc. Used by
