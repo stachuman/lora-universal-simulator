@@ -8,18 +8,9 @@
 </head>
 <body>
 
-<!-- ── Nav bar ─────────────────────────────────────────── -->
-<nav class="navbar">
-  <span class="brand">lora-universal-simulator</span>
-  <ul class="nav-links">
-    <li><a href="/static/index.html" class="active">Dashboard</a></li>
-    <li><a href="/static/simulations.html">Simulations</a></li>
-    <li><a href="/static/topologies.html">Topologies</a></li>
-    <li><a href="/static/interactive.html">Interactive REPL</a></li>
-  </ul>
-  <span class="spacer"></span>
-  <span style="font-size:11px; color:var(--text-dim)">v0.1</span>
-</nav>
+<!-- ── Nav bar (rendered by /static/js/nav.js) ─────────── -->
+<div id="nav-mount" data-active="dashboard"></div>
+<script src="/static/js/nav.js"></script>
 
 <!-- ── Dashboard ───────────────────────────────────────── -->
 <div class="page">

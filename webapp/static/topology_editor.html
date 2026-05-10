@@ -204,21 +204,24 @@
 </head>
 <body>
 
-<!-- ── Header ──────────────────────────────────────────── -->
+<!-- ── Global nav (rendered by /static/js/nav.js) ──────── -->
+<div id="nav-mount" data-active="topologies"></div>
+<script src="/static/js/nav.js"></script>
+
+<!-- ── Local toolbar ───────────────────────────────────── -->
 <div class="te-header">
-  <a href="/static/topologies.html" class="btn btn-sm">&larr; Back</a>
+  <a href="/static/topologies.html" class="btn btn-sm" title="Back to topology list">&larr; Back</a>
   <span class="sep">|</span>
-  <span class="brand">lora-universal-simulator</span>
-  <span class="sep">/</span>
   <h2 id="page-title">Edit Topology</h2>
   <span class="spacer"></span>
-  <button class="btn" id="btn-preview-snr" onclick="previewSNR()">Preview SNR</button>
-  <button class="btn" id="btn-compute-srtm" onclick="computeSrtm()" title="Compute terrain-aware per-link SNR via SRTM elevation + ITM (Longley-Rice). Sync; minutes for &gt;50 nodes.">Compute via SRTM+ITM</button>
-  <button class="btn btn-primary" id="btn-save" onclick="saveTopo()">Save</button>
-  <button class="btn" id="btn-open-file" onclick="document.getElementById('file-input').click()" title="Open a topology or full scenario JSON from disk. Scenario commands/expect/simulation fields are preserved on save.">Open file…</button>
-  <button class="btn" id="btn-save-file" onclick="saveToFile()" title="Save current state to a JSON file (downloaded by the browser). For loaded scenarios, all preserved fields round-trip verbatim.">Save to file…</button>
+  <button class="btn" id="btn-open-file" onclick="document.getElementById('file-input').click()" title="Open a topology or full scenario JSON from disk. Scenario commands/expect/simulation fields are preserved on save.">Open file&hellip;</button>
   <input type="file" id="file-input" accept=".json,application/json" style="display:none" onchange="onFileOpen(event)">
-  <button class="btn btn-danger" id="btn-cancel" onclick="window.location.href='/static/topologies.html'">Cancel</button>
+  <span class="sep">|</span>
+  <button class="btn" id="btn-preview-snr" onclick="previewSNR()" title="Preview log-distance SNR for the current node positions (no terrain).">Preview SNR</button>
+  <button class="btn" id="btn-compute-srtm" onclick="computeSrtm()" title="Compute terrain-aware per-link SNR via SRTM elevation + ITM (Longley-Rice). Sync; minutes for &gt;50 nodes.">Compute via SRTM+ITM</button>
+  <span class="sep">|</span>
+  <button class="btn" id="btn-save-file" onclick="saveToFile()" title="Download the current state as a JSON file. For loaded scenarios, all preserved fields round-trip verbatim.">Save to file&hellip;</button>
+  <button class="btn btn-primary" id="btn-save" onclick="saveTopo()" title="Save to the server-side topology library (requires this page to have been opened with ?id=…).">Save</button>
 </div>
 
 <div class="te-body">
@@ -881,6 +884,11 @@
 
       lastFileName = file.name;
       const isScenario = _isScenario(j);
+      const displayName = (isScenario ? j._name : j.name) || file.name.replace(/\.json$/i, '');
+      const kind = isScenario ? 'scenario' : 'topology';
+      document.title = `Edit ${kind}: ${displayName} — lora-universal-simulator`;
+      document.getElementById('page-title').textContent =
+        `Edit ${kind}: ${displayName}`;
 
       if (isScenario) {
         // Stash everything except the editor-managed pieces.
@@ -1026,18 +1034,24 @@
   // ── Load topology ─────────────────────────────────────────
   async function loadTopology() {
     if (!topoId) {
-      // No id → empty editor; user is expected to click "Open file…"
-      // to populate from an on-disk JSON. Initialize an empty map so
-      // the layout renders cleanly and the buttons are reachable.
-      document.title = 'Edit: (empty) — lora-universal-simulator';
-      document.getElementById('page-title').textContent =
-        'Edit: (empty — Open file… or save manually)';
+      // No id → "Open from file" flow. Hide the server-Save button
+      // (it requires an id), label the page accordingly, and trigger
+      // the file picker right away so the user lands on a usable
+      // dialog instead of a near-empty page with another button to
+      // hunt for.
+      document.title = 'Open scenario — lora-universal-simulator';
+      document.getElementById('page-title').textContent = 'Open from file';
+      document.getElementById('btn-save').style.display = 'none';
       _applyPathLossToInputs({});
       initMap([41.39, 2.16]);
       renderNodeList();
       renderDetail();
       redrawMap();
-      setStatus('Empty editor. Use "Open file…" to load a JSON from disk.');
+      setStatus('Pick a topology or scenario JSON to begin.');
+      // Defer one tick so the page paint completes before the picker
+      // overlay appears (some browsers ignore programmatic .click()
+      // until an event loop turn after load).
+      setTimeout(() => document.getElementById('file-input').click(), 0);
       return;
     }
 

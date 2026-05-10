@@ -187,12 +187,14 @@
 </head>
 <body>
 
-<!-- ── Header ──────────────────────────────────────────── -->
+<!-- ── Global nav (rendered by /static/js/nav.js) ──────── -->
+<div id="nav-mount" data-active="topologies"></div>
+<script src="/static/js/nav.js"></script>
+
+<!-- ── Local toolbar ───────────────────────────────────── -->
 <div class="tc-header">
-  <a href="/static/topologies.html" class="btn btn-sm">&larr; Back</a>
+  <a href="/static/topologies.html" class="btn btn-sm" title="Back to topology list">&larr; Back</a>
   <span class="sep">|</span>
-  <span class="brand">lora-universal-simulator</span>
-  <span class="sep">/</span>
   <h2>New Topology</h2>
   <span class="spacer"></span>
 </div>

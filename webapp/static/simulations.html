@@ -69,16 +69,9 @@
 </head>
 <body>
 
-<!-- ── Nav bar ─────────────────────────────────────────── -->
-<nav class="navbar">
-  <span class="brand">lora-universal-simulator</span>
-  <ul class="nav-links">
-    <li><a href="/static/index.html">Dashboard</a></li>
-    <li><a href="/static/simulations.html" class="active">Simulations</a></li>
-    <li><a href="/static/topologies.html">Topologies</a></li>
-  </ul>
-  <span class="spacer"></span>
-</nav>
+<!-- ── Nav bar (rendered by /static/js/nav.js) ─────────── -->
+<div id="nav-mount" data-active="simulations"></div>
+<script src="/static/js/nav.js"></script>
 
 <!-- ── Page content ────────────────────────────────────── -->
 <div class="page-wide">

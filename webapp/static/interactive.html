@@ -426,15 +426,9 @@
 </head>
 <body>
 
-<!-- Nav bar -->
-<nav class="navbar">
-  <span class="brand">lora-universal-simulator</span>
-  <ul class="nav-links">
-    <li><a href="/static/index.html">Dashboard</a></li>
-    <li><a href="/static/simulations.html">Simulations</a></li>
-  </ul>
-  <span class="spacer"></span>
-</nav>
+<!-- ── Nav bar (rendered by /static/js/nav.js) ─────────── -->
+<div id="nav-mount" data-active="interactive"></div>
+<script src="/static/js/nav.js"></script>
 
 <!-- Create flow (shown when no ?id= param) -->
 <div id="create-flow" class="create-flow hidden">
@@ -442,10 +436,12 @@
   <div class="card">
     <h3>Scenario JSON</h3>
     <div class="flex gap-8 items-center mt-8 mb-8">
-      <label class="btn btn-sm" style="cursor:pointer">
-        Load from file
+      <label class="btn btn-sm" style="cursor:pointer" title="Load a scenario JSON from disk into the textarea (overwrites current contents).">
+        Load from file&hellip;
         <input type="file" id="scenario-file" accept=".json" style="display:none">
       </label>
+      <button class="btn btn-sm" id="btn-save-scenario-file" onclick="saveScenarioToFile()" title="Download the current textarea contents as a JSON file.">Save to file&hellip;</button>
+      <a href="/static/topology_editor.html" class="btn btn-sm" title="Open the visual editor (map + node list) to edit a topology or scenario JSON, then paste back here.">Edit visually&hellip;</a>
     </div>
     <textarea id="scenario-json" rows="14"
       style="width:100%; font-family:var(--font-mono); font-size:11px; padding:8px; border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-input); color:var(--text); resize:vertical;"
@@ -600,16 +596,51 @@
     document.getElementById('create-flow').classList.remove('hidden');
   }
 
-  // Load scenario JSON from file
+  // Load scenario JSON from file (and remember the filename for
+  // a subsequent Save to file…)
+  let lastLoadedFileName = null;
   document.getElementById('scenario-file').addEventListener('change', function() {
     const file = this.files[0];
     if (!file) return;
+    lastLoadedFileName = file.name;
     const reader = new FileReader();
     reader.onload = (e) => {
       document.getElementById('scenario-json').value = e.target.result;
     };
     reader.readAsText(file);
+    // Reset so picking the same file fires change again.
+    this.value = '';
   });
+
+  // Browser-side download of textarea contents.
+  window.saveScenarioToFile = function() {
+    const raw = document.getElementById('scenario-json').value;
+    if (!raw.trim()) {
+      document.getElementById('create-status').textContent =
+        'Nothing to save — the scenario textarea is empty.';
+      return;
+    }
+    let body = raw;
+    try { body = JSON.stringify(JSON.parse(raw), null, 2); }
+    catch (e) { /* keep raw text if not valid JSON yet */ }
+    let suggested = lastLoadedFileName;
+    if (!suggested) {
+      try {
+        const parsed = JSON.parse(raw);
+        const n = parsed && (parsed._name || parsed.name);
+        suggested = (n ? String(n) : 'scenario') + '.json';
+      } catch (e) { suggested = 'scenario.json'; }
+    }
+    const blob = new Blob([body], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = suggested;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   document.getElementById('btn-create').addEventListener('click', async function() {
     const raw = document.getElementById('scenario-json').value.trim();

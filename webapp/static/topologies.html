@@ -22,17 +22,9 @@
 </head>
 <body>
 
-<!-- ── Nav bar ─────────────────────────────────────────── -->
-<nav class="navbar">
-  <span class="brand">lora-universal-simulator</span>
-  <ul class="nav-links">
-    <li><a href="/static/index.html">Dashboard</a></li>
-    <li><a href="/static/simulations.html">Simulations</a></li>
-    <li><a href="/static/topologies.html" class="active">Topologies</a></li>
-    <li><a href="/static/interactive.html">Interactive REPL</a></li>
-  </ul>
-  <span class="spacer"></span>
-</nav>
+<!-- ── Nav bar (rendered by /static/js/nav.js) ─────────── -->
+<div id="nav-mount" data-active="topologies"></div>
+<script src="/static/js/nav.js"></script>
 
 <!-- ── Page content ────────────────────────────────────── -->
 <div class="page-wide">
@@ -44,7 +36,7 @@
     <div class="flex gap-8">
       <button class="btn" onclick="loadTopologies()">Refresh</button>
       <a href="/static/topology_creator.html" class="btn btn-primary">+ New Topology</a>
-      <a href="/static/topology_editor.html" class="btn" title="Open the editor empty so you can load a topology or scenario JSON from disk via &quot;Open file…&quot;.">Open from file…</a>
+      <a href="/static/topology_editor.html" class="btn" title="Open a topology JSON or full scenario JSON from disk for editing. Scenario commands/expect/simulation fields are preserved on save.">Open scenario or topology…</a>
     </div>
   </div>
 

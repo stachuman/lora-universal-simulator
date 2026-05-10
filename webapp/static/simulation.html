@@ -212,15 +212,9 @@
 </head>
 <body>
 
-<nav class="navbar">
-  <span class="brand">lora-universal-simulator</span>
-  <ul class="nav-links">
-    <li><a href="/static/index.html">Dashboard</a></li>
-    <li><a href="/static/simulations.html">Simulations</a></li>
-    <li><a href="/static/topologies.html">Topologies</a></li>
-  </ul>
-  <span class="spacer"></span>
-</nav>
+<!-- ── Nav bar (rendered by /static/js/nav.js) ─────────── -->
+<div id="nav-mount" data-active="simulations"></div>
+<script src="/static/js/nav.js"></script>
 
 <div class="page" style="max-width:1100px">
 
@@ -235,8 +229,10 @@
       <label for="scenario-json">Paste a complete lus scenario JSON below, or load it from a file:</label>
       <textarea id="scenario-json" placeholder='{"simulation": {...}, "nodes": [...], "topology": {...}, "commands": [...]}' spellcheck="false"></textarea>
       <div class="file-row">
-        <button class="btn" onclick="document.getElementById('json-file-input').click()">Load from file</button>
+        <button class="btn" onclick="document.getElementById('json-file-input').click()" title="Load a scenario JSON from disk into the textarea (overwrites current contents).">Load from file&hellip;</button>
         <input type="file" id="json-file-input" accept=".json" style="display:none">
+        <button class="btn" id="btn-save-scenario" onclick="saveScenarioToFile()" title="Download the current textarea contents as a JSON file (browser save).">Save to file&hellip;</button>
+        <a href="/static/topology_editor.html" class="btn btn-sm" title="Open the visual editor (map + node list) to edit a topology or scenario JSON. Useful for editing nodes/links graphically before pasting back here.">Edit visually&hellip;</a>
         <span id="file-name" style="font-size:11px; color:var(--text-dim)"></span>
       </div>
 
@@ -448,10 +444,13 @@
     }
   };
 
-  // File picker wires textarea
+  // File picker wires textarea (and remembers the filename so a
+  // subsequent Save to file… can default to the same name).
+  let lastLoadedFileName = null;
   document.getElementById('json-file-input').addEventListener('change', function(e) {
     const file = e.target.files[0];
     if (!file) return;
+    lastLoadedFileName = file.name;
     document.getElementById('file-name').textContent = file.name;
     const reader = new FileReader();
     reader.onload = function(ev) {
@@ -467,7 +466,44 @@
       document.getElementById('file-name').textContent = '';
     };
     reader.readAsText(file);
+    // Reset value so re-picking the same file fires change again.
+    e.target.value = '';
   });
+
+  // Browser-side download of textarea contents. Pretty-print if the
+  // textarea parses as JSON; otherwise dump as-is so the user doesn't
+  // lose draft text mid-edit.
+  window.saveScenarioToFile = function() {
+    const raw = document.getElementById('scenario-json').value;
+    const errDiv = document.getElementById('form-error');
+    errDiv.classList.add('hidden');
+    if (!raw.trim()) {
+      errDiv.textContent = 'Nothing to save — the scenario textarea is empty.';
+      errDiv.classList.remove('hidden');
+      return;
+    }
+    let body = raw;
+    try {
+      body = JSON.stringify(JSON.parse(raw), null, 2);
+    } catch (e) { /* not valid JSON yet — keep raw text */ }
+    let suggested = lastLoadedFileName;
+    if (!suggested) {
+      try {
+        const parsed = JSON.parse(raw);
+        const n = parsed && (parsed._name || parsed.name);
+        suggested = (n ? String(n) : 'scenario') + '.json';
+      } catch (e) { suggested = 'scenario.json'; }
+    }
+    const blob = new Blob([body], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = suggested;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   window.submitSim = async function() {
     const raw = document.getElementById('scenario-json').value.trim();
