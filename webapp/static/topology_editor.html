@@ -215,6 +215,9 @@
   <button class="btn" id="btn-preview-snr" onclick="previewSNR()">Preview SNR</button>
   <button class="btn" id="btn-compute-srtm" onclick="computeSrtm()" title="Compute terrain-aware per-link SNR via SRTM elevation + ITM (Longley-Rice). Sync; minutes for &gt;50 nodes.">Compute via SRTM+ITM</button>
   <button class="btn btn-primary" id="btn-save" onclick="saveTopo()">Save</button>
+  <button class="btn" id="btn-open-file" onclick="document.getElementById('file-input').click()" title="Open a topology or full scenario JSON from disk. Scenario commands/expect/simulation fields are preserved on save.">Open file…</button>
+  <button class="btn" id="btn-save-file" onclick="saveToFile()" title="Save current state to a JSON file (downloaded by the browser). For loaded scenarios, all preserved fields round-trip verbatim.">Save to file…</button>
+  <input type="file" id="file-input" accept=".json,application/json" style="display:none" onchange="onFileOpen(event)">
   <button class="btn btn-danger" id="btn-cancel" onclick="window.location.href='/static/topologies.html'">Cancel</button>
 </div>
 
@@ -358,6 +361,16 @@
   // via SRTM compute or topology load). Persisted to the topology JSON
   // so a re-load doesn't require re-running the slow ITM compute.
   let snrLinks = [];
+  // When the user opens a full scenario JSON via "Open file…", every
+  // top-level key NOT managed by this editor (commands, expect, simulation,
+  // _name, _desc, etc.) gets stashed here verbatim so saveToFile can
+  // round-trip it. nodes / topology / path_loss are managed by the editor
+  // and excluded from this stash. Empty when editing a fresh / topology-
+  // only document.
+  let preservedScenarioFields = {};
+  // Filename to default the download to. Set when "Open file…" loads
+  // a JSON; falls back to "topology.json" otherwise.
+  let lastFileName = null;
 
   // Drop both pieces of computed SNR state. Call this whenever node
   // positions or identities change so the heatmap doesn't show stale
@@ -822,6 +835,150 @@
       btn.disabled = false;
       previewBtn.disabled = false;
     }
+  };
+
+  // ── File open / save (disk) ──────────────────────────────
+  // The editor accepts two JSON shapes:
+  //   • Topology — {name, path_loss, nodes, links?}  (existing /api/topologies format)
+  //   • Scenario — full lus scenario with simulation, nodes, topology, commands, expect, ...
+  // Detection: a "scenario" has at least one of {simulation, commands, expect}.
+  // Scenario top-level fields not owned by the editor are stashed in
+  // preservedScenarioFields for byte-faithful round-trip on saveToFile.
+
+  function _isScenario(j) {
+    return (j && typeof j === 'object'
+      && (('simulation' in j) || ('commands' in j) || ('expect' in j)));
+  }
+
+  function _applyPathLossToInputs(pl) {
+    pl = pl || {};
+    document.getElementById('pl-alpha').value           = pl.alpha                   != null ? pl.alpha                   : 3.0;
+    document.getElementById('pl-sigma').value           = pl.sigma_db                != null ? pl.sigma_db                : 0;
+    document.getElementById('pl-refdist').value         = pl.ref_distance_m          != null ? pl.ref_distance_m          : 1.0;
+    document.getElementById('pl-refloss').value         = pl.ref_loss_db             != null ? pl.ref_loss_db             : 40.0;
+    document.getElementById('pl-noisefloor').value      = pl.noise_floor_db          != null ? pl.noise_floor_db          : -120.0;
+    document.getElementById('pl-txpower').value         = pl.tx_power_dbm            != null ? pl.tx_power_dbm            : 14.0;
+    document.getElementById('pl-tx-offset-sigma').value = pl.node_tx_offset_sigma_db != null ? pl.node_tx_offset_sigma_db : 0;
+    document.getElementById('pl-rx-offset-sigma').value = pl.node_rx_offset_sigma_db != null ? pl.node_rx_offset_sigma_db : 0;
+    document.getElementById('pl-asym-coh').value        = pl.asymmetry_coherence_ms  != null ? pl.asymmetry_coherence_ms  : 0;
+  }
+
+  window.onFileOpen = async function(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let j;
+      try { j = JSON.parse(text); }
+      catch (e) { setStatus('Invalid JSON: ' + e.message, true); return; }
+
+      lastFileName = file.name;
+      const isScenario = _isScenario(j);
+
+      if (isScenario) {
+        // Stash everything except the editor-managed pieces.
+        preservedScenarioFields = {};
+        for (const key of Object.keys(j)) {
+          if (key === 'nodes' || key === 'topology') continue;
+          if (key === 'simulation') {
+            // Stash simulation but strip path_loss (editor owns it).
+            const sim = { ...(j.simulation || {}) };
+            delete sim.path_loss;
+            preservedScenarioFields.simulation = sim;
+            continue;
+          }
+          preservedScenarioFields[key] = j[key];
+        }
+        document.getElementById('topo-name').value =
+          j._name || file.name.replace(/\.json$/i, '');
+        _applyPathLossToInputs((j.simulation || {}).path_loss || {});
+      } else {
+        // Topology shape — no preserved fields beyond what the editor owns.
+        preservedScenarioFields = {};
+        document.getElementById('topo-name').value =
+          j.name || file.name.replace(/\.json$/i, '');
+        _applyPathLossToInputs(j.path_loss || {});
+      }
+
+      // nodes — preserve every field verbatim (antenna_height_m, start_at_ms,
+      // dies_at_ms, future ones).
+      nodes = (j.nodes || []).map(n => {
+        const out = { ...n };
+        if (out.lat != null) out.lat = parseFloat(out.lat);
+        if (out.lon != null) out.lon = parseFloat(out.lon);
+        return out;
+      });
+
+      // topology.links[] (scenarios) or top-level links[] (some topology dumps).
+      const linksIn = (j.topology && j.topology.links) || j.links || [];
+      snrLinks = Array.isArray(linksIn) ? linksIn : [];
+      snrMatrix = snrLinks.length > 0 ? linksToMatrix(nodes, snrLinks) : null;
+
+      // Re-fit the map.
+      const geoNodes = nodes.filter(n => n.lat != null && n.lon != null);
+      if (geoNodes.length > 0) {
+        const avgLat = geoNodes.reduce((s, n) => s + n.lat, 0) / geoNodes.length;
+        const avgLon = geoNodes.reduce((s, n) => s + n.lon, 0) / geoNodes.length;
+        if (!leafletMap) initMap([avgLat, avgLon]);
+        else leafletMap.setView([avgLat, avgLon], 11);
+      } else if (!leafletMap) {
+        initMap([41.39, 2.16]);
+      }
+
+      selectedIdx = null;
+      renderNodeList();
+      renderDetail();
+      redrawMap();
+      markDirty();
+      if (geoNodes.length > 1) {
+        const bounds = L.latLngBounds(geoNodes.map(n => [n.lat, n.lon]));
+        leafletMap.fitBounds(bounds, { padding: [30, 30] });
+      }
+      setStatus(
+        `Loaded ${file.name}: ${nodes.length} nodes, ${snrLinks.length} links` +
+        (isScenario ? ' (scenario fields preserved)' : '')
+      );
+    } finally {
+      // Clear the input so re-opening the same file fires onchange again.
+      event.target.value = '';
+    }
+  };
+
+  window.saveToFile = function() {
+    if (nodes.length === 0) {
+      setStatus('Nothing to save — no nodes placed.', true);
+      return;
+    }
+    const name = document.getElementById('topo-name').value.trim();
+    const path_loss = collectPathLoss();
+    const links = snrLinks;
+
+    let out;
+    if (Object.keys(preservedScenarioFields).length > 0) {
+      // Scenario round-trip: rebuild the full document.
+      out = { ...preservedScenarioFields };
+      out._name = name || preservedScenarioFields._name || 'scenario';
+      // Re-attach path_loss inside simulation.
+      const sim = { ...(out.simulation || {}) };
+      sim.path_loss = path_loss;
+      out.simulation = sim;
+      out.nodes = nodes;
+      out.topology = { ...(out.topology || {}), links };
+    } else {
+      // Topology shape.
+      out = { name: name || 'topology', path_loss, nodes, links };
+    }
+
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = lastFileName || (name ? name + '.json' : 'topology.json');
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setStatus(`Downloaded ${a.download}`);
   };
 
   // ── Save ──────────────────────────────────────────────────
