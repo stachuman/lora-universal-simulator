@@ -1,0 +1,32 @@
+{
+  "_name": "t27_asymmetric_link",
+  "_desc": "Two-node asymmetric link. alice→bob is +10 dB SNR (good); bob→alice is -25 dB (below SF12 floor). Both flood. bob receives alice's broadcast; alice never receives bob's. Asserts the explicit-asymmetric path lands directional values in the link matrix and the runtime drops below-floor frames per direction.",
+  "simulation": {
+    "duration_ms": 10000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "examples/flooder.lua",
+      "config": { "role": "originator" } },
+    { "name": "bob",   "script": "examples/flooder.lua",
+      "config": { "role": "originator" } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr":  10.0, "rssi":  -78.0, "bidir": false },
+      { "from": "bob",   "to": "alice", "snr": -25.0, "rssi": -120.0, "bidir": false }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000, "node": "alice", "command": "send from-alice" },
+    { "at_ms": 4000, "node": "bob",   "command": "send from-bob"   }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "recv", "value": "from-alice" },
+    { "type": "event_count_min",      "event_type": "drop_weak", "min": 1 }
+  ]
+}
