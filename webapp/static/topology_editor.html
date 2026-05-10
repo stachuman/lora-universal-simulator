@@ -1019,7 +1019,18 @@
   // ── Load topology ─────────────────────────────────────────
   async function loadTopology() {
     if (!topoId) {
-      setStatus('No topology ID in URL (?id=…)', true);
+      // No id → empty editor; user is expected to click "Open file…"
+      // to populate from an on-disk JSON. Initialize an empty map so
+      // the layout renders cleanly and the buttons are reachable.
+      document.title = 'Edit: (empty) — lora-universal-simulator';
+      document.getElementById('page-title').textContent =
+        'Edit: (empty — Open file… or save manually)';
+      _applyPathLossToInputs({});
+      initMap([41.39, 2.16]);
+      renderNodeList();
+      renderDetail();
+      redrawMap();
+      setStatus('Empty editor. Use "Open file…" to load a JSON from disk.');
       return;
     }
 
