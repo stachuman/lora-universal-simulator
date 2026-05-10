@@ -126,7 +126,7 @@ SNR(d_m) = tx_power_dbm − [ref_loss_db + 10·alpha·log10(d_m / ref_distance_m
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `model` | string | required | `"log_distance"` | The only model implemented today. |
+| `model` | string | `"log_distance"` | `"log_distance"` or `"none"` | `"log_distance"` runs the per-pair baseline below; `"none"` skips it entirely so only explicit `topology.links[]` populate the link matrix and unlisted pairs return `getLink → false` (the runtime treats them as out of range). Use `"none"` when the operator has authored a complete topology — e.g., the SRTM+ITM webapp generator's directional output — and doesn't want log-distance fallback for unlisted pairs. |
 | `alpha` | float | required | 1.0..6.0 (typical) | Path-loss exponent. 2 = free-space, 3 = suburban, 3.5 = urban, ≥4 = dense urban / heavy obstruction. |
 | `sigma_db` | float | required | 0.0..20.0 | Log-normal shadowing standard deviation. `0.0` = deterministic. |
 | `ref_distance_m` | float | required | > 0 | Reference distance d₀. |
@@ -182,7 +182,7 @@ the computed value for the specific pair.
 | `to` | string | required | Destination node name |
 | `snr` | float | required | Mean SNR in dB at the receiver |
 | `rssi` | float | required | Mean RSSI in dBm at the receiver |
-| `bidir` | bool | true | If true, the link is mirrored for the `to → from` direction |
+| `bidir` | bool | true | If true, the entry's snr/rssi/snr_std_dev applies to BOTH directions of the pair (`from → to` AND `to → from`). When false, only the `from → to` direction is set; the reverse is unaffected. Asymmetric topologies (e.g., the SRTM+ITM generator's default output) emit two `bidir: false` entries per pair, one for each direction, with potentially different SNR/RSSI per direction. |
 | `snr_std_dev` | float | 0.0 | Per-packet log-normal shadowing on this link |
 | `snr_coherence_ms` | int | 0 | Optional fading coherence; 0 = i.i.d. |
 | `loss` | float | 0.0 | Probability the packet is dropped (in addition to SNR-based loss) |
