@@ -164,6 +164,23 @@
     box-shadow: none;
   }
 
+  /* Draggable node icon (replaces L.circleMarker — circleMarker has
+     no built-in dragging, so we need a real L.marker + divIcon). */
+  .te-node-icon {
+    background: #3b82f6;
+    border: 2px solid #2563eb;
+    border-radius: 50%;
+    width: 12px; height: 12px;
+    box-sizing: border-box;
+    cursor: pointer;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  }
+  .te-node-icon.selected {
+    background: #fbbf24;
+    border: 3px solid #ea580c;
+    width: 18px; height: 18px;
+  }
+
   /* Preset buttons for path-loss */
   .preset-buttons {
     display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px;
@@ -476,14 +493,16 @@
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
       if (n.lat == null || n.lon == null) continue;
+      // L.marker + divIcon (NOT L.circleMarker) so {draggable: true}
+      // actually works — circleMarker has no built-in dragging
+      // support, the prior new-L.Draggable workaround was dead code.
       const isSelected = i === selectedIdx;
-      const marker = L.circleMarker([n.lat, n.lon], {
-        radius: isSelected ? 9 : 6,
-        color: isSelected ? '#ea580c' : '#2563eb',
-        weight: isSelected ? 3 : 2,
-        fillColor: '#3b82f6',
-        fillOpacity: 0.9,
+      const icon = L.divIcon({
+        className: isSelected ? 'te-node-icon selected' : 'te-node-icon',
+        iconSize: isSelected ? [18, 18] : [12, 12],
+        iconAnchor: isSelected ? [9, 9] : [6, 6],
       });
+      const marker = L.marker([n.lat, n.lon], { icon, draggable: true });
       if (showLabels) {
         marker.bindTooltip(n.name, { permanent: true, direction: 'top', offset: [0, -10], className: 'te-label' });
       } else {
@@ -497,12 +516,6 @@
         selectNode(this._nodeIdx);
       });
 
-      // Draggable
-      const draggable = new L.Draggable(marker._path || marker._icon || marker.getElement() || document.createElement('div'));
-      marker.on('mousedown', function() {
-        this.dragging && this.dragging.enable();
-      });
-      marker.dragging && marker.dragging.enable();
       marker.on('dragend', function() {
         const pos = this.getLatLng();
         const idx = this._nodeIdx;
