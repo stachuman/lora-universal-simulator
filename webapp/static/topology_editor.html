@@ -273,6 +273,27 @@
         <label>Lon</label>
         <input id="det-lon" type="number" step="any" oninput="onDetChange()">
       </div>
+      <div class="det-field">
+        <label title="ITM antenna height (m). Default 1.5 (handheld); rooftop gateways set 10+.">
+          Antenna height (m)
+        </label>
+        <input id="det-antenna" type="number" step="any" min="0"
+               placeholder="1.5" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label title="If set, node is fully off until this sim-time (ms). Leave blank for default (alive from t=0).">
+          start_at_ms
+        </label>
+        <input id="det-start-at" type="number" step="1" min="1"
+               placeholder="(blank = always on)" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label title="If set, node powers off at this sim-time (ms). Leave blank to never die.">
+          dies_at_ms
+        </label>
+        <input id="det-dies-at" type="number" step="1" min="1"
+               placeholder="(blank = never dies)" oninput="onDetChange()">
+      </div>
       <div style="margin-top:8px; display:flex; gap:6px;">
         <button class="btn btn-sm btn-danger" id="btn-delete-node" onclick="deleteSelectedNode()">Delete Node</button>
       </div>
@@ -304,6 +325,18 @@
 
   let nodes = [];
   let snrMatrix = null;
+  // SRTM-computed link list (kept in sync with snrMatrix when populated
+  // via SRTM compute or topology load). Persisted to the topology JSON
+  // so a re-load doesn't require re-running the slow ITM compute.
+  let snrLinks = [];
+
+  // Drop both pieces of computed SNR state. Call this whenever node
+  // positions or identities change so the heatmap doesn't show stale
+  // numbers that no longer correspond to the current node set.
+  function clearComputedSnr() {
+    snrMatrix = null;
+    snrLinks = [];
+  }
   let isDirty = false;
   let selectedIdx = null;
   let searchFilter = '';
@@ -475,7 +508,7 @@
         const idx = this._nodeIdx;
         nodes[idx].lat = parseFloat(pos.lat.toFixed(6));
         nodes[idx].lon = parseFloat(pos.lng.toFixed(6));
-        snrMatrix = null;
+        clearComputedSnr();
         markDirty();
         if (selectedIdx === idx) renderDetail();
         redrawMap();
@@ -524,17 +557,43 @@
     document.getElementById('det-name').value = n.name || '';
     document.getElementById('det-lat').value  = n.lat  != null ? n.lat : '';
     document.getElementById('det-lon').value  = n.lon  != null ? n.lon : '';
+    document.getElementById('det-antenna').value =
+      n.antenna_height_m != null ? n.antenna_height_m : '';
+    document.getElementById('det-start-at').value =
+      n.start_at_ms != null ? n.start_at_ms : '';
+    document.getElementById('det-dies-at').value =
+      n.dies_at_ms != null ? n.dies_at_ms : '';
+  }
+
+  // Parse a number-or-blank input. Blank → undefined (drop the key);
+  // any non-blank parsed value is set.
+  function _readOptionalNumber(elId) {
+    const raw = document.getElementById(elId).value.trim();
+    if (raw === '') return undefined;
+    const v = parseFloat(raw);
+    return Number.isFinite(v) ? v : undefined;
   }
 
   // detail change handler
   window.onDetChange = function() {
     if (selectedIdx === null || selectedIdx >= nodes.length) return;
-    const oldName = nodes[selectedIdx].name;
-    const newName = document.getElementById('det-name').value;
-    nodes[selectedIdx].name = newName;
-    nodes[selectedIdx].lat  = parseFloat(document.getElementById('det-lat').value) || nodes[selectedIdx].lat;
-    nodes[selectedIdx].lon  = parseFloat(document.getElementById('det-lon').value) || nodes[selectedIdx].lon;
-    snrMatrix = null;
+    const n = nodes[selectedIdx];
+    n.name = document.getElementById('det-name').value;
+    n.lat  = parseFloat(document.getElementById('det-lat').value) || n.lat;
+    n.lon  = parseFloat(document.getElementById('det-lon').value) || n.lon;
+    // Optional fields: drop the key when input is blank so the
+    // saved JSON stays minimal (and the C++ runtime sees the
+    // defaults, not 0/null).
+    const antenna = _readOptionalNumber('det-antenna');
+    if (antenna === undefined) delete n.antenna_height_m;
+    else                       n.antenna_height_m = antenna;
+    const startAt = _readOptionalNumber('det-start-at');
+    if (startAt === undefined) delete n.start_at_ms;
+    else                       n.start_at_ms = Math.round(startAt);
+    const diesAt = _readOptionalNumber('det-dies-at');
+    if (diesAt === undefined) delete n.dies_at_ms;
+    else                      n.dies_at_ms = Math.round(diesAt);
+    clearComputedSnr();
     markDirty();
     renderNodeList();
     redrawMap();
@@ -579,7 +638,7 @@
       lat: parseFloat(center.lat.toFixed(6)),
       lon: parseFloat(center.lng.toFixed(6)),
     });
-    snrMatrix = null;
+    clearComputedSnr();
     markDirty();
     renderNodeList();
     redrawMap();
@@ -593,7 +652,7 @@
     if (!confirm('Delete node "' + name + '"?')) return;
     nodes.splice(selectedIdx, 1);
     selectedIdx = null;
-    snrMatrix = null;
+    clearComputedSnr();
     markDirty();
     renderNodeList();
     renderDetail();
@@ -612,6 +671,10 @@
       setStatus('Computing SNR preview…');
       const result = await postJSON('/api/topo-creator/preview-snr', { nodes, path_loss });
       snrMatrix = result.matrix;
+      // Log-distance preview replaces any SRTM-derived links — clear
+      // the snrLinks list so a subsequent Save persists ONLY what's
+      // actually computed (in this case nothing terrain-aware).
+      snrLinks = [];
       redrawMap();
       setStatus(nodes.length + ' nodes | SNR preview applied');
     } catch (e) {
@@ -665,7 +728,9 @@
       const result = await postJSON('/api/topo-creator/generate-srtm', {
         nodes, path_loss, itm,
       });
-      snrMatrix = linksToMatrix(nodes, result.links);
+      snrLinks = result.links;
+      snrMatrix = linksToMatrix(nodes, snrLinks);
+      markDirty();  // computed quality is now in unsaved state
       redrawMap();
       setStatus(
         `SRTM: kept ${result.n_links_kept}/${result.n_pairs_evaluated} ` +
@@ -692,6 +757,7 @@
       name,
       path_loss: collectPathLoss(),
       nodes,
+      links: snrLinks,
     };
 
     try {
@@ -741,11 +807,22 @@
       document.getElementById('pl-rx-offset-sigma').value = pl.node_rx_offset_sigma_db   != null ? pl.node_rx_offset_sigma_db   : 0;
       document.getElementById('pl-asym-coh').value        = pl.asymmetry_coherence_ms    != null ? pl.asymmetry_coherence_ms    : 0;
 
-      nodes = (entry.nodes || []).map(n => ({
-        name: n.name,
-        lat:  n.lat != null ? parseFloat(n.lat) : null,
-        lon:  n.lon != null ? parseFloat(n.lon) : null,
-      }));
+      // Preserve every per-node field verbatim (antenna_height_m,
+      // start_at_ms, dies_at_ms, future ones) so a save round-trip
+      // doesn't silently strip operator-set values. Cast lat/lon to
+      // float to be safe.
+      nodes = (entry.nodes || []).map(n => {
+        const out = { ...n };
+        if (out.lat != null) out.lat = parseFloat(out.lat);
+        if (out.lon != null) out.lon = parseFloat(out.lon);
+        return out;
+      });
+
+      // Restore SRTM-computed link quality (if any was saved); rebuild
+      // the matrix the heatmap consumes so a re-load shows terrain
+      // colours without re-running the slow ITM compute.
+      snrLinks = Array.isArray(entry.links) ? entry.links : [];
+      snrMatrix = snrLinks.length > 0 ? linksToMatrix(nodes, snrLinks) : null;
 
       // Determine map center
       const geoNodes = nodes.filter(n => n.lat != null && n.lon != null);

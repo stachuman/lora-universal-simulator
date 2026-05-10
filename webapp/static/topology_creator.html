@@ -335,6 +335,10 @@
   // ── State ──────────────────────────────────────────────
   let nodes = [];           // [{name, lat, lon}]
   let snrMatrix = null;     // N×N matrix of SNR values after preview
+  // SRTM-computed links (kept in sync with snrMatrix when computed via
+  // SRTM+ITM). Persisted on Save so a re-load doesn't need to re-run
+  // the slow ITM compute.
+  let snrLinks = [];
   let leafletMap = null;
   let regionMap = null;
   let markerGroup = null;
@@ -450,6 +454,7 @@
     if (!name) name = nextNodeName();
     nodes.push({ name, lat: parseFloat(lat.toFixed(6)), lon: parseFloat(lon.toFixed(6)) });
     snrMatrix = null;
+    snrLinks = [];
     redrawMap();
     updateStatus();
     updateButtons();
@@ -465,6 +470,7 @@
     }
     nodes.splice(best, 1);
     snrMatrix = null;
+    snrLinks = [];
     redrawMap();
     updateStatus();
     updateButtons();
@@ -587,6 +593,7 @@
         lon:  parseFloat(n.lon.toFixed(6)),
       }));
       snrMatrix = null;
+      snrLinks = [];
       redrawMap();
       if (nodes.length > 0) {
         const bounds = L.latLngBounds(nodes.map(n => [n.lat, n.lon]));
@@ -613,6 +620,10 @@
       document.getElementById('statusbar').textContent = 'Computing SNR preview…';
       const result = await postJSON('/api/topo-creator/preview-snr', { nodes, path_loss });
       snrMatrix = result.matrix;
+      // Log-distance preview replaces any SRTM-derived links — clear
+      // the snrLinks list so a Save persists ONLY actually-computed
+      // terrain quality (in this case nothing).
+      snrLinks = [];
       redrawMap();
       updateStatus();
     } catch (e) {
@@ -668,7 +679,8 @@
       const result = await postJSON('/api/topo-creator/generate-srtm', {
         nodes, path_loss, itm,
       });
-      snrMatrix = linksToMatrix(nodes, result.links);
+      snrLinks = result.links;
+      snrMatrix = linksToMatrix(nodes, snrLinks);
       redrawMap();
       document.getElementById('statusbar').textContent =
         `SRTM: kept ${result.n_links_kept}/${result.n_pairs_evaluated} ` +
@@ -719,6 +731,7 @@
       name,
       path_loss: collectPathLoss(),
       nodes,
+      links: snrLinks,
     };
 
     try {

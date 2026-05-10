@@ -36,6 +36,11 @@ class TopologyIn(BaseModel):
     name: str
     path_loss: dict = Field(default_factory=dict)
     nodes: list[dict] = Field(default_factory=list)
+    # Optional: per-link snr/rssi/snr_std_dev/bidir computed by the
+    # SRTM+ITM endpoint. Round-tripped verbatim so a saved topology
+    # remembers its terrain-aware link quality without re-running
+    # the (slow) ITM compute on every load.
+    links: list[dict] = Field(default_factory=list)
 
 
 class TopologySummary(BaseModel):
@@ -77,6 +82,7 @@ async def create_topology(body: TopologyIn) -> TopologyCreatedResponse:
         "created_at": time.time(),
         "path_loss": body.path_loss,
         "nodes": body.nodes,
+        "links": body.links,
     }
     try:
         validate_topology_dict(topo)
@@ -108,6 +114,7 @@ async def update_topology(topo_id: str, body: TopologyIn) -> dict:
     updated["name"] = body.name
     updated["path_loss"] = body.path_loss
     updated["nodes"] = body.nodes
+    updated["links"] = body.links
 
     try:
         validate_topology_dict(updated)
