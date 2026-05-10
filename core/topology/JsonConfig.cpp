@@ -118,12 +118,9 @@ static SimConfig parseJson(const json& j) {
                 cfg.simulation.path_loss.asymmetry_coherence_ms = pl["asymmetry_coherence_ms"].get<uint64_t>();
             if (pl.contains("frequency_mhz"))
                 cfg.simulation.path_loss.frequency_mhz = pl["frequency_mhz"].get<double>();
-            if (cfg.simulation.path_loss.model != "log_distance") {
-                throw std::runtime_error(
-                    "config error at simulation.path_loss: model must be "
-                    "\"log_distance\" for v1 (got \""
-                    + cfg.simulation.path_loss.model + "\")");
-            }
+            // model is validated downstream in validate(); accept any
+            // string at parse time so the validator's error message is
+            // the canonical one.
         }
         // NOTE: simulation.firmware, simulation.hot_start, simulation.delay_tuning
         // were intentionally stripped during the MeshCore -> universal port.
@@ -368,6 +365,15 @@ static void validateConfig(const SimConfig& cfg) {
                          + std::to_string(cfg.simulation.radio.duty_cycle) + ")");
     if (cfg.simulation.radio.duty_cycle_window_ms == 0)
         errors.push_back("simulation.radio.duty_cycle_window_ms must be > 0");
+    {
+        const auto& m = cfg.simulation.path_loss.model;
+        if (cfg.simulation.path_loss.present
+            && m != "log_distance" && m != "none") {
+            errors.push_back(
+                "simulation.path_loss.model must be \"log_distance\" or "
+                "\"none\" (got \"" + m + "\")");
+        }
+    }
     if (cfg.simulation.path_loss.frequency_mhz <= 0.0)
         errors.push_back("simulation.path_loss.frequency_mhz must be > 0 (got "
                          + std::to_string(cfg.simulation.path_loss.frequency_mhz) + ")");
