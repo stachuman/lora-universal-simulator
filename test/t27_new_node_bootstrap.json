@@ -1,0 +1,41 @@
+{
+  "_name": "t27_new_node_bootstrap",
+  "_desc": "5-node line a-b-c-d-e. a/b/c/d boot at t=0; e boots at t=20000 (after warmup, after the rest converged) and immediately tries 'send a hello'. Verifies the bootstrap-UX work: e's send is held in the defer queue (send_deferred fires) until e's rt populates from neighbour beacons (send_drained fires), then delivered. Without the defer queue + cold-start fast-first-beacon, e would either drop the send (send_no_route) or wait minutes.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 10000,
+    "seed": 42,
+    "node_startup_jitter_ms": 100,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "dave",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "eve",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 },
+      "start_at_ms": 20000 }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "carol", "to": "dave",  "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "dave",  "to": "eve",   "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 20100, "node": "eve", "command": "send alice hello-from-newcomer" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "send_deferred", "value": "" },
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "send_drained",  "value": "" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "delivered",     "value": "hello-from-newcomer" }
+  ]
+}

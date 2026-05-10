@@ -108,6 +108,34 @@
 --   reason a 3-cycle can be detected without enlarging the wire format —
 --   the byte was already in the beacon entry, we just hadn't been keeping it.
 --
+-- Bootstrap UX (cold-start joiners)
+--   Goal: a new user opening the app and tapping "send" should see clear
+--   feedback ("connecting... sending... delivered") rather than a silent
+--   drop. Two pieces:
+--
+--   1. Cold-start fast first beacon. If on_init runs AFTER warmup_ms
+--      (single new joiner, mesh already converged), schedule the first
+--      beacon at rand(1, 200) ms instead of rand(0, beacon_period_warmup).
+--      Neighbours' triggered beacons bring this node into routing tables
+--      within ~hundreds of ms instead of waiting up to a full operational
+--      beacon period (5 min default).
+--
+--   2. Defer queue for originator sends with no route. Instead of
+--      dropping with send_no_route, hold the send for up to
+--      send_defer_ttl_ms (default 30 s) in self.deferred_sends. Drain
+--      triggered by:
+--        - on_recv 'B' (after rt mutations) — fastest case, route just
+--          arrived; deferred send fires within ~hundreds of ms of boot.
+--        - Periodic 1 s timer — fallback for TTL pruning when no
+--          routing traffic flows.
+--      Events: send_deferred (initial hold; app should show "connecting"),
+--      send_drained (route appeared; app updates to "sending"),
+--      send_giveup (TTL elapsed; app surfaces real failure).
+--
+--   Forwarders (mid-flight, previous_hop != nil) NEVER defer — a route
+--   gone mid-flight is a real failure (originator's app-layer end-to-end
+--   retry is the recovery), so they keep the legacy send_no_route emit.
+--
 -- Data plane (RTS on routing_sf, CTS+DATA on data_sf, ACK on routing_sf)
 --   tx_queue is a FIFO of {origin, dst_id, dst_name, payload}; both
 --   originators (on_command) and forwarders (on_recv 'D' relay branch)
@@ -1232,6 +1260,7 @@ local start_ack_timeout
 local start_pending_rx_expiry
 local issue_send
 local become_free
+local try_drain_deferred
 
 -- Look up the next non-tried, non-blind candidate for this pending_tx
 -- destination. Returns the next_hop id if found, or nil if every
@@ -1644,6 +1673,52 @@ end
 -- inbound DATA. Both paths use exactly the same RTS frame, so this
 -- function unifies what was previously duplicated between on_command and
 -- the on_recv "D" forward branch.
+-- Walk self.deferred_sends. For each entry: if rt[dst] now exists, push
+-- back to head of tx_queue (preserves user-issued order across multiple
+-- deferred sends) and emit send_drained. If TTL elapsed, drop and emit
+-- send_giveup. Called from on_recv 'B' (after merges) and from a 1s
+-- periodic timer scheduled in on_init.
+try_drain_deferred = function(self)
+  if #self.deferred_sends == 0 then return end
+  local now = self:now()
+  local kept = {}
+  local drained = {}
+  for _, d in ipairs(self.deferred_sends) do
+    if self.rt[d.dst_id] ~= nil then
+      table.insert(drained, d)
+    elseif (now - d.queued_at_ms) >= self.send_defer_ttl_ms then
+      self:emit("send_giveup", {
+        origin     = d.origin, dst = d.dst_id, dst_name = d.dst_name,
+        payload    = d.user_text, origin_seq = d.origin_seq,
+        waited_ms  = now - d.queued_at_ms,
+        reason     = "defer_ttl",
+      })
+      self:log(string.format(
+        "send_giveup dst=%s waited=%dms (defer TTL %dms expired without route)",
+        d.dst_name, now - d.queued_at_ms, self.send_defer_ttl_ms))
+    else
+      table.insert(kept, d)
+    end
+  end
+  self.deferred_sends = kept
+  if #drained > 0 then
+    -- Re-queue head-first so the original order is preserved.
+    for i = #drained, 1, -1 do
+      local d = drained[i]
+      self:emit("send_drained", {
+        origin     = d.origin, dst = d.dst_id, dst_name = d.dst_name,
+        payload    = d.user_text, origin_seq = d.origin_seq,
+        waited_ms  = now - d.queued_at_ms,
+      })
+      self:log(string.format(
+        "send_drained dst=%s waited=%dms (route appeared) → tx_queue",
+        d.dst_name, now - d.queued_at_ms))
+      table.insert(self.tx_queue, 1, d)
+    end
+    become_free(self)
+  end
+end
+
 -- payload here is the FULL bytes (origin-seq header + user_text) — what
 -- goes on the wire. user_text is what the user / visualizer sees in
 -- emit data. origin_seq is the 16-bit per-origin counter (set at
@@ -1651,11 +1726,35 @@ end
 issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop)
   local entry = self.rt[dst_id]
   if not entry then
-    self:emit("send_no_route", {
-      origin = origin, payload = user_text, origin_seq = origin_seq, dst = dst_id,
+    -- Forwarder mid-flight with no route: real failure (route went stale
+    -- between when we accepted the DATA and when we tried to forward it).
+    -- Drop with the existing send_no_route — the originator's app-layer
+    -- end-to-end retry is the recovery path here.
+    if previous_hop ~= nil then
+      self:emit("send_no_route", {
+        origin = origin, payload = user_text, origin_seq = origin_seq, dst = dst_id,
+      })
+      self:log(string.format("send_no_route dst=%s (forwarder, route gone mid-flight)",
+        dst_name))
+      return
+    end
+    -- Originator with no route: defer up to send_defer_ttl_ms for the
+    -- route to appear (e.g., new node still bootstrapping). The drain
+    -- loop (periodic + on_recv 'B' hook) will retry on rt_update.
+    table.insert(self.deferred_sends, {
+      origin       = origin, dst_id = dst_id, dst_name = dst_name,
+      payload      = payload, user_text = user_text, origin_seq = origin_seq,
+      queued_at_ms = self:now(),
     })
-    self:log(string.format("send_no_route dst=%s (queue drain skipped this entry)",
-      dst_name))
+    self:emit("send_deferred", {
+      origin     = origin, dst = dst_id, dst_name = dst_name,
+      payload    = user_text, origin_seq = origin_seq,
+      ttl_ms     = self.send_defer_ttl_ms,
+      depth      = #self.deferred_sends,
+    })
+    self:log(string.format(
+      "send_deferred dst=%s (no route yet; holding for up to %dms; depth=%d)",
+      dst_name, self.send_defer_ttl_ms, #self.deferred_sends))
     return
   end
   local primary_next = entry.candidates[1].next_hop
@@ -2075,6 +2174,15 @@ function on_init(self, config)
   self.ack_timeout_handle      = nil  -- so on_recv "K" can cancel
   self.pending_rx_expiry_handle = nil  -- so on_recv "D" can cancel
   self.tx_queue          = {}   -- queued user sends, drained at every "free" point
+  -- Originator-only defer queue. When the user issues a send to a
+  -- destination not yet in rt[], we hold the send for up to
+  -- send_defer_ttl_ms instead of dropping it on the floor. Any rt_update
+  -- (or the periodic 1s drain) walks this list; entries whose dst is
+  -- now reachable get pushed back to tx_queue + emit send_drained;
+  -- entries past TTL emit send_giveup. Forwarders never defer (they're
+  -- mid-flight; lost-route mid-flight is a real failure).
+  self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, origin_seq, queued_at_ms}
+  self.send_defer_ttl_ms  = config.send_defer_ttl_ms or 30000
   -- Hop-level RTS-retry dedup. {sender_id → {msg_id, t_ms}}; lookups
   -- treat entries older than self.last_acked_ttl_ms as missing so the
   -- 4-bit msg_id wrap (every 16 sends per sender) doesn't false-pos
@@ -2121,14 +2229,33 @@ function on_init(self, config)
     self.ack_air_ms, self.routing_sf,
     self.rts_timeout_ms, self.pending_rx_expiry_max_ms))
 
-  -- Random first-fire offset within one period — spreads the first
-  -- round of beacons so they don't all hit the air on the same step.
-  -- Use the warmup-rate period for the first beacon so we don't end up
-  -- waiting up to 5 minutes for a node to first announce itself.
-  local first_period = (self:now() < self.warmup_ms)
-                       and self.beacon_period_warmup_ms
-                       or  self.beacon_period_ms
-  self:after(self:rand(0, first_period), function() beacon_fire(self) end)
+  -- First-beacon scheduling, two cases:
+  --   1. Boot at t=0 OR within warmup window: mass-boot scenario, MUST
+  --      jitter across the warmup beacon period (default 5 s) so the
+  --      first round doesn't collide. Same as before.
+  --   2. Boot AFTER warmup ended (start_at_ms set, single new joiner
+  --      coming up after the mesh has converged): no storm risk —
+  --      fire ASAP with tiny jitter so neighbours' triggered beacons
+  --      bring us into the routing table within ~hundreds of ms instead
+  --      of waiting up to a full operational beacon period.
+  local boot_at = self:now()
+  if boot_at < self.warmup_ms or self.warmup_ms == 0 then
+    -- Case 1: mass-boot or no-warmup-configured. Jitter across warmup period.
+    local first_period = self.beacon_period_warmup_ms
+    self:after(self:rand(0, first_period), function() beacon_fire(self) end)
+  else
+    -- Case 2: cold-start joiner past warmup. Fire fast (~100ms avg).
+    self:after(self:rand(1, 200), function() beacon_fire(self) end)
+  end
+
+  -- Periodic 1s drain of self.deferred_sends — fires regardless of
+  -- beacon traffic, so deferred originator sends have a deterministic
+  -- TTL-pruning + retry loop independent of the radio.
+  local function drain_loop()
+    try_drain_deferred(self)
+    self:after(1000, drain_loop)
+  end
+  self:after(1000, drain_loop)
 end
 
 function on_recv(self, frame, meta)
@@ -2230,6 +2357,11 @@ function on_recv(self, frame, meta)
     if rt_changed then schedule_triggered_beacon(self) end
 
     maybe_emit_rt_full(self)
+    -- Bootstrap UX: any rt mutation may have populated routes that
+    -- previously-deferred originator sends were waiting for. Drain now
+    -- so the user's "send" delivers as soon as the route appears,
+    -- without waiting for the periodic 1s drain timer.
+    if rt_changed then try_drain_deferred(self) end
     return
   end
 

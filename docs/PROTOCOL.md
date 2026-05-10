@@ -25,6 +25,7 @@ coexist on the same channel via a 4-bit `network_id` filter.
 9. [Cross-network filtering (`network_id`)](#9-cross-network-filtering-network_id)
 10. [Origin-level dedup](#10-origin-level-dedup)
 11. [Half-duplex, LBT, duty cycle](#11-half-duplex-lbt-duty-cycle)
+11a. [Bootstrap UX (cold-start joiners)](#11a-bootstrap-ux-cold-start-joiners)
 12. [Lifecycle: on_init + on_recv + on_radio_busy](#12-lifecycle-on_init--on_recv--on_radio_busy)
 13. [Event vocabulary](#13-event-vocabulary)
 14. [Configuration reference](#14-configuration-reference)
@@ -848,6 +849,100 @@ When over budget:
 
 ---
 
+## 11a. Bootstrap UX (cold-start joiners)
+
+The "new user installs the app, opens it, immediately taps send" case
+needs explicit handling — without it, the user sees a silent drop and
+abandons the app. Two mechanisms:
+
+### 11a.1 Cold-start fast first beacon
+
+In `on_init`:
+
+```
+boot_at = self:now()
+if boot_at < warmup_ms or warmup_ms == 0:
+  # Mass-boot scenario (everyone starts at t=0, or no warmup configured)
+  # — must jitter to avoid beacon storm
+  schedule first beacon at rand(0, beacon_period_warmup_ms)  # ~5 s
+else:
+  # Cold-start joiner past warmup — single new node, no storm risk
+  # — fire ASAP so neighbours' triggered beacons populate our rt within
+  # ~hundreds of ms instead of waiting up to a full operational period
+  schedule first beacon at rand(1, 200)  # ~100 ms avg
+```
+
+The cold-start path cuts mean bootstrap latency from ~2.5 s (random
+offset within warmup beacon period) to ~150 ms (immediate beacon +
+neighbour's triggered beacon back to us). For real hardware, the
+"detect we're a cold-start joiner vs. mass-boot" test falls back to
+"always jitter" since `warmup_ms` is 0.
+
+### 11a.2 Defer queue for originator sends
+
+`issue_send` for an originator (`previous_hop == nil`) with no `rt[dst]`:
+instead of dropping with `send_no_route`, push onto `self.deferred_sends`
+with timestamp + emit `send_deferred`. The application sees:
+
+```
+t = T          send_deferred  → UI: "Connecting to mesh..."
+t = T+Δ        send_drained   → UI: "Sending..." (route appeared)
+                              OR
+t = T+TTL      send_giveup    → UI: "Couldn't reach destination"
+```
+
+Drain happens at:
+- `on_recv 'B'` after rt mutations (fastest, ~hundreds of ms after boot)
+- A periodic 1 s timer (fallback when no routing traffic flows)
+
+Forwarders (`previous_hop ~= nil`) never defer — a route gone
+mid-flight is a real failure; the originator's app-layer retry is the
+recovery path. They keep the legacy `send_no_route` emit.
+
+### 11a.3 Bootstrap timeline (measured on t27)
+
+5-node line `a-b-c-d-e`, eve boots at t=20000 (past warmup_ms=10000):
+
+```
+t = 20000 ms   eve.on_init runs
+                schedules first beacon at t+150ms (cold-start path)
+                schedules periodic drain at t+1000ms
+
+t = 20100 ms   eve issues "send alice hello"
+                rt[alice] missing → emit send_deferred (depth=1)
+
+t = 20100..    eve fires first beacon (n=0, empty rt)
+t = 20150       → dave receives, installs rt[eve], schedules
+                  triggered beacon
+
+t = 20200..    dave fires triggered beacon with full table
+t = 20300       → eve receives, installs rt for everything
+                  dave knew (alice, bob, carol)
+
+t = 20388 ms   eve's on_recv 'B' calls try_drain_deferred
+                rt[alice] now exists → emit send_drained (waited=288ms)
+                push back to tx_queue → become_free → issue_send
+                pack RTS → tx → handshake with dave...
+
+t = 24510 ms   alice emits delivered (4-hop chain a←b←c←d←e)
+```
+
+Net: from "user taps send" to "delivered" = ~4.4 s, with 288 ms of that
+being the bootstrap wait. The user sees `send_deferred` immediately
+(UI shows "connecting"), `send_drained` at 288 ms (UI shows "sending"),
+`delivered` at 4.4 s (UI confirms).
+
+### 11a.4 Configuration
+
+| Key | Default | Description |
+|---|---|---|
+| `send_defer_ttl_ms` | 30000 | How long deferred originator sends are held before `send_giveup` fires |
+
+No new wire format. No additional state at neighbours. Pure script-side
+addition that uses existing primitives.
+
+---
+
 ## 12. Lifecycle: on_init + on_recv + on_radio_busy
 
 ### 12.1 on_init
@@ -956,7 +1051,10 @@ expectations) subscribe by event_type.
 | `tx_enqueue` | New send queued | `origin`, `dst`, `payload` |
 | `tx_dequeue` | Queued send picked up | `origin`, `dst` |
 | `tx_requeued` | NACK with long busy_for; pending_tx pushed back | `origin`, `dst`, `busy_for_ms` |
-| `send_no_route` | Originator has no rt[dst] | `origin`, `dst` |
+| `send_no_route` | Forwarder has no rt[dst] mid-flight (route went stale) | `origin`, `dst` |
+| `send_deferred` | Originator has no rt[dst] yet — held in defer queue | `origin`, `dst`, `dst_name`, `ttl_ms`, `depth` |
+| `send_drained` | Deferred send drained back to tx_queue (route appeared) | `origin`, `dst`, `waited_ms` |
+| `send_giveup` | Defer TTL elapsed without route appearing | `origin`, `dst`, `waited_ms`, `reason` |
 | `rts_tx` | RTS emitted | `origin`, `dst`, `next`, `msg_id`, `sf_bitmap` |
 | `rts_retry` | tx_rts_retry fired | `reason`, `attempt` |
 | `rts_rx` | RTS decoded, addressed to us | `from`, `dst`, `msg_id`, `chosen_data_sf`, `rx_snr`, `ewma_snr` |
@@ -1048,6 +1146,7 @@ the JSON scenario). Defaults shown.
 | `max_payload_bytes` | 50 | Receiver's pending_rx_expiry budget cap |
 | `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
+| `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
 
 ### 14.4 Channel access
 
