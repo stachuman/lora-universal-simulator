@@ -38,11 +38,17 @@ class PathLossModel(BaseModel):
 
 
 class RadioHardware(BaseModel):
-    """Per-radio hardware turnaround delays (rx<->tx mode switching)."""
+    """Per-radio hardware turnaround delays + decode-quality knobs."""
     model_config = ConfigDict(extra="forbid")
 
     rx_to_tx_delay_ms: Optional[int] = Field(default=None, ge=0)
     tx_to_rx_delay_ms: Optional[int] = Field(default=None, ge=0)
+    # SF re-tune latency between successive frames at different SFs.
+    sf_switch_delay_ms: Optional[float] = Field(default=None, ge=0.0)
+    # Per-dB steepness of the soft decode-margin curve at threshold.
+    decode_margin_steepness_db: Optional[float] = Field(default=None, ge=0.0)
+    # Probability the modem misses a preamble even with adequate SNR.
+    rx_preamble_miss_prob: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class RadioConfig(BaseModel):
@@ -85,6 +91,16 @@ class SimulationConfig(BaseModel):
     # random offset in [0, node_startup_jitter_ms] from the seeded RNG.
     # Parsed in core/topology/JsonConfig.cpp; see SimController::start.
     node_startup_jitter_ms: int = Field(default=0, ge=0)
+    # Per-node clock-drift Gaussian (ppm). Drawn once per node from
+    # N(0, sigma) and applied as a constant skew throughout the run.
+    clock_drift_ppm_sigma: Optional[float] = Field(default=None, ge=0.0)
+    # Scenario-level default beacon period. Some authoring flows surface
+    # this at the simulation level; the C++ runtime currently doesn't
+    # consume it directly (per-node `config.beacon_period_ms` is the
+    # actual source for dv_dual_sf and friends), but we accept it so
+    # the webapp doesn't reject scenarios that include it for tooling
+    # / metadata purposes.
+    beacon_period_ms: Optional[int] = Field(default=None, ge=0)
     radio: RadioConfig
     path_loss: Optional[PathLossModel] = None
 
@@ -127,6 +143,16 @@ class NodeConfig(BaseModel):
     # be > 0 — ITM's qlrpfl divides by antenna height, so 0 m
     # produces ZeroDivisionError. A buried sensor can use 0.1 m.
     antenna_height_m: Optional[float] = Field(default=None, gt=0.0)
+    # Per-node TX power offset (dB). Adds to simulation.path_loss.tx_power_dbm.
+    tx_power_offset_db: Optional[float] = None
+    # Per-node RX gain offset (dB). Adds to receiver-side path-loss budget.
+    rx_offset_db: Optional[float] = None
+    # Per-node clock drift in ppm. Constant across the run; if absent
+    # and clock_drift_ppm_sigma is set, drawn from the Gaussian.
+    clock_drift_ppm: Optional[float] = None
+    # Mobility — constant velocity vector for nodes on the move.
+    velocity_mps: Optional[float] = Field(default=None, ge=0.0)
+    direction_deg: Optional[float] = Field(default=None, ge=0.0, lt=360.0)
 
 
 class TopologyLink(BaseModel):
