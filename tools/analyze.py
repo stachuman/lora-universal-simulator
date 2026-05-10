@@ -598,10 +598,14 @@ def section_delivery_breakdown(events_path: str, since_ms: int = 0) -> dict:
     none worked; the `trigger` field in its data names the proximate cause.
     "unresolved" = a tx_enqueue at the originator with no terminal event,
     typically still in flight at sim_end or quietly dropped along the way.
+
+    Returns enqueued_times / delivered_times / exhausted_times maps so
+    downstream sections (cold-start curve, lifetime-waste) can derive
+    per-message timing without re-scanning the events file.
     """
     enqueued: dict = {}    # (origin, seq) -> first enqueue time at originator
     delivered: dict = {}   # (origin, seq) -> first delivered time
-    exhausted: dict = {}   # (origin, seq) -> trigger string
+    exhausted: dict = {}   # (origin, seq) -> {time_ms, trigger}
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
             continue
@@ -619,13 +623,16 @@ def section_delivery_breakdown(events_path: str, since_ms: int = 0) -> dict:
         elif et == "delivered" and key not in delivered:
             delivered[key] = e.get("time_ms", 0)
         elif et == "path_cascade_exhausted" and key not in exhausted:
-            exhausted[key] = d.get("trigger", "?")
+            exhausted[key] = {
+                "time_ms": e.get("time_ms", 0),
+                "trigger": d.get("trigger", "?"),
+            }
     n_enq = len(enqueued)
     n_del = sum(1 for k in delivered if k in enqueued)
     n_exh = sum(1 for k in exhausted if k in enqueued and k not in delivered)
     n_unresolved = n_enq - n_del - n_exh
     triggers: Counter = Counter(
-        v for k, v in exhausted.items() if k in enqueued and k not in delivered
+        v["trigger"] for k, v in exhausted.items() if k in enqueued and k not in delivered
     )
     return {
         "n_enqueued": n_enq,
@@ -635,6 +642,8 @@ def section_delivery_breakdown(events_path: str, since_ms: int = 0) -> dict:
         "exhausted_triggers": triggers,
         "enqueued_times": enqueued,
         "delivered_keys": set(delivered.keys()),
+        "delivered_times": delivered,
+        "exhausted_times": exhausted,
     }
 
 
@@ -845,6 +854,87 @@ def print_section_13(r: dict) -> None:
           f"(higher = beacons carry more new info; <1 means many BCNs are redundant)")
 
 
+# ---- Section 14: per-message lifetime + cascade-requeue waste ------------
+
+def section_lifetime_waste(deliv: dict) -> dict:
+    """Per-message lifetime distribution + the channel-time-consumed ratio
+    between exhausted and delivered messages. High ratio is the smell test
+    for "cascade-requeue is keeping failing messages alive too long" —
+    a dense-network failure mode where the protocol gives messages multiple
+    retry chances, but the retries themselves saturate the channel and
+    prevent ANY messages from succeeding. The "before/after" insight:
+
+      • Delivered messages: typical lifetime is seconds (one happy-path
+        RTS-CTS-DATA-ACK + maybe one retry).
+      • Exhausted messages: lifetime is the per-message wallclock cap
+        (cascade_requeue_total_max_ms) plus queue-wait time, often
+        minutes — multiplied by however many concurrent failures exist.
+
+    On s04 60-min with cascade_requeue_max=3 we observed median exhausted
+    lifetime 178 s vs median delivered 10 s (18x), and TOTAL channel-time
+    consumed by exhausted (50,880 s) vs delivered (1,700 s) at a 30x
+    ratio. Section warns at ≥10x.
+
+    Reuses the enqueued/delivered/exhausted time maps from
+    section_delivery_breakdown — no second pass over the events file.
+    """
+    enq = deliv.get("enqueued_times") or {}
+    delivered_times = deliv.get("delivered_times") or {}
+    exhausted_times = deliv.get("exhausted_times") or {}
+
+    deliv_lifetimes: list[int] = []
+    for k, t_d in delivered_times.items():
+        if k in enq:
+            deliv_lifetimes.append(int(t_d) - int(enq[k]))
+    exh_lifetimes: list[int] = []
+    for k, info in exhausted_times.items():
+        if k in enq:
+            exh_lifetimes.append(int(info["time_ms"]) - int(enq[k]))
+
+    return {
+        "deliv_lifetimes_ms": sorted(deliv_lifetimes),
+        "exh_lifetimes_ms":   sorted(exh_lifetimes),
+        "total_deliv_ms":     sum(deliv_lifetimes),
+        "total_exh_ms":       sum(exh_lifetimes),
+    }
+
+
+def print_section_14(r: dict) -> None:
+    print("\n=== (14) per-message lifetime + cascade-requeue waste ===")
+    def stats(s: list[int], label: str) -> str:
+        if not s:
+            return f"{label}: (none)"
+        n = len(s)
+        return (f"{label}: n={n}  min={s[0]//1000}s  "
+                f"median={s[n // 2]//1000}s  "
+                f"p95={s[min(n-1, int(0.95*n))]//1000}s  "
+                f"max={s[-1]//1000}s")
+    print(f"  {stats(r['deliv_lifetimes_ms'], 'delivered')}")
+    print(f"  {stats(r['exh_lifetimes_ms'],   'exhausted')}")
+    total_d_s = r["total_deliv_ms"] / 1000.0
+    total_e_s = r["total_exh_ms"] / 1000.0
+    print(f"  total channel-time consumed (in-system, summed across messages):")
+    print(f"    delivered: {total_d_s:.0f} s")
+    print(f"    exhausted: {total_e_s:.0f} s")
+    if total_d_s > 0:
+        ratio = total_e_s / total_d_s
+        print(f"    ratio: {ratio:.1f}x")
+        if ratio >= 10:
+            print(f"  HIGH WASTE: exhausted messages consume {ratio:.0f}x more channel "
+                  f"time than delivered.")
+            print(f"  Likely cause: cascade-requeue keeping failing messages alive too "
+                  f"long in a dense / overloaded network — each failed flight burns "
+                  f"channel capacity that healthy flights need.")
+            print(f"  Levers: cascade_requeue_max (4 attempts total today),")
+            print(f"          cascade_requeue_total_max_ms (per-msg wallclock cap),")
+            print(f"          or load-aware skip (drop new sends when queue is deep).")
+        elif ratio >= 3:
+            print(f"  Elevated waste ratio. Worth checking whether failed-message "
+                  f"lifetimes are longer than the underlying flight cost justifies.")
+    elif total_e_s > 0:
+        print(f"    ratio: infinite (zero deliveries; every send exhausted)")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -943,6 +1033,8 @@ def main() -> None:
     print_section_12(section_cold_start(deliv))
 
     print_section_13(section_bcn_effective(args.events, warmup_end_ms))
+
+    print_section_14(section_lifetime_waste(deliv))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 

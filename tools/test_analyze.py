@@ -259,6 +259,98 @@ def test_cold_start_buckets_by_enqueue_time():
     assert rows[1]["sent"] == 2 and rows[1]["delivered"] == 2
 
 
+# ---- lifetime-waste detection --------------------------------------------
+
+def test_lifetime_waste_computes_ratio_and_distributions():
+    """Three originator-side enqueues:
+       - msg (1, 1) → delivered after 5 s   (short, healthy)
+       - msg (1, 2) → delivered after 7 s   (short, healthy)
+       - msg (1, 3) → exhausted after 180 s (long, choking the channel)
+    Total delivered time: 12 s; total exhausted time: 180 s; ratio 15x.
+    """
+    events = [
+        _emit(node=1, t_ms=1000,    et="tx_enqueue",
+              origin=1, origin_seq=1, payload="m1"),
+        _emit(node=2, t_ms=6000,    et="delivered",
+              origin=1, origin_seq=1, payload="m1"),
+        _emit(node=1, t_ms=2000,    et="tx_enqueue",
+              origin=1, origin_seq=2, payload="m2"),
+        _emit(node=2, t_ms=9000,    et="delivered",
+              origin=1, origin_seq=2, payload="m2"),
+        _emit(node=1, t_ms=3000,    et="tx_enqueue",
+              origin=1, origin_seq=3, payload="m3"),
+        _emit(node=1, t_ms=183_000, et="path_cascade_exhausted",
+              origin=1, origin_seq=3, dst=2, trigger="rts_giveup", tried=[3, 4, 5]),
+    ]
+    path = _write_ndjson(events)
+    try:
+        deliv = analyze.section_delivery_breakdown(path)
+        # Sanity-check the new fields exist
+        assert "delivered_times" in deliv
+        assert "exhausted_times" in deliv
+        assert deliv["delivered_times"][(1, 1)] == 6000
+        assert deliv["delivered_times"][(1, 2)] == 9000
+        assert deliv["exhausted_times"][(1, 3)]["time_ms"]  == 183_000
+        assert deliv["exhausted_times"][(1, 3)]["trigger"]   == "rts_giveup"
+
+        r = analyze.section_lifetime_waste(deliv)
+        # Lifetimes: 5000 ms, 7000 ms for delivered; 180_000 ms for exhausted
+        assert r["deliv_lifetimes_ms"] == [5000, 7000]
+        assert r["exh_lifetimes_ms"]   == [180_000]
+        assert r["total_deliv_ms"]     == 12_000
+        assert r["total_exh_ms"]       == 180_000
+        # Ratio 180_000 / 12_000 = 15x — should trigger the HIGH WASTE branch
+    finally:
+        os.unlink(path)
+
+
+def test_lifetime_waste_handles_no_deliveries():
+    """When zero messages delivered but some exhausted, lifetime-waste
+    must not divide by zero — total_deliv_ms is 0 and the print path
+    reports 'infinite ratio' instead of crashing."""
+    events = [
+        _emit(node=1, t_ms=1000,   et="tx_enqueue",
+              origin=1, origin_seq=1, payload="m1"),
+        _emit(node=1, t_ms=60_000, et="path_cascade_exhausted",
+              origin=1, origin_seq=1, dst=2, trigger="rts_giveup", tried=[]),
+    ]
+    path = _write_ndjson(events)
+    try:
+        deliv = analyze.section_delivery_breakdown(path)
+        r = analyze.section_lifetime_waste(deliv)
+        assert r["total_deliv_ms"] == 0
+        assert r["total_exh_ms"]   == 59_000
+        # print_section_14 must not raise — exercise the no-delivery branch
+        analyze.print_section_14(r)
+    finally:
+        os.unlink(path)
+
+
+def test_lifetime_waste_ignores_forwarder_enqueues():
+    """Only originator-side enqueues (node == origin) define the message
+    lifetime. A forwarder's tx_enqueue is a different event for the
+    same (origin, seq) and must NOT be counted as a separate message
+    or reset the lifetime origin."""
+    events = [
+        # Originator enqueues at t=1000
+        _emit(node=1, t_ms=1000,  et="tx_enqueue",
+              origin=1, origin_seq=1, payload="m1"),
+        # Forwarder enqueues at t=2000 — different node, same key
+        _emit(node=3, t_ms=2000,  et="tx_enqueue",
+              origin=1, origin_seq=1, depth=1, payload="m1"),
+        _emit(node=2, t_ms=11_000, et="delivered",
+              origin=1, origin_seq=1, payload="m1"),
+    ]
+    path = _write_ndjson(events)
+    try:
+        deliv = analyze.section_delivery_breakdown(path)
+        r = analyze.section_lifetime_waste(deliv)
+        # Lifetime must be 11000 - 1000 = 10000, not 11000 - 2000
+        assert r["deliv_lifetimes_ms"] == [10_000]
+    finally:
+        os.unlink(path)
+
+
 # ---- BCN effectiveness ---------------------------------------------------
 
 def test_bcn_effective_ratio():
