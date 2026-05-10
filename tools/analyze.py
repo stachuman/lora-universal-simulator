@@ -124,6 +124,29 @@ def find_warmup_end_ms(path: str) -> int:
     return 0
 
 
+def build_pkt_label_map(path: str) -> dict[str, str]:
+    """Map every tx event's packet id to its label.
+
+    rx events do not carry the originator's label — only sf/bw/snr/etc — so
+    classifying an rx by class (DATA / BCN / RTS / …) requires joining via
+    the pkt id back to the corresponding tx. The map is built once across
+    the WHOLE file (no warmup filter): a tx during warmup may still produce
+    rx events post-warmup, and we need to classify those correctly.
+    """
+    pkt_label: dict[str, str] = {}
+    with open(path) as f:
+        for line in f:
+            if not line:
+                continue
+            e = json.loads(line)
+            if e.get("type") == "tx":
+                pkt = e.get("pkt")
+                lbl = e.get("label")
+                if pkt and lbl:
+                    pkt_label[pkt] = lbl
+    return pkt_label
+
+
 # ---- Section 3: control-plane overhead -----------------------------------
 
 def section_control_plane(events_path: str, since_ms: int = 0) -> dict:
@@ -331,12 +354,12 @@ def fastest_sf_for_snr(snr_db: float, allowed: list[int], margin_db: float) -> i
     return max(allowed)
 
 
-def section_sf_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> dict:
+def section_sf_optimality(cfg: dict, events_path: str,
+                          pkt_label: dict[str, str], since_ms: int = 0) -> dict:
     sim = cfg.get("simulation", {})
     radio = sim.get("radio", {})
     bw_hz = int(radio.get("bw", 62)) * 1000
     cr = int(radio.get("cr", 5))
-    pre_sym = 16
     margin_db = 5.0  # mirrors dv_dual_sf.lua default sf_margin_db
     # Allowed data SFs come from per-node config; derive a global from the
     # union over nodes (close enough for analysis).
@@ -349,54 +372,63 @@ def section_sf_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> dic
         allowed = {7, 8, 9, 10, 11, 12}
     allowed = sorted(allowed)
 
-    rows = []  # (chosen_sf, optimal_sf, snr, payload_len)
+    # Filter rx events to label=DATA only (joined via pkt id). Filtering
+    # by `sf in allowed_data_sfs` is wrong: when routing_sf is in
+    # allowed_data_sfs (typical for dv_dual_sf scenarios) every BCN /
+    # RTS / CTS / ACK rx is miscounted as a data leg, swamping the
+    # ~hundreds of real DATA events with thousands of control rx.
+    rows = []  # (chosen_sf, optimal_sf, snr, airtime)
+    skipped_no_label = 0
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "rx":
             continue
-        # Only data frames; CTS/ACK/etc don't represent the data-leg cost.
-        # We don't have a label on rx events directly, so use the airtime
-        # heuristic: data frames are noticeably longer than CTS/ACK/BCN
-        # because they carry the user payload. Easier: filter by SF being
-        # in the allowed_data_sfs set (control plane uses routing_sf).
-        sf = e.get("sf")
-        if sf not in allowed:
+        lbl = pkt_label.get(e.get("pkt"))
+        if lbl is None:
+            skipped_no_label += 1
             continue
+        if lbl != "DATA":
+            continue
+        sf = e.get("sf")
         snr = e.get("snr")
-        if snr is None:
+        if sf is None or snr is None:
             continue
         opt = fastest_sf_for_snr(snr, allowed, margin_db)
         rows.append((sf, opt, snr, e.get("airtime_ms", 0)))
     return {"rows": rows, "allowed": allowed, "margin_db": margin_db,
-            "bw_hz": bw_hz, "cr": cr}
+            "bw_hz": bw_hz, "cr": cr,
+            "rx_with_no_label_join": skipped_no_label}
 
 
 def print_section_2(r: dict) -> None:
-    print("\n=== (2) SF optimality (data-leg) ===")
+    print("\n=== (2) SF optimality (DATA legs only — label-joined) ===")
     rows = r["rows"]
     if not rows:
-        print("  (no data-leg rx events found)")
+        print("  (no DATA rx events found)")
+        if r.get("rx_with_no_label_join"):
+            print(f"  (note: {r['rx_with_no_label_join']} rx events had no matching tx label)")
         return
     optimal = sum(1 for sf, opt, *_ in rows if sf == opt)
     one_slow = sum(1 for sf, opt, *_ in rows if sf - opt == 1)
     two_slow = sum(1 for sf, opt, *_ in rows if sf - opt >= 2)
     total = len(rows)
-    print(f"  data-leg rx events: {total} (allowed SFs: {r['allowed']}, margin={r['margin_db']} dB)")
+    print(f"  DATA rx events: {total} (allowed SFs: {r['allowed']}, margin={r['margin_db']} dB)")
     print(f"    chose optimal:        {optimal:>4} ({100*optimal/total:.0f}%)")
     print(f"    one SF slower:        {one_slow:>4} ({100*one_slow/total:.0f}%)")
     print(f"    two+ SF slower:       {two_slow:>4} ({100*two_slow/total:.0f}%)")
-    if rows:
-        # Airtime "tax": total actual airtime vs total optimal airtime,
-        # where optimal recomputes airtime at the optimal SF for each row.
-        # Approximation — uses 64-byte payload as a representative size.
-        rep_bytes = 64
-        actual_air = sum(airtime_ms(sf, r["bw_hz"], r["cr"], 16, rep_bytes)
-                         for sf, *_ in rows)
-        opt_air = sum(airtime_ms(opt, r["bw_hz"], r["cr"], 16, rep_bytes)
-                      for _, opt, *_ in rows)
-        if opt_air > 0:
-            tax = (actual_air - opt_air) / opt_air
-            print(f"  SF-airtime tax: {100*tax:.1f}% "
-                  f"(actual data airtime is {tax:+.1%} vs optimal at 64-byte rep)")
+    # Airtime "tax": total actual airtime vs total optimal airtime,
+    # recomputing each row at its optimal SF. Uses 64 bytes as the
+    # representative DATA payload.
+    rep_bytes = 64
+    actual_air = sum(airtime_ms(sf, r["bw_hz"], r["cr"], 16, rep_bytes)
+                     for sf, *_ in rows)
+    opt_air = sum(airtime_ms(opt, r["bw_hz"], r["cr"], 16, rep_bytes)
+                  for _, opt, *_ in rows)
+    if opt_air > 0:
+        tax = (actual_air - opt_air) / opt_air
+        print(f"  SF-airtime tax: {100*tax:.1f}% "
+              f"(actual data airtime is {tax:+.1%} vs optimal at 64-byte rep)")
+    if r.get("rx_with_no_label_join"):
+        print(f"  (note: {r['rx_with_no_label_join']} rx events had no matching tx — pre-warmup tx?)")
 
 
 # ---- Section 4: concurrency ----------------------------------------------
@@ -476,6 +508,343 @@ def print_section_5(ctrl: dict) -> None:
     print(f"    response retries (K-dup, CTS-dup): {retry_resp} ms ({100*retry_resp/data_air:.1f}% of data)")
 
 
+# ---- Section 6: per-class SF distribution (TX side) ----------------------
+
+def section_per_class_sf(events_path: str, since_ms: int = 0) -> dict:
+    """For each (label, sf) pair: count of TX events and total airtime.
+
+    Cuts the data the opposite way of section_control_plane (which sums by
+    class only) so a glance reveals where the SF/airtime cost lives —
+    e.g. "BCN at SF10 is 78% of total" or "DATA fan-out across SF8/9/10".
+    """
+    by_lbl_sf: dict = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # [count, air]
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "tx":
+            continue
+        lbl = e.get("label", "?")
+        sf = e.get("sf")
+        air = e.get("airtime_ms", 0)
+        by_lbl_sf[lbl][sf][0] += 1
+        by_lbl_sf[lbl][sf][1] += air
+    return by_lbl_sf
+
+
+def print_section_6(r: dict, total_air: int) -> None:
+    print("\n=== (6) per-class SF distribution (TX side) ===")
+    if not r:
+        print("  (no tx events)")
+        return
+    print(f"  {'label':<10} {'sf':>3} {'count':>6} {'airtime_ms':>11} {'avg_ms':>8} {'%air':>6}")
+    # Sort by total airtime desc within each label, labels ordered by total airtime
+    label_total = {lbl: sum(v[1] for v in sfs.values()) for lbl, sfs in r.items()}
+    for lbl in sorted(r.keys(), key=lambda k: -label_total[k]):
+        sfs = r[lbl]
+        for sf in sorted(sfs.keys()):
+            cnt, air = sfs[sf]
+            avg = air / cnt if cnt else 0
+            pct = 100 * air / total_air if total_air else 0
+            print(f"  {lbl:<10} {sf:>3} {cnt:>6} {air:>11} {avg:>8.0f} {pct:>5.1f}%")
+
+
+# ---- Section 7: drop / collision histogram -------------------------------
+
+# Failure-mode event types emitted by the C++ runtime when an rx is rejected
+# or a tx can't go out. Listed explicitly (not pattern-matched on "drop" in
+# the type) so future runtime additions don't silently change the report.
+DROP_TYPES = {
+    "collision",          # two TXes overlap on the same SF/channel
+    "drop_weak",          # rx SNR below SF demod threshold
+    "drop_sf_mismatch",   # rx not listening on this SF at this moment
+    "drop_preamble_miss", # preamble decode failed
+    "drop_halfduplex",    # node TX'ing while a rx was arriving
+    "drop_rx_blind",      # node off-air during rx
+    "drop_busy",          # rx queue full / engine busy
+    "drop_decoder",       # CRC / payload decoder rejected the frame
+    "decoder_fail",
+    "rx_failed",
+    "duty_block",         # tx blocked by duty-cycle gate
+    "tx_fail",
+}
+
+
+def section_drops(events_path: str, since_ms: int = 0) -> Counter:
+    counts: Counter = Counter()
+    for e in iter_events(events_path, since_ms):
+        t = e.get("type", "")
+        if t in DROP_TYPES:
+            counts[t] += 1
+    return counts
+
+
+def print_section_7(r: Counter) -> None:
+    print("\n=== (7) drop / collision events (post-warmup) ===")
+    if not r:
+        print("  (no drop or collision events observed)")
+        return
+    total = sum(r.values())
+    for t, n in sorted(r.items(), key=lambda kv: -kv[1]):
+        print(f"  {t:<22} {n:>6}  ({100*n/total:.1f}%)")
+    print(f"  {'TOTAL':<22} {total:>6}")
+
+
+# ---- Section 8: delivery-failure breakdown -------------------------------
+
+def section_delivery_breakdown(events_path: str, since_ms: int = 0) -> dict:
+    """For each user-originated message (originator-side tx_enqueue), record
+    its terminal outcome: delivered / path_cascade_exhausted / unresolved.
+
+    A message is identified by (origin, origin_seq). path_cascade_exhausted
+    fires at the originator when every fallback next-hop has been tried and
+    none worked; the `trigger` field in its data names the proximate cause.
+    "unresolved" = a tx_enqueue at the originator with no terminal event,
+    typically still in flight at sim_end or quietly dropped along the way.
+    """
+    enqueued: dict = {}    # (origin, seq) -> first enqueue time at originator
+    delivered: dict = {}   # (origin, seq) -> first delivered time
+    exhausted: dict = {}   # (origin, seq) -> trigger string
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        origin = d.get("origin")
+        seq = d.get("origin_seq")
+        if origin is None or seq is None:
+            continue
+        key = (origin, seq)
+        if et == "tx_enqueue" and e.get("node") == origin and key not in enqueued:
+            # Filter to the originator's own enqueue. Forwarder enqueues
+            # also fire (depth>=1) and would inflate the "sent" count.
+            enqueued[key] = e.get("time_ms", 0)
+        elif et == "delivered" and key not in delivered:
+            delivered[key] = e.get("time_ms", 0)
+        elif et == "path_cascade_exhausted" and key not in exhausted:
+            exhausted[key] = d.get("trigger", "?")
+    n_enq = len(enqueued)
+    n_del = sum(1 for k in delivered if k in enqueued)
+    n_exh = sum(1 for k in exhausted if k in enqueued and k not in delivered)
+    n_unresolved = n_enq - n_del - n_exh
+    triggers: Counter = Counter(
+        v for k, v in exhausted.items() if k in enqueued and k not in delivered
+    )
+    return {
+        "n_enqueued": n_enq,
+        "n_delivered": n_del,
+        "n_exhausted": n_exh,
+        "n_unresolved": max(0, n_unresolved),
+        "exhausted_triggers": triggers,
+        "enqueued_times": enqueued,
+        "delivered_keys": set(delivered.keys()),
+    }
+
+
+def print_section_8(r: dict) -> None:
+    print("\n=== (8) delivery breakdown ===")
+    n = r["n_enqueued"]
+    if n == 0:
+        print("  (no originator-side tx_enqueue events)")
+        return
+    print(f"  user messages enqueued at originator: {n}")
+    print(f"    delivered:                {r['n_delivered']:>4} ({100*r['n_delivered']/n:.0f}%)")
+    print(f"    path_cascade_exhausted:   {r['n_exhausted']:>4} ({100*r['n_exhausted']/n:.0f}%)")
+    print(f"    unresolved (still in-flight or silently dropped):"
+          f" {r['n_unresolved']:>4} ({100*r['n_unresolved']/n:.0f}%)")
+    if r["exhausted_triggers"]:
+        print(f"  cascade-exhaustion triggers:")
+        for trig, c in sorted(r["exhausted_triggers"].items(), key=lambda kv: -kv[1]):
+            print(f"    {trig:<22} {c}")
+
+
+# ---- Section 9: end-to-end latency for delivered -------------------------
+
+def section_latency(events_path: str, since_ms: int = 0) -> list[int]:
+    """Latency = (delivered.time_ms − originator's tx_enqueue.time_ms) per
+    delivered (origin, seq). Useful for spotting protocols that "deliver"
+    well only when given many seconds of slack.
+    """
+    enqueued: dict = {}
+    latencies: list[int] = []
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        origin = d.get("origin")
+        seq = d.get("origin_seq")
+        if origin is None or seq is None:
+            continue
+        key = (origin, seq)
+        if et == "tx_enqueue" and e.get("node") == origin and key not in enqueued:
+            enqueued[key] = e.get("time_ms", 0)
+        elif et == "delivered":
+            t0 = enqueued.get(key)
+            if t0 is not None:
+                latencies.append(int(e.get("time_ms", 0)) - int(t0))
+    return latencies
+
+
+def print_section_9(latencies: list[int]) -> None:
+    print("\n=== (9) end-to-end latency (delivered) ===")
+    if not latencies:
+        print("  (no deliveries to measure)")
+        return
+    s = sorted(latencies)
+    n = len(s)
+    median = s[n // 2]
+    p95 = s[min(n - 1, int(0.95 * n))]
+    p99 = s[min(n - 1, int(0.99 * n))]
+    print(f"  n={n}  min={min(s)} ms  median={median} ms  "
+          f"p95={p95} ms  p99={p99} ms  max={max(s)} ms")
+
+
+# ---- Section 10: per-node TX hot spots -----------------------------------
+
+def section_per_node_tx(events_path: str, cfg: dict, since_ms: int = 0,
+                        top_n: int = 10) -> list[tuple]:
+    """Top-N nodes by total TX airtime. Surfaces hot spots that consume
+    disproportionate channel capacity (often gateway-shaped routers).
+
+    The runtime currently emits tx.node as the node *name* string, while
+    script_emit.node is the integer index. We accept either form and
+    resolve to a display name via cfg.nodes when an int comes in.
+    """
+    air_by_node: Counter = Counter()
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "tx":
+            continue
+        air_by_node[e.get("node")] += e.get("airtime_ms", 0)
+    name_by_idx = {i: n.get("name", f"#{i}") for i, n in enumerate(cfg.get("nodes", []))}
+    rows = []
+    for node_key, air_ms in air_by_node.most_common(top_n):
+        if isinstance(node_key, int):
+            label = name_by_idx.get(node_key, f"#{node_key}")
+        else:
+            label = str(node_key)
+        rows.append((label, air_ms))
+    return rows
+
+
+def print_section_10(rows: list[tuple], total_air: int) -> None:
+    print("\n=== (10) per-node TX airtime — top 10 ===")
+    if not rows:
+        print("  (no tx events)")
+        return
+    print(f"  {'node':<24} {'airtime_ms':>11} {'%total':>7}")
+    for name, air in rows:
+        pct = 100 * air / total_air if total_air else 0
+        print(f"  {name:<24} {air:>11} {pct:>6.1f}%")
+
+
+# ---- Section 11: routing churn -------------------------------------------
+
+ROUTING_CHURN_TYPES = ("rt_aged", "rt_update", "rt_prune")
+
+
+def section_routing_churn(events_path: str, since_ms: int = 0) -> dict:
+    counts: Counter = Counter()
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        if et in ROUTING_CHURN_TYPES:
+            counts[et] += 1
+    return dict(counts)
+
+
+def print_section_11(r: dict, analyzed_ms: int) -> None:
+    print("\n=== (11) routing-table churn ===")
+    if not r:
+        print("  (no rt_aged / rt_update / rt_prune events)")
+        return
+    total = sum(r.values())
+    sec = analyzed_ms / 1000.0 if analyzed_ms > 0 else 1.0
+    for t, n in sorted(r.items(), key=lambda kv: -kv[1]):
+        print(f"  {t:<22} {n:>6}  ({n/sec:.1f}/s)")
+    print(f"  {'TOTAL':<22} {total:>6}  ({total/sec:.1f}/s)")
+
+
+# ---- Section 12: cold-start delivery curve -------------------------------
+
+def section_cold_start(deliv: dict, n_buckets: int = 5) -> list[dict]:
+    """Bucket originator-side tx_enqueue events into N equal-time buckets
+    and report delivery rate per bucket. A flat curve says "this rate is
+    structural"; a rising curve says "convergence still helps later sends".
+    Reuses the (origin, seq) → enqueue_time map from section_delivery_breakdown.
+    """
+    enqueued = deliv.get("enqueued_times") or {}
+    delivered_keys = deliv.get("delivered_keys") or set()
+    if not enqueued:
+        return []
+    items = sorted(enqueued.items(), key=lambda kv: kv[1])
+    t_min = items[0][1]
+    t_max = items[-1][1]
+    if t_max == t_min:
+        return [{"start_ms": t_min, "end_ms": t_max,
+                 "sent": len(items),
+                 "delivered": sum(1 for k, _ in items if k in delivered_keys)}]
+    # +1 ms so the very last item lands in the final bucket via floor-division.
+    bucket = (t_max - t_min) // n_buckets + 1
+    out = [{"start_ms": t_min + i * bucket,
+            "end_ms":   t_min + (i + 1) * bucket,
+            "sent": 0, "delivered": 0} for i in range(n_buckets)]
+    for key, t in items:
+        idx = min((t - t_min) // bucket, n_buckets - 1)
+        out[idx]["sent"] += 1
+        if key in delivered_keys:
+            out[idx]["delivered"] += 1
+    return out
+
+
+def print_section_12(rows: list[dict]) -> None:
+    print("\n=== (12) cold-start delivery curve (by enqueue time) ===")
+    if not rows:
+        print("  (no originator-side enqueues to bucket)")
+        return
+    print(f"  {'window (s)':<24} {'sent':>5} {'delivered':>10} {'rate':>6}")
+    for r in rows:
+        s = r["sent"]
+        d = r["delivered"]
+        rate = (100 * d / s) if s else 0.0
+        win = f"{r['start_ms']/1000:.0f}–{r['end_ms']/1000:.0f}"
+        print(f"  {win:<24} {s:>5} {d:>10} {rate:>5.0f}%")
+
+
+# ---- Section 13: BCN effective rate --------------------------------------
+
+def section_bcn_effective(events_path: str, since_ms: int = 0) -> dict:
+    """How often does receiving a BCN actually update the routing table?
+
+    Compares `beacon_rx` event count (BCNs heard by neighbors) against
+    `rt_update` event count (RT entries actually changed). Low ratio
+    means the routing protocol is paying full BCN airtime cost for
+    little informational gain — a lever for diff-only encoding.
+    """
+    beacon_rx = 0
+    rt_update = 0
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        if et == "beacon_rx":
+            beacon_rx += 1
+        elif et == "rt_update":
+            rt_update += 1
+    return {"beacon_rx": beacon_rx, "rt_update": rt_update}
+
+
+def print_section_13(r: dict) -> None:
+    print("\n=== (13) BCN effectiveness ===")
+    bcn_rx = r["beacon_rx"]
+    upd = r["rt_update"]
+    if bcn_rx == 0:
+        print("  (no beacon_rx events)")
+        return
+    print(f"  beacon_rx events:  {bcn_rx}")
+    print(f"  rt_update events:  {upd}")
+    print(f"  rt_update / beacon_rx: {upd/bcn_rx:.2f} "
+          f"(higher = beacons carry more new info; <1 means many BCNs are redundant)")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -530,25 +899,50 @@ def main() -> None:
     print(f"# nodes:    {len(cfg.get('nodes', []))}")
     print(f"# duration: {duration_ms} ms")
     if warmup_end_ms > 0:
-        analyzed = max(0, duration_ms - warmup_end_ms)
+        analyzed_ms = max(0, duration_ms - warmup_end_ms)
         print(f"# warmup:   skipping {warmup_end_ms} ms (warmup_end event); "
-              f"analyzing {analyzed} ms of steady state")
+              f"analyzing {analyzed_ms} ms of steady state")
     else:
+        analyzed_ms = duration_ms
         print(f"# warmup:   none (no warmup_end event in stream)")
+
+    # One pre-pass over the file: pkt_id → label map. All sections that
+    # need to classify rx events by their origin-tx label use this.
+    pkt_label = build_pkt_label_map(args.events)
 
     ctrl = section_control_plane(args.events, warmup_end_ms)
     print_section_3(ctrl)
 
+    print_section_6(section_per_class_sf(args.events, warmup_end_ms),
+                    ctrl["total_air_ms"])
+
     path = section_path_optimality(cfg, args.events, warmup_end_ms)
     print_section_1(path)
 
-    sf = section_sf_optimality(cfg, args.events, warmup_end_ms)
+    sf = section_sf_optimality(cfg, args.events, pkt_label, warmup_end_ms)
     print_section_2(sf)
 
     conc = section_concurrency(args.events, warmup_end_ms)
     print_section_4(conc)
 
     print_section_5(ctrl)
+
+    print_section_7(section_drops(args.events, warmup_end_ms))
+
+    deliv = section_delivery_breakdown(args.events, warmup_end_ms)
+    print_section_8(deliv)
+
+    print_section_9(section_latency(args.events, warmup_end_ms))
+
+    print_section_10(section_per_node_tx(args.events, cfg, warmup_end_ms),
+                     ctrl["total_air_ms"])
+
+    print_section_11(section_routing_churn(args.events, warmup_end_ms),
+                     analyzed_ms)
+
+    print_section_12(section_cold_start(deliv))
+
+    print_section_13(section_bcn_effective(args.events, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 
