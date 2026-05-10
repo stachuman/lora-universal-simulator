@@ -295,7 +295,7 @@ RX is already retuned to `data_sf` after sending RTS, awaiting CTS.
 NACK and CTS are the two possible admissions; sharing the channel is
 intentional.
 
-### 3.7 Frame-size summary
+### 3.8 Frame-size summary
 
 | Frame | Bytes | Notes |
 |---|---|---|
@@ -419,13 +419,54 @@ rts_timeout_fire / ack_timeout_fire — retries_left == 0 path:
   3. If found:
      - Switch pending_tx.next; reset retries; tx_rts_retry("cascade_rts")
      - Emit path_cascade
-  4. If exhausted:
-     - Emit path_cascade_exhausted + the legacy giveup event
-     - Clear pending_tx; become_free
+  4. If exhausted (no more alts):
+     - try_cascade_requeue (§5.6) — push back to tx_queue with backoff
+       so other queued items can drain. Returns true if requeued.
+     - If requeue caps hit: emit path_cascade_exhausted + the legacy
+       giveup event (rts_giveup or data_ack_giveup); clear pending_tx.
 ```
 
-This implements K=3 multi-alt routing without changing the wire
-format.
+### 5.6 Cascade-exhaustion requeue (Phase C)
+
+A single stuck destination must not block deliverable items behind it
+in `tx_queue`. When `pending_tx` exhausts all K alts (true
+`path_cascade_exhausted`), instead of dropping immediately the item is
+pushed back into `tx_queue` with **exponential backoff** so other
+queued items can rotate through the dispatch.
+
+```
+try_cascade_requeue(self, trigger):
+  next_count   = (px.requeue_count or 0) + 1
+  total_age_ms = now − px.enqueue_time_ms
+  if next_count > cascade_requeue_max:           return false  ← drop
+  if total_age_ms >= cascade_requeue_total_max_ms: return false  ← drop
+  backoff_ms = min(cascade_requeue_base_ms × 2^(next_count - 1),
+                   cascade_requeue_backoff_cap_ms)
+  push to tx_queue with:
+    next_attempt_ms = now + backoff_ms       ← scheduled, not FIFO
+    requeue_count   = next_count             ← bumped
+    enqueue_time_ms = original                ← preserved
+  emit cascade_requeue {requeue_count, backoff_ms, total_age_ms, trigger}
+  return true                                ← caller skips legacy giveup
+```
+
+`tx_queue` is now a **scheduled queue** of items shaped
+`{origin, dst_id, dst_name, payload, user_text, origin_seq,
+previous_hop, next_attempt_ms, requeue_count, enqueue_time_ms}`.
+`become_free` pops the earliest-ready item (smallest
+`next_attempt_ms <= now`, FIFO tie-break) whenever the node becomes
+idle. If no item is ready, `become_free` arms a single
+`queue_wakeup_handle` and returns.
+
+This implements K=3 multi-alt routing PLUS bounded-time stuck-flight
+isolation, all without changing the wire format.
+
+| Key | Default | Description |
+|---|---|---|
+| `cascade_requeue_max` | 3 | Max number of cascade-exhaust requeues before drop |
+| `cascade_requeue_base_ms` | 5000 | Base backoff (exponential: base × 2^(count-1)) |
+| `cascade_requeue_backoff_cap_ms` | 30000 | Backoff caps at this value |
+| `cascade_requeue_total_max_ms` | 120000 | Total wallclock cap; older items drop |
 
 ---
 
@@ -472,6 +513,30 @@ their TXes across the silence-jitter window (default 10 s).
 
 `quiet_threshold_ms = 0` disables both the throttle and the silence-
 jitter (used by unit tests).
+
+**Max-idle override (`beacon_max_idle_ms`):** in dense meshes (100+
+nodes), the channel never goes quiet for the 30 s threshold —
+periodic beacons are suppressed indefinitely once the network is
+busy. Routes from the warmup phase then age out (~10-30 min later)
+with no fresh advertisements arriving, and the network can collapse
+into a stable 0%-delivery state.
+
+The override: if a node hasn't BCN'd in `beacon_max_idle_ms`
+(default **480 s = 8 min**, just under the 30 min default
+`rt_aging_ttl_neighbor_ms`), bypass the busy throttle on the next
+periodic timer fire and emit anyway. Both gate-check sites (pre-
+jitter and post-jitter) honour the override. Emit
+`beacon_max_idle_force` makes the override visible in telemetry.
+
+`last_beacon_tx_ms` is set inside `send_beacon_page`, so triggered
+beacons also reset the staleness clock — periodic + triggered
+combine as expected. Set `beacon_max_idle_ms = 0` to disable the
+override entirely.
+
+Real-deployment tuning: keep `beacon_max_idle_ms` <
+`rt_aging_ttl_neighbor_ms` so direct-link entries get refreshed
+before they age out. Multi-hop entries
+(`rt_aging_ttl_remote_ms`) survive longer rotation gaps.
 
 ### 6.3 Triggered beacon
 
@@ -532,13 +597,20 @@ dirty or stable — it just merges via existing rt_merge.
 Per-candidate `last_seen_ms` is refreshed by `rt_merge` whenever a
 beacon advertises that exact `(dest, next_hop)` combination. A periodic
 aging loop walks `rt[]` every `rt_aging_check_period_ms` (default 60 s)
-and evicts candidates older than `rt_aging_ttl_ms` (default 10 min,
-= 2× default operational beacon period of 5 min).
+and evicts candidates older than a **hop-class-specific TTL**:
+
+- `hops == 1` (direct neighbour) → `rt_aging_ttl_neighbor_ms`
+  (default **30 min**)
+- `hops >= 2` (remote multi-hop) → `rt_aging_ttl_remote_ms`
+  (default **90 min**)
 
 ```
 age_out_stale_routes(self):
+  ttl_n = rt_aging_ttl_neighbor_ms
+  ttl_r = rt_aging_ttl_remote_ms
   for each rt[dest]:
-    keep, primary_evicted = filter candidates by (now - last_seen) < ttl
+    keep, primary_evicted = filter candidates by:
+      (now - c.last_seen_ms) < (c.hops == 1 ? ttl_n : ttl_r)
     if #keep == 0:
       rt[dest] = nil
       schedule_triggered_beacon
@@ -550,14 +622,23 @@ age_out_stale_routes(self):
   if any evicted: emit rt_aged + schedule_triggered_beacon
 ```
 
+**Two-tier TTL rationale.** Direct-neighbour entries refresh on every
+received frame from that neighbour (RTS/CTS/DATA/ACK/BCN — see "any-RX
+refresh" below). They tolerate a shorter TTL because death detection
+for moving / dying neighbours stays responsive. Multi-hop entries
+only refresh when their advertiser's beacon-rotation slot lands on
+that destination — they need a much longer TTL to survive normal
+rotation gaps without false-eviction (in a 100-node mesh with 49
+entries/page, full rotation is ~3 beacon periods × success rate, easily
+30+ minutes under throttling).
+
 **Direct-neighbour last_seen refresh on ANY RX:** the on_recv top hook
 also refreshes `rt[meta.src].candidates[direct].last_seen_ms` for every
-incoming frame, not just beacons. This prevents direct neighbours from
+incoming frame, not just beacons. Prevents direct neighbours from
 being falsely evicted when their periodic beacons are throttle-
 suppressed under heavy traffic — RTS/CTS/DATA/ACK traffic from them
 counts as proof they're alive. Multi-hop entries still age via beacon
-advertisements only (the multi-hop info IS stale if no one is
-re-advertising it).
+advertisements only.
 
 **Why no explicit "delete" advertisement?** The wire format has no
 "this route is gone" frame. When a node evicts a destination entirely,
@@ -565,17 +646,18 @@ the triggered beacon advertises the rest of the table without the
 gone destination. Neighbours hearing that beacon refresh their other
 routes via this node, and their own aging loop eventually evicts the
 gone destination from their tables (when `last_seen` to it stops
-refreshing). Cascade time across N hops: ~`N × rt_aging_ttl_ms`.
+refreshing). Cascade time across N hops: ~`N × ttl`.
 
 **Configurable behavior:**
 
 | Key | Default | Description |
 |---|---|---|
-| `rt_aging_ttl_ms` | 600000 (10 min) | Candidate expires if not refreshed within this window |
+| `rt_aging_ttl_neighbor_ms` | 1800000 (30 min) | Direct-neighbour candidate expires if not refreshed within this window |
+| `rt_aging_ttl_remote_ms` | 5400000 (90 min) | Multi-hop candidate expires if not refreshed within this window |
 | `rt_aging_check_period_ms` | 60000 (1 min) | How often the aging scan runs |
 
-Set `rt_aging_ttl_ms = 0` to disable aging (memory leak risk in
-long-lived deployments; useful for tests).
+Set both TTLs to 0 to disable aging (memory leak risk in long-lived
+deployments; useful for tests).
 
 ### 6.6 Bounded beacons (paged emission)
 
@@ -700,12 +782,23 @@ so peer NACK / busy-replies match the right msg_id.
 
 ### 8.1 RTS reaches receiver but it's busy
 
+NACK fires ONLY for the `pending_rx` busy case. The `pending_tx`
+(busy-as-sender) trigger was **removed** because the busy_for_ms
+estimate lied in the failure case — a node stuck in an ACK-loss
+retry loop predicts ~5 s but is actually busy 60+ s, causing
+senders to make wrong decisions. Now silent-drop with
+`rts_drop_pending_tx`; senders rely on `rts_timeout` + cascade.
+
 ```
-on_recv 'R' at receiver, while pending_rx is set with a DIFFERENT
-flight (different sender or different msg_id):
-  emit nack_tx
-  pack_nack(r.msg_id, busy_for = pending_rx_expires_in)
-  tx 'N' on data_sf
+on_recv 'R' at receiver:
+  if pending_rx busy + DIFFERENT (sender or msg_id):
+    emit nack_tx
+    pack_nack(r.msg_id, busy_for = pending_rx_expires_in)
+    tx 'N' on data_sf
+  elif pending_tx busy:
+    emit rts_drop_pending_tx          ← silent drop, no NACK
+    return
+  else: normal RTS handling
 ```
 
 Originator on receiving NACK:
@@ -1178,6 +1271,7 @@ expectations) subscribe by event_type.
 | `beacon_rx` | Beacon decoded | `src`, `n_entries` |
 | `beacon_skipped_busy` | Throttle suppressed beacon | `since_rx_ms`, `threshold_ms`, `stage` |
 | `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind` |
+| `beacon_max_idle_force` | Max-idle override bypassed busy throttle (§6.2) | `since_tx_ms`, `max_idle_ms`, `since_rx_ms` |
 | `rt_update` | Route added/promoted to a slot | `dest`, `next`, `score`, `hops`, `slot` |
 | `rt_prune` | 3-cycle prune dropped a candidate | `dest`, `pruned_via` |
 | `rt_aged` | Stale-route aging evicted a candidate (§6.5) | `dest`, `slot`, `next_hop`, `hops`, `age_ms`, `ttl_ms` |
@@ -1200,6 +1294,7 @@ expectations) subscribe by event_type.
 | `rts_rx_dup` | Duplicate RTS while pending_rx active | `from`, `msg_id` |
 | `rts_already_acked` | Cached ack short-circuit | `from`, `msg_id` |
 | `rts_drop_no_sf` | RTS bitmap intersection empty | `from`, `msg_id`, `sf_bitmap` |
+| `rts_drop_pending_tx` | Silent-drop RTS while we're busy as sender (§8.1) | `from`, `msg_id` |
 | `cts_tx` | CTS emitted | `to`, `msg_id`, `chosen_data_sf` |
 | `cts_rx` | CTS decoded, matches pending_tx | `from`, `msg_id`, `chosen_data_sf` |
 | `cts_invalid_sf` | Receiver picked an SF outside our bitmap | `from`, `msg_id`, `chosen_data_sf` |
@@ -1226,7 +1321,8 @@ expectations) subscribe by event_type.
 | `rts_giveup` | RTS exhausted retries | `origin`, `dst`, `msg_id`, `last_next_hop` |
 | `data_ack_giveup` | ACK timeout exhausted | `origin`, `dst`, `msg_id` |
 | `path_cascade` | Switching to next alt after K=3 cascade fired | `from_next`, `to_next`, `attempt`, `trigger` |
-| `path_cascade_exhausted` | All K alts tried | `dst`, `tried`, `trigger` |
+| `path_cascade_exhausted` | All K alts tried AND requeue caps hit (§5.6) | `dst`, `tried`, `trigger` |
+| `cascade_requeue` | All K alts tried; pushed back to tx_queue with backoff (§5.6) | `dst`, `msg_id`, `requeue_count`, `backoff_ms`, `total_age_ms`, `trigger` |
 
 ### 13.4 F1 blind-window mitigation
 
@@ -1270,11 +1366,12 @@ the JSON scenario). Defaults shown.
 |---|---|---|
 | `beacon_period_warmup_ms` | 5000 | Period during warmup_ms |
 | `beacon_period_ms` | 300000 | Operational period (5 min) |
-| `beacon_max_bytes` | 200 | Max beacon frame size |
+| `beacon_max_bytes` | 151 | Max beacon frame size — 4-byte header + 49 × 3-byte entries (post-bit-pack default; was 200 with 4-byte entries) |
 | `beacon_trigger_jitter_min_ms` | 50 | Triggered beacon delay min |
 | `beacon_trigger_jitter_max_ms` | 500 | Triggered beacon delay max |
 | `quiet_threshold_ms` | 30000 | Adaptive throttle silence requirement |
 | `beacon_silence_jitter_ms` | 10000 | Defer-jitter after silence detected |
+| `beacon_max_idle_ms` | 480000 (8 min) | Max idle before busy throttle is bypassed (§6.2). Set to 0 to disable. |
 
 ### 14.3 Data plane
 
@@ -1283,15 +1380,20 @@ the JSON scenario). Defaults shown.
 | `cts_to_data_gap_ms` | 5 | Originator pause between CTS-rx and DATA-tx |
 | `rts_timeout_ms` | computed | airtime(routing_sf, RTS) + airtime(data_sf, CTS) |
 | `rts_busy_retry_ms` | 30 | Retry delay when our retry timer fires while we're mid-RX |
-| `rts_max_retries` | 8 | RTS retry budget. Bumped from 3 to 8 with the F1 work so the exponential `rts_timeout` backoff (×2 capped at ×4) can cover a full receiver blind window even when the CTS we'd have overheard was lost in flight. |
+| `rts_max_retries` | 3 | RTS retry budget. Was 8 before fix `7ba772c` (drop pending_tx NACK + cap retries). With base ~5 s `rts_timeout` under load, 8 retries = ~30+ s per next-hop before alt-switching; 3 retries = ~12 s per next-hop, ~36 s across K=3 alts. Bounds wallclock pending_tx time so a stuck flight clears faster. |
 | `max_payload_bytes` | 50 | Receiver's pending_rx_expiry budget cap |
 | `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
 | `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
 | `q_query_ttl_ms` | 5000 | Sender Q dedup window — don't re-fire for same dest (§3.7) |
 | `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (src,dest) (§3.7) |
-| `rt_aging_ttl_ms` | 600000 | Stale-route eviction threshold — see §6.5 |
+| `rt_aging_ttl_neighbor_ms` | 1800000 (30 min) | Direct-neighbour candidate TTL — see §6.5 |
+| `rt_aging_ttl_remote_ms` | 5400000 (90 min) | Multi-hop candidate TTL — see §6.5 |
 | `rt_aging_check_period_ms` | 60000 | Aging-scan period — see §6.5 |
+| `cascade_requeue_max` | 3 | Phase C — max cascade-exhaust requeues before drop (§5.6) |
+| `cascade_requeue_base_ms` | 5000 | Phase C — base backoff (exponential: base × 2^(count-1)) |
+| `cascade_requeue_backoff_cap_ms` | 30000 | Phase C — backoff caps at this value |
+| `cascade_requeue_total_max_ms` | 120000 | Phase C — total wallclock cap; older items drop |
 
 ### 14.4 Channel access
 
@@ -1368,9 +1470,10 @@ sender. No cap today; acceptable in trusted-network settings.
 ### 15.5 ~~Alt freshness expiry not implemented~~ — RESOLVED
 
 **Resolved.** §6.5 stale-route aging now evicts candidates whose
-`last_seen_ms` exceeds `rt_aging_ttl_ms` (default 10 min). Both
-primary and alts are subject to the same TTL. Direct neighbours get
-their last_seen refreshed on every on_recv (not just beacons) so
+`last_seen_ms` exceeds a hop-class-specific TTL: direct neighbours
+use `rt_aging_ttl_neighbor_ms` (default 30 min), multi-hop entries
+use `rt_aging_ttl_remote_ms` (default 90 min). Direct-neighbour
+last_seen also refreshes on every on_recv (not just beacons) so
 heavy-traffic-throttled scenarios don't false-evict alive nodes.
 
 The narrower follow-up is **explicit "deleted route" advertisement**
