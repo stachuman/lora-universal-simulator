@@ -168,8 +168,11 @@ def main() -> None:
                    default="scenarios/s04_seattle_realistic.json",
                    help="Output scenario path")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--duration-ms", type=int, default=1_800_000,
-                   help="Total sim duration (default 30 min)")
+    p.add_argument("--duration-ms", type=int, default=3_600_000,
+                   help="Total sim duration (default 60 min). Long enough that "
+                        "messages sent in the last 5-10 min still have time to "
+                        "drain so analyzer windows don't go 0%% from missing "
+                        "tail-end delivery deadlines.")
     p.add_argument("--warmup-ms", type=int, default=30_000,
                    help="Min warmup before first send (default 30 s). The actual "
                         "warmup is auto-extended to max(warmup_ms, "
@@ -202,15 +205,16 @@ def main() -> None:
     repeaters = sample_repeaters(cfg["nodes"], args.repeater_senders, rng)
     identities = sorted(set(repeaters) | set(CORNER_NAMES))
 
-    # Three burst windows at 5 / 15 / 25 min — early/mid/late so the
+    # Burst windows every 10 min (5 / 15 / 25 / 35 / 45 / 55 ...) so the
     # cold-start curve (analyzer §12) shows whether the network can
-    # absorb peaks at different convergence stages.
-    five_min = 5 * 60_000
-    bursts = [
-        (5  * 60_000, 5, 3000),
-        (15 * 60_000, 5, 3000),
-        (25 * 60_000, 5, 3000),
-    ]
+    # absorb peaks at different convergence stages — including past
+    # the warmup-honeymoon, past the first TTL boundary, and into
+    # genuine steady-state.
+    bursts = []
+    t = 5 * 60_000
+    while t < args.duration_ms - 60_000:    # leave 1 min slack at the tail
+        bursts.append((t, 5, 3000))
+        t += 10 * 60_000
 
     # Auto-extend warmup so even the latest-starting node gets a full
     # warmup-period beacon phase. The runtime gates beacon cadence on a
@@ -229,12 +233,13 @@ def main() -> None:
     # Carry over s03's nodes / topology / path_loss verbatim. Override
     # only the sim duration, the commands, and the scenario name/desc.
     cfg["_name"] = "s04_seattle_realistic"
+    burst_label = "/".join(str(c // 60_000) for c, _, _ in bursts) + " min"
     cfg["_desc"] = (
         "Seattle topology (s03 reference, 134 ITM repeaters + 4 corners), "
         f"extended to {args.duration_ms // 60_000} min with {len(cmds)} sends "
         f"distributed across {len(identities)} active identities ({len(repeaters)} "
         f"named repeaters + 4 corners). Baseline mean inter-send {args.mean_interval_ms}ms "
-        "+ 3 burst windows at 5/15/25 min (5 sends in ~3s each). "
+        f"+ {len(bursts)} burst windows at {burst_label} (5 sends in ~3s each). "
         f"Per-node startup jitter [0, {args.node_startup_jitter_ms}] ms so the warmup "
         "phase isn't synchronized — desyncs initial route-aging so the network doesn't "
         "collapse in lockstep at the global TTL boundary. Goal: surface time-windowed "
