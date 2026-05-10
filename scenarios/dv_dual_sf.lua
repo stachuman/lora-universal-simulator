@@ -2822,6 +2822,12 @@ function on_init(self, config)
   self.q_responded_to  = {}                                  -- {(src,dest)_str → t_ms_last_responded}
   self.q_query_ttl_ms   = config.q_query_ttl_ms   or 5000
   self.q_respond_ttl_ms = config.q_respond_ttl_ms or 10000
+  -- Diagnostic-only: periodic node_state_snapshot emit cadence.
+  -- Captures blind_until count, tx_queue depth, deferred_sends count,
+  -- rt size — anything that could grow unboundedly under stress, so
+  -- analysers can spot late-window failure modes without replaying
+  -- every observation event. Default 60 s. Set 0 to disable.
+  self.state_snapshot_period_ms = config.state_snapshot_period_ms or 60000
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
   -- (origin_id, origin_seq) tuple and rejects subsequent arrivals of the
@@ -2893,6 +2899,42 @@ function on_init(self, config)
     self:after(self.rt_aging_check_period_ms, aging_loop)
   end
   self:after(self.rt_aging_check_period_ms, aging_loop)
+
+  -- Periodic node-state snapshot — diagnostic-only, every
+  -- state_snapshot_period_ms (default 60 s, set 0 to disable).
+  -- Emits a single event per node per period with the size of every
+  -- per-node accumulator that could grow unboundedly under stress
+  -- (blind_until, tx_queue, deferred_sends, rt). Lets analyzers spot
+  -- monotonically-growing state without per-event reconstruction.
+  if self.state_snapshot_period_ms > 0 then
+    local function snapshot_loop()
+      local now = self:now()
+      -- Count currently-active blind_until entries (until_ms > now).
+      -- Expired entries are pruned on lookup but may linger in the
+      -- table between is_blind() calls; count only active ones.
+      local blind_n = 0
+      for _, until_ms in pairs(self.blind_until) do
+        if until_ms > now then blind_n = blind_n + 1 end
+      end
+      local rt_n = 0
+      local rt_cands = 0
+      for _, entry in pairs(self.rt) do
+        rt_n = rt_n + 1
+        if entry.candidates then rt_cands = rt_cands + #entry.candidates end
+      end
+      self:emit("node_state_snapshot", {
+        blind_count         = blind_n,
+        queue_depth         = #self.tx_queue,
+        deferred_count      = #self.deferred_sends,
+        has_pending_tx      = self.pending_tx ~= nil,
+        has_pending_rx      = self.pending_rx ~= nil,
+        rt_dst_count        = rt_n,
+        rt_total_candidates = rt_cands,
+      })
+      self:after(self.state_snapshot_period_ms, snapshot_loop)
+    end
+    self:after(self.state_snapshot_period_ms, snapshot_loop)
+  end
 end
 
 function on_recv(self, frame, meta)
