@@ -172,6 +172,26 @@ def test_compute_link_matrix_srtm_miss_skips_pair():
     assert r["links"] == []
 
 
+@itm_skip
+def test_compute_pair_link_zero_antenna_clamps_not_crashes():
+    """ITM's qlrpfl divides by antenna height — 0 m would crash with
+    ZeroDivisionError. The service clamps to a 0.1 m floor as a
+    defensive last line; pydantic + C++ validators reject 0 at the
+    schema layer in normal flows."""
+    from server.services.topo_srtm import compute_pair_link
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    a = {"name": "a", "lat": 47.61, "lon": -122.33, "antenna_height_m": 0.0}
+    b = {"name": "b", "lat": 47.62, "lon": -122.33, "antenna_height_m": 1.5}
+    r = compute_pair_link(
+        a, b, srtm,
+        freq_mhz=868.0, tx_power_dbm=14.0,
+        bandwidth_hz=62500.0, noise_figure_db=6.0,
+        profile_resolution_m=90.0,
+    )
+    assert r is not None, "0 antenna height should clamp, not return None"
+    assert isinstance(r["snr_db"], float)
+
+
 def test_compute_link_matrix_max_links_per_node_cap():
     """Star topology with 5 leaves around 1 hub. With max_links_per_node=2,
     only 2 of the 4 hub-leaf links survive."""

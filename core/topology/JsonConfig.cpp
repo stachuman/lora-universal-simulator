@@ -400,9 +400,11 @@ static void validateConfig(const SimConfig& cfg) {
                     + ") must be < dies_at_ms ("
                     + std::to_string(nd.dies_at_ms) + ")");
             }
-            if (nd.antenna_height_m < 0.0f) {
-                errors.push_back(ctx + ".antenna_height_m must be >= 0 (got "
-                    + std::to_string(nd.antenna_height_m) + ")");
+            if (nd.antenna_height_m <= 0.0f) {
+                errors.push_back(ctx + ".antenna_height_m must be > 0 (got "
+                    + std::to_string(nd.antenna_height_m)
+                    + "; ITM divides by antenna height — use 0.1 for"
+                    + " a buried sensor instead of 0)");
             }
         }
     }

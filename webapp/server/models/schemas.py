@@ -119,8 +119,10 @@ class NodeConfig(BaseModel):
     dies_at_ms: Optional[int] = Field(default=None, ge=1)
     # Authoring-time only — used by the SRTM+ITM topology generator
     # (ITM needs antenna heights to compute path obstruction). Default
-    # 1.5 m (handheld); rooftop gateways set per-node to 10+ m.
-    antenna_height_m: Optional[float] = Field(default=None, ge=0.0)
+    # 1.5 m (handheld); rooftop gateways set per-node to 10+ m. Must
+    # be > 0 — ITM's qlrpfl divides by antenna height, so 0 m
+    # produces ZeroDivisionError. A buried sensor can use 0.1 m.
+    antenna_height_m: Optional[float] = Field(default=None, gt=0.0)
 
 
 class TopologyLink(BaseModel):

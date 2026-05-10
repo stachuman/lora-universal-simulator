@@ -200,8 +200,12 @@ def compute_pair_link(
     """
     lat_a, lon_a = node_a["lat"], node_a["lon"]
     lat_b, lon_b = node_b["lat"], node_b["lon"]
-    h_a = float(node_a.get("antenna_height_m", 1.5))
-    h_b = float(node_b.get("antenna_height_m", 1.5))
+    # Defensive floor — ITM's qlrpfl divides by antenna height, so 0
+    # crashes with ZeroDivisionError. Pydantic + C++ validators reject
+    # 0 at the schema layer; this clamp is the last-line safety in case
+    # a caller bypasses validation.
+    h_a = max(0.1, float(node_a.get("antenna_height_m", 1.5)))
+    h_b = max(0.1, float(node_b.get("antenna_height_m", 1.5)))
 
     distance_km = haversine_km(lat_a, lon_a, lat_b, lon_b)
     if distance_km <= 0:

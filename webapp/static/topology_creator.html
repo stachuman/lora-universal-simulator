@@ -35,6 +35,30 @@
     overflow-y: auto; overflow-x: hidden;
   }
 
+  /* Node detail section (shown on marker click — same as editor) */
+  .node-detail {
+    border-top: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+  .node-detail h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); font-weight: 700; margin-bottom: 8px;
+  }
+  .det-field {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 5px;
+  }
+  .det-field label {
+    font-size: 10px; color: var(--text-dim); width: 90px; flex-shrink: 0;
+  }
+  .det-field input {
+    flex: 1; min-width: 0;
+    background: var(--bg-input); color: var(--text);
+    border: 1px solid var(--border-light);
+    padding: 3px 6px; font-size: 11px; font-family: var(--font-mono);
+    border-radius: var(--radius);
+  }
+  .det-field input:focus { outline: none; border-color: var(--accent); }
+
   .tc-section {
     padding: 12px;
     border-bottom: 1px solid var(--border-light);
@@ -306,6 +330,47 @@
       </div>
     </div>
 
+    <!-- Node detail (shown on selection) -->
+    <div class="node-detail" id="node-detail" style="display:none">
+      <h4 id="det-title">Selected Node</h4>
+      <div class="det-field">
+        <label>Name</label>
+        <input id="det-name" type="text" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label>Lat</label>
+        <input id="det-lat" type="number" step="any" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label>Lon</label>
+        <input id="det-lon" type="number" step="any" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label title="ITM antenna height (m). Default 1.5 (handheld); rooftop gateways set 10+.">
+          Antenna height (m)
+        </label>
+        <input id="det-antenna" type="number" step="any" min="0.1"
+               placeholder="1.5" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label title="If set, node is fully off until this sim-time (ms). Leave blank for default (alive from t=0).">
+          start_at_ms
+        </label>
+        <input id="det-start-at" type="number" step="1" min="1"
+               placeholder="(blank = always on)" oninput="onDetChange()">
+      </div>
+      <div class="det-field">
+        <label title="If set, node powers off at this sim-time (ms). Leave blank to never die.">
+          dies_at_ms
+        </label>
+        <input id="det-dies-at" type="number" step="1" min="1"
+               placeholder="(blank = never dies)" oninput="onDetChange()">
+      </div>
+      <div style="margin-top:8px; display:flex; gap:6px;">
+        <button class="btn btn-sm btn-danger" id="btn-delete-selected" onclick="deleteSelectedNode()">Delete Node</button>
+      </div>
+    </div>
+
     <div class="tc-error" id="tc-error"></div>
 
     <!-- Actions -->
@@ -339,6 +404,10 @@
   // SRTM+ITM). Persisted on Save so a re-load doesn't need to re-run
   // the slow ITM compute.
   let snrLinks = [];
+  // Index of the selected node (or null). The detail panel + drag
+  // handlers consult this so the user can click a marker to fine-tune
+  // its name/lat/lon/antenna_height_m/start_at_ms/dies_at_ms.
+  let selectedIdx = null;
   let leafletMap = null;
   let regionMap = null;
   let markerGroup = null;
@@ -455,6 +524,8 @@
     nodes.push({ name, lat: parseFloat(lat.toFixed(6)), lon: parseFloat(lon.toFixed(6)) });
     snrMatrix = null;
     snrLinks = [];
+    selectedIdx = null;  // a new node becomes available; let the user click to select
+    renderDetail();
     redrawMap();
     updateStatus();
     updateButtons();
@@ -471,6 +542,8 @@
     nodes.splice(best, 1);
     snrMatrix = null;
     snrLinks = [];
+    selectedIdx = null;
+    renderDetail();
     redrawMap();
     updateStatus();
     updateButtons();
@@ -509,15 +582,111 @@
     // Draw node markers
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
+      const isSelected = (i === selectedIdx);
       const marker = L.circleMarker([n.lat, n.lon], {
-        radius: 6, color: '#2563eb', weight: 2,
+        radius: isSelected ? 9 : 6,
+        color:  isSelected ? '#ea580c' : '#2563eb',
+        weight: isSelected ? 3 : 2,
         fillColor: '#3b82f6', fillOpacity: 0.9,
       }).addTo(markerGroup);
       marker.bindTooltip(n.name + '<br>' + n.lat.toFixed(5) + ', ' + n.lon.toFixed(5),
         { permanent: false, className: 'tc-label' });
       marker._nodeIdx = i;
+
+      marker.on('click', function(e) {
+        L.DomEvent.stopPropagation(e);
+        selectNode(this._nodeIdx);
+      });
+
+      // Draggable — same pattern as topology_editor.html.
+      marker.on('mousedown', function() {
+        this.dragging && this.dragging.enable();
+      });
+      marker.dragging && marker.dragging.enable();
+      marker.on('dragend', function() {
+        const pos = this.getLatLng();
+        const idx = this._nodeIdx;
+        nodes[idx].lat = parseFloat(pos.lat.toFixed(6));
+        nodes[idx].lon = parseFloat(pos.lng.toFixed(6));
+        snrMatrix = null;
+        snrLinks = [];
+        if (selectedIdx === idx) renderDetail();
+        redrawMap();
+        updateStatus();
+        updateButtons();
+      });
     }
   }
+
+  // ── Selection + detail panel ─────────────────────────────
+  function selectNode(idx) {
+    selectedIdx = idx;
+    renderDetail();
+    redrawMap();
+  }
+
+  function renderDetail() {
+    const panel = document.getElementById('node-detail');
+    if (selectedIdx === null || selectedIdx >= nodes.length) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = '';
+    const n = nodes[selectedIdx];
+    document.getElementById('det-title').textContent = 'Node: ' + n.name;
+    document.getElementById('det-name').value = n.name || '';
+    document.getElementById('det-lat').value  = n.lat  != null ? n.lat : '';
+    document.getElementById('det-lon').value  = n.lon  != null ? n.lon : '';
+    document.getElementById('det-antenna').value =
+      n.antenna_height_m != null ? n.antenna_height_m : '';
+    document.getElementById('det-start-at').value =
+      n.start_at_ms != null ? n.start_at_ms : '';
+    document.getElementById('det-dies-at').value =
+      n.dies_at_ms != null ? n.dies_at_ms : '';
+  }
+
+  function _readOptionalNumber(elId) {
+    const raw = document.getElementById(elId).value.trim();
+    if (raw === '') return undefined;
+    const v = parseFloat(raw);
+    return Number.isFinite(v) ? v : undefined;
+  }
+
+  window.onDetChange = function() {
+    if (selectedIdx === null || selectedIdx >= nodes.length) return;
+    const n = nodes[selectedIdx];
+    n.name = document.getElementById('det-name').value;
+    n.lat  = parseFloat(document.getElementById('det-lat').value) || n.lat;
+    n.lon  = parseFloat(document.getElementById('det-lon').value) || n.lon;
+    const antenna = _readOptionalNumber('det-antenna');
+    if (antenna === undefined) delete n.antenna_height_m;
+    else                       n.antenna_height_m = antenna;
+    const startAt = _readOptionalNumber('det-start-at');
+    if (startAt === undefined) delete n.start_at_ms;
+    else                       n.start_at_ms = Math.round(startAt);
+    const diesAt = _readOptionalNumber('det-dies-at');
+    if (diesAt === undefined) delete n.dies_at_ms;
+    else                      n.dies_at_ms = Math.round(diesAt);
+    snrMatrix = null;
+    snrLinks = [];
+    redrawMap();
+    updateStatus();
+    updateButtons();
+  };
+
+  window.deleteSelectedNode = function() {
+    if (selectedIdx === null || selectedIdx >= nodes.length) return;
+    const name = nodes[selectedIdx].name || '(unnamed)';
+    if (!confirm('Delete node "' + name + '"?')) return;
+    nodes.splice(selectedIdx, 1);
+    selectedIdx = null;
+    snrMatrix = null;
+    snrLinks = [];
+    renderDetail();
+    redrawMap();
+    updateStatus();
+    updateButtons();
+  };
 
   // ── Status bar ──────────────────────────────────────────
   function updateStatus() {
@@ -594,6 +763,8 @@
       }));
       snrMatrix = null;
       snrLinks = [];
+      selectedIdx = null;
+      renderDetail();
       redrawMap();
       if (nodes.length > 0) {
         const bounds = L.latLngBounds(nodes.map(n => [n.lat, n.lon]));
