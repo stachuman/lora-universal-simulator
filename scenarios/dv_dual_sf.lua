@@ -117,16 +117,23 @@
 --     Half-duplex skip applies — busy nodes drop the trigger and rely on
 --     the next mutation (or periodic) to retry.
 --   stale-route aging: every rt_aging_check_period_ms (default 60s),
---     walk rt[]; evict candidates whose last_seen_ms exceeded
---     rt_aging_ttl_ms (default 10 min = 2× default operational beacon
---     period). When primary evicted: mark entry.dirty for differential
---     beacon. When all candidates evicted: drop entry + trigger beacon
---     (no wire-format way to advertise "deleted route" — receivers'
---     own aging eventually catches up via the absence of advertisement).
---     Direct-neighbour last_seen_ms also refreshed on ANY on_recv frame
---     from that neighbour (not just beacons), so heavy-traffic-throttled
---     beacons don't false-evict alive direct neighbours. Telemetry:
---     rt_aged event per evicted candidate.
+--     walk rt[]; evict candidates whose last_seen_ms exceeded a
+--     hop-class-specific TTL:
+--       hops == 1  → rt_aging_ttl_neighbor_ms  (default 30 min)
+--       hops >= 2  → rt_aging_ttl_remote_ms    (default 90 min)
+--     Two-tier rationale: direct neighbour entries refresh on every
+--     received frame from that neighbour (rt_merge top-of-on_recv hook),
+--     so they tolerate a shorter TTL — death detection for moving /
+--     dying neighbours stays responsive. Multi-hop entries only
+--     refresh when their advertiser's beacon-rotation slot comes up,
+--     so they need a much longer TTL to survive normal rotation gaps
+--     without false-eviction.
+--     When primary evicted: mark entry.dirty for differential beacon.
+--     When all candidates evicted: drop entry + trigger beacon (no
+--     wire-format way to advertise "deleted route" — receivers' own
+--     aging eventually catches up via the absence of advertisement).
+--     Telemetry: rt_aged event per evicted candidate.
+--     ► Real-deployment tuning formula in on_init's aging block.
 --   on_recv 'B' from N at rx_snr
 --     install rt[N] = {direct, snr, hops=1, n2_hop=nil}
 --     for each entry e in beacon (e.dest != self.id):
@@ -1405,17 +1412,31 @@ local function rt_prune_cycle(self, dest_id, sender_id)
 end
 
 -- Stale-route aging. Walk every rt[dest], evict candidates whose
--- last_seen_ms is older than self.rt_aging_ttl_ms. If primary evicted,
--- mark entry.dirty so the differential beacon ships the new primary.
--- If all candidates evicted, drop the entry entirely + schedule a
--- triggered beacon (no wire-format way to say "I no longer route to X",
--- but the trigger ensures the rest of our table propagates without
--- the gone-dest, so neighbours' own aging eventually catches up).
+-- last_seen_ms is older than the TTL for their hop class:
+--
+--   c.hops == 1   →  rt_aging_ttl_neighbor_ms     (direct neighbour)
+--   c.hops >= 2   →  rt_aging_ttl_remote_ms       (multi-hop)
+--
+-- Two-tier rationale: direct neighbours get refreshed by EVERY received
+-- frame (rt_merge top-of-on_recv hook updates last_seen_ms whenever
+-- this neighbour TXes anything we hear), so 1-hop entries can have a
+-- shorter TTL — death detection for moving / dying neighbours stays
+-- responsive. Multi-hop entries only refresh when their advertiser's
+-- rotation slot comes up, so they need a much longer TTL to survive
+-- normal rotation gaps without being false-evicted.
+--
+-- If primary evicted, mark entry.dirty so the differential beacon ships
+-- the new primary. If all candidates evicted, drop the entry entirely
+-- + schedule a triggered beacon (no wire-format way to say "I no
+-- longer route to X", but the trigger ensures the rest of our table
+-- propagates without the gone-dest, so neighbours' own aging eventually
+-- catches up).
 local function age_out_stale_routes(self)
   if next(self.rt) == nil then return end
   local now = self:now()
-  local ttl = self.rt_aging_ttl_ms
-  if ttl <= 0 then return end                    -- aging disabled
+  local ttl_n = self.rt_aging_ttl_neighbor_ms
+  local ttl_r = self.rt_aging_ttl_remote_ms
+  if (ttl_n <= 0) and (ttl_r <= 0) then return end       -- aging disabled
   local any_evicted = false
   -- Collect dest_ids first (Lua's pairs+modify is OK in 5.3+ but only
   -- for removal of the current key; we want bulk-safe iteration).
@@ -1429,8 +1450,10 @@ local function age_out_stale_routes(self)
       local kept = {}
       local primary_evicted = false
       for i, c in ipairs(entry.candidates) do
+        local ttl = (c.hops and c.hops <= 1) and ttl_n or ttl_r
         local age = now - c.last_seen_ms
-        if age < ttl then
+        if ttl <= 0 or age < ttl then
+          -- TTL ≤ 0 disables aging for this hop class; keep the entry.
           table.insert(kept, c)
         else
           if i == 1 then primary_evicted = true end
@@ -1440,9 +1463,9 @@ local function age_out_stale_routes(self)
             age_ms = age, ttl_ms = ttl,
           })
           self:log(string.format(
-            "rt_aged dst=%s %s via %s (age %dms > ttl %dms)",
+            "rt_aged dst=%s %s via %s hops=%d (age %dms > ttl %dms)",
             name_of(self, dest_id), (i == 1) and "primary" or "alt",
-            name_of(self, c.next_hop), age, ttl))
+            name_of(self, c.next_hop), c.hops or -1, age, ttl))
           any_evicted = true
         end
       end
@@ -2256,7 +2279,7 @@ local function send_beacon_page(self, kind)
   -- max-idle override (beacon_fire) to break out of long throttle
   -- windows: in dense channels the quiet_threshold gate suppresses
   -- periodic beacons indefinitely, starving neighbours' routing tables
-  -- past rt_aging_ttl_ms. The override fires a BCN regardless of
+  -- past the rt_aging_ttl_* TTLs. The override fires a BCN regardless of
   -- channel-busy state once this node has been quiet for too long.
   self.last_beacon_tx_ms = self:now()
   return tx_flood(self, frame, {
@@ -2297,12 +2320,14 @@ local function beacon_fire(self)
     -- bypass the channel-busy throttle and fire anyway. In dense meshes
     -- the quiet_threshold gate suppresses periodic beacons indefinitely
     -- (channel never goes quiet for the whole 30s threshold), which
-    -- starves routing tables past rt_aging_ttl_ms and the network
+    -- starves routing tables past the rt_aging_ttl_* TTLs and the network
     -- collapses around the global TTL boundary. The override guarantees
     -- a baseline BCN cadence regardless of channel state — set
-    -- beacon_max_idle_ms < rt_aging_ttl_ms so neighbours' RT entries
-    -- get refreshed before they age out. Disable by setting
-    -- beacon_max_idle_ms = 0.
+    -- beacon_max_idle_ms < rt_aging_ttl_neighbor_ms (1-hop TTL) so
+    -- neighbours' direct-link entries get refreshed before they age out.
+    -- Multi-hop entries (rt_aging_ttl_remote_ms) survive longer rotation
+    -- gaps; see the deployment-tuning block in on_init for the formula.
+    -- Disable by setting beacon_max_idle_ms = 0.
     local force_idle = false
     if self.beacon_max_idle_ms and self.beacon_max_idle_ms > 0 then
       local since_tx = (self.last_beacon_tx_ms ~= nil)
@@ -2474,10 +2499,13 @@ function on_init(self, config)
   -- hasn't BCN'd in beacon_max_idle_ms. In dense meshes the channel
   -- never goes quiet for the throttle's threshold, so periodic beacons
   -- are suppressed indefinitely — neighbours' RT entries age out at
-  -- rt_aging_ttl_ms (default 10 min) and the network collapses around
-  -- the global TTL boundary. Defaulting to 480000 ms (8 min) leaves
-  -- 2 min of margin under the 10 min default rt_aging_ttl_ms so the
-  -- override fires before routes age out. Set to 0 to disable.
+  -- the rt_aging_ttl_* TTLs and the network collapses around the
+  -- TTL boundary. Default 480000 ms (8 min) sits well below the
+  -- rt_aging_ttl_neighbor_ms default (30 min) so 1-hop entries get
+  -- refreshed before they age out, and 1/3 of rt_aging_ttl_remote_ms
+  -- (90 min) so multi-hop rotation cycles complete in time. Set to 0
+  -- to disable. See on_init's aging block for the deployment-scaling
+  -- formula.
   --
   -- last_beacon_tx_ms is `nil` until the first BCN; the override treats
   -- nil as "never beaconed → fire freely" (matches the throttle's
@@ -2667,19 +2695,63 @@ function on_init(self, config)
   -- Receivers reject foreign-network BCN/RTS at the routing layer
   -- before doing CTS/DATA work. 0 = default mesh; 1..15 = distinct meshes.
   self.network_id        = config.network_id or 0
-  -- Stale-route aging. Per-candidate last_seen_ms is refreshed by
-  -- rt_merge whenever a beacon advertises that exact (dest, next_hop)
-  -- combination, AND for direct-neighbour entries on every on_recv
-  -- frame from that neighbour (so heavy-traffic throttling of beacons
-  -- doesn't false-evict alive direct neighbours). The aging loop runs
-  -- every rt_aging_check_period_ms and evicts candidates whose
-  -- last_seen is older than rt_aging_ttl_ms. Whole entries get dropped
-  -- when their last candidate ages out, with a triggered beacon to
-  -- propagate the change. Defaults: 10 min TTL = 2× default operational
-  -- beacon period (300s); 1 min check period = catches leaks promptly
-  -- without measurable overhead.
-  self.rt_aging_ttl_ms          = config.rt_aging_ttl_ms          or 600000
-  self.rt_aging_check_period_ms = config.rt_aging_check_period_ms or 60000
+  -- Stale-route aging — two-tier TTL by hop class.
+  --
+  -- Per-candidate last_seen_ms is refreshed by rt_merge whenever a
+  -- beacon advertises that exact (dest, next_hop) combination, AND
+  -- for direct-neighbour entries on every on_recv frame from that
+  -- neighbour. Direct-neighbour entries (c.hops == 1) refresh on
+  -- every received frame from that node — so they can carry a shorter
+  -- TTL without false-eviction risk. Multi-hop entries (c.hops >= 2)
+  -- only refresh when their advertiser's rotation slot comes up; they
+  -- need a TTL multiple of the full-rotation cycle to survive.
+  --
+  -- The aging loop runs every rt_aging_check_period_ms (default 60 s).
+  --
+  -- ┌─────────────────────────────────────────────────────────────────┐
+  -- │ DEPLOYMENT TUNING (real LoRa hardware, mostly-static nodes):    │
+  -- │                                                                 │
+  -- │ Both refresh and aging should scale to HOURS for real           │
+  -- │ deployments. The simulation defaults below are tuned for a      │
+  -- │ 30-minute s04 stress run, not for production.                   │
+  -- │                                                                 │
+  -- │ Formula:                                                        │
+  -- │   per_entry_refresh_max_ms                                      │
+  -- │     = ceil(RT_size / beacon_max_entries) × beacon_max_idle_ms   │
+  -- │                                                                 │
+  -- │   rt_aging_ttl_neighbor_ms                                      │
+  -- │     = M × beacon_max_idle_ms       (M = 2..3, loss tolerance)   │
+  -- │                                                                 │
+  -- │   rt_aging_ttl_remote_ms                                        │
+  -- │     = N × per_entry_refresh_max_ms (N = 4..8, loss tolerance)   │
+  -- │                                                                 │
+  -- │ Worked example — 50-node mostly-static deployment:              │
+  -- │   beacon_max_idle_ms        = 30 min  (low ambient airtime)     │
+  -- │   beacon_period_ms          = 30 min  (matches max_idle)        │
+  -- │   RT_size = 50, beacon_max_entries ≈ 50 → 1 rotation page       │
+  -- │   per_entry_refresh_max_ms  = 1 × 30 = 30 min                   │
+  -- │   rt_aging_ttl_neighbor_ms  = 2 × 30 = 60 min                   │
+  -- │   rt_aging_ttl_remote_ms    = 4 × 30 = 120 min  (2 hours)       │
+  -- │                                                                 │
+  -- │ Caveat for very large RTs: per_entry_refresh grows linearly     │
+  -- │ with RT_size, so at scale you should either (a) cap RT to       │
+  -- │ "important" destinations, (b) shrink per-entry encoding to      │
+  -- │ fit more in one beacon, or (c) switch distant destinations to   │
+  -- │ reactive (Q-frame) lookup instead of proactive flooding.        │
+  -- └─────────────────────────────────────────────────────────────────┘
+  --
+  -- Simulation defaults (tuned for s04, not production):
+  --   beacon_max_idle_ms = 8 min  (set in beacon-throttle block above)
+  --   RT_size ≈ 140 (s04), beacon_max_entries ≈ 50 → 3 rotation pages
+  --   per_entry_refresh_max_ms = 3 × 8 = 24 min
+  --   rt_aging_ttl_neighbor_ms = 2 × 8 = 16 min  →  rounded to 30 min
+  --                                                  (jitter headroom)
+  --   rt_aging_ttl_remote_ms   = 4 × 24 = 96 min →  rounded to 90 min
+  --                                                  (covers 3.75 cycles
+  --                                                   ≈ 2-3 missed cycles)
+  self.rt_aging_ttl_neighbor_ms = config.rt_aging_ttl_neighbor_ms or 1800000   -- 30 min
+  self.rt_aging_ttl_remote_ms   = config.rt_aging_ttl_remote_ms   or 5400000   -- 90 min
+  self.rt_aging_check_period_ms = config.rt_aging_check_period_ms or 60000     -- 1 min
   -- Q (RREQ-route) dedup tracking. Sender side: don't re-fire Q for
   -- same dest within q_query_ttl_ms (default 5s). Responder side: don't
   -- respond to same (src,dest) Q within q_respond_ttl_ms (default 10s).
@@ -2751,8 +2823,9 @@ function on_init(self, config)
   self:after(1000, drain_loop)
 
   -- Periodic stale-route aging — every rt_aging_check_period_ms,
-  -- evict candidates whose last_seen_ms exceeded rt_aging_ttl_ms.
-  -- See age_out_stale_routes for the full mechanism.
+  -- evict candidates whose last_seen_ms exceeded the hop-class TTL
+  -- (rt_aging_ttl_neighbor_ms for 1-hop, rt_aging_ttl_remote_ms for
+  -- multi-hop). See age_out_stale_routes for the full mechanism.
   local function aging_loop()
     age_out_stale_routes(self)
     self:after(self.rt_aging_check_period_ms, aging_loop)

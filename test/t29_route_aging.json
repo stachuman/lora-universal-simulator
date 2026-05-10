@@ -1,6 +1,6 @@
 {
   "_name": "t29_route_aging",
-  "_desc": "3-node line a-b-c. carol dies at t=20000. With small rt_aging_ttl_ms (15000) and frequent aging checks (5000), alice's rt[carol] should age out within ~15-20s of carol's last-heard-from time. Verifies: rt_aged event fires for carol at alice/bob, the dead route gets evicted instead of accumulating retries forever.",
+  "_desc": "3-node line a-b-c. carol dies at t=20000. With small rt_aging_ttl_neighbor_ms / rt_aging_ttl_remote_ms (both 15000) and frequent aging checks (5000), alice's rt[carol] should age out within ~15-20s of carol's last-heard-from time. Verifies: rt_aged event fires for carol at alice/bob, the dead route gets evicted instead of accumulating retries forever. (Both hop-class TTLs set explicitly so the alice→carol multi-hop entry uses rt_aging_ttl_remote_ms and the bob→carol direct-neighbour entry uses rt_aging_ttl_neighbor_ms — both want to age out within the same 15s window for this test.)",
   "simulation": {
     "duration_ms": 60000,
     "step_ms": 1,
@@ -12,15 +12,15 @@
   "nodes": [
     { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
       "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000,
-                  "quiet_threshold_ms": 0, "rt_aging_ttl_ms": 15000,
+                  "quiet_threshold_ms": 0, "rt_aging_ttl_neighbor_ms": 15000, "rt_aging_ttl_remote_ms": 15000,
                   "rt_aging_check_period_ms": 5000 } },
     { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
       "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000,
-                  "quiet_threshold_ms": 0, "rt_aging_ttl_ms": 15000,
+                  "quiet_threshold_ms": 0, "rt_aging_ttl_neighbor_ms": 15000, "rt_aging_ttl_remote_ms": 15000,
                   "rt_aging_check_period_ms": 5000 } },
     { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
       "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000,
-                  "quiet_threshold_ms": 0, "rt_aging_ttl_ms": 15000,
+                  "quiet_threshold_ms": 0, "rt_aging_ttl_neighbor_ms": 15000, "rt_aging_ttl_remote_ms": 15000,
                   "rt_aging_check_period_ms": 5000 },
       "dies_at_ms": 20000 }
   ],
