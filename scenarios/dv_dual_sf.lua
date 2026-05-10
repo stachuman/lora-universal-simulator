@@ -1007,6 +1007,22 @@ local function rts_timeout_for_attempt(base_ms, attempt_idx)
   return base_ms * mult
 end
 
+-- Per-message retry budget. The effective rts_max_retries for a message
+-- shrinks by its requeue_count: a fresh message (requeue_count=0) gets
+-- the full base budget; each subsequent cascade-requeue cycle gives it
+-- one fewer RTS retry per next-hop. Combined with the K=3 cascade alts,
+-- this means a retried-once message tries 3 alts × 2 retries = 6 RTS
+-- attempts/cycle vs 9 for a fresh one; a retried-twice gets 3 alts × 1
+-- retry = 3; a retried-thrice gets 3 alts × 0 retries = 3 (the alt
+-- cascade itself still walks the K candidates, just with no rty per).
+-- Channel time per cycle shrinks accordingly, letting zombie messages
+-- die faster and freeing capacity for fresh ones.
+local function effective_rts_max_retries(self, requeue_count)
+  local n = self.rts_max_retries - (requeue_count or 0)
+  if n < 0 then n = 0 end
+  return n
+end
+
 -- F1 mitigation: blind_until tracks when each 1-hop neighbour will
 -- finish its data_sf RX window (deaf on routing_sf). Populated by
 -- overhearing CTS frames; consulted before issuing or retrying RTS.
@@ -1556,7 +1572,7 @@ local function tx_rts_retry(self, reason)
       px.msg_id, name_of(self, px.next), name_of(self, val_b)))
     px.alts_tried[px.next] = true   -- mark previous next_hop as tried
     px.next = val_b
-    px.retries_left = self.rts_max_retries
+    px.retries_left = effective_rts_max_retries(self, px.requeue_count)
   end
 
   -- payload_len lets the receiver size its pending_rx_expiry to the
@@ -1731,7 +1747,7 @@ local function rts_timeout_fire(self, captured_msg_id)
       captured_msg_id, name_of(self, self.pending_tx.next), name_of(self, val_b)))
     self.pending_tx.alts_tried[self.pending_tx.next] = true
     self.pending_tx.next = val_b
-    self.pending_tx.retries_left = self.rts_max_retries
+    self.pending_tx.retries_left = effective_rts_max_retries(self, self.pending_tx.requeue_count)
     tx_rts_retry(self, "blind_alt")
     return
   end
@@ -1757,7 +1773,7 @@ local function rts_timeout_fire(self, captured_msg_id)
       self:log(string.format("path_cascade msg=%d %s -> %s (rts_giveup)",
         captured_msg_id, name_of(self, prev_next), name_of(self, next_hop)))
       self.pending_tx.next         = next_hop
-      self.pending_tx.retries_left = self.rts_max_retries
+      self.pending_tx.retries_left = effective_rts_max_retries(self, self.pending_tx.requeue_count)
       tx_rts_retry(self, "cascade_rts")
       return
     end
@@ -1858,7 +1874,7 @@ local function ack_timeout_fire(self, captured_msg_id)
       self:log(string.format("path_cascade msg=%d %s -> %s (ack_giveup)",
         captured_msg_id, name_of(self, prev_next), name_of(self, next_hop)))
       self.pending_tx.next         = next_hop
-      self.pending_tx.retries_left = self.rts_max_retries
+      self.pending_tx.retries_left = effective_rts_max_retries(self, self.pending_tx.requeue_count)
       tx_rts_retry(self, "cascade_ack")
       return
     end
@@ -2193,7 +2209,8 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     payload      = payload,        -- full bytes (origin-seq hdr + user_text)
     user_text    = user_text,      -- for emit + log clarity
     origin_seq   = origin_seq,     -- end-to-end message id (with origin)
-    retries_left = self.rts_max_retries,
+    retries_left = effective_rts_max_retries(self,
+      (queue_meta and queue_meta.requeue_count) or 0),
     alts_tried   = initial_alts_tried,
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
@@ -2232,27 +2249,44 @@ end
 -- delivered branch, pending_rx_expiry. Forwarders don't drain because
 -- forwarding sets pending_tx synchronously in the same handler.
 --
--- Pops the earliest-ready item (smallest next_attempt_ms <= now); FIFO
--- tie-break (lowest array index wins on ties). If no item is ready,
--- arms self.queue_wakeup_handle for the earliest pending next_attempt_ms
--- so the queue advances when its delay elapses, then returns without
+-- Pops the highest-priority ready item: among items with
+-- next_attempt_ms <= now, prefer LOWEST requeue_count (fresh msgs jump
+-- ahead of zombies), tie-break on lowest next_attempt_ms, then on FIFO
+-- order (lowest array index). If no item is ready, arms
+-- self.queue_wakeup_handle for the earliest pending next_attempt_ms so
+-- the queue advances when its delay elapses, then returns without
 -- dequeuing. The single wakeup handle is cancelled at the start of any
 -- successful pop (it's stale).
+--
+-- Why requeue_count first: a fresh message has the best chance of
+-- delivering quickly (its destination route is probably still valid;
+-- the channel hasn't yet been polluted by its retries). A high-retry
+-- message has already failed K alts × N retries × multiple cycles —
+-- giving it priority over fresh traffic spends channel time on a
+-- low-probability outcome. The (effective_rts_max_retries) helper
+-- already gives zombies fewer RTS attempts per cycle; this ordering
+-- compounds that by giving them lower scheduling priority too.
 become_free = function(self)
   if self.pending_tx ~= nil or self.pending_rx ~= nil then return end
   if #self.tx_queue == 0 then return end
   local now = self:now()
-  -- Scan: find the ready item with smallest next_attempt_ms (ties broken
-  -- by lowest array index, i.e. FIFO). Also remember the earliest
-  -- not-yet-ready item so we can arm a wakeup if nothing is ready.
+  -- Scan: find the ready item with (lowest requeue_count, lowest
+  -- next_attempt_ms) (ties broken by FIFO via iteration order). Also
+  -- remember the earliest not-yet-ready item so we can arm a wakeup
+  -- if nothing is ready.
   local best_idx          = nil
+  local best_rcnt         = nil
   local best_next         = nil
   local earliest_unready  = nil
   for i, it in ipairs(self.tx_queue) do
     local nxt = it.next_attempt_ms or 0
     if nxt <= now then
-      if best_next == nil or nxt < best_next then
+      local rcnt = it.requeue_count or 0
+      if best_idx == nil
+         or rcnt < best_rcnt
+         or (rcnt == best_rcnt and nxt < best_next) then
         best_idx  = i
+        best_rcnt = rcnt
         best_next = nxt
       end
     else
