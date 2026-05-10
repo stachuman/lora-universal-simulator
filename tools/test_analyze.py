@@ -404,5 +404,91 @@ def test_per_node_tx_accepts_string_node_names():
         os.unlink(path)
 
 
+# ---- duty-cycle stats ----------------------------------------------------
+
+def test_duty_cycle_consumption_per_node_and_class():
+    """Two nodes, 60 s sim, 1% duty cycle. Per-node budget = 600 ms.
+    Alice TXes 540 ms (90% of budget); Bob TXes 60 ms (10%).
+    Class breakdown: BCN 500 ms total, DATA 100 ms total."""
+    cfg = {
+        "simulation": {
+            "duration_ms": 60_000,
+            "radio": {"duty_cycle": 0.01, "duty_cycle_window_ms": 3_600_000},
+        },
+        "nodes": [{"name": "alice"}, {"name": "bob"}],
+    }
+    events = [
+        _tx("a1", "BCN",  t_ms=1000,  air=400, node="alice"),
+        _tx("a2", "DATA", t_ms=2000,  air=140, node="alice"),  # alice total 540
+        _tx("b1", "BCN",  t_ms=3000,  air=60,  node="bob"),    # bob total 60
+        {"type": "script_emit", "node": 0, "time_ms": 4000,
+         "emit_type": "duty_cycle_blocked", "data": {"label": "BCN"}},
+        {"type": "script_emit", "node": 0, "time_ms": 5000,
+         "emit_type": "duty_cycle_blocked", "data": {"label": "RTS"}},
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_duty_cycle(cfg, path, since_ms=0)
+        assert r["duty_cycle"] == 0.01
+        assert r["budget_per_node_ms"] == 600       # 1% of 60_000ms
+        # Per-node consumption sorted ascending: bob 10%, alice 90%
+        assert r["consumption_pct"] == [10.0, 90.0]
+        assert r["air_by_label"]["BCN"]  == 460
+        assert r["air_by_label"]["DATA"] == 140
+        assert r["blocked_count"] == 2
+    finally:
+        os.unlink(path)
+
+
+def test_duty_cycle_silent_nodes_count_as_zero():
+    """Nodes with zero TX must appear in the consumption distribution
+    as 0% — otherwise the median is skewed toward heavy TX'ers and
+    misses the network's true health picture."""
+    cfg = {
+        "simulation": {
+            "duration_ms": 60_000,
+            "radio": {"duty_cycle": 0.01, "duty_cycle_window_ms": 3_600_000},
+        },
+        # Two silent nodes + one heavy TX'er
+        "nodes": [{"name": "silent1"}, {"name": "silent2"}, {"name": "heavy"}],
+    }
+    events = [
+        _tx("h1", "BCN", t_ms=1000, air=600, node="heavy"),  # 100% of budget
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_duty_cycle(cfg, path, since_ms=0)
+        # Sorted: [0%, 0%, 100%]; median is the middle entry → 0%
+        assert r["consumption_pct"] == [0.0, 0.0, 100.0]
+    finally:
+        os.unlink(path)
+
+
+def test_duty_cycle_respects_warmup_since_ms():
+    """When the analyzer skips warmup (since_ms > 0), the budget is
+    based on the analyzed window, not the full sim duration. And TX
+    events during warmup don't count toward consumption."""
+    cfg = {
+        "simulation": {
+            "duration_ms": 60_000, "warmup_ms": 30_000,
+            "radio": {"duty_cycle": 0.01, "duty_cycle_window_ms": 3_600_000},
+        },
+        "nodes": [{"name": "n0"}],
+    }
+    events = [
+        _tx("w1", "BCN", t_ms=5000,  air=200, node="n0"),  # in warmup; skipped
+        _tx("p1", "BCN", t_ms=40000, air=150, node="n0"),  # post-warmup
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_duty_cycle(cfg, path, since_ms=30_000)
+        # Analyzed = 30s → budget = 300ms; consumed = 150ms = 50%
+        assert r["analyzed_ms"] == 30_000
+        assert r["budget_per_node_ms"] == 300
+        assert r["consumption_pct"] == [50.0]
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

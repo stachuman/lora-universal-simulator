@@ -935,6 +935,114 @@ def print_section_14(r: dict) -> None:
         print(f"    ratio: infinite (zero deliveries; every send exhausted)")
 
 
+# ---- Section 15: duty-cycle consumption ----------------------------------
+
+def section_duty_cycle(cfg: dict, events_path: str,
+                       since_ms: int = 0) -> dict:
+    """Per-node airtime as % of the EU868 / configured duty-cycle budget,
+    plus a class-by-class breakdown of where the budget is spent.
+
+    Duty cycle is the regulatory cap on per-radio airtime: at any sliding
+    `window_ms` (default 3600 s = 1 hour), total TX airtime per node must
+    not exceed `duty_cycle × window_ms` (default 1% × 3600 s = 36 s/hr).
+    For a sim run of duration D, total expected max airtime per node is
+    `duty_cycle × D` (the sliding window can't grant more total budget
+    over D than its rate allows). When a node hits the cap, subsequent
+    TXes get duty_cycle_blocked and the protocol stalls — this is real
+    LoRa hardware behavior, not a simulator artifact.
+
+    Reports:
+      • config (duty_cycle %, window_ms, per-node budget for analyzed
+        duration)
+      • per-node TX-airtime / budget % distribution (min/p25/median/p75/max)
+      • network-aggregate airtime by class with both share_of_budget
+        (out of N×budget) and share_of_total (out of actual TX'd)
+      • count of duty_cycle_blocked emits (TXes the protocol asked
+        for but couldn't fire because of the cap)
+    """
+    sim = cfg.get("simulation", {})
+    radio = sim.get("radio", {}) or {}
+    duty_cycle = float(radio.get("duty_cycle", 0.01))
+    window_ms = int(radio.get("duty_cycle_window_ms", 3_600_000))
+    duration_ms = int(sim.get("duration_ms", 0))
+    analyzed_ms = max(0, duration_ms - since_ms)
+    # Per-node budget for the analyzed window. The duty-cycle rate is
+    # constant over time so the budget scales linearly with the analyzed
+    # window even if it exceeds the sliding-window length (the protocol
+    # can't "save up" budget across windows).
+    budget_per_node_ms = int(duty_cycle * analyzed_ms)
+
+    air_by_node: Counter = Counter()
+    air_by_label: Counter = Counter()
+    blocked_count = 0
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") == "tx":
+            air_by_node[e.get("node")] += e.get("airtime_ms", 0)
+            air_by_label[e.get("label", "?")] += e.get("airtime_ms", 0)
+        elif e.get("type") == "script_emit" and e.get("emit_type") == "duty_cycle_blocked":
+            blocked_count += 1
+
+    # Build per-node consumption % distribution. Use cfg.nodes as the
+    # universe so silent nodes count as 0% (otherwise the median is
+    # biased toward heavy TX'ers).
+    consumption_pct: list[float] = []
+    if budget_per_node_ms > 0:
+        for n in cfg.get("nodes", []):
+            name = n.get("name")
+            air = air_by_node.get(name, 0)
+            consumption_pct.append(100.0 * air / budget_per_node_ms)
+    consumption_pct.sort()
+
+    return {
+        "duty_cycle":          duty_cycle,
+        "window_ms":           window_ms,
+        "analyzed_ms":         analyzed_ms,
+        "budget_per_node_ms":  budget_per_node_ms,
+        "n_nodes":             len(cfg.get("nodes", [])),
+        "consumption_pct":     consumption_pct,
+        "air_by_label":        dict(air_by_label),
+        "blocked_count":       blocked_count,
+    }
+
+
+def print_section_15(r: dict) -> None:
+    print("\n=== (15) duty-cycle consumption ===")
+    if r["budget_per_node_ms"] == 0:
+        print("  (duty cycle disabled or zero analyzed window — nothing to compute)")
+        return
+    dc_pct = 100.0 * r["duty_cycle"]
+    print(f"  config:           {dc_pct:.2f}% per {r['window_ms']/1000:.0f} s sliding window")
+    print(f"  analyzed:         {r['analyzed_ms']/1000:.0f} s "
+          f"({r['analyzed_ms']/60_000:.1f} min)")
+    print(f"  per-node budget:  {r['budget_per_node_ms']/1000:.1f} s "
+          f"(= {dc_pct:.2f}% × analyzed window)")
+    s = r["consumption_pct"]
+    n = len(s)
+    if n > 0:
+        def q(p: float) -> float:
+            return s[min(n - 1, max(0, int(p * n)))]
+        print(f"  per-node TX airtime as % of budget (n={n} nodes):")
+        print(f"    min  {s[0]:>6.1f}%   p25  {q(0.25):>6.1f}%   "
+              f"median {q(0.50):>6.1f}%   p75 {q(0.75):>6.1f}%   "
+              f"max  {s[-1]:>6.1f}%")
+    network_budget_ms = r["n_nodes"] * r["budget_per_node_ms"]
+    total_air = sum(r["air_by_label"].values())
+    print(f"  network total TX airtime: {total_air/1000:.0f} s "
+          f"({100.0 * total_air / network_budget_ms:.1f}% of "
+          f"{network_budget_ms/1000:.0f} s network budget)")
+    if r["blocked_count"] > 0:
+        print(f"  duty_cycle_blocked events: {r['blocked_count']} "
+              f"(TXes the protocol attempted but couldn't fire)")
+    if r["air_by_label"]:
+        print(f"  airtime by class (share of network budget, share of actual TX):")
+        print(f"    {'label':<10} {'airtime_s':>10} {'% budget':>9} {'% of TX':>9}")
+        for lbl, air in sorted(r["air_by_label"].items(), key=lambda kv: -kv[1]):
+            pct_budget = 100.0 * air / network_budget_ms if network_budget_ms > 0 else 0
+            pct_total  = 100.0 * air / total_air if total_air > 0 else 0
+            print(f"    {lbl:<10} {air/1000:>10.0f} "
+                  f"{pct_budget:>8.1f}% {pct_total:>8.1f}%")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -1035,6 +1143,8 @@ def main() -> None:
     print_section_13(section_bcn_effective(args.events, warmup_end_ms))
 
     print_section_14(section_lifetime_waste(deliv))
+
+    print_section_15(section_duty_cycle(cfg, args.events, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 
