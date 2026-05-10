@@ -1,0 +1,42 @@
+{
+  "_name": "t31_round_robin_queue",
+  "_desc": "Round-robin tx_queue stress: alice has a stale route to dummy_blocker (which dies at t=1500, before sends start) plus working routes to bob and carol. At t=2000 alice queues three sends back-to-back: msg_to_blocker (dst dead → cascade_exhaustion), msg_to_bob, msg_to_carol. Strict FIFO would block bob+carol behind blocker for ~30s. The scheduled tx_queue requeues blocker with exponential backoff after each cascade exhaustion, letting bob and carol pop and deliver during the backoff gaps. After cascade_requeue_max=3 attempts blocker truly drops with path_cascade_exhausted. Verifies (1) bob+carol delivered, (2) cascade_requeue fired, (3) path_cascade_exhausted fired, (4) requeue count is bounded.",
+  "simulation": {
+    "duration_ms": 120000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice",          "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 500, "quiet_threshold_ms": 0 } },
+    { "name": "bob",            "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 500, "quiet_threshold_ms": 0 } },
+    { "name": "carol",          "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 500, "quiet_threshold_ms": 0 } },
+    { "name": "dummy_blocker",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 500, "quiet_threshold_ms": 0 },
+      "dies_at_ms": 1500 }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",           "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "alice", "to": "carol",         "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "alice", "to": "dummy_blocker", "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000, "node": "alice", "command": "send dummy_blocker msg_to_blocker" },
+    { "at_ms": 2000, "node": "alice", "command": "send bob msg_to_bob" },
+    { "at_ms": 2000, "node": "alice", "command": "send carol msg_to_carol" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "delivered",              "value": "msg_to_bob" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "delivered",              "value": "msg_to_carol" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "cascade_requeue",        "value": "" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "path_cascade_exhausted", "value": "" },
+    { "type": "event_count",          "event_type":   "cascade_requeue", "node": "alice", "max": 5 }
+  ]
+}

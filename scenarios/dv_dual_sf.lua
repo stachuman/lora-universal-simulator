@@ -3472,6 +3472,9 @@ function on_command(self, cmd_str)
     payload    = full_payload,    -- full bytes that go on the wire
     user_text  = text,            -- emit / log clarity
     origin_seq = seq,
+    enqueue_time_ms = self:now(), -- first enqueue; cap reference for cascade-requeue
+    requeue_count   = 0,
+    next_attempt_ms = 0,
   })
   self:emit("tx_enqueue", {
     origin = self.id, payload = text, origin_seq = seq,
