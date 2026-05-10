@@ -571,26 +571,43 @@
     markerGroup.clearLayers();
     edgeGroup.clearLayers();
 
-    // Draw edges (SNR preview). Skip pairs whose SNR isn't finite —
-    // SRTM-miss / below-cutoff entries (-Infinity) shouldn't render
-    // as ghost lines on the map.
+    // Draw edges (SNR preview). One polyline per pair; when the matrix
+    // holds both directions (asymmetric SRTM result) we colour by the
+    // worst direction since that's what limits a real flight, and the
+    // tooltip shows both. Skip pairs where neither direction is finite
+    // (SRTM miss / below cutoff).
     if (snrMatrix && snrMatrix.length === nodes.length) {
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
-          const snr = snrMatrix[i][j];
-          if (!Number.isFinite(snr)) continue;
-          const color = snrColor(snr);
+          const snr_ij = snrMatrix[i][j];
+          const snr_ji = snrMatrix[j][i];
+          const has_ij = Number.isFinite(snr_ij);
+          const has_ji = Number.isFinite(snr_ji);
+          if (!has_ij && !has_ji) continue;
+          const snr_min = Math.min(
+            has_ij ? snr_ij :  Infinity,
+            has_ji ? snr_ji :  Infinity
+          );
+          const color = snrColor(snr_min);
           const line = L.polyline(
             [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
             {
-              color, weight: snrWidth(snr), opacity: 0.75,
-              dashArray: snrDash(snr), interactive: true,
+              color, weight: snrWidth(snr_min), opacity: 0.75,
+              dashArray: snrDash(snr_min), interactive: true,
             }
           );
-          line.bindTooltip(
-            nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snr.toFixed(1) + ' dB',
-            { sticky: true, className: 'tc-label' }
-          );
+          let label;
+          if (has_ij && has_ji && Math.abs(snr_ij - snr_ji) > 0.05) {
+            label = nodes[i].name + ' → ' + nodes[j].name + ': '
+                  + snr_ij.toFixed(1) + ' dB / '
+                  + nodes[j].name + ' → ' + nodes[i].name + ': '
+                  + snr_ji.toFixed(1) + ' dB';
+          } else {
+            const s = has_ij ? snr_ij : snr_ji;
+            label = nodes[i].name + ' ↔ ' + nodes[j].name + ': '
+                  + s.toFixed(1) + ' dB';
+          }
+          line.bindTooltip(label, { sticky: true, className: 'tc-label' });
           edgeGroup.addLayer(line);
         }
       }
@@ -822,9 +839,13 @@
   };
 
   // ── Convert links list -> NxN SNR matrix used by redrawMap ────
-  // The SRTM endpoint returns {links: [{from,to,snr,...}]} — sparse.
-  // Pairs missing from links[] are below the SNR cutoff or hit SRTM
-  // misses; mark them as -Infinity so redrawMap dims them.
+  // The SRTM endpoint may return DIRECTIONAL entries (from→to with
+  // bidir=false) when asymmetry is enabled. Store each direction
+  // independently (m[from][to] only, no cross-assign); redrawMap
+  // takes min(m[i][j], m[j][i]) for the heatmap colour because the
+  // weakest direction is what limits a real flight.
+  // bidir=true entries (legacy / asymmetry-disabled path) write both
+  // cells so the renderer treats them as symmetric.
   function linksToMatrix(nodeList, links) {
     const n = nodeList.length;
     const idx = {};
@@ -836,7 +857,7 @@
       const i = idx[l.from], j = idx[l.to];
       if (i === undefined || j === undefined) continue;
       m[i][j] = l.snr;
-      m[j][i] = l.snr;  // ITM is symmetric in this iteration
+      if (l.bidir) m[j][i] = l.snr;
     }
     return m;
   }

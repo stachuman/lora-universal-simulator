@@ -465,25 +465,42 @@
 
     const showLabels = document.getElementById('map-labels').checked;
 
-    // Edges — skip pairs whose SNR isn't finite (SRTM miss / below
-    // cutoff / no preview yet for that pair); they shouldn't render
-    // as ghost lines on the map.
+    // Edges — one polyline per pair; colour by min(snr_ij, snr_ji)
+    // so the worst direction (the limiting one for a real flight)
+    // sets the heatmap tier. Tooltip splits the directions when they
+    // differ. Skip pairs where neither direction has finite SNR.
     if (snrMatrix && snrMatrix.length === nodes.length) {
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           if (nodes[i].lat == null || nodes[j].lat == null) continue;
-          const snr = snrMatrix[i][j];
-          if (!Number.isFinite(snr)) continue;
+          const snr_ij = snrMatrix[i][j];
+          const snr_ji = snrMatrix[j][i];
+          const has_ij = Number.isFinite(snr_ij);
+          const has_ji = Number.isFinite(snr_ji);
+          if (!has_ij && !has_ji) continue;
+          const snr_min = Math.min(
+            has_ij ? snr_ij :  Infinity,
+            has_ji ? snr_ji :  Infinity
+          );
           const line = L.polyline(
             [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
             {
-              color: snrColor(snr), weight: snrWidth(snr), opacity: 0.7,
-              dashArray: snrDash(snr), interactive: true,
+              color: snrColor(snr_min), weight: snrWidth(snr_min), opacity: 0.7,
+              dashArray: snrDash(snr_min), interactive: true,
             }
           );
-          line.bindTooltip(
-            nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snr.toFixed(1) + ' dB',
-            { sticky: true, className: 'te-label' });
+          let label;
+          if (has_ij && has_ji && Math.abs(snr_ij - snr_ji) > 0.05) {
+            label = nodes[i].name + ' → ' + nodes[j].name + ': '
+                  + snr_ij.toFixed(1) + ' dB / '
+                  + nodes[j].name + ' → ' + nodes[i].name + ': '
+                  + snr_ji.toFixed(1) + ' dB';
+          } else {
+            const s = has_ij ? snr_ij : snr_ji;
+            label = nodes[i].name + ' ↔ ' + nodes[j].name + ': '
+                  + s.toFixed(1) + ' dB';
+          }
+          line.bindTooltip(label, { sticky: true, className: 'te-label' });
           edgeGroup.addLayer(line);
         }
       }
@@ -698,8 +715,10 @@
   };
 
   // ── Convert SRTM links list -> NxN SNR matrix for redrawMap ───
-  // Pairs missing from links[] are below SNR cutoff or hit SRTM
-  // misses; -Infinity dims them in the heatmap.
+  // Directional entries (bidir=false, the asymmetric default) write
+  // only m[from][to]; bidir=true entries write both cells. Pairs
+  // missing from links[] are below SNR cutoff / SRTM misses and stay
+  // at -Infinity so redrawMap dims/skips them.
   function linksToMatrix(nodeList, links) {
     const n = nodeList.length;
     const idx = {};
@@ -711,7 +730,7 @@
       const i = idx[l.from], j = idx[l.to];
       if (i === undefined || j === undefined) continue;
       m[i][j] = l.snr;
-      m[j][i] = l.snr;
+      if (l.bidir) m[j][i] = l.snr;
     }
     return m;
   }

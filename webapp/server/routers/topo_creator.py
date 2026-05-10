@@ -131,6 +131,13 @@ class SrtmItmParams(BaseModel):
     profile_resolution_m: float = Field(default=90.0, gt=0.0)
     min_snr_db: float = -20.0
     max_links_per_node: int = Field(default=8, ge=1, le=64)
+    # When True (default), compute_link_matrix samples per-direction
+    # SNR offsets from N(0, σ²) where σ is the ITM reliability spread,
+    # producing realistic asymmetry — strong links stay near-symmetric,
+    # marginal links can diverge several dB. False = legacy single
+    # bidir-true entry per pair (deterministic baseline; useful in tests).
+    asymmetry: bool = True
+    asymmetry_floor_db: float = Field(default=0.3, ge=0.0)
 
 
 class GenerateSrtmRequest(BaseModel):
@@ -179,6 +186,8 @@ def generate_srtm(req: GenerateSrtmRequest):
         max_links_per_node=req.itm.max_links_per_node,
         climate=req.itm.climate,
         polarization=req.itm.polarization,
+        asymmetry=req.itm.asymmetry,
+        asymmetry_floor_db=req.itm.asymmetry_floor_db,
         srtm_data=srtm_data,
     )
     return {
@@ -249,6 +258,8 @@ def refine_with_srtm(req: RefineWithSrtmRequest):
         min_snr_db=req.itm.min_snr_db,
         max_links_per_node=req.itm.max_links_per_node,
         climate=req.itm.climate, polarization=req.itm.polarization,
+        asymmetry=req.itm.asymmetry,
+        asymmetry_floor_db=req.itm.asymmetry_floor_db,
         srtm_data=srtm_data,
     )
     # Replace topology.links[] in place; preserve everything else.

@@ -7,9 +7,17 @@ compute_link_matrix(nodes, params) -> list of {from, to, snr, rssi, ...}.
 
 from __future__ import annotations
 
+import hashlib
 import math
+import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
+
+
+# Z-score for 80%-central interval of a Gaussian: P(|Z| < 1.282) = 0.80.
+# ITM's loss_10 / loss_90 percentiles bracket that 80%, so the sample
+# stddev (1σ) of the loss process is (loss_10 - loss_90) / (2 * 1.282).
+_ITM_SPREAD_TO_SIGMA = 1.0 / (2.0 * 1.282)
 
 
 _EARTH_RADIUS_KM = 6371.0
@@ -228,12 +236,38 @@ def compute_pair_link(
     snr_db = rx_dbm - nf_dbm
     # Reliability spread: ITM's loss_10 (worse) - loss_90 (better) gives
     # the dB range across 80% of conditions; halve for a ~1-sigma proxy.
-    spread_db = max(0.0, r["loss_10pct_db"] - r["loss_90pct_db"]) / 2.0
+    # ITM's reliability bracket is the 10/90 percentile of LOSS; the
+    # corresponding 1σ of a normal distribution is (loss_10-loss_90)/2.56
+    # (z=±1.282 covers 80% of mass). Store as 1σ for the orchestrator's
+    # snr_std_dev runtime shadow + for the asymmetry sampler below.
+    spread_db = max(0.0, r["loss_10pct_db"] - r["loss_90pct_db"]) * _ITM_SPREAD_TO_SIGMA
     return {
         "snr_db": snr_db,
         "rssi_dbm": rx_dbm,
         "snr_std_dev": spread_db,
     }
+
+
+def _asym_offsets(a_name: str, b_name: str, freq_mhz: float,
+                  sigma_db: float) -> tuple[float, float]:
+    """Deterministic Gaussian (offset_AB, offset_BA) drawn from N(0, σ²).
+
+    Same physical pair (regardless of name order) gets the same draws —
+    we canonicalize on min/max name so (a,b) and (b,a) hash identically.
+    The two directions are independent draws from the same distribution
+    so a single weak link can have one direction at -8 dB and the other
+    at -3 dB, matching real-world LoRa observations of asymmetric
+    receiver noise + multipath.
+    """
+    if sigma_db <= 0.0:
+        return 0.0, 0.0
+    lo, hi = (a_name, b_name) if a_name < b_name else (b_name, a_name)
+    seed_str = f"{lo}|{hi}|{freq_mhz:.6f}"
+    seed = int(hashlib.md5(seed_str.encode("utf-8")).hexdigest()[:16], 16)
+    rng = random.Random(seed)
+    o_lo = rng.gauss(0.0, sigma_db)
+    o_hi = rng.gauss(0.0, sigma_db)
+    return (o_lo, o_hi) if a_name < b_name else (o_hi, o_lo)
 
 
 def compute_link_matrix(
@@ -247,16 +281,25 @@ def compute_link_matrix(
     max_links_per_node: int = 8,
     climate: int = 6,
     polarization: int = 1,
+    asymmetry: bool = True,
+    asymmetry_floor_db: float = 0.3,
     cache_dir: Optional[str] = None,
     srtm_data=None,
     max_workers: int = 4,
 ) -> dict:
-    """Compute every node-pair link in parallel.
+    """Compute every node-pair link.
 
     Returns dict:
       links: list[dict] of {from, to, snr, rssi, snr_std_dev, bidir}.
-              `bidir` is always True (ITM is symmetric for a given
-              pair of antenna heights; we emit one entry per pair).
+              When `asymmetry` is True (the default), each kept pair
+              emits TWO directed entries (bidir=False) with per-
+              direction SNR/RSSI sampled from N(median, σ²) where σ is
+              ITM's reliability-bracket spread (clamped to
+              `asymmetry_floor_db`). Strong links → near-symmetric;
+              marginal links naturally diverge several dB. Sampling is
+              deterministic in (node names, freq) so reruns reproduce.
+              When `asymmetry` is False, each kept pair emits ONE
+              bidir=True entry with the ITM median (legacy behaviour).
       n_pairs_evaluated, n_links_kept, n_srtm_misses: int.
 
     For testability, callers can pass an explicit `srtm_data` mock;
@@ -269,7 +312,9 @@ def compute_link_matrix(
     pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
     n_pairs_evaluated = len(pairs)
     n_srtm_misses = 0
-    raw_results: list[tuple[int, int, dict]] = []
+    # raw_results: list of (i, j, link_dict, bidir_bool). When asymmetry
+    # is on we emit two records per pair (the second swaps i and j).
+    raw_results: list[tuple[int, int, dict, bool]] = []
 
     # ProcessPoolExecutor would parallelize the compute, but srtm_data is
     # not picklable for unit tests; for clarity we run serially here and
@@ -286,30 +331,71 @@ def compute_link_matrix(
         if link is None:
             n_srtm_misses += 1
             continue
-        if link["snr_db"] < min_snr_db:
-            continue
-        raw_results.append((i, j, link))
 
-    # Apply max_links_per_node cap: keep top-N strongest per node.
-    keep_count: dict[int, int] = {i: 0 for i in range(n)}
-    sorted_results = sorted(
-        raw_results,
-        key=lambda t: (-t[2]["snr_db"], t[0], t[1]),
-    )
-    kept: list[dict] = []
-    for (i, j, link) in sorted_results:
-        if keep_count[i] >= max_links_per_node or keep_count[j] >= max_links_per_node:
+        if not asymmetry:
+            if link["snr_db"] < min_snr_db:
+                continue
+            raw_results.append((i, j, link, True))
             continue
-        keep_count[i] += 1
-        keep_count[j] += 1
-        kept.append({
-            "from": nodes[i]["name"],
-            "to": nodes[j]["name"],
-            "snr": round(link["snr_db"], 2),
-            "rssi": round(link["rssi_dbm"], 2),
-            "snr_std_dev": round(link["snr_std_dev"], 3),
-            "bidir": True,
-        })
+
+        # Asymmetric: per-direction Gaussian offset around the median.
+        sigma = max(asymmetry_floor_db, link["snr_std_dev"])
+        a_name = nodes[i]["name"]
+        b_name = nodes[j]["name"]
+        offset_ij, offset_ji = _asym_offsets(a_name, b_name, freq_mhz, sigma)
+        link_ij = {
+            "snr_db":      link["snr_db"]   + offset_ij,
+            "rssi_dbm":    link["rssi_dbm"] + offset_ij,
+            "snr_std_dev": link["snr_std_dev"],
+        }
+        link_ji = {
+            "snr_db":      link["snr_db"]   + offset_ji,
+            "rssi_dbm":    link["rssi_dbm"] + offset_ji,
+            "snr_std_dev": link["snr_std_dev"],
+        }
+        # Per-direction min_snr_db filter. A pair where ONE direction
+        # falls below the cutoff still keeps the other side; the
+        # orchestrator treats each direction independently anyway.
+        if link_ij["snr_db"] >= min_snr_db:
+            raw_results.append((i, j, link_ij, False))
+        if link_ji["snr_db"] >= min_snr_db:
+            raw_results.append((j, i, link_ji, False))
+
+    # Apply max_links_per_node cap. The cap is per-NODE, not per-edge;
+    # both directions of an asymmetric pair count once toward each
+    # endpoint's cap. Group records by canonical pair and decide
+    # admission together.
+    pair_groups: dict[tuple[int, int], list[tuple[int, int, dict, bool]]] = {}
+    for rec in raw_results:
+        i_, j_ = rec[0], rec[1]
+        key = (min(i_, j_), max(i_, j_))
+        pair_groups.setdefault(key, []).append(rec)
+
+    # Sort pair groups by best-direction SNR descending; ties broken
+    # lexicographically by node ids.
+    def _pair_key(item):
+        (a, b), entries = item
+        best = max(e[2]["snr_db"] for e in entries)
+        return (-best, a, b)
+
+    sorted_pairs = sorted(pair_groups.items(), key=_pair_key)
+
+    keep_count: dict[int, int] = {i: 0 for i in range(n)}
+    kept: list[dict] = []
+    for (a, b), entries in sorted_pairs:
+        if keep_count[a] >= max_links_per_node or keep_count[b] >= max_links_per_node:
+            continue
+        keep_count[a] += 1
+        keep_count[b] += 1
+        for (i_, j_, link, bidir) in entries:
+            kept.append({
+                "from": nodes[i_]["name"],
+                "to":   nodes[j_]["name"],
+                "snr":  round(link["snr_db"], 2),
+                "rssi": round(link["rssi_dbm"], 2),
+                "snr_std_dev": round(link["snr_std_dev"], 3),
+                "bidir": bidir,
+            })
     return {
         "links": kept,
         "n_pairs_evaluated": n_pairs_evaluated,

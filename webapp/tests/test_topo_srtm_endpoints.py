@@ -43,6 +43,9 @@ async def test_generate_srtm_basic(fake_srtm_flat):
         },
         "itm": {
             "min_snr_db": -50.0,
+            # Test the legacy single-bidir-entry path; asymmetric mode
+            # has its own coverage in test_topo_srtm.py.
+            "asymmetry": False,
         },
     }
     async with LifespanManager(app):
@@ -117,7 +120,7 @@ async def test_refine_with_srtm_preserves_other_fields(fake_srtm_flat):
     }
     body = {
         "scenario": scenario,
-        "itm": {"min_snr_db": -50.0},
+        "itm": {"min_snr_db": -50.0, "asymmetry": False},
     }
     async with LifespanManager(app):
         async with AsyncClient(transport=ASGITransport(app=app),

@@ -131,7 +131,8 @@ def test_sample_elevation_profile_min_2_points():
 
 
 @itm_skip
-def test_compute_link_matrix_three_nodes_flat_terrain():
+def test_compute_link_matrix_three_nodes_flat_terrain_symmetric_legacy():
+    """asymmetry=False reproduces the legacy single-bidir-per-pair output."""
     from server.services.topo_srtm import compute_link_matrix
     srtm = _FakeSrtm(lambda lat, lon: 50.0)
     nodes = [
@@ -145,6 +146,7 @@ def test_compute_link_matrix_three_nodes_flat_terrain():
         profile_resolution_m=90.0,
         min_snr_db=-50.0,  # permissive — keep everything
         max_links_per_node=8,
+        asymmetry=False,
         srtm_data=srtm,
     )
     assert r["n_pairs_evaluated"] == 3, "C(3,2) = 3 pairs"
@@ -157,6 +159,72 @@ def test_compute_link_matrix_three_nodes_flat_terrain():
         assert isinstance(l["snr"], float)
         assert isinstance(l["rssi"], float)
         assert l["snr_std_dev"] >= 0
+
+
+@itm_skip
+def test_compute_link_matrix_default_emits_directional_pairs():
+    """Default (asymmetry=True): 3 pairs → 6 directional entries (bidir=False)."""
+    from server.services.topo_srtm import compute_link_matrix
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    nodes = [
+        {"name": "alice", "lat": 47.61, "lon": -122.33, "antenna_height_m": 1.5},
+        {"name": "bob",   "lat": 47.62, "lon": -122.33, "antenna_height_m": 1.5},
+        {"name": "carol", "lat": 47.63, "lon": -122.33, "antenna_height_m": 1.5},
+    ]
+    r = compute_link_matrix(
+        nodes, freq_mhz=868.0,
+        bandwidth_hz=62500.0, noise_figure_db=6.0,
+        profile_resolution_m=90.0,
+        min_snr_db=-50.0, max_links_per_node=8,
+        srtm_data=srtm,
+    )
+    # Two directed entries per pair, both bidir=False.
+    assert len(r["links"]) == 6
+    pairs = {tuple(sorted([l["from"], l["to"]])) for l in r["links"]}
+    assert pairs == {("alice", "bob"), ("alice", "carol"), ("bob", "carol")}
+    for l in r["links"]:
+        assert l["bidir"] is False
+
+
+@itm_skip
+def test_asymmetry_is_deterministic_across_runs():
+    """Same nodes + freq + asymmetry_floor → identical SNR values on rerun."""
+    from server.services.topo_srtm import compute_link_matrix
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    nodes = [
+        {"name": "n1", "lat": 47.61, "lon": -122.33, "antenna_height_m": 1.5},
+        {"name": "n2", "lat": 47.62, "lon": -122.33, "antenna_height_m": 1.5},
+    ]
+    r1 = compute_link_matrix(nodes, min_snr_db=-50.0, srtm_data=srtm)
+    r2 = compute_link_matrix(nodes, min_snr_db=-50.0, srtm_data=srtm)
+    assert r1["links"] == r2["links"], (
+        "asymmetric draws must be deterministic given same node names + freq"
+    )
+
+
+@itm_skip
+def test_asymmetry_floor_keeps_strong_links_near_symmetric():
+    """A strong (flat-terrain) link should have its two directions
+    within ±asymmetry_floor_db of each other; the floor caps how far
+    apart they can be when ITM's own spread is ~0."""
+    from server.services.topo_srtm import compute_link_matrix
+    srtm = _FakeSrtm(lambda lat, lon: 50.0)
+    nodes = [
+        {"name": "a", "lat": 47.61, "lon": -122.33, "antenna_height_m": 1.5},
+        {"name": "b", "lat": 47.611, "lon": -122.33, "antenna_height_m": 1.5},
+    ]
+    r = compute_link_matrix(
+        nodes, min_snr_db=-50.0, asymmetry_floor_db=0.5,
+        srtm_data=srtm,
+    )
+    by_dir = {(l["from"], l["to"]): l["snr"] for l in r["links"]}
+    snr_ab = by_dir[("a", "b")]
+    snr_ba = by_dir[("b", "a")]
+    # With sigma=0.5 dB the per-direction draws are tightly bounded.
+    # |Δ| should comfortably stay under 4σ (3.5 dB allows margin).
+    assert abs(snr_ab - snr_ba) < 3.5, (
+        f"strong-link asymmetry too wide: {snr_ab} vs {snr_ba}"
+    )
 
 
 def test_compute_link_matrix_srtm_miss_skips_pair():
@@ -194,7 +262,9 @@ def test_compute_pair_link_zero_antenna_clamps_not_crashes():
 
 def test_compute_link_matrix_max_links_per_node_cap():
     """Star topology with 5 leaves around 1 hub. With max_links_per_node=2,
-    only 2 of the 4 hub-leaf links survive."""
+    only 2 of the 4 hub-leaf pairs survive — counting PAIRS (canonical
+    name-set), not directional entries (asymmetric mode emits 2 per
+    pair)."""
     from server.services.topo_srtm import compute_link_matrix
     srtm = _FakeSrtm(lambda lat, lon: 50.0)
     nodes = [
@@ -207,8 +277,10 @@ def test_compute_link_matrix_max_links_per_node_cap():
     r = compute_link_matrix(
         nodes, min_snr_db=-50.0, max_links_per_node=2, srtm_data=srtm,
     )
-    # hub appears in at most 2 kept links.
-    hub_appearances = sum(
-        1 for l in r["links"] if l["from"] == "hub" or l["to"] == "hub"
+    hub_pairs = {
+        tuple(sorted([l["from"], l["to"]]))
+        for l in r["links"] if l["from"] == "hub" or l["to"] == "hub"
+    }
+    assert len(hub_pairs) <= 2, (
+        f"hub should be capped at 2 pairs, got {len(hub_pairs)}: {hub_pairs}"
     )
-    assert hub_appearances <= 2, f"hub should be capped at 2, got {hub_appearances}"
