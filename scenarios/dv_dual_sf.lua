@@ -11,6 +11,7 @@
 -- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|msg_id(4)](1), payload(n)  →  6+n B |
 -- | `'K'` | ACK    | `K`, [msg_id(4)|snr_bucket(4)](1)  →  2 B                                       |
 -- | `'N'` | NACK   | `N`, [reserved(4)|msg_id(4)](1), busy_for_ms_lo(1), busy_for_ms_hi(1)  →  4 B  |
+-- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [network_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
 --
 -- All control frames carry a 4-bit msg_id (per-(originator) flight
 -- counter, wraps at 16; dedup tolerated by last_acked_from's 10s TTL).
@@ -171,12 +172,26 @@
 --   retry is the recovery), so they keep the legacy send_no_route emit.
 --
 -- Data plane (RTS on routing_sf, CTS+DATA on data_sf, ACK on routing_sf)
---   tx_queue is a FIFO of {origin, dst_id, dst_name, payload}; both
---   originators (on_command) and forwarders (on_recv 'D' relay branch)
---   enqueue, never call issue_send directly. become_free pops one whenever
---   the node becomes idle (pending_tx == pending_rx == nil) — that's the
---   single drain point. Forwarders defer the post-ACK action one
---   ack_air_ms tick so the ACK and the next RTS don't share a step.
+--   tx_queue is a SCHEDULED queue of items shaped
+--   {origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop,
+--    next_attempt_ms, requeue_count, enqueue_time_ms}; both originators
+--   (on_command) and forwarders (on_recv 'D' relay branch) enqueue,
+--   never call issue_send directly. become_free pops the earliest-ready
+--   item (smallest next_attempt_ms <= now, FIFO tie-break) whenever the
+--   node becomes idle (pending_tx == pending_rx == nil) — that's the
+--   single drain point. If no item is ready, become_free arms a single
+--   self.queue_wakeup_handle and returns. Forwarders defer the post-ACK
+--   action one ack_air_ms tick so the ACK and the next RTS don't share
+--   a step.
+--
+--   Cascade-exhaustion requeue: when pending_tx exhausts all K alts (true
+--   path_cascade_exhausted), instead of dropping immediately the item is
+--   pushed back into tx_queue with exponential backoff (cascade_requeue
+--   emit). Hard cap on retries (cascade_requeue_max) and on total wallclock
+--   (cascade_requeue_total_max_ms) → if either is exceeded the message is
+--   truly dropped with the legacy path_cascade_exhausted + rts_giveup
+--   (or data_ack_giveup) emits. Goal: a single stuck destination must
+--   not block deliverable items behind it in the queue.
 --
 --   ORIGINATOR (on_command "send <dst> <text>"): enqueue + become_free
 --   FORWARDER (on_recv 'D' relay): enqueue + after(ack_air_ms+1, become_free)
@@ -804,6 +819,31 @@ local function parse_nack(frame)
   }
 end
 
+-- Q — RREQ-route, 4 bytes:
+--   byte 0 : tag 'Q'
+--   byte 1 : src (8) — the requester
+--   byte 2 : dest (8) — destination they want a route for
+--   byte 3 : network_id (4 hi nibble) | reserved (4 lo nibble)
+-- One-hop route query. Direct neighbours that have rt[dest] mark it
+-- dirty + schedule a triggered beacon (the differential beacon
+-- mechanism then prioritises that dest in the next emission).
+-- Receivers without rt[dest] silent-drop. Dedup at responder via
+-- self.q_responded_to keyed by (src, dest); dedup at sender via
+-- self.q_queried keyed by dest.
+local function pack_q(network_id, src, dest)
+  local b3 = (network_id & 0xf) << 4
+  return "Q" .. string.char(src) .. string.char(dest) .. string.char(b3)
+end
+
+local function parse_q(frame)
+  if #frame < 4 or frame:sub(1,1) ~= "Q" then return nil end
+  return {
+    src        = frame:byte(2),
+    dest       = frame:byte(3),
+    network_id = (frame:byte(4) >> 4) & 0xf,
+  }
+end
+
 -- DATA — 6-byte header + payload:
 --   byte 0 : tag 'D'
 --   byte 1 : origin (8)
@@ -841,6 +881,7 @@ local CTS_LEN = 2       -- 'C' + (msg_id<<4 | (sf-5)<<1 | reserved_1)
 local DATA_HDR_LEN = 6  -- 'D' + origin + src + dst + next + (reserved_4|msg_id_4) (payload follows)
 local ACK_LEN = 2       -- 'K' + (msg_id<<4 | snr_bucket)
 local NACK_LEN = 4      -- 'N' + (reserved_4|msg_id_4) + busy_for_ms_lo + busy_for_ms_hi
+local Q_LEN    = 4      -- 'Q' + src + dest + (network_id_4|reserved_4)
 
 -- LoRa on-air time in milliseconds (Semtech AN1200.13). This is intentionally
 -- in Lua (not exposed via a runtime binding) so the same code can be ported
@@ -1509,6 +1550,61 @@ local function tx_rts_retry(self, reason)
   -- on routing_sf now, no retune needed until DATA is about to TX.
 end
 
+-- Helper: when pending_tx exhausts all K cascade alts, try to push the
+-- item back into tx_queue with exponential backoff so other queued items
+-- can rotate through. Returns true if the item was requeued (caller
+-- should clear pending_tx and become_free without emitting the legacy
+-- giveup events). Returns false when the requeue caps are hit (caller
+-- emits the legacy path_cascade_exhausted + rts_giveup / data_ack_giveup
+-- and truly drops). trigger arg is "rts_giveup" or "ack_giveup" — used
+-- only for the cascade_requeue emit's diagnostics, NOT for the legacy
+-- emits in the false branch (caller still owns those).
+local function try_cascade_requeue(self, trigger)
+  local px = self.pending_tx
+  if px == nil then return false end
+  local now = self:now()
+  local enq = px.enqueue_time_ms or now
+  local total_age_ms = now - enq
+  local next_count = (px.requeue_count or 0) + 1
+  if next_count > self.cascade_requeue_max then return false end
+  if total_age_ms >= self.cascade_requeue_total_max_ms then return false end
+  -- Exponential backoff: base * 2^(requeue_count - 1), capped. Using
+  -- (next_count - 1) so the first requeue waits exactly base_ms (not
+  -- base*2). Math.huge guard not needed because cap clips before overflow.
+  local backoff_ms = self.cascade_requeue_base_ms * (2 ^ (next_count - 1))
+  if backoff_ms > self.cascade_requeue_backoff_cap_ms then
+    backoff_ms = self.cascade_requeue_backoff_cap_ms
+  end
+  backoff_ms = math.floor(backoff_ms)
+  table.insert(self.tx_queue, {
+    origin     = px.origin,
+    dst_id     = px.dst,
+    dst_name   = name_of(self, px.dst),
+    payload    = px.payload,
+    user_text  = px.user_text,
+    origin_seq = px.origin_seq,
+    previous_hop    = px.previous_hop,
+    enqueue_time_ms = enq,                         -- preserve original
+    requeue_count   = next_count,                  -- bump
+    next_attempt_ms = now + backoff_ms,            -- exponential delay
+  })
+  self:emit("cascade_requeue", {
+    origin        = px.origin,
+    payload       = px.user_text,
+    origin_seq    = px.origin_seq,
+    dst           = px.dst,
+    msg_id        = px.msg_id,
+    requeue_count = next_count,
+    backoff_ms    = backoff_ms,
+    total_age_ms  = total_age_ms,
+    trigger       = trigger,
+  })
+  self:log(string.format(
+    "cascade_requeue msg=%d dst=%s -> back of queue (#%d, age=%dms, backoff=%dms, trigger=%s)",
+    px.msg_id, name_of(self, px.dst), next_count, total_age_ms, backoff_ms, trigger))
+  return true
+end
+
 -- Fires after rts_timeout_ms with no CTS. Decides retry vs giveup vs
 -- defer (when busy as receiver of someone else's data).
 local function rts_timeout_fire(self, captured_msg_id)
@@ -1587,8 +1683,16 @@ local function rts_timeout_fire(self, captured_msg_id)
       tx_rts_retry(self, "cascade_rts")
       return
     end
-    -- All K candidates exhausted. Emit the tracking event + the legacy
-    -- giveup event for compatibility, then clear pending_tx.
+    -- All K candidates exhausted. Phase C: try to push the item back
+    -- into tx_queue with exponential backoff first (cascade_requeue) so
+    -- other deliverable items can rotate through. Only when
+    -- requeue_count or total_age_ms caps are hit do we truly drop and
+    -- emit the legacy path_cascade_exhausted + rts_giveup.
+    if try_cascade_requeue(self, "rts_giveup") then
+      self.pending_tx = nil
+      become_free(self)
+      return
+    end
     local tried_list = {}
     for nh, _ in pairs(self.pending_tx.alts_tried) do
       table.insert(tried_list, nh)
@@ -1678,6 +1782,13 @@ local function ack_timeout_fire(self, captured_msg_id)
       self.pending_tx.next         = next_hop
       self.pending_tx.retries_left = self.rts_max_retries
       tx_rts_retry(self, "cascade_ack")
+      return
+    end
+    -- Phase C: cascade_requeue first; only when caps are hit do we
+    -- emit the legacy path_cascade_exhausted + data_ack_giveup.
+    if try_cascade_requeue(self, "ack_giveup") then
+      self.pending_tx = nil
+      become_free(self)
       return
     end
     local tried_list = {}
@@ -1865,7 +1976,11 @@ try_drain_deferred = function(self)
   end
   self.deferred_sends = kept
   if #drained > 0 then
-    -- Re-queue head-first so the original order is preserved.
+    -- Re-queue head-first so the original order is preserved. Stamp the
+    -- new tx_queue fields: preserve the original send-issue time
+    -- (queued_at_ms) as enqueue_time_ms — the deferred wait counts toward
+    -- the cascade-requeue total wallclock cap so a long-deferred message
+    -- doesn't get extra free retries beyond the global e2e budget.
     for i = #drained, 1, -1 do
       local d = drained[i]
       self:emit("send_drained", {
@@ -1876,6 +1991,9 @@ try_drain_deferred = function(self)
       self:log(string.format(
         "send_drained dst=%s waited=%dms (route appeared) → tx_queue",
         d.dst_name, now - d.queued_at_ms))
+      d.enqueue_time_ms = d.queued_at_ms
+      d.requeue_count   = 0
+      d.next_attempt_ms = 0
       table.insert(self.tx_queue, 1, d)
     end
     become_free(self)
@@ -1885,8 +2003,12 @@ end
 -- payload here is the FULL bytes (origin-seq header + user_text) — what
 -- goes on the wire. user_text is what the user / visualizer sees in
 -- emit data. origin_seq is the 16-bit per-origin counter (set at
--- on_command for new sends, preserved across forwards).
-issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop)
+-- on_command for new sends, preserved across forwards). queue_meta is
+-- an optional table {enqueue_time_ms, requeue_count} threaded from the
+-- tx_queue item through to pending_tx for cascade-requeue accounting;
+-- when nil (forwarder direct path) we treat this as a fresh hop and
+-- start enqueue_time_ms = now, requeue_count = 0.
+issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop, queue_meta)
   local entry = self.rt[dst_id]
   if not entry then
     -- Forwarder mid-flight with no route: real failure (route went stale
@@ -1918,6 +2040,22 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     self:log(string.format(
       "send_deferred dst=%s (no route yet; holding for up to %dms; depth=%d)",
       dst_name, self.send_defer_ttl_ms, #self.deferred_sends))
+    -- Q escalation: alongside the passive defer, actively request the
+    -- route from neighbours via a one-hop Q frame. Whichever brings
+    -- the route in faster (passive wait or Q response) wins. Dedup so
+    -- repeated sends to the same unknown dst don't spam Q.
+    local now_q = self:now()
+    local last_q = self.q_queried[dst_id]
+    if not last_q or (now_q - last_q) >= self.q_query_ttl_ms then
+      self.q_queried[dst_id] = now_q
+      self:emit("q_tx", { dst = dst_id, dst_name = dst_name })
+      self:log(string.format("q_tx -> dst=%s (route query)", dst_name))
+      tx_initiating(self, pack_q(self.network_id, self.id, dst_id), {
+        sf    = self.routing_sf,
+        label = "Q",
+        info  = string.format("dst=%s", dst_name),
+      })
+    end
     return
   end
   local primary_next = entry.candidates[1].next_hop
@@ -1944,6 +2082,9 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
       origin = origin, dst_id = dst_id, dst_name = dst_name,
       payload = payload, user_text = user_text, origin_seq = origin_seq,
       previous_hop = previous_hop,
+      enqueue_time_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
+      requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
+      next_attempt_ms = 0,
     })
     self:after(val_b, function() become_free(self) end)
     return
@@ -1978,6 +2119,13 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     alts_tried   = initial_alts_tried,
     chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
+    -- Cascade-requeue accounting: enqueue_time_ms is the original tx_queue
+    -- enqueue time (preserved across requeues); requeue_count is how many
+    -- times this same e2e message has bounced through the cascade-requeue
+    -- path. queue_meta is supplied by become_free from the popped item;
+    -- forwarders calling issue_send directly pass nil → fresh hop.
+    enqueue_time_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
+    requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
   }
   -- payload_len includes the 2-byte origin-seq header — see pack_rts.
   local rts = pack_rts(self.network_id, origin, self.id, dst_id, primary_next, mid,
@@ -2005,16 +2153,67 @@ end
 -- point: ack_rx, ack_timeout giveup, rts_timeout giveup, on_recv "D"
 -- delivered branch, pending_rx_expiry. Forwarders don't drain because
 -- forwarding sets pending_tx synchronously in the same handler.
+--
+-- Pops the earliest-ready item (smallest next_attempt_ms <= now); FIFO
+-- tie-break (lowest array index wins on ties). If no item is ready,
+-- arms self.queue_wakeup_handle for the earliest pending next_attempt_ms
+-- so the queue advances when its delay elapses, then returns without
+-- dequeuing. The single wakeup handle is cancelled at the start of any
+-- successful pop (it's stale).
 become_free = function(self)
   if self.pending_tx ~= nil or self.pending_rx ~= nil then return end
   if #self.tx_queue == 0 then return end
-  local item = table.remove(self.tx_queue, 1)
+  local now = self:now()
+  -- Scan: find the ready item with smallest next_attempt_ms (ties broken
+  -- by lowest array index, i.e. FIFO). Also remember the earliest
+  -- not-yet-ready item so we can arm a wakeup if nothing is ready.
+  local best_idx          = nil
+  local best_next         = nil
+  local earliest_unready  = nil
+  for i, it in ipairs(self.tx_queue) do
+    local nxt = it.next_attempt_ms or 0
+    if nxt <= now then
+      if best_next == nil or nxt < best_next then
+        best_idx  = i
+        best_next = nxt
+      end
+    else
+      if earliest_unready == nil or nxt < earliest_unready then
+        earliest_unready = nxt
+      end
+    end
+  end
+  if best_idx == nil then
+    -- Nothing ready. Arm a single wakeup at the earliest unready
+    -- next_attempt_ms (cancel any prior to avoid stacking).
+    if self.queue_wakeup_handle then
+      self:cancel(self.queue_wakeup_handle)
+      self.queue_wakeup_handle = nil
+    end
+    if earliest_unready ~= nil then
+      local wait_ms = earliest_unready - now
+      if wait_ms < 1 then wait_ms = 1 end
+      self.queue_wakeup_handle = self:after(wait_ms, function()
+        self.queue_wakeup_handle = nil
+        become_free(self)
+      end)
+    end
+    return
+  end
+  -- A ready item exists; cancel any pending wakeup as it's stale.
+  if self.queue_wakeup_handle then
+    self:cancel(self.queue_wakeup_handle)
+    self.queue_wakeup_handle = nil
+  end
+  local item = table.remove(self.tx_queue, best_idx)
   self:emit("tx_dequeue", {
     origin = item.origin, payload = item.user_text, origin_seq = item.origin_seq,
     dst = item.dst_id, depth = #self.tx_queue,
   })
   issue_send(self, item.origin, item.dst_id, item.dst_name,
-             item.payload, item.user_text, item.origin_seq, item.previous_hop)
+             item.payload, item.user_text, item.origin_seq, item.previous_hop,
+             { enqueue_time_ms = item.enqueue_time_ms,
+               requeue_count   = item.requeue_count })
 end
 
 -- ---------- script lifecycle ------------------------------------------------
@@ -2292,6 +2491,24 @@ function on_init(self, config)
      + airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN))
   self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
   self.rts_max_retries    = config.rts_max_retries    or 3
+  -- Cascade-requeue knobs (Phase C): when pending_tx exhausts all K alts
+  -- (true path_cascade_exhausted), instead of dropping immediately we push
+  -- the item back into tx_queue with exponential backoff so other
+  -- deliverable items behind it in the queue can rotate through. Hard
+  -- caps on requeue_count and total_age_ms prevent stuck messages from
+  -- clogging the queue forever.
+  --   cascade_requeue_max            — max times an item can be requeued
+  --                                     after cascade exhaustion (default 3
+  --                                     = 4 total attempts: original + 3).
+  --   cascade_requeue_base_ms        — first requeue backoff (default 5s).
+  --   cascade_requeue_backoff_cap_ms — exponential cap (default 30s).
+  --   cascade_requeue_total_max_ms   — hard wallclock cap on per-message
+  --                                     age (default 120s; matches the
+  --                                     longest acceptable e2e latency).
+  self.cascade_requeue_max            = config.cascade_requeue_max            or 3
+  self.cascade_requeue_base_ms        = config.cascade_requeue_base_ms        or 5000
+  self.cascade_requeue_backoff_cap_ms = config.cascade_requeue_backoff_cap_ms or 30000
+  self.cascade_requeue_total_max_ms   = config.cascade_requeue_total_max_ms   or 120000
   -- TX-policy controls (see "TX policy classes" section above).
   --   lbt_enabled            — pre-check channel_busy_until before TX of
   --                            initiating-directed (RTS / NACK) and flood
@@ -2361,6 +2578,8 @@ function on_init(self, config)
   self.ack_timeout_handle      = nil  -- so on_recv "K" can cancel
   self.pending_rx_expiry_handle = nil  -- so on_recv "D" can cancel
   self.tx_queue          = {}   -- queued user sends, drained at every "free" point
+  self.queue_wakeup_handle = nil  -- single self:after handle armed by become_free
+                                  -- when nothing is ready; cancelled on successful pop
   -- Originator-only defer queue. When the user issues a send to a
   -- destination not yet in rt[], we hold the send for up to
   -- send_defer_ttl_ms instead of dropping it on the floor. Any rt_update
@@ -2395,6 +2614,14 @@ function on_init(self, config)
   -- without measurable overhead.
   self.rt_aging_ttl_ms          = config.rt_aging_ttl_ms          or 600000
   self.rt_aging_check_period_ms = config.rt_aging_check_period_ms or 60000
+  -- Q (RREQ-route) dedup tracking. Sender side: don't re-fire Q for
+  -- same dest within q_query_ttl_ms (default 5s). Responder side: don't
+  -- respond to same (src,dest) Q within q_respond_ttl_ms (default 10s).
+  -- Both prevent Q-storm amplification on lossy links / large meshes.
+  self.q_queried       = {}                                  -- {dest_id → t_ms_last_queried}
+  self.q_responded_to  = {}                                  -- {(src,dest)_str → t_ms_last_responded}
+  self.q_query_ttl_ms   = config.q_query_ttl_ms   or 5000
+  self.q_respond_ttl_ms = config.q_respond_ttl_ms or 10000
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
   -- (origin_id, origin_seq) tuple and rejects subsequent arrivals of the
@@ -2993,6 +3220,13 @@ function on_recv(self, frame, meta)
       user_text  = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
       previous_hop = self.pending_tx.previous_hop,
+      -- Preserve original tx_queue accounting: this is a busy-NACK requeue,
+      -- NOT a cascade-requeue, so requeue_count stays at the pending_tx's
+      -- value (which is what was inherited when the item was first popped).
+      -- enqueue_time_ms is preserved so the wallclock cap still applies.
+      enqueue_time_ms = self.pending_tx.enqueue_time_ms or self:now(),
+      requeue_count   = self.pending_tx.requeue_count or 0,
+      next_attempt_ms = 0,
     })
     self:emit("tx_requeued", {
       origin = self.pending_tx.origin,
@@ -3146,6 +3380,9 @@ function on_recv(self, frame, meta)
           user_text  = d_user_text,
           origin_seq = d_origin_seq,
           previous_hop = d_src,               -- forward loop guard
+          enqueue_time_ms = self:now(),       -- fresh hop attempt
+          requeue_count   = 0,
+          next_attempt_ms = 0,
         })
         self:emit("forward_queued", {
           origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
@@ -3156,6 +3393,58 @@ function on_recv(self, frame, meta)
       issue_send(self, d_origin, d_dst, dst_name,
                  d_payload, d_user_text, d_origin_seq, d_src)
     end)
+    return
+  end
+
+  if tag == "Q" then
+    local q = parse_q(frame)
+    if not q then return end
+    -- Cross-network filter — drop foreign Q before any work.
+    if q.network_id ~= self.network_id then return end
+    -- Don't respond to ourselves (loop guard).
+    if q.src == self.id then return end
+    -- Dedup: if we recently responded to the same (src, dest), skip.
+    -- The originator's defer queue still has timer-based retry; if our
+    -- response was lost, the next Q-firing window will re-enable us.
+    local key = q.src * 256 + q.dest
+    local last = self.q_responded_to[key]
+    local now = self:now()
+    if last and (now - last) < self.q_respond_ttl_ms then return end
+    self.q_responded_to[key] = now
+
+    self:emit("q_rx", { from = q.src, dest = q.dest })
+
+    if q.dest == self.id then
+      -- Special case: someone wants a route to us. Mark our own direct-
+      -- entry dirty (which is rt[self.id] if it exists; but rt typically
+      -- doesn't include self). The cleanest signal: just send a triggered
+      -- beacon so they get our identity (direct entry rt[self.id] from
+      -- our point of view doesn't exist; receivers learn us via the BCN
+      -- src field, not entries).
+      schedule_triggered_beacon(self)
+      self:log(string.format(
+        "q_rx <- %s asking for me; triggered beacon scheduled",
+        name_of(self, q.src)))
+      return
+    end
+
+    local entry = self.rt[q.dest]
+    if entry == nil then
+      -- We don't know the route either — silent (someone else might).
+      self:log(string.format(
+        "q_rx <- %s asking for %s; no route, silent",
+        name_of(self, q.src), name_of(self, q.dest)))
+      return
+    end
+
+    -- We have it. Mark dirty + schedule triggered beacon — the
+    -- differential beacon mechanism will prioritise this dest in the
+    -- priority slots of the next emission.
+    entry.dirty = true
+    schedule_triggered_beacon(self)
+    self:log(string.format(
+      "q_rx <- %s asking for %s; marked dirty + triggered beacon",
+      name_of(self, q.src), name_of(self, q.dest)))
     return
   end
 end

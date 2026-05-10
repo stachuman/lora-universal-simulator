@@ -1,0 +1,42 @@
+{
+  "_name": "t30_route_query",
+  "_desc": "Verifies Q (RREQ-route) mechanism: when an originator sends to an unknown destination, alongside the defer-queue push it fires a one-hop Q frame asking neighbours for the route. Receiving neighbours with that route mark it dirty + schedule a triggered beacon (which then prioritises the dest in its dirty slots). 5-node line a-b-c-d-e; eve joins past warmup and immediately sends to alice. Verify: q_tx fires from eve, q_rx received at dave, send_drained + delivered.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 10000,
+    "seed": 42,
+    "node_startup_jitter_ms": 100,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "dave",  "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "eve",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 30000, "quiet_threshold_ms": 0 },
+      "start_at_ms": 20000 }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "carol", "to": "dave",  "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "dave",  "to": "eve",   "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 20100, "node": "eve", "command": "send alice hello-via-Q" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "q_tx",          "value": "alice" },
+    { "type": "script_emit_contains", "node": "dave",  "emit_type": "q_rx",          "value": "" },
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "send_drained",  "value": "" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "delivered",     "value": "hello-via-Q" }
+  ]
+}

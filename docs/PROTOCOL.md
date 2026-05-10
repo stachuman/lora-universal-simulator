@@ -237,6 +237,44 @@ The originator/forwarder feeds the decoded SNR into
 `snr_ewma_out[next_hop]` — outbound link-quality estimate, separate
 from `snr_ewma_in` (inbound).
 
+### 3.7 Q (`'Q'`) — 4 bytes (RREQ-route)
+
+```
+byte:  0   1     2      3
+       ┌───┬─────┬──────┬───────────────────────────────────┐
+       │'Q'│ src │ dest │ network_id (4 hi)                 │
+       │   │     │      │ reserved (4 lo)                   │
+       └───┴─────┴──────┴───────────────────────────────────┘
+```
+
+- `src` (8 bits): the requester's node id.
+- `dest` (8 bits): destination they want a route for.
+- `network_id` (4 bits): mesh identifier. Receivers reject foreign-
+  network Q frames.
+
+One-hop only — receivers don't forward Q frames. Direct neighbours that
+have `rt[dest]` mark it dirty + schedule a triggered beacon (the
+differential beacon mechanism then prioritises that dest in the
+next emission).
+
+**Sender behaviour:** in `issue_send` for an originator, when
+`rt[dst]` is missing, alongside the defer-queue push (§11a.2) we
+also fire a Q to actively request the route from neighbours.
+Whichever brings the route in faster (passive defer wait or active
+Q response) wins. Dedup at sender via `q_queried[dest]` (default
+TTL 5 s) prevents Q-spam for repeated sends to the same unknown.
+
+**Receiver behaviour:** dedup via `q_responded_to[src+dest]` (default
+TTL 10 s) prevents responding to the same query multiple times — if
+multiple neighbours hear the same Q, the existing triggered-beacon
+jitter (50-500 ms) spreads their responses naturally. Receivers
+without the requested route silent-drop (someone else may respond).
+
+Special cases:
+- `q.src == self.id`: loop guard, drop.
+- `q.dest == self.id`: someone's asking for ME; schedule triggered
+  beacon (receivers learn us via the BCN src field, not entries).
+
 ### 3.6 NACK (`'N'`) — 4 bytes
 
 ```
@@ -261,7 +299,8 @@ intentional.
 
 | Frame | Bytes | Notes |
 |---|---|---|
-| BCN | 4 + 4n | n entries; default cap 49 → max ~200 B |
+| BCN | 4 + 3n | n entries (3 B each, bit-packed); default cap 49 → max ~151 B |
+| Q   | 4      | RREQ-route (one-hop) |
 | RTS | 8 | fixed |
 | CTS | 2 | fixed |
 | DATA | 6 + n | n = payload bytes (≤ `max_payload_bytes`) |
@@ -1175,6 +1214,8 @@ expectations) subscribe by event_type.
 | `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `origin_seq` |
 | `dup_drop` | Duplicate (origin, origin_seq) | `origin`, `origin_seq` |
 | `forward_queued` | Forwarder enqueued the relay | `origin`, `dst` |
+| `q_tx` | Q (RREQ-route) emitted by sender (§3.7) | `dst`, `dst_name` |
+| `q_rx` | Q decoded; receiver matches network_id | `from`, `dest` |
 | `forward_fail` | Forwarder dropped (no route, no budget, etc.) | `origin`, `dst`, `reason` |
 | `retune_for_data` | RX retuned for DATA reception | `from`, `msg_id`, `chosen_data_sf` |
 
@@ -1247,6 +1288,8 @@ the JSON scenario). Defaults shown.
 | `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
 | `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
+| `q_query_ttl_ms` | 5000 | Sender Q dedup window — don't re-fire for same dest (§3.7) |
+| `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (src,dest) (§3.7) |
 | `rt_aging_ttl_ms` | 600000 | Stale-route eviction threshold — see §6.5 |
 | `rt_aging_check_period_ms` | 60000 | Aging-scan period — see §6.5 |
 
