@@ -24,7 +24,7 @@ coexist on the same channel via a 4-bit `network_id` filter.
 8. [Data plane — failure modes](#8-data-plane--failure-modes)
 9. [Cross-network filtering (`network_id`)](#9-cross-network-filtering-network_id)
 10. [Origin-level dedup](#10-origin-level-dedup)
-11. [Half-duplex, LBT, duty cycle](#11-half-duplex-lbt-duty-cycle)
+11. [Half-duplex, LBT, duty cycle](#11-half-duplex-lbt-duty-cycle) — incl. **§11.5 budget tiers**, **§11.6 node_state_snapshot**
 11a. [Bootstrap UX (cold-start joiners)](#11a-bootstrap-ux-cold-start-joiners)
 12. [Lifecycle: on_init + on_recv + on_radio_busy](#12-lifecycle-on_init--on_recv--on_radio_busy)
 13. [Event vocabulary](#13-event-vocabulary)
@@ -280,20 +280,33 @@ Special cases:
 ```
 byte:  0   1                       2                3
        ┌───┬───────────────────┬─────────────────┬─────────────────┐
-       │'N'│ reserved (4 hi)   │ busy_for_ms_lo  │ busy_for_ms_hi  │
-       │   │ msg_id (4 lo)     │                 │                 │
+       │'N'│ reason   (4 hi)   │ payload_lo      │ payload_hi      │
+       │   │ msg_id   (4 lo)   │                 │                 │
        └───┴───────────────────┴─────────────────┴─────────────────┘
 ```
 
 - `msg_id` (4 bits): RTS's msg_id being NACKed.
-- `busy_for_ms` (16 bits, little-endian): how long the receiver
-  expects to be busy. Originator can either wait (if short) or push
-  the send back into its queue (if long).
+- `reason` (4 bits, hi nibble of byte 1): which NACK variant this is.
+  Currently defined:
+  - **0 = `BUSY_RX`** — legacy receiver-busy signal. Payload is
+    `busy_for_ms` (uint16 LE) — how long the receiver's `pending_rx`
+    will hold this slot.
+  - **1 = `BUDGET`** — receiver's duty-cycle budget tier is
+    CRITICAL or EXHAUSTED (§9.x). Payload byte 0 = `budget_tier`
+    (0..3), byte 1 = reserved.
+  - 2..15 reserved.
+- `payload_lo`, `payload_hi`: per-reason payload bytes; interpretation
+  per the table above.
 
-NACK rides on `data_sf`, not `routing_sf`, because the originator's
-RX is already retuned to `data_sf` after sending RTS, awaiting CTS.
-NACK and CTS are the two possible admissions; sharing the channel is
-intentional.
+**Wire-compat note:** before the BUDGET reason was added, byte 1's high
+nibble was always 0 (`reason=BUSY_RX` implicitly). Old receivers that
+ignored that nibble see exactly the same bytes for BUSY_RX NACKs. New
+receivers MUST read `reason` to interpret payload correctly.
+
+NACK rides on `data_sf` (BUSY_RX) or `routing_sf` (BUDGET — sender's
+RX is already on routing for the BCN-rejection path). The originator's
+RX state is whatever the sender's last retune left it on — most
+common case for BUSY_RX is data_sf since sender retuned post-RTS-tx.
 
 ### 3.8 Frame-size summary
 
@@ -458,15 +471,42 @@ previous_hop, next_attempt_ms, requeue_count, enqueue_time_ms}`.
 idle. If no item is ready, `become_free` arms a single
 `queue_wakeup_handle` and returns.
 
+**Load-adaptive cap (Phase D3):** under sustained local pressure (deep
+`tx_queue`), the effective `cascade_requeue_max` shrinks. Each item in
+`tx_queue` beyond `cascade_requeue_load_threshold` (default 0)
+subtracts 1 from the budget. When the effective budget reaches 0, new
+cascade exhaustions drop immediately instead of being requeued — a
+stressed node sheds retry load so it stops choking the channel with
+retries that aren't going to succeed. The diagnostic emit
+`cascade_load_skip` distinguishes load-induced drops from hard-cap
+exhaustion.
+
+**Per-message retry budget (Phase D4):** alongside the requeue cap,
+the per-cycle RTS retry count *also* shrinks per requeue:
+`effective_rts_max_retries(self, requeue_count) = max(0,
+rts_max_retries - requeue_count)`. So a fresh send (requeue=0) gets
+the full 3 RTS retries × 3 alts = 9 RTS attempts per cycle; a
+3×-requeued zombie gets 0 × 3 = 3 (alt walk only, no per-hop
+retry). Zombie messages spend less channel time per cycle.
+
+**Requeue-aware queue priority:** `become_free` picks the ready item
+with the LOWEST `requeue_count` first (tie-break by `next_attempt_ms`,
+then FIFO). Fresh sends jump ahead of zombies in the queue — fresh
+messages have the best chance of delivering quickly (route still
+valid; channel not yet polluted by their retries), so the
+channel-time investment goes where it pays off.
+
 This implements K=3 multi-alt routing PLUS bounded-time stuck-flight
-isolation, all without changing the wire format.
+isolation PLUS load-adaptive shedding, all without changing the wire
+format.
 
 | Key | Default | Description |
 |---|---|---|
 | `cascade_requeue_max` | 3 | Max number of cascade-exhaust requeues before drop |
 | `cascade_requeue_base_ms` | 5000 | Base backoff (exponential: base × 2^(count-1)) |
 | `cascade_requeue_backoff_cap_ms` | 30000 | Backoff caps at this value |
-| `cascade_requeue_total_max_ms` | 120000 | Total wallclock cap; older items drop |
+| `cascade_requeue_total_max_ms` | **60000** | Total wallclock cap; older items drop. (Was 120000 pre-D3 — tightened after measuring s04 successful-delivery max ~115s; 60s keeps most legitimate slow paths alive while killing 3-13 minute zombie cascades.) |
+| `cascade_requeue_load_threshold` | 0 | Local tx_queue depth above which the effective requeue budget starts shrinking (Phase D3) |
 
 ---
 
@@ -532,6 +572,40 @@ jitter and post-jitter) honour the override. Emit
 beacons also reset the staleness clock — periodic + triggered
 combine as expected. Set `beacon_max_idle_ms = 0` to disable the
 override entirely.
+
+**B+C composite filter (post-`246cb8a`).** The pure max-idle override
+recreates the synchronized-burst failure it was meant to fix: 138
+nodes hit max_idle within seconds of each other (all warmed up around
+the same time), forced through a 10s silence-jitter, producing
+50-57 BCN/min bursts that re-saturate the channel at ~300% capacity.
+The composite filter dampens this:
+
+- **(B) Defer override on recent BCN-RX.** New tracker
+  `last_rx_bcn_ms` (separate from `last_rx_routing_sf_ms` — only set
+  on actual BCN reception, NOT on RTS/CTS/ACK). When override eligible
+  AND a neighbour BCN'd within the last `beacon_max_idle_ms / 3`, defer
+  our override. The first nodes to hit max_idle fire, their BCNs land
+  at neighbours, neighbours see fresh `last_rx_bcn_ms` and defer their
+  own overrides → naturally cascading the burst across `max_idle/3`
+  (~2.7 min for the 8 min default) instead of compressing into the
+  silence-jitter's 10 s window.
+
+- **(C) Skip-if-clean.** When override eligible AND we have **zero
+  dirty rt entries** (nothing new to advertise), AND a neighbour just
+  beaconed (refresh load is being carried), **skip the override
+  entirely**. Avoids burning channel time on no-information emissions.
+  Heartbeat preserved: dirty=0 nodes whose neighbours have ALSO gone
+  silent will still fire (both filter conditions fail). Emit
+  `beacon_max_idle_skip_clean` makes this visible in telemetry.
+
+Composite skip condition:
+```
+dirty_n == 0 AND since_bcn_rx < beacon_max_idle_ms / 3
+```
+
+Both pre-jitter and post-jitter override paths apply the same filter
+so a neighbour BCN landing during our jitter window correctly defers
+our emission.
 
 Real-deployment tuning: keep `beacon_max_idle_ms` <
 `rt_aging_ttl_neighbor_ms` so direct-link entries get refreshed
@@ -1077,6 +1151,78 @@ When over budget:
 - INITIATING-class (RTS): defer + emit `duty_cycle_blocked`.
 - FLOOD-class (BCN): drop the page; next periodic fire retries.
 
+### 11.5 Duty-cycle budget tiers (advisory)
+
+The hard-block above (over-budget at TX time) is reactive — it only
+fires once we've already burned the budget. The **budget-tier
+system** provides a forward-looking advisory: rather than waiting
+until we're at 100%, the protocol classifies remaining budget into
+4 tiers and reacts proactively at each.
+
+```
+compute_budget_tier(self):
+  pct_used = 100 × airtime_used_ms(window) / duty_cycle_budget_ms
+  if pct_used >= budget_exhausted_pct (default 95): return EXHAUSTED (3)
+  if pct_used >= budget_critical_pct  (default 80): return CRITICAL  (2)
+  if pct_used >= budget_strained_pct  (default 50): return STRAINED  (1)
+  return HEALTHY (0)
+```
+
+| Tier | Pct used | Behaviour |
+|---|---|---|
+| **HEALTHY** (0) | ≤ 50% | Normal operation |
+| **STRAINED** (1) | 50-80% | (currently informational only — emitted in `node_state_snapshot`) |
+| **CRITICAL** (2) | 80-95% | Refuse forwards via budget-NACK; skip own beacons |
+| **EXHAUSTED** (3) | > 95% | `duty_cycle_blocked` is imminent — same as CRITICAL |
+
+The tier is consulted at three sites:
+
+1. **At `on_recv 'R'`** (forwarder admission). If our tier ≥ CRITICAL,
+   we likely can't carry this flight to completion (CTS + DATA-RX
+   has no cost but ACK does, and we'd consume more budget on
+   subsequent forwards if we accept). Reply with a **budget-NACK**
+   (§3.6, `reason=BUDGET`) so the sender immediately reroutes via
+   the existing `classify_blind` machinery instead of doing a full
+   RTS-CTS-DATA-ACK cycle that stalls when we get
+   `duty_cycle_blocked` partway through. Wire cost: a few ms NACK
+   airtime; saves the much larger CTS+ACK round-trip.
+
+2. **At `beacon_fire`** (own emission). If our tier ≥ CRITICAL, skip
+   the beacon — preserve remaining budget for forwards already in our
+   queue. Emit `beacon_skipped_budget` for telemetry.
+
+3. **At `on_recv 'N'` (sender side, budget reason).** When we
+   receive a budget-NACK from a peer, mark that peer **blind** for a
+   tier-proportional window (`budget_blind_strained_ms`,
+   `budget_blind_critical_ms`, `budget_blind_exhausted_ms`). The
+   existing `classify_blind` machinery then naturally reroutes via
+   alts. After the blind window expires we'll try the peer again; if
+   they're still saturated they'll budget-NACK us again.
+
+| Key | Default | Description |
+|---|---|---|
+| `budget_strained_pct` | 50 | ≤ this → HEALTHY; > this → STRAINED |
+| `budget_critical_pct` | 80 | > this → CRITICAL (NACK + beacon-skip kick in) |
+| `budget_exhausted_pct` | 95 | > this → EXHAUSTED |
+| `budget_blind_strained_ms` | 60000 (1 min) | Sender-side blind window for STRAINED-NACKed peer |
+| `budget_blind_critical_ms` | 180000 (3 min) | Same, for CRITICAL |
+| `budget_blind_exhausted_ms` | 300000 (5 min) | Same, for EXHAUSTED |
+
+### 11.6 Periodic node state snapshot
+
+For accumulator diagnostics (analyze.py + visualize), each node
+periodically emits a `node_state_snapshot` event capturing
+quasi-static counters: tx_queue depth, deferred_sends depth,
+in-flight pending counts, current budget tier, current rt size,
+plus throughput counters since last snapshot.
+
+```
+state_snapshot_period_ms (default 60000 = 1 min)
+  → emit node_state_snapshot { ... } and reschedule
+```
+
+Set `state_snapshot_period_ms = 0` to disable.
+
 ---
 
 ## 11a. Bootstrap UX (cold-start joiners)
@@ -1272,6 +1418,8 @@ expectations) subscribe by event_type.
 | `beacon_skipped_busy` | Throttle suppressed beacon | `since_rx_ms`, `threshold_ms`, `stage` |
 | `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind` |
 | `beacon_max_idle_force` | Max-idle override bypassed busy throttle (§6.2) | `since_tx_ms`, `max_idle_ms`, `since_rx_ms` |
+| `beacon_max_idle_skip_clean` | B+C composite skipped override (no dirty + recent neighbour BCN) (§6.2) | `dirty_n`, `since_bcn_rx_ms`, `max_idle_ms` |
+| `beacon_skipped_budget` | Beacon skipped because budget tier ≥ CRITICAL (§11.5) | `tier`, `pct_used` |
 | `rt_update` | Route added/promoted to a slot | `dest`, `next`, `score`, `hops`, `slot` |
 | `rt_prune` | 3-cycle prune dropped a candidate | `dest`, `pruned_via` |
 | `rt_aged` | Stale-route aging evicted a candidate (§6.5) | `dest`, `slot`, `next_hop`, `hops`, `age_ms`, `ttl_ms` |
@@ -1304,8 +1452,8 @@ expectations) subscribe by event_type.
 | `ack_tx` | ACK emitted | `to`, `msg_id`, `data_snr` |
 | `ack_rx` | ACK decoded, matches pending_tx | `from`, `msg_id`, `data_snr_db` |
 | `ack_snr_feedback` | snr_ewma_out updated from ACK piggyback | `from`, `data_snr_db`, `snr_bucket`, `ewma_out` |
-| `nack_tx` | NACK emitted | `to`, `msg_id`, `busy_for_ms`, `reason` |
-| `nack_rx` | NACK decoded, matches pending_tx | `from`, `msg_id`, `busy_for_ms` |
+| `nack_tx` | NACK emitted | `to`, `msg_id`, `reason` (`busy_rx` or `budget_low`), plus per-reason: `busy_for_ms` OR `tier` |
+| `nack_rx` | NACK decoded, matches pending_tx | `from`, `msg_id`, `reason`, plus per-reason: `busy_for_ms` OR `tier`, `blind_ms` |
 | `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `origin_seq` |
 | `dup_drop` | Duplicate (origin, origin_seq) | `origin`, `origin_seq` |
 | `forward_queued` | Forwarder enqueued the relay | `origin`, `dst` |
@@ -1323,6 +1471,7 @@ expectations) subscribe by event_type.
 | `path_cascade` | Switching to next alt after K=3 cascade fired | `from_next`, `to_next`, `attempt`, `trigger` |
 | `path_cascade_exhausted` | All K alts tried AND requeue caps hit (§5.6) | `dst`, `tried`, `trigger` |
 | `cascade_requeue` | All K alts tried; pushed back to tx_queue with backoff (§5.6) | `dst`, `msg_id`, `requeue_count`, `backoff_ms`, `total_age_ms`, `trigger` |
+| `cascade_load_skip` | Cascade-requeue dropped early due to local load (§5.6 Phase D3) | `dst`, `msg_id`, `queue_depth`, `load_threshold`, `effective_max` |
 
 ### 13.4 F1 blind-window mitigation
 
@@ -1341,6 +1490,7 @@ expectations) subscribe by event_type.
 | `duty_cycle_blocked` | Pre-check denied a TX | `label`, `airtime_ms`, `used_ms`, `wait_ms` |
 | `radio_busy` | Runtime fired on_radio_busy | `reason`, `label`, `busy_until_ms` |
 | `tx_giveup` | tx_stash retries exhausted | `label`, `reason` |
+| `node_state_snapshot` | Periodic accumulator-diagnostics dump (§11.6) | `tx_queue_depth`, `deferred_sends_depth`, `pending_tx`, `pending_rx`, `rt_size`, `budget_tier`, `pct_used`, plus throughput counters |
 
 ---
 
@@ -1393,7 +1543,9 @@ the JSON scenario). Defaults shown.
 | `cascade_requeue_max` | 3 | Phase C — max cascade-exhaust requeues before drop (§5.6) |
 | `cascade_requeue_base_ms` | 5000 | Phase C — base backoff (exponential: base × 2^(count-1)) |
 | `cascade_requeue_backoff_cap_ms` | 30000 | Phase C — backoff caps at this value |
-| `cascade_requeue_total_max_ms` | 120000 | Phase C — total wallclock cap; older items drop |
+| `cascade_requeue_total_max_ms` | 60000 | Phase C — total wallclock cap; older items drop (was 120000 pre-D3) |
+| `cascade_requeue_load_threshold` | 0 | Phase D3 — local tx_queue depth above which the effective requeue budget shrinks (§5.6) |
+| `state_snapshot_period_ms` | 60000 | Period for `node_state_snapshot` event (§11.6); 0 = disable |
 
 ### 14.4 Channel access
 
@@ -1404,6 +1556,12 @@ the JSON scenario). Defaults shown.
 | `flood_lbt_max_defer_ms` | one beacon-airtime | LBT defer cap for FLOOD |
 | `duty_cycle` | 0.01 | ETSI EN 300 220 default |
 | `duty_cycle_window_ms` | 3600000 | 1-hour rolling window |
+| `budget_strained_pct` | 50 | ≤ this % used → HEALTHY tier; > → STRAINED (§11.5) |
+| `budget_critical_pct` | 80 | > this → CRITICAL (budget-NACK + own-beacon-skip kick in) |
+| `budget_exhausted_pct` | 95 | > this → EXHAUSTED |
+| `budget_blind_strained_ms` | 60000 (1 min) | Sender-side blind window after STRAINED budget-NACK |
+| `budget_blind_critical_ms` | 180000 (3 min) | Same, for CRITICAL |
+| `budget_blind_exhausted_ms` | 300000 (5 min) | Same, for EXHAUSTED |
 
 ### 14.5 Mesh / network
 
