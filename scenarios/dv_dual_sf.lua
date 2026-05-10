@@ -322,14 +322,19 @@
 --   2. pending_rx busy + same (from,msg_id) → CTS-dup, restart expiry
 --   3. pending_rx busy + different sender   → NACK on data_sf, busy_for =
 --      max(0, set_at + pending_rx_expiry_ms − now)
---   4. pending_tx in flight                  → NACK on data_sf, busy_for =
---      pessimistic-full-flight estimate
+--   4. pending_tx in flight                  → REMOVED. Used to NACK with a
+--      pessimistic estimate, but the estimate lied in failure cases (a node
+--      stuck in an ACK-loss retry loop predicts ~5 s but is actually busy
+--      60+ s). Silent drop now (rts_drop_pending_tx emit only); senders
+--      rely on rts_timeout + cascade machinery instead.
 --   5. otherwise                              → normal RTS handling
 -- NACK rides on data_sf (not routing_sf) because the sender's RX is
 -- already retuned to data_sf after its RTS-tx, awaiting CTS. NACK and CTS
 -- share the channel logically — they're the two possible admissions.
 --
 -- Sender-side NACK (on_recv 'N' matching pending_tx.msg_id):
+-- After the pending_tx receiver-side trigger was removed, this only fires
+-- for pending_rx NACKs (case 3 above). Behaviour unchanged:
 --   • cancel rts_timeout
 --   • mark NACK sender blind for busy_for_ms (so concurrent retries
 --     against the same next-hop defer via classify_blind)
@@ -2277,11 +2282,16 @@ function on_init(self, config)
   -- rts_busy_retry_ms is used when our retry timer fires while we're mid-RX
   -- of someone else's flight (pending_rx set) — short reschedule rather
   -- than TX over their incoming data plane.
+  -- rts_max_retries: 3 retries × K=3 alts caps a stuck send at ~3-4 retry
+  -- intervals × ~5 s = ~15-20 s per next-hop and ~45-60 s total wallclock.
+  -- Previously 8 (×3 alts = 24 retries) which could exceed 2 minutes
+  -- wallclock — too slow to free pending_tx when a next-hop is genuinely
+  -- stuck in an ACK-loss loop.
   self.rts_timeout_ms = config.rts_timeout_ms or
     (airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN)
      + airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN))
   self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
-  self.rts_max_retries    = config.rts_max_retries    or 8
+  self.rts_max_retries    = config.rts_max_retries    or 3
   -- TX-policy controls (see "TX policy classes" section above).
   --   lbt_enabled            — pre-check channel_busy_until before TX of
   --                            initiating-directed (RTS / NACK) and flood
@@ -2674,32 +2684,16 @@ function on_recv(self, frame, meta)
     end
 
     if self.pending_tx ~= nil then
-      -- We're mid-flight ourselves (originating or forwarding). Tell the
-      -- sender we're busy. Estimate busy_for using the slowest SF in our
-      -- allowed bitmap as a pessimistic upper bound on DATA airtime; if
-      -- our flight uses a faster SF the sender's wait+retry just fires
-      -- a bit early from on_recv "K" → become_free path.
-      local slowest = 5
-      for sf = 12, 5, -1 do
-        if sf_in_bitmap(self.allowed_sf_bitmap, sf) then slowest = sf; break end
-      end
-      local busy_for = airtime_ms(slowest, self.bw_hz, self.cr,
-                                   self.preamble_sym,
-                                   DATA_HDR_LEN + self.max_payload_bytes)
-                       + self.ack_air_ms
-      if busy_for > 65535 then busy_for = 65535 end
-      local nack = pack_nack(r.msg_id, busy_for)
-      self:emit("nack_tx", {
-        origin = r.origin,    -- the inbound RTS's flight, not our pending_tx
-        to = r.src, msg_id = r.msg_id, busy_for_ms = busy_for, reason = "pending_tx",
-      })
-      self:log(string.format("nack_tx -> %s msg_id=%d busy_for=%dms (busy with pending_tx msg=%d)",
-        name_of(self, r.src), r.msg_id, busy_for, self.pending_tx.msg_id))
-      tx_initiating(self, nack, {
-        sf    = self.routing_sf,
-        label = "NACK",
-        info  = string.format("to=%s msg=%d busy_for=%dms reason=pending_tx",
-          name_of(self, r.src), r.msg_id, busy_for),
+      -- We're mid-flight ourselves. Used to NACK back with a busy_for_ms
+      -- estimate, but the estimate was a lie in the failure case (a node
+      -- stuck in an ACK-loss retry loop predicts ~5 s but is actually
+      -- busy for 60+ s). The NACK chain cost up to 28 s of airtime per
+      -- stuck node on s03_seattle_medium. Silent drop is cheaper: the
+      -- sender's rts_timeout fires after ~5 s and the existing
+      -- tx_blind_alt / cascade machinery walks to the next-hop.
+      self:emit("rts_drop_pending_tx", {
+        origin = r.origin, from = r.src, msg_id = r.msg_id,
+        our_pending_msg_id = self.pending_tx.msg_id,
       })
       return
     end

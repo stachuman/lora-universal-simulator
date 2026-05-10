@@ -128,9 +128,9 @@
   "expect": [
     {
       "type": "script_emit_contains",
-      "node": "d2",
+      "node": "d1",
       "emit_type": "delivered",
-      "value": "second-flight"
+      "value": "first-flight"
     },
     {
       "type": "script_emit_contains",

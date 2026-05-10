@@ -1,0 +1,33 @@
+{
+  "_name": "t30_pending_tx_silent_drop",
+  "_desc": "Pending-tx silent-drop test. Triangle of alice/bob/carol with strong alice<->bob and alice<->carol links and a weak bob<->carol link. alice sends a long payload to bob first; ~1s later carol sends to alice. While alice is mid-flight (pending_tx set) the inbound RTS from carol used to trigger a NACK with reason=pending_tx (a pessimistic busy_for_ms estimate that lied in the failure case). New behavior: alice silently drops the RTS and emits rts_drop_pending_tx; carol's rts_timeout retries and the existing cascade machinery handle the rest. The assertion is positive presence of rts_drop_pending_tx on alice — proves the new code path fires at least once.",
+  "simulation": {
+    "duration_ms": 90000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 12, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 12, "allowed_data_sfs": [12], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "max_payload_bytes": 80 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 12, "allowed_data_sfs": [12], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "max_payload_bytes": 80 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 12, "allowed_data_sfs": [12], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "max_payload_bytes": 80 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "alice", "to": "carol", "snr": 10.0, "rssi": -82.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 25000, "node": "alice", "command": "send bob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { "at_ms": 26000, "node": "carol", "command": "send alice ping" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_drop_pending_tx", "value": "" }
+  ]
+}
