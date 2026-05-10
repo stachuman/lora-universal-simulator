@@ -173,7 +173,14 @@ void SimController::initialize() {
     // explicit topology.links loop, so any explicit entries below
     // override the path-loss-derived per-pair values (useful for tests
     // that want surgical link tuning on top of automated defaults).
-    if (_cfg.simulation.path_loss.present) {
+    // Gate the path-loss baseline on both `present` (operator wrote a
+    // path_loss block at all) and model != "none" (the operator
+    // explicitly wants no log-distance baseline — only pairs in
+    // topology.links[] populate the link matrix). When skipped,
+    // _path_loss stays nullptr; downstream code that consults it is
+    // already null-guarded.
+    if (_cfg.simulation.path_loss.present
+        && _cfg.simulation.path_loss.model != "none") {
         PathLossConfig plc;
         plc.model                   = _cfg.simulation.path_loss.model;
         plc.alpha                   = _cfg.simulation.path_loss.alpha;
