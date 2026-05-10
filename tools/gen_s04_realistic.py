@@ -171,7 +171,11 @@ def main() -> None:
     p.add_argument("--duration-ms", type=int, default=1_800_000,
                    help="Total sim duration (default 30 min)")
     p.add_argument("--warmup-ms", type=int, default=30_000,
-                   help="Warmup before first send (default 30 s)")
+                   help="Min warmup before first send (default 30 s). The actual "
+                        "warmup is auto-extended to max(warmup_ms, "
+                        "node_startup_jitter_ms + 30 s) so that even the latest-"
+                        "starting node gets ~30 s of warmup-period beacons before "
+                        "the global warmup_ms gate switches it to operational rate.")
     p.add_argument("--mean-interval-ms", type=int, default=10_000,
                    help="Baseline mean inter-send interval (default 10 s)")
     p.add_argument("--repeater-senders", type=int, default=12,
@@ -180,6 +184,10 @@ def main() -> None:
     p.add_argument("--corner-share", type=float, default=0.30,
                    help="Probability the originator is a corner companion "
                         "(default 0.30 → 30%% from corners, 70%% from repeaters)")
+    p.add_argument("--node-startup-jitter-ms", type=int, default=60_000,
+                   help="Per-node random delay on on_init in [0, JITTER] (default 60 s). "
+                        "Desynchronizes the warmup phase so routes don't age out in lockstep "
+                        "and the channel doesn't see a synchronized BCN burst at boot.")
     args = p.parse_args()
 
     src_path = Path(args.src)
@@ -204,9 +212,16 @@ def main() -> None:
         (25 * 60_000, 5, 3000),
     ]
 
+    # Auto-extend warmup so even the latest-starting node gets a full
+    # warmup-period beacon phase. The runtime gates beacon cadence on a
+    # GLOBAL `now() < warmup_ms` check, not a per-node "since on_init"
+    # check, so a node that starts at t=jitter_max with the default
+    # warmup_ms=30s would skip warmup-period beacons entirely.
+    effective_warmup_ms = max(args.warmup_ms, args.node_startup_jitter_ms + 30_000)
+
     cmds = build_commands(
         identities, rng,
-        warmup_ms=args.warmup_ms, duration_ms=args.duration_ms,
+        warmup_ms=effective_warmup_ms, duration_ms=args.duration_ms,
         mean_interval_ms=args.mean_interval_ms,
         corner_share=args.corner_share, bursts=bursts,
     )
@@ -219,11 +234,15 @@ def main() -> None:
         f"extended to {args.duration_ms // 60_000} min with {len(cmds)} sends "
         f"distributed across {len(identities)} active identities ({len(repeaters)} "
         f"named repeaters + 4 corners). Baseline mean inter-send {args.mean_interval_ms}ms "
-        "+ 3 burst windows at 5/15/25 min (5 sends in ~3s each). Goal: surface "
-        "time-windowed congestion and steady-state behavior past the s03 cold-start phase."
+        "+ 3 burst windows at 5/15/25 min (5 sends in ~3s each). "
+        f"Per-node startup jitter [0, {args.node_startup_jitter_ms}] ms so the warmup "
+        "phase isn't synchronized — desyncs initial route-aging so the network doesn't "
+        "collapse in lockstep at the global TTL boundary. Goal: surface time-windowed "
+        "congestion and steady-state behavior past the s03 cold-start phase."
     )
     cfg["simulation"]["duration_ms"] = args.duration_ms
-    cfg["simulation"]["warmup_ms"]   = args.warmup_ms
+    cfg["simulation"]["warmup_ms"]   = effective_warmup_ms
+    cfg["simulation"]["node_startup_jitter_ms"] = args.node_startup_jitter_ms
     cfg["commands"] = cmds
 
     out_path = Path(args.out)

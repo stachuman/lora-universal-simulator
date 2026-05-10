@@ -1,13 +1,13 @@
 {
   "_name": "s04_seattle_realistic",
-  "_desc": "Seattle topology (s03 reference, 134 ITM repeaters + 4 corners), extended to 30 min with 170 sends distributed across 16 active identities (12 named repeaters + 4 corners). Baseline mean inter-send 10000ms + 3 burst windows at 5/15/25 min (5 sends in ~3s each). Goal: surface time-windowed congestion and steady-state behavior past the s03 cold-start phase.",
+  "_desc": "Seattle topology (s03 reference, 134 ITM repeaters + 4 corners), extended to 30 min with 166 sends distributed across 16 active identities (12 named repeaters + 4 corners). Baseline mean inter-send 10000ms + 3 burst windows at 5/15/25 min (5 sends in ~3s each). Per-node startup jitter [0, 60000] ms so the warmup phase isn't synchronized \u2014 desyncs initial route-aging so the network doesn't collapse in lockstep at the global TTL boundary. Goal: surface time-windowed congestion and steady-state behavior past the s03 cold-start phase.",
   "simulation": {
     "duration_ms": 1800000,
     "step_ms": 1,
-    "warmup_ms": 30000,
+    "warmup_ms": 90000,
     "beacon_period_ms": 900000,
     "seed": 42,
-    "node_startup_jitter_ms": 500,
+    "node_startup_jitter_ms": 60000,
     "radio": {
       "sf": 10,
       "bw": 62.5,
@@ -18,854 +18,834 @@
   },
   "commands": [
     {
-      "at_ms": 60751,
-      "node": "CH_RPTR",
-      "command": "send Crow_Repeater s1 CH_RPTR->Crow_Repeater"
+      "at_ms": 120751,
+      "node": "Ballard",
+      "command": "send dmatestbednode0 s1 Ballard->dmatestbednode0"
     },
     {
-      "at_ms": 81613,
+      "at_ms": 141613,
+      "node": "alice",
+      "command": "send dmatestbednode0 s1 alice->dmatestbednode0"
+    },
+    {
+      "at_ms": 144669,
       "node": "bob",
-      "command": "send alice s1 bob->alice"
+      "command": "send CrossNet_Room s1 bob->CrossNet_Room"
     },
     {
-      "at_ms": 84669,
+      "at_ms": 151612,
+      "node": "bob",
+      "command": "send alice s2 bob->alice"
+    },
+    {
+      "at_ms": 153580,
       "node": "WA7DASR1",
       "command": "send alice s1 WA7DASR1->alice"
     },
     {
-      "at_ms": 91612,
+      "at_ms": 177955,
       "node": "Martin_Room",
       "command": "send Fremont01_Greenwood3 s1 Martin_Room->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 93580,
+      "at_ms": 198397,
       "node": "alice",
-      "command": "send Ballard s1 alice->Ballard"
+      "command": "send Ballard s2 alice->Ballard"
     },
     {
-      "at_ms": 117955,
+      "at_ms": 201941,
       "node": "CrossNet_Room",
       "command": "send 18th__Union s1 CrossNet_Room->18th__Union"
     },
     {
-      "at_ms": 138397,
+      "at_ms": 212128,
       "node": "bob",
-      "command": "send WA7DASR1 s2 bob->WA7DASR1"
+      "command": "send WA7DASR1 s3 bob->WA7DASR1"
     },
     {
-      "at_ms": 141941,
+      "at_ms": 221517,
       "node": "CH_RPTR",
-      "command": "send bob s2 CH_RPTR->bob"
+      "command": "send bob s1 CH_RPTR->bob"
     },
     {
-      "at_ms": 152128,
+      "at_ms": 223175,
       "node": "dmatestbednode0",
       "command": "send First_Hill_Skyline s1 dmatestbednode0->First_Hill_Skyline"
     },
     {
-      "at_ms": 161517,
+      "at_ms": 237551,
       "node": "Ballard",
-      "command": "send CH_RPTR s1 Ballard->CH_RPTR"
+      "command": "send CH_RPTR s2 Ballard->CH_RPTR"
     },
     {
-      "at_ms": 163175,
+      "at_ms": 245302,
       "node": "dmatestbednode0",
       "command": "send dave s2 dmatestbednode0->dave"
     },
     {
-      "at_ms": 177551,
+      "at_ms": 260381,
       "node": "alice",
-      "command": "send dave s2 alice->dave"
+      "command": "send dave s3 alice->dave"
     },
     {
-      "at_ms": 185302,
+      "at_ms": 267938,
       "node": "Martin_Room",
       "command": "send CH_RPTR s2 Martin_Room->CH_RPTR"
     },
     {
-      "at_ms": 200381,
+      "at_ms": 267943,
       "node": "18th__Union",
       "command": "send Crow_Repeater s1 18th__Union->Crow_Repeater"
     },
     {
-      "at_ms": 207938,
+      "at_ms": 271860,
       "node": "18th__Union",
       "command": "send dmatestbednode0 s2 18th__Union->dmatestbednode0"
     },
     {
-      "at_ms": 207943,
+      "at_ms": 272056,
       "node": "WA7DASR1",
       "command": "send Chucks s2 WA7DASR1->Chucks"
     },
     {
-      "at_ms": 211860,
+      "at_ms": 298520,
       "node": "Crow_Repeater",
-      "command": "send carol s1 Crow_Repeater->carol"
+      "command": "send carol b1 Crow_Repeater->carol"
     },
     {
-      "at_ms": 212056,
+      "at_ms": 299146,
       "node": "First_Hill_Skyline",
-      "command": "send WA7DASR1 s1 First_Hill_Skyline->WA7DASR1"
+      "command": "send WA7DASR1 b1 First_Hill_Skyline->WA7DASR1"
     },
     {
-      "at_ms": 238520,
+      "at_ms": 299500,
       "node": "Chucks",
-      "command": "send dave s1 Chucks->dave"
+      "command": "send dave b1 Chucks->dave"
     },
     {
-      "at_ms": 259616,
+      "at_ms": 299667,
       "node": "bob",
-      "command": "send dmatestbednode0 s3 bob->dmatestbednode0"
+      "command": "send dmatestbednode0 b4 bob->dmatestbednode0"
     },
     {
-      "at_ms": 277434,
+      "at_ms": 300013,
       "node": "CH_RPTR",
-      "command": "send bob s3 CH_RPTR->bob"
+      "command": "send bob b2 CH_RPTR->bob"
     },
     {
-      "at_ms": 281108,
+      "at_ms": 300294,
       "node": "First_Hill_Skyline",
-      "command": "send carol s2 First_Hill_Skyline->carol"
+      "command": "send carol b2 First_Hill_Skyline->carol"
     },
     {
-      "at_ms": 281704,
+      "at_ms": 319616,
       "node": "dmatestbednode0",
       "command": "send bob s3 dmatestbednode0->bob"
     },
     {
-      "at_ms": 299739,
+      "at_ms": 337434,
       "node": "bob",
-      "command": "send carol b4 bob->carol"
+      "command": "send carol s5 bob->carol"
     },
     {
-      "at_ms": 300666,
+      "at_ms": 341108,
       "node": "First_Hill_Skyline",
-      "command": "send dave b3 First_Hill_Skyline->dave"
+      "command": "send dave s3 First_Hill_Skyline->dave"
     },
     {
-      "at_ms": 301005,
+      "at_ms": 341704,
       "node": "dave",
-      "command": "send Chucks b1 dave->Chucks"
+      "command": "send Chucks s1 dave->Chucks"
     },
     {
-      "at_ms": 301178,
+      "at_ms": 362742,
       "node": "dave",
-      "command": "send Crow_Repeater b2 dave->Crow_Repeater"
+      "command": "send Crow_Repeater s2 dave->Crow_Repeater"
     },
     {
-      "at_ms": 301381,
+      "at_ms": 392107,
       "node": "Chucks",
-      "command": "send CrossNet_Room b2 Chucks->CrossNet_Room"
+      "command": "send CrossNet_Room s2 Chucks->CrossNet_Room"
     },
     {
-      "at_ms": 302742,
+      "at_ms": 393002,
       "node": "bob",
-      "command": "send First_Hill_Skyline s5 bob->First_Hill_Skyline"
+      "command": "send First_Hill_Skyline s6 bob->First_Hill_Skyline"
     },
     {
-      "at_ms": 332107,
+      "at_ms": 399657,
       "node": "Ballard",
-      "command": "send carol s2 Ballard->carol"
+      "command": "send carol s3 Ballard->carol"
     },
     {
-      "at_ms": 333002,
+      "at_ms": 400374,
       "node": "dave",
       "command": "send WA7DASR1 s3 dave->WA7DASR1"
     },
     {
-      "at_ms": 339657,
+      "at_ms": 414670,
       "node": "Martin_Room",
       "command": "send Crow_Repeater s3 Martin_Room->Crow_Repeater"
     },
     {
-      "at_ms": 340374,
+      "at_ms": 429187,
       "node": "Ballard",
-      "command": "send dmatestbednode0 s3 Ballard->dmatestbednode0"
+      "command": "send dmatestbednode0 s4 Ballard->dmatestbednode0"
     },
     {
-      "at_ms": 354670,
+      "at_ms": 430561,
       "node": "CH_RPTR",
-      "command": "send WA7DASR1 s4 CH_RPTR->WA7DASR1"
+      "command": "send WA7DASR1 s3 CH_RPTR->WA7DASR1"
     },
     {
-      "at_ms": 369187,
+      "at_ms": 437009,
       "node": "CrossNet_Room",
       "command": "send 18th__Union s2 CrossNet_Room->18th__Union"
     },
     {
-      "at_ms": 370561,
+      "at_ms": 444989,
       "node": "dave",
       "command": "send Crow_Repeater s4 dave->Crow_Repeater"
     },
     {
-      "at_ms": 377009,
+      "at_ms": 448068,
       "node": "Crow_Repeater",
       "command": "send Fremont01_Greenwood3 s2 Crow_Repeater->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 384989,
+      "at_ms": 468659,
       "node": "Martin_Room",
       "command": "send Ballard s4 Martin_Room->Ballard"
     },
     {
-      "at_ms": 388068,
+      "at_ms": 474160,
       "node": "Take_His_Face_Off",
       "command": "send Chucks s1 Take_His_Face_Off->Chucks"
     },
     {
-      "at_ms": 408659,
+      "at_ms": 476540,
       "node": "dave",
       "command": "send 18th__Union s5 dave->18th__Union"
     },
     {
-      "at_ms": 414160,
+      "at_ms": 484289,
       "node": "Martin_Room",
       "command": "send alice s5 Martin_Room->alice"
     },
     {
-      "at_ms": 416540,
+      "at_ms": 497379,
       "node": "dmatestbednode0",
       "command": "send alice s4 dmatestbednode0->alice"
     },
     {
-      "at_ms": 424289,
+      "at_ms": 499624,
       "node": "Crow_Repeater",
       "command": "send Fremont01_Greenwood3 s3 Crow_Repeater->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 437379,
+      "at_ms": 503359,
       "node": "carol",
       "command": "send Take_His_Face_Off s1 carol->Take_His_Face_Off"
     },
     {
-      "at_ms": 439624,
+      "at_ms": 556645,
       "node": "Ballard",
-      "command": "send bob s4 Ballard->bob"
+      "command": "send bob s5 Ballard->bob"
     },
     {
-      "at_ms": 443359,
+      "at_ms": 567139,
       "node": "Martin_Room",
       "command": "send CrossNet_Room s6 Martin_Room->CrossNet_Room"
     },
     {
-      "at_ms": 496645,
+      "at_ms": 572903,
       "node": "Crow_Repeater",
       "command": "send Fremont01_Greenwood3 s4 Crow_Repeater->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 507139,
+      "at_ms": 580192,
       "node": "Martin_Room",
       "command": "send CH_RPTR s7 Martin_Room->CH_RPTR"
     },
     {
-      "at_ms": 512903,
+      "at_ms": 581481,
       "node": "dave",
       "command": "send WA7DASR1 s6 dave->WA7DASR1"
     },
     {
-      "at_ms": 520192,
+      "at_ms": 584026,
       "node": "CH_RPTR",
-      "command": "send WA7DASR1 s5 CH_RPTR->WA7DASR1"
+      "command": "send WA7DASR1 s4 CH_RPTR->WA7DASR1"
     },
     {
-      "at_ms": 521481,
+      "at_ms": 588152,
       "node": "First_Hill_Skyline",
       "command": "send Take_His_Face_Off s4 First_Hill_Skyline->Take_His_Face_Off"
     },
     {
-      "at_ms": 524026,
+      "at_ms": 597026,
       "node": "CrossNet_Room",
       "command": "send Crow_Repeater s3 CrossNet_Room->Crow_Repeater"
     },
     {
-      "at_ms": 528152,
+      "at_ms": 599641,
       "node": "carol",
       "command": "send Fremont01_Greenwood3 s2 carol->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 537026,
+      "at_ms": 602128,
       "node": "WA7DASR1",
       "command": "send Chucks s3 WA7DASR1->Chucks"
     },
     {
-      "at_ms": 539641,
+      "at_ms": 602864,
       "node": "dmatestbednode0",
       "command": "send CH_RPTR s5 dmatestbednode0->CH_RPTR"
     },
     {
-      "at_ms": 542128,
+      "at_ms": 612836,
       "node": "CrossNet_Room",
       "command": "send Take_His_Face_Off s4 CrossNet_Room->Take_His_Face_Off"
     },
     {
-      "at_ms": 542864,
+      "at_ms": 615435,
       "node": "Take_His_Face_Off",
       "command": "send Crow_Repeater s2 Take_His_Face_Off->Crow_Repeater"
     },
     {
-      "at_ms": 552836,
+      "at_ms": 639018,
       "node": "bob",
-      "command": "send WA7DASR1 s6 bob->WA7DASR1"
+      "command": "send WA7DASR1 s7 bob->WA7DASR1"
     },
     {
-      "at_ms": 555435,
+      "at_ms": 658653,
       "node": "Chucks",
       "command": "send CH_RPTR s3 Chucks->CH_RPTR"
     },
     {
-      "at_ms": 579018,
+      "at_ms": 659387,
       "node": "bob",
-      "command": "send Fremont01_Greenwood3 s7 bob->Fremont01_Greenwood3"
+      "command": "send Fremont01_Greenwood3 s8 bob->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 598653,
+      "at_ms": 662105,
       "node": "Ballard",
-      "command": "send Martin_Room s5 Ballard->Martin_Room"
+      "command": "send Martin_Room s6 Ballard->Martin_Room"
     },
     {
-      "at_ms": 599387,
+      "at_ms": 673160,
       "node": "WA7DASR1",
       "command": "send Take_His_Face_Off s4 WA7DASR1->Take_His_Face_Off"
     },
     {
-      "at_ms": 602105,
+      "at_ms": 675570,
       "node": "dave",
       "command": "send Fremont01_Greenwood3 s7 dave->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 613160,
+      "at_ms": 676989,
       "node": "CH_RPTR",
-      "command": "send alice s6 CH_RPTR->alice"
+      "command": "send alice s5 CH_RPTR->alice"
     },
     {
-      "at_ms": 615570,
-      "node": "Ballard",
-      "command": "send carol s6 Ballard->carol"
-    },
-    {
-      "at_ms": 616989,
-      "node": "CH_RPTR",
-      "command": "send carol s7 CH_RPTR->carol"
-    },
-    {
-      "at_ms": 644402,
-      "node": "Martin_Room",
-      "command": "send Fremont01_Greenwood3 s8 Martin_Room->Fremont01_Greenwood3"
-    },
-    {
-      "at_ms": 652865,
-      "node": "bob",
-      "command": "send dmatestbednode0 s8 bob->dmatestbednode0"
-    },
-    {
-      "at_ms": 659264,
-      "node": "Fremont01_Greenwood3",
-      "command": "send CH_RPTR s1 Fremont01_Greenwood3->CH_RPTR"
-    },
-    {
-      "at_ms": 674617,
-      "node": "WA7DASR1",
-      "command": "send Martin_Room s5 WA7DASR1->Martin_Room"
-    },
-    {
-      "at_ms": 691093,
-      "node": "Take_His_Face_Off",
-      "command": "send Crow_Repeater s3 Take_His_Face_Off->Crow_Repeater"
-    },
-    {
-      "at_ms": 693205,
-      "node": "Fremont01_Greenwood3",
-      "command": "send WA7DASR1 s2 Fremont01_Greenwood3->WA7DASR1"
-    },
-    {
-      "at_ms": 694224,
-      "node": "Martin_Room",
-      "command": "send First_Hill_Skyline s9 Martin_Room->First_Hill_Skyline"
-    },
-    {
-      "at_ms": 699863,
-      "node": "Martin_Room",
-      "command": "send Fremont01_Greenwood3 s10 Martin_Room->Fremont01_Greenwood3"
-    },
-    {
-      "at_ms": 705372,
-      "node": "dmatestbednode0",
-      "command": "send carol s6 dmatestbednode0->carol"
-    },
-    {
-      "at_ms": 711664,
-      "node": "CrossNet_Room",
-      "command": "send carol s5 CrossNet_Room->carol"
-    },
-    {
-      "at_ms": 724723,
-      "node": "carol",
-      "command": "send bob s3 carol->bob"
-    },
-    {
-      "at_ms": 735912,
-      "node": "Fremont01_Greenwood3",
-      "command": "send alice s3 Fremont01_Greenwood3->alice"
-    },
-    {
-      "at_ms": 777367,
-      "node": "dave",
-      "command": "send Ballard s8 dave->Ballard"
-    },
-    {
-      "at_ms": 778403,
-      "node": "Chucks",
-      "command": "send Crow_Repeater s4 Chucks->Crow_Repeater"
-    },
-    {
-      "at_ms": 783555,
-      "node": "Martin_Room",
-      "command": "send Ballard s11 Martin_Room->Ballard"
-    },
-    {
-      "at_ms": 787699,
-      "node": "bob",
-      "command": "send First_Hill_Skyline s9 bob->First_Hill_Skyline"
-    },
-    {
-      "at_ms": 807480,
-      "node": "dmatestbednode0",
-      "command": "send Chucks s7 dmatestbednode0->Chucks"
-    },
-    {
-      "at_ms": 810338,
-      "node": "dave",
-      "command": "send Crow_Repeater s9 dave->Crow_Repeater"
-    },
-    {
-      "at_ms": 812447,
-      "node": "First_Hill_Skyline",
-      "command": "send 18th__Union s5 First_Hill_Skyline->18th__Union"
-    },
-    {
-      "at_ms": 818400,
-      "node": "dave",
-      "command": "send First_Hill_Skyline s10 dave->First_Hill_Skyline"
-    },
-    {
-      "at_ms": 823879,
-      "node": "Take_His_Face_Off",
-      "command": "send bob s4 Take_His_Face_Off->bob"
-    },
-    {
-      "at_ms": 827143,
-      "node": "dave",
-      "command": "send Fremont01_Greenwood3 s11 dave->Fremont01_Greenwood3"
-    },
-    {
-      "at_ms": 830017,
-      "node": "carol",
-      "command": "send CrossNet_Room s4 carol->CrossNet_Room"
-    },
-    {
-      "at_ms": 855691,
-      "node": "First_Hill_Skyline",
-      "command": "send Take_His_Face_Off s6 First_Hill_Skyline->Take_His_Face_Off"
-    },
-    {
-      "at_ms": 861545,
-      "node": "Martin_Room",
-      "command": "send carol s12 Martin_Room->carol"
-    },
-    {
-      "at_ms": 881302,
-      "node": "Chucks",
-      "command": "send Martin_Room s5 Chucks->Martin_Room"
-    },
-    {
-      "at_ms": 889294,
-      "node": "dave",
-      "command": "send Fremont01_Greenwood3 s12 dave->Fremont01_Greenwood3"
-    },
-    {
-      "at_ms": 889813,
-      "node": "carol",
-      "command": "send WA7DASR1 s5 carol->WA7DASR1"
-    },
-    {
-      "at_ms": 898532,
-      "node": "First_Hill_Skyline",
-      "command": "send bob b7 First_Hill_Skyline->bob"
-    },
-    {
-      "at_ms": 899726,
-      "node": "dave",
-      "command": "send dmatestbednode0 b13 dave->dmatestbednode0"
-    },
-    {
-      "at_ms": 900771,
-      "node": "alice",
-      "command": "send dmatestbednode0 b3 alice->dmatestbednode0"
-    },
-    {
-      "at_ms": 901217,
-      "node": "Take_His_Face_Off",
-      "command": "send alice b5 Take_His_Face_Off->alice"
-    },
-    {
-      "at_ms": 901235,
-      "node": "dave",
-      "command": "send CH_RPTR b14 dave->CH_RPTR"
-    },
-    {
-      "at_ms": 962209,
-      "node": "CH_RPTR",
-      "command": "send 18th__Union s8 CH_RPTR->18th__Union"
-    },
-    {
-      "at_ms": 980289,
-      "node": "carol",
-      "command": "send Chucks s6 carol->Chucks"
-    },
-    {
-      "at_ms": 1015025,
-      "node": "Crow_Repeater",
-      "command": "send carol s5 Crow_Repeater->carol"
-    },
-    {
-      "at_ms": 1041111,
-      "node": "CrossNet_Room",
-      "command": "send carol s6 CrossNet_Room->carol"
-    },
-    {
-      "at_ms": 1059995,
-      "node": "First_Hill_Skyline",
-      "command": "send CrossNet_Room s8 First_Hill_Skyline->CrossNet_Room"
-    },
-    {
-      "at_ms": 1061813,
-      "node": "Fremont01_Greenwood3",
-      "command": "send 18th__Union s4 Fremont01_Greenwood3->18th__Union"
-    },
-    {
-      "at_ms": 1068461,
-      "node": "18th__Union",
-      "command": "send First_Hill_Skyline s3 18th__Union->First_Hill_Skyline"
-    },
-    {
-      "at_ms": 1070865,
-      "node": "alice",
-      "command": "send carol s4 alice->carol"
-    },
-    {
-      "at_ms": 1075990,
-      "node": "18th__Union",
-      "command": "send carol s4 18th__Union->carol"
-    },
-    {
-      "at_ms": 1076594,
-      "node": "bob",
-      "command": "send Chucks s10 bob->Chucks"
-    },
-    {
-      "at_ms": 1081357,
-      "node": "Take_His_Face_Off",
-      "command": "send CH_RPTR s6 Take_His_Face_Off->CH_RPTR"
-    },
-    {
-      "at_ms": 1123562,
-      "node": "dave",
-      "command": "send WA7DASR1 s15 dave->WA7DASR1"
-    },
-    {
-      "at_ms": 1126643,
-      "node": "bob",
-      "command": "send Fremont01_Greenwood3 s11 bob->Fremont01_Greenwood3"
-    },
-    {
-      "at_ms": 1141971,
-      "node": "Crow_Repeater",
-      "command": "send CH_RPTR s6 Crow_Repeater->CH_RPTR"
-    },
-    {
-      "at_ms": 1148040,
-      "node": "dmatestbednode0",
-      "command": "send alice s8 dmatestbednode0->alice"
-    },
-    {
-      "at_ms": 1153539,
-      "node": "bob",
-      "command": "send CrossNet_Room s12 bob->CrossNet_Room"
-    },
-    {
-      "at_ms": 1185078,
-      "node": "alice",
-      "command": "send dmatestbednode0 s5 alice->dmatestbednode0"
-    },
-    {
-      "at_ms": 1238944,
-      "node": "WA7DASR1",
-      "command": "send dmatestbednode0 s6 WA7DASR1->dmatestbednode0"
-    },
-    {
-      "at_ms": 1247058,
-      "node": "First_Hill_Skyline",
-      "command": "send bob s9 First_Hill_Skyline->bob"
-    },
-    {
-      "at_ms": 1259730,
-      "node": "bob",
-      "command": "send Ballard s13 bob->Ballard"
-    },
-    {
-      "at_ms": 1261411,
-      "node": "CrossNet_Room",
-      "command": "send dave s7 CrossNet_Room->dave"
-    },
-    {
-      "at_ms": 1264930,
+      "at_ms": 704402,
       "node": "Ballard",
       "command": "send carol s7 Ballard->carol"
     },
     {
-      "at_ms": 1299574,
+      "at_ms": 712865,
+      "node": "CH_RPTR",
+      "command": "send carol s6 CH_RPTR->carol"
+    },
+    {
+      "at_ms": 719264,
+      "node": "Martin_Room",
+      "command": "send Fremont01_Greenwood3 s8 Martin_Room->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 734617,
+      "node": "bob",
+      "command": "send dmatestbednode0 s9 bob->dmatestbednode0"
+    },
+    {
+      "at_ms": 751093,
+      "node": "Fremont01_Greenwood3",
+      "command": "send CH_RPTR s1 Fremont01_Greenwood3->CH_RPTR"
+    },
+    {
+      "at_ms": 753205,
+      "node": "WA7DASR1",
+      "command": "send Martin_Room s5 WA7DASR1->Martin_Room"
+    },
+    {
+      "at_ms": 754224,
+      "node": "Take_His_Face_Off",
+      "command": "send Crow_Repeater s3 Take_His_Face_Off->Crow_Repeater"
+    },
+    {
+      "at_ms": 759863,
+      "node": "Fremont01_Greenwood3",
+      "command": "send WA7DASR1 s2 Fremont01_Greenwood3->WA7DASR1"
+    },
+    {
+      "at_ms": 765372,
+      "node": "Martin_Room",
+      "command": "send First_Hill_Skyline s9 Martin_Room->First_Hill_Skyline"
+    },
+    {
+      "at_ms": 771664,
+      "node": "Martin_Room",
+      "command": "send Fremont01_Greenwood3 s10 Martin_Room->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 784723,
+      "node": "dmatestbednode0",
+      "command": "send carol s6 dmatestbednode0->carol"
+    },
+    {
+      "at_ms": 795912,
+      "node": "CrossNet_Room",
+      "command": "send carol s5 CrossNet_Room->carol"
+    },
+    {
+      "at_ms": 837367,
+      "node": "carol",
+      "command": "send bob s3 carol->bob"
+    },
+    {
+      "at_ms": 838403,
+      "node": "Fremont01_Greenwood3",
+      "command": "send alice s3 Fremont01_Greenwood3->alice"
+    },
+    {
+      "at_ms": 843555,
+      "node": "dave",
+      "command": "send Ballard s8 dave->Ballard"
+    },
+    {
+      "at_ms": 847699,
+      "node": "Chucks",
+      "command": "send Crow_Repeater s4 Chucks->Crow_Repeater"
+    },
+    {
+      "at_ms": 867480,
+      "node": "Martin_Room",
+      "command": "send Ballard s11 Martin_Room->Ballard"
+    },
+    {
+      "at_ms": 870338,
+      "node": "bob",
+      "command": "send First_Hill_Skyline s10 bob->First_Hill_Skyline"
+    },
+    {
+      "at_ms": 872447,
+      "node": "dmatestbednode0",
+      "command": "send Chucks s7 dmatestbednode0->Chucks"
+    },
+    {
+      "at_ms": 878400,
+      "node": "dave",
+      "command": "send Crow_Repeater s9 dave->Crow_Repeater"
+    },
+    {
+      "at_ms": 883879,
+      "node": "First_Hill_Skyline",
+      "command": "send 18th__Union s5 First_Hill_Skyline->18th__Union"
+    },
+    {
+      "at_ms": 887143,
+      "node": "dave",
+      "command": "send First_Hill_Skyline s10 dave->First_Hill_Skyline"
+    },
+    {
+      "at_ms": 890017,
+      "node": "Take_His_Face_Off",
+      "command": "send bob s4 Take_His_Face_Off->bob"
+    },
+    {
+      "at_ms": 899739,
+      "node": "dave",
+      "command": "send Fremont01_Greenwood3 b11 dave->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 900725,
+      "node": "carol",
+      "command": "send CrossNet_Room b4 carol->CrossNet_Room"
+    },
+    {
+      "at_ms": 901005,
+      "node": "First_Hill_Skyline",
+      "command": "send Take_His_Face_Off b6 First_Hill_Skyline->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 901178,
+      "node": "Martin_Room",
+      "command": "send carol b12 Martin_Room->carol"
+    },
+    {
+      "at_ms": 901381,
+      "node": "Chucks",
+      "command": "send Martin_Room b5 Chucks->Martin_Room"
+    },
+    {
+      "at_ms": 915691,
+      "node": "dave",
+      "command": "send Fremont01_Greenwood3 s12 dave->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 921545,
+      "node": "carol",
+      "command": "send WA7DASR1 s5 carol->WA7DASR1"
+    },
+    {
+      "at_ms": 941302,
+      "node": "First_Hill_Skyline",
+      "command": "send bob s7 First_Hill_Skyline->bob"
+    },
+    {
+      "at_ms": 949294,
+      "node": "dave",
+      "command": "send dmatestbednode0 s13 dave->dmatestbednode0"
+    },
+    {
+      "at_ms": 949813,
+      "node": "alice",
+      "command": "send dmatestbednode0 s4 alice->dmatestbednode0"
+    },
+    {
+      "at_ms": 1022209,
+      "node": "Take_His_Face_Off",
+      "command": "send alice s5 Take_His_Face_Off->alice"
+    },
+    {
+      "at_ms": 1040289,
+      "node": "dave",
+      "command": "send CH_RPTR s14 dave->CH_RPTR"
+    },
+    {
+      "at_ms": 1075025,
+      "node": "CH_RPTR",
+      "command": "send 18th__Union s7 CH_RPTR->18th__Union"
+    },
+    {
+      "at_ms": 1101111,
+      "node": "carol",
+      "command": "send Chucks s6 carol->Chucks"
+    },
+    {
+      "at_ms": 1119995,
+      "node": "Crow_Repeater",
+      "command": "send carol s5 Crow_Repeater->carol"
+    },
+    {
+      "at_ms": 1121813,
+      "node": "CrossNet_Room",
+      "command": "send carol s6 CrossNet_Room->carol"
+    },
+    {
+      "at_ms": 1128461,
+      "node": "First_Hill_Skyline",
+      "command": "send CrossNet_Room s8 First_Hill_Skyline->CrossNet_Room"
+    },
+    {
+      "at_ms": 1130865,
+      "node": "Fremont01_Greenwood3",
+      "command": "send 18th__Union s4 Fremont01_Greenwood3->18th__Union"
+    },
+    {
+      "at_ms": 1135990,
+      "node": "18th__Union",
+      "command": "send First_Hill_Skyline s3 18th__Union->First_Hill_Skyline"
+    },
+    {
+      "at_ms": 1136594,
+      "node": "alice",
+      "command": "send carol s5 alice->carol"
+    },
+    {
+      "at_ms": 1141357,
+      "node": "18th__Union",
+      "command": "send carol s4 18th__Union->carol"
+    },
+    {
+      "at_ms": 1183562,
+      "node": "bob",
+      "command": "send Chucks s11 bob->Chucks"
+    },
+    {
+      "at_ms": 1186643,
+      "node": "Take_His_Face_Off",
+      "command": "send CH_RPTR s6 Take_His_Face_Off->CH_RPTR"
+    },
+    {
+      "at_ms": 1201971,
+      "node": "dave",
+      "command": "send WA7DASR1 s15 dave->WA7DASR1"
+    },
+    {
+      "at_ms": 1208040,
+      "node": "bob",
+      "command": "send Fremont01_Greenwood3 s12 bob->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 1213539,
+      "node": "Crow_Repeater",
+      "command": "send CH_RPTR s6 Crow_Repeater->CH_RPTR"
+    },
+    {
+      "at_ms": 1245078,
+      "node": "dmatestbednode0",
+      "command": "send alice s8 dmatestbednode0->alice"
+    },
+    {
+      "at_ms": 1298944,
+      "node": "bob",
+      "command": "send CrossNet_Room s13 bob->CrossNet_Room"
+    },
+    {
+      "at_ms": 1307058,
+      "node": "alice",
+      "command": "send dmatestbednode0 s6 alice->dmatestbednode0"
+    },
+    {
+      "at_ms": 1319730,
+      "node": "WA7DASR1",
+      "command": "send dmatestbednode0 s6 WA7DASR1->dmatestbednode0"
+    },
+    {
+      "at_ms": 1321411,
+      "node": "First_Hill_Skyline",
+      "command": "send bob s9 First_Hill_Skyline->bob"
+    },
+    {
+      "at_ms": 1324930,
+      "node": "bob",
+      "command": "send Ballard s14 bob->Ballard"
+    },
+    {
+      "at_ms": 1359574,
+      "node": "CrossNet_Room",
+      "command": "send dave s7 CrossNet_Room->dave"
+    },
+    {
+      "at_ms": 1368229,
+      "node": "Ballard",
+      "command": "send carol s8 Ballard->carol"
+    },
+    {
+      "at_ms": 1376042,
       "node": "18th__Union",
       "command": "send First_Hill_Skyline s5 18th__Union->First_Hill_Skyline"
     },
     {
-      "at_ms": 1308229,
+      "at_ms": 1389824,
       "node": "WA7DASR1",
       "command": "send Crow_Repeater s7 WA7DASR1->Crow_Repeater"
     },
     {
-      "at_ms": 1316042,
+      "at_ms": 1390412,
       "node": "carol",
       "command": "send 18th__Union s7 carol->18th__Union"
     },
     {
-      "at_ms": 1329824,
+      "at_ms": 1399186,
       "node": "Fremont01_Greenwood3",
       "command": "send Ballard s5 Fremont01_Greenwood3->Ballard"
     },
     {
-      "at_ms": 1330412,
+      "at_ms": 1406174,
       "node": "Crow_Repeater",
       "command": "send alice s7 Crow_Repeater->alice"
     },
     {
-      "at_ms": 1339186,
+      "at_ms": 1425328,
       "node": "Fremont01_Greenwood3",
       "command": "send bob s6 Fremont01_Greenwood3->bob"
     },
     {
-      "at_ms": 1346174,
+      "at_ms": 1427041,
       "node": "bob",
-      "command": "send alice s14 bob->alice"
+      "command": "send alice s15 bob->alice"
     },
     {
-      "at_ms": 1365328,
+      "at_ms": 1459426,
       "node": "WA7DASR1",
       "command": "send CrossNet_Room s8 WA7DASR1->CrossNet_Room"
     },
     {
-      "at_ms": 1367041,
+      "at_ms": 1460261,
       "node": "Martin_Room",
       "command": "send carol s13 Martin_Room->carol"
     },
     {
-      "at_ms": 1399426,
+      "at_ms": 1462316,
       "node": "First_Hill_Skyline",
       "command": "send dave s10 First_Hill_Skyline->dave"
     },
     {
-      "at_ms": 1400261,
+      "at_ms": 1471355,
       "node": "CrossNet_Room",
       "command": "send First_Hill_Skyline s8 CrossNet_Room->First_Hill_Skyline"
     },
     {
-      "at_ms": 1402316,
+      "at_ms": 1482600,
       "node": "Ballard",
-      "command": "send Crow_Repeater s8 Ballard->Crow_Repeater"
+      "command": "send Crow_Repeater s9 Ballard->Crow_Repeater"
     },
     {
-      "at_ms": 1411355,
+      "at_ms": 1485281,
       "node": "Chucks",
       "command": "send carol s6 Chucks->carol"
     },
     {
-      "at_ms": 1422600,
+      "at_ms": 1486558,
       "node": "Take_His_Face_Off",
       "command": "send alice s7 Take_His_Face_Off->alice"
     },
     {
-      "at_ms": 1425281,
+      "at_ms": 1498532,
       "node": "18th__Union",
-      "command": "send Martin_Room s6 18th__Union->Martin_Room"
+      "command": "send Martin_Room b6 18th__Union->Martin_Room"
     },
     {
-      "at_ms": 1426558,
+      "at_ms": 1499726,
       "node": "CH_RPTR",
-      "command": "send Martin_Room s9 CH_RPTR->Martin_Room"
+      "command": "send Martin_Room b8 CH_RPTR->Martin_Room"
     },
     {
-      "at_ms": 1448656,
+      "at_ms": 1500666,
       "node": "carol",
-      "command": "send Crow_Repeater s8 carol->Crow_Repeater"
+      "command": "send Crow_Repeater b8 carol->Crow_Repeater"
     },
     {
-      "at_ms": 1451482,
+      "at_ms": 1500771,
       "node": "carol",
-      "command": "send Martin_Room s9 carol->Martin_Room"
+      "command": "send Martin_Room b9 carol->Martin_Room"
     },
     {
-      "at_ms": 1460508,
+      "at_ms": 1501235,
       "node": "bob",
-      "command": "send Ballard s15 bob->Ballard"
+      "command": "send Ballard b16 bob->Ballard"
     },
     {
-      "at_ms": 1470167,
+      "at_ms": 1508656,
       "node": "dave",
       "command": "send Fremont01_Greenwood3 s16 dave->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 1475600,
+      "at_ms": 1511482,
       "node": "Chucks",
       "command": "send bob s7 Chucks->bob"
     },
     {
-      "at_ms": 1484362,
+      "at_ms": 1520508,
       "node": "dmatestbednode0",
       "command": "send Fremont01_Greenwood3 s9 dmatestbednode0->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 1491759,
+      "at_ms": 1530167,
       "node": "18th__Union",
       "command": "send CH_RPTR s7 18th__Union->CH_RPTR"
     },
     {
-      "at_ms": 1498924,
+      "at_ms": 1535600,
       "node": "dave",
-      "command": "send alice b17 dave->alice"
+      "command": "send alice s17 dave->alice"
     },
     {
-      "at_ms": 1498938,
+      "at_ms": 1544362,
       "node": "carol",
-      "command": "send Fremont01_Greenwood3 b10 carol->Fremont01_Greenwood3"
+      "command": "send Fremont01_Greenwood3 s10 carol->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 1498972,
+      "at_ms": 1551759,
       "node": "Crow_Repeater",
-      "command": "send Fremont01_Greenwood3 b8 Crow_Repeater->Fremont01_Greenwood3"
+      "command": "send Fremont01_Greenwood3 s8 Crow_Repeater->Fremont01_Greenwood3"
     },
     {
-      "at_ms": 1499050,
+      "at_ms": 1579047,
       "node": "Martin_Room",
-      "command": "send Crow_Repeater b14 Martin_Room->Crow_Repeater"
+      "command": "send Crow_Repeater s14 Martin_Room->Crow_Repeater"
     },
     {
-      "at_ms": 1499583,
+      "at_ms": 1581331,
       "node": "Fremont01_Greenwood3",
-      "command": "send CrossNet_Room b7 Fremont01_Greenwood3->CrossNet_Room"
+      "command": "send CrossNet_Room s7 Fremont01_Greenwood3->CrossNet_Room"
     },
     {
-      "at_ms": 1519047,
+      "at_ms": 1593925,
       "node": "Chucks",
       "command": "send Ballard s8 Chucks->Ballard"
     },
     {
-      "at_ms": 1521331,
+      "at_ms": 1596652,
       "node": "Crow_Repeater",
       "command": "send Ballard s9 Crow_Repeater->Ballard"
     },
     {
-      "at_ms": 1533925,
+      "at_ms": 1601690,
       "node": "dmatestbednode0",
       "command": "send CH_RPTR s10 dmatestbednode0->CH_RPTR"
     },
     {
-      "at_ms": 1536652,
+      "at_ms": 1612827,
       "node": "dave",
       "command": "send CrossNet_Room s18 dave->CrossNet_Room"
     },
     {
-      "at_ms": 1541690,
+      "at_ms": 1616393,
       "node": "Martin_Room",
       "command": "send WA7DASR1 s15 Martin_Room->WA7DASR1"
     },
     {
-      "at_ms": 1552827,
+      "at_ms": 1620193,
       "node": "alice",
-      "command": "send dave s6 alice->dave"
+      "command": "send dave s7 alice->dave"
     },
     {
-      "at_ms": 1556393,
+      "at_ms": 1634130,
       "node": "bob",
-      "command": "send Crow_Repeater s16 bob->Crow_Repeater"
+      "command": "send Crow_Repeater s17 bob->Crow_Repeater"
     },
     {
-      "at_ms": 1560193,
+      "at_ms": 1634883,
       "node": "alice",
-      "command": "send bob s7 alice->bob"
+      "command": "send bob s8 alice->bob"
     },
     {
-      "at_ms": 1574130,
+      "at_ms": 1641013,
       "node": "CrossNet_Room",
       "command": "send 18th__Union s9 CrossNet_Room->18th__Union"
     },
     {
-      "at_ms": 1574883,
+      "at_ms": 1705736,
       "node": "Martin_Room",
       "command": "send CrossNet_Room s16 Martin_Room->CrossNet_Room"
     },
     {
-      "at_ms": 1581013,
+      "at_ms": 1761194,
       "node": "CH_RPTR",
-      "command": "send alice s10 CH_RPTR->alice"
+      "command": "send alice s9 CH_RPTR->alice"
     },
     {
-      "at_ms": 1645736,
+      "at_ms": 1761954,
       "node": "Fremont01_Greenwood3",
       "command": "send Ballard s8 Fremont01_Greenwood3->Ballard"
     },
     {
-      "at_ms": 1701194,
+      "at_ms": 1764351,
       "node": "Take_His_Face_Off",
       "command": "send CrossNet_Room s8 Take_His_Face_Off->CrossNet_Room"
     },
     {
-      "at_ms": 1701954,
+      "at_ms": 1767432,
       "node": "Fremont01_Greenwood3",
       "command": "send Crow_Repeater s9 Fremont01_Greenwood3->Crow_Repeater"
     },
     {
-      "at_ms": 1704351,
+      "at_ms": 1794501,
       "node": "alice",
-      "command": "send CrossNet_Room s8 alice->CrossNet_Room"
-    },
-    {
-      "at_ms": 1707432,
-      "node": "Fremont01_Greenwood3",
-      "command": "send Ballard s10 Fremont01_Greenwood3->Ballard"
-    },
-    {
-      "at_ms": 1734501,
-      "node": "First_Hill_Skyline",
-      "command": "send Martin_Room s11 First_Hill_Skyline->Martin_Room"
-    },
-    {
-      "at_ms": 1755775,
-      "node": "alice",
-      "command": "send CH_RPTR s9 alice->CH_RPTR"
-    },
-    {
-      "at_ms": 1776917,
-      "node": "carol",
-      "command": "send Ballard s11 carol->Ballard"
-    },
-    {
-      "at_ms": 1781529,
-      "node": "Ballard",
-      "command": "send Take_His_Face_Off s9 Ballard->Take_His_Face_Off"
-    },
-    {
-      "at_ms": 1783245,
-      "node": "Take_His_Face_Off",
-      "command": "send WA7DASR1 s9 Take_His_Face_Off->WA7DASR1"
+      "command": "send CrossNet_Room s9 alice->CrossNet_Room"
     }
   ],
   "expect": [],
