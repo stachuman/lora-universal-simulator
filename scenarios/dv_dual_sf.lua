@@ -815,22 +815,51 @@ end
 
 -- NACK — 4 bytes:
 --   byte 0 : tag 'N'
---   byte 1 : reserved (4 hi nibble) | msg_id (4 lo nibble)
---   byte 2-3 : busy_for_ms (16-bit, lo first)
-local function pack_nack(msg_id, busy_for_ms)
-  if busy_for_ms < 0 then busy_for_ms = 0 end
-  if busy_for_ms > 65535 then busy_for_ms = 65535 end
-  return "N" .. string.char(msg_id & 0xf)
-              .. string.char(busy_for_ms % 256)
-              .. string.char(math.floor(busy_for_ms / 256) % 256)
+--   byte 1 : reason (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 2-3 : payload (interpretation depends on reason)
+--
+-- Reasons:
+--   NACK_REASON_BUSY_RX (0): legacy pending_rx-busy signal.
+--     payload = busy_for_ms (uint16 LE) — how long the receiver expects
+--     to remain locked to its current pending_rx flight.
+--   NACK_REASON_BUDGET (1): duty-cycle budget is exhausted at the
+--     receiver. Don't keep retrying me — route around.
+--     payload byte 0 = budget_tier (0..3), payload byte 1 = reserved.
+--
+-- Reason 0 is the wire encoding the legacy code used (writing 0 in the
+-- high nibble of byte 1 implicitly), so old receivers that ignore the
+-- high nibble see exactly what they saw before. New receivers MUST
+-- read reason to interpret payload correctly.
+local NACK_REASON_BUSY_RX = 0
+local NACK_REASON_BUDGET  = 1
+
+local function pack_nack(msg_id, reason, payload_lo, payload_hi)
+  reason = reason or NACK_REASON_BUSY_RX
+  payload_lo = payload_lo or 0
+  payload_hi = payload_hi or 0
+  if payload_lo < 0 then payload_lo = 0 elseif payload_lo > 255 then payload_lo = 255 end
+  if payload_hi < 0 then payload_hi = 0 elseif payload_hi > 255 then payload_hi = 255 end
+  local byte1 = ((reason & 0xf) << 4) | (msg_id & 0xf)
+  return "N" .. string.char(byte1)
+              .. string.char(payload_lo)
+              .. string.char(payload_hi)
 end
 
 local function parse_nack(frame)
   if #frame < 4 or frame:sub(1,1) ~= "N" then return nil end
-  return {
-    msg_id      = frame:byte(2) & 0xf,
-    busy_for_ms = frame:byte(3) + frame:byte(4) * 256,
+  local b1 = frame:byte(2)
+  local reason = (b1 >> 4) & 0xf
+  local p_lo, p_hi = frame:byte(3), frame:byte(4)
+  local r = {
+    msg_id      = b1 & 0xf,
+    reason      = reason,
+    payload_lo  = p_lo,
+    payload_hi  = p_hi,
+    -- Convenience aliases — interpretations per reason
+    busy_for_ms = (reason == NACK_REASON_BUSY_RX) and (p_lo + p_hi * 256) or nil,
+    budget_tier = (reason == NACK_REASON_BUDGET)  and p_lo                or nil,
   }
+  return r
 end
 
 -- Q — RREQ-route, 4 bytes:
@@ -1076,6 +1105,32 @@ end
 -- instead of waiting for the round-trip and retrying via on_radio_busy.
 -- Pre-check uses the same data the runtime uses, queried via the
 -- self:airtime_used_ms / self:oldest_tx_end_ms primitives — composes for free.
+-- Budget tier — coarse 4-level summary of remaining duty-cycle budget.
+-- Used both locally (gate own BCN emission) and at the wire (NACK reason
+-- = budget_low + tier so senders can deprioritize this neighbour).
+-- Returns one of:
+--   0 = HEALTHY       (>=50% budget remaining; normal operation)
+--   1 = STRAINED      (20-50% remaining; emit BCN sparingly)
+--   2 = CRITICAL      (5-20% remaining; refuse forwards via NACK)
+--   3 = EXHAUSTED     (<5% remaining; duty_cycle_blocked is imminent)
+local BUDGET_TIER_HEALTHY   = 0
+local BUDGET_TIER_STRAINED  = 1
+local BUDGET_TIER_CRITICAL  = 2
+local BUDGET_TIER_EXHAUSTED = 3
+
+local function compute_budget_tier(self)
+  if not self.duty_cycle or self.duty_cycle <= 0
+     or not self.duty_cycle_budget_ms or self.duty_cycle_budget_ms <= 0 then
+    return BUDGET_TIER_HEALTHY    -- duty-cycle disabled
+  end
+  local used = self:airtime_used_ms(self.duty_cycle_window_ms)
+  local pct_used = 100.0 * used / self.duty_cycle_budget_ms
+  if pct_used >= self.budget_exhausted_pct then return BUDGET_TIER_EXHAUSTED end
+  if pct_used >= self.budget_critical_pct  then return BUDGET_TIER_CRITICAL  end
+  if pct_used >= self.budget_strained_pct  then return BUDGET_TIER_STRAINED  end
+  return BUDGET_TIER_HEALTHY
+end
+
 local function check_duty_cycle(self, this_airtime_ms)
   if not self.duty_cycle or self.duty_cycle <= 0
      or not self.duty_cycle_window_ms or self.duty_cycle_window_ms <= 0 then
@@ -2338,6 +2393,23 @@ local function send_beacon_page(self, kind)
     self:log(string.format("beacon_tx skipped (busy in data exchange) kind=%s", kind))
     return false
   end
+  -- Budget-aware skip: when our duty-cycle tier is CRITICAL or EXHAUSTED,
+  -- a BCN is luxury — we should preserve every remaining ms of budget
+  -- for forwards that have already arrived in our queue. Triggered BCNs
+  -- after rt mutations are also gated so the protocol degrades gracefully
+  -- as the duty-cycle ceiling approaches. Neighbours don't NEED our BCN
+  -- to discover us — passive last_seen refresh from any received frame
+  -- (RTS/CTS/ACK we send) keeps us in their tables.
+  if compute_budget_tier(self) >= BUDGET_TIER_CRITICAL then
+    self:emit("beacon_skipped_budget", {
+      tier = compute_budget_tier(self),
+      kind = kind,
+    })
+    self:log(string.format(
+      "beacon_tx skipped (budget tier=%d) kind=%s",
+      compute_budget_tier(self), kind))
+    return false
+  end
   local frame, new_offset, diff = pack_beacon(self,
                                               self.beacon_max_entries,
                                               self.beacon_offset)
@@ -2713,6 +2785,29 @@ function on_init(self, config)
   self.duty_cycle           = config.duty_cycle           or config._sim_duty_cycle           or 0.01
   self.duty_cycle_window_ms = config.duty_cycle_window_ms or config._sim_duty_cycle_window_ms or 3600000
   self.duty_cycle_budget_ms = math.floor(self.duty_cycle * self.duty_cycle_window_ms)
+  -- Budget-tier thresholds. compute_budget_tier(self) returns one of
+  -- BUDGET_TIER_HEALTHY (0), STRAINED (1), CRITICAL (2), EXHAUSTED (3)
+  -- based on (airtime_used / budget). The protocol uses the tier in
+  -- three places:
+  --   • compute_budget_tier called at RTS-RX → if >= CRITICAL emit a
+  --     budget-reason NACK back to sender instead of CTS — sender
+  --     learns the saturated state from the unicast reply rather than
+  --     waiting for a BCN advertisement that costs more airtime.
+  --   • compute_budget_tier called at our own beacon_fire → skip the
+  --     emit when >= CRITICAL (preserve remaining budget for forwards
+  --     that already arrived in our queue).
+  --   • sender-side: on receiving a budget-NACK, mark the responder
+  --     blind for a tier-proportional window, naturally rerouting via
+  --     the existing classify_blind machinery.
+  self.budget_strained_pct  = config.budget_strained_pct  or 50    -- ≤50% used = HEALTHY ; >50% = STRAINED
+  self.budget_critical_pct  = config.budget_critical_pct  or 80    -- >80% used = CRITICAL
+  self.budget_exhausted_pct = config.budget_exhausted_pct or 95    -- >95% used = EXHAUSTED
+  -- Sender-side: when we receive a budget NACK, mark the peer blind
+  -- for this duration (per tier). After it expires we'll try again;
+  -- if the peer is still saturated it'll NACK us again.
+  self.budget_blind_strained_ms  = config.budget_blind_strained_ms  or  60000   -- 1 min
+  self.budget_blind_critical_ms  = config.budget_blind_critical_ms  or 180000   -- 3 min
+  self.budget_blind_exhausted_ms = config.budget_blind_exhausted_ms or 300000   -- 5 min
   -- Inter-frame gap between CTS RX and DATA TX (originator side). The
   -- simulator's set_rx_sf is instantaneous, but real hardware needs a
   -- handful of µs to settle on the new SF — pad with 5ms by default.
@@ -3251,7 +3346,8 @@ function on_recv(self, frame, meta)
       local busy_for = self.pending_rx.set_at_ms + expiry - now
       if busy_for < 0 then busy_for = 0 end
       if busy_for > 65535 then busy_for = 65535 end
-      local nack = pack_nack(r.msg_id, busy_for)
+      local nack = pack_nack(r.msg_id, NACK_REASON_BUSY_RX,
+        busy_for % 256, math.floor(busy_for / 256) % 256)
       self:emit("nack_tx", {
         origin = r.origin,    -- the inbound RTS's flight, not our pending_rx's
         to = r.src, msg_id = r.msg_id, busy_for_ms = busy_for, reason = "pending_rx",
@@ -3279,6 +3375,36 @@ function on_recv(self, frame, meta)
       self:emit("rts_drop_pending_tx", {
         origin = r.origin, from = r.src, msg_id = r.msg_id,
         our_pending_msg_id = self.pending_tx.msg_id,
+      })
+      return
+    end
+
+    -- Budget-aware NACK: if our duty-cycle budget is tier CRITICAL or
+    -- EXHAUSTED, we likely can't carry this flight to completion (CTS
+    -- + DATA-RX has no cost but ACK does, and we'd consume more budget
+    -- on subsequent forwards if we accept). Reply with a budget NACK
+    -- so the sender immediately reroutes via the existing classify_blind
+    -- machinery instead of doing a full RTS-CTS-DATA-ACK cycle that
+    -- stalls when we get duty_cycle_blocked partway through.
+    --
+    -- We still pay the NACK airtime (a few ms at SF8) but save the
+    -- much larger CTS+ACK round-trip. Net positive when the alternative
+    -- is a stalled flight that the sender must rts_timeout out of.
+    local my_tier = compute_budget_tier(self)
+    if my_tier >= BUDGET_TIER_CRITICAL then
+      local nack = pack_nack(r.msg_id, NACK_REASON_BUDGET, my_tier, 0)
+      self:emit("nack_tx", {
+        origin = r.origin, to = r.src, msg_id = r.msg_id,
+        reason = "budget_low", tier = my_tier,
+      })
+      self:log(string.format(
+        "nack_tx -> %s msg_id=%d reason=budget_low tier=%d",
+        name_of(self, r.src), r.msg_id, my_tier))
+      tx_initiating(self, nack, {
+        sf    = self.routing_sf,
+        label = "NACK",
+        info  = string.format("to=%s msg=%d reason=budget tier=%d",
+          name_of(self, r.src), r.msg_id, my_tier),
       })
       return
     end
@@ -3503,6 +3629,73 @@ function on_recv(self, frame, meta)
       self.rts_timeout_handle = nil
     end
 
+    -- Budget NACK (new reason). The peer is duty-cycle-saturated; mark
+    -- them blind for a tier-proportional window so classify_blind
+    -- naturally reroutes the next attempt via the cascade alts. No
+    -- wait-and-retry — budget recovery is on the order of minutes, not
+    -- the NACK_WAIT_THRESHOLD's 2 seconds.
+    if n.reason == NACK_REASON_BUDGET then
+      local tier = n.budget_tier or BUDGET_TIER_CRITICAL
+      local blind_ms = self.budget_blind_critical_ms
+      if tier >= BUDGET_TIER_EXHAUSTED then
+        blind_ms = self.budget_blind_exhausted_ms
+      elseif tier <= BUDGET_TIER_STRAINED then
+        blind_ms = self.budget_blind_strained_ms
+      end
+      local from_id = self.pending_tx.next
+      local end_ms  = self:now() + blind_ms
+      local prev    = self.blind_until[from_id]
+      if prev == nil or end_ms > prev then
+        self.blind_until[from_id] = end_ms
+        self:emit("blind_observed", {
+          node = from_id, until_ms = end_ms, reason = "nack_budget", tier = tier,
+        })
+      end
+      self:emit("nack_rx", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        origin_seq = self.pending_tx.origin_seq,
+        from = self.pending_tx.next, msg_id = n.msg_id,
+        reason = "budget_low", tier = tier, blind_ms = blind_ms,
+      })
+      self:log(string.format(
+        "nack_rx <- %s msg_id=%d reason=budget_low tier=%d -> blind for %dms",
+        name_of(self, self.pending_tx.next), n.msg_id, tier, blind_ms))
+      -- Push pending_tx back to the queue via the existing cascade-requeue
+      -- helper. That gives us the full cap suite (cascade_requeue_max,
+      -- cascade_requeue_total_max_ms wallclock, load-adaptive shrink) so
+      -- a message ping-ponging between saturated peers can't live forever.
+      -- When the helper returns false (caps exhausted), fall through to a
+      -- final drop with the existing path_cascade_exhausted emit pair.
+      if try_cascade_requeue(self, "budget_low") then
+        self.pending_tx = nil
+        become_free(self)
+        return
+      end
+      -- Caps hit — true drop.
+      self:emit("path_cascade_exhausted", {
+        origin     = self.pending_tx.origin,
+        payload    = self.pending_tx.user_text,
+        origin_seq = self.pending_tx.origin_seq,
+        dst        = self.pending_tx.dst, msg_id = self.pending_tx.msg_id,
+        tried      = {}, trigger = "budget_low",
+      })
+      self:emit("rts_giveup", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        origin_seq = self.pending_tx.origin_seq,
+        dst    = self.pending_tx.dst,
+        next   = self.pending_tx.next, msg_id = self.pending_tx.msg_id,
+      })
+      self:log(string.format(
+        "rts_giveup msg=%d dst=%s (budget_low caps hit)",
+        self.pending_tx.msg_id, name_of(self, self.pending_tx.dst)))
+      self.pending_tx = nil
+      become_free(self)
+      return
+    end
+
+    -- Legacy busy_rx NACK path (reason 0).
     self:emit("nack_rx", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,

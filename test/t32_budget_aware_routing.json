@@ -1,0 +1,45 @@
+{
+  "_name": "t32_budget_aware_routing",
+  "_desc": "Budget-aware NACK + reroute. alice has two next-hops to dave: hub_busy (preferred but with a tiny duty-cycle budget of 0.05% = 1.8s/hour at default window) and hub_idle (alternate with normal 1% budget). hub_busy is also configured to start the run with most of its budget already consumed via a separate beacon-heavy load (we approximate by setting budget_strained_pct=10 and budget_critical_pct=15, so it crosses into CRITICAL immediately on its first BCN). When alice tries to send to dave via hub_busy, hub_busy emits nack_tx with reason=budget_low; alice marks hub_busy as blind and reroutes via hub_idle. Verifies: (1) at least one nack_tx with reason=budget_low fires from hub_busy; (2) alice's flight delivers to dave through hub_idle; (3) blind_observed fires at alice with reason=nack_budget.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5, "duty_cycle": 0.01, "duty_cycle_window_ms": 3600000 }
+  },
+  "nodes": [
+    { "name": "alice",    "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "hub_busy", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0,
+                  "budget_strained_pct":  0.1,
+                  "budget_critical_pct":  0.3,
+                  "budget_exhausted_pct": 95 } },
+    { "name": "hub_idle", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "dave",     "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice",    "to": "hub_busy", "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "alice",    "to": "hub_idle", "snr":  8.0, "rssi": -84.0, "bidir": true },
+      { "from": "hub_busy", "to": "dave",     "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "hub_idle", "to": "dave",     "snr":  8.0, "rssi": -84.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 15000, "node": "alice", "command": "send dave msg1 budget-test" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "hub_busy", "emit_type": "nack_tx",        "value": "" },
+    { "type": "script_emit_contains", "node": "alice",    "emit_type": "blind_observed", "value": "" },
+    { "type": "script_emit_contains", "node": "dave",     "emit_type": "delivered",      "value": "msg1" }
+  ]
+}
