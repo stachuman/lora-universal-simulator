@@ -400,18 +400,21 @@
 
     const showLabels = document.getElementById('map-labels').checked;
 
-    // Edges
+    // Edges — skip pairs whose SNR isn't finite (SRTM miss / below
+    // cutoff / no preview yet for that pair); they shouldn't render
+    // as ghost lines on the map.
     if (snrMatrix && snrMatrix.length === nodes.length) {
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           if (nodes[i].lat == null || nodes[j].lat == null) continue;
           const snr = snrMatrix[i][j];
+          if (!Number.isFinite(snr)) continue;
           const line = L.polyline(
             [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
             { color: snrColor(snr), weight: 1.5, opacity: 0.65, interactive: true }
           );
-          const s = (snr != null && Number.isFinite(snr)) ? snr.toFixed(1) + ' dB' : 'N/A';
-          line.bindTooltip(nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + s,
+          line.bindTooltip(
+            nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snr.toFixed(1) + ' dB',
             { sticky: true, className: 'te-label' });
           edgeGroup.addLayer(line);
         }

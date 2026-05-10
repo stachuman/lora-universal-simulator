@@ -459,19 +459,21 @@
     markerGroup.clearLayers();
     edgeGroup.clearLayers();
 
-    // Draw edges (SNR preview)
+    // Draw edges (SNR preview). Skip pairs whose SNR isn't finite —
+    // SRTM-miss / below-cutoff entries (-Infinity) shouldn't render
+    // as ghost lines on the map.
     if (snrMatrix && snrMatrix.length === nodes.length) {
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const snr = snrMatrix[i][j];
+          if (!Number.isFinite(snr)) continue;
           const color = snrColor(snr);
           const line = L.polyline(
             [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
             { color, weight: 1.5, opacity: 0.7, interactive: true }
           );
-          const snrStr = (snr != null && Number.isFinite(snr)) ? snr.toFixed(1) + ' dB' : 'N/A';
           line.bindTooltip(
-            nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snrStr,
+            nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snr.toFixed(1) + ' dB',
             { sticky: true, className: 'tc-label' }
           );
           edgeGroup.addLayer(line);
