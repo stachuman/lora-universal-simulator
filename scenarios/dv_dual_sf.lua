@@ -5,7 +5,7 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [network_id(4)|reserved(4)](1), src(1), n(1), entries × n × {dest(1), next(1), score_i8(1), hops(1)}  →  4+4n B |
+-- | `'B'` | Beacon | `B`, [network_id(4)|reserved(4)](1), src(1), n(1), entries × n × {dest(1), next(1), [score_bucket_4|hops_4](1)}  →  4+3n B |
 -- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [network_id(4)|msg_id(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
 -- | `'C'` | CTS    | `C`, [msg_id(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
 -- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|msg_id(4)](1), payload(n)  →  6+n B |
@@ -518,15 +518,42 @@
 -- bumps the offset every fire so successive beacons cycle through the
 -- whole table. Receivers don't need to track pages — every entry they
 -- hear gets merged via rt_merge as before.
--- BCN — 4-byte header + n × 4-byte entries:
+-- BCN — 4-byte header + n × 3-byte entries:
 --   byte 0 : tag 'B'
 --   byte 1 : network_id (4 hi nibble) | reserved (4 lo nibble)
 --   byte 2 : src (8)
 --   byte 3 : n (8)
---   entries (4 B each): dest(8) + next(8) + score_i8(8) + hops(8)
+--   entries (3 B each): dest(8) + next(8) + (score_bucket_4 << 4 | hops_4)(8)
 -- network_id (4 bits): same field as RTS. Receivers reject foreign-
 -- network beacons before rt_merge so foreign nodes don't pollute our
 -- routing tables.
+-- Per-entry score is the 4-bit SNR bucket (16 levels, 2 dB resolution,
+-- range -20..+10 dB) — same encoding used by the ACK piggyback for
+-- consistency. Hops use the low 4 bits (protocol caps at 8 so 0-15 has
+-- ample headroom). Saves 1 byte/entry vs the byte-aligned 4-byte format
+-- (~25% per beacon, biggest channel-time win for large mesh + narrow BW).
+
+-- Quantize an SNR (dB) to a 4-bit bucket [0..15]. 16 buckets, 2 dB per
+-- bin, range -20..+10 dB:
+--   bucket  0: snr <= -20 dB
+--   bucket 15: snr >= +10 dB
+-- Range chosen to span LoRa demod thresholds (SF12 = -20, SF7 = -7.5)
+-- with 5 buckets of headroom above SF7 for "easy decode" signal.
+-- Used by both ACK piggyback (DATA-leg SNR feedback) and BCN entries
+-- (chain-min SNR score). The decode helper returns the BIN CENTER so
+-- EWMAs / comparisons treat quantization as fair rounding, not
+-- systematic bias toward bin lower edge.
+local function bucket_of_snr_4b(snr_db)
+  local b = math.floor((snr_db + 20) / 2)
+  if b < 0 then b = 0 end
+  if b > 15 then b = 15 end
+  return b
+end
+
+local function snr_of_bucket_4b(bucket)
+  return -19 + bucket * 2  -- -19, -17, ..., +9, +11 (bin centers)
+end
+
 -- Differential pack_beacon — two-tier emission.
 --
 -- Phase 1 (priority): every rt[dest] with .dirty=true (set by rt_merge
@@ -594,14 +621,11 @@ local function pack_beacon(node, max_entries, offset)
   local out = "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(n_total)
   local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
-    local s = math.floor(p.score + 0.5)
-    if s < -128 then s = -128 end
-    if s >  127 then s =  127 end
-    if s < 0 then s = s + 256 end
+    local b = bucket_of_snr_4b(p.score)               -- 4-bit bucket
+    local hops = p.hops & 0xf                          -- protocol caps at 8; 4 bits ample
     out = out .. string.char(dest_id)
               .. string.char(p.next_hop)
-              .. string.char(s)
-              .. string.char(p.hops)
+              .. string.char((b << 4) | hops)
   end
   for i = 1, dirty_n do pack_one(dirty_in_order[i]) end
   for _, d  in ipairs(stable_page) do pack_one(d) end
@@ -624,38 +648,19 @@ local function parse_beacon(frame)
   local nid = (frame:byte(2) >> 4) & 0xf
   local src = frame:byte(3)
   local n   = frame:byte(4)
-  if #frame < 4 + 4*n then return nil end
+  if #frame < 4 + 3*n then return nil end          -- 3 bytes per entry now
   local entries = {}
   local pos = 5
   for _ = 1, n do
     local dest = frame:byte(pos)
     local nxt  = frame:byte(pos + 1)
-    local sb   = frame:byte(pos + 2)
-    local score = (sb >= 128) and (sb - 256) or sb
-    local hops = frame:byte(pos + 3)
+    local sh   = frame:byte(pos + 2)
+    local score = snr_of_bucket_4b((sh >> 4) & 0xf)  -- decode bucket center
+    local hops  = sh & 0xf
     table.insert(entries, { dest = dest, next = nxt, score = score, hops = hops })
-    pos = pos + 4
+    pos = pos + 3
   end
   return { network_id = nid, src = src, entries = entries }
-end
-
--- Quantize an SNR (dB) to a 4-bit bucket [0..15] for byte-tight ACK
--- piggyback. 16 buckets, 2 dB per bin, range -20..+10 dB:
---   bucket  0: snr <= -20 dB
---   bucket 15: snr >= +10 dB
--- Range chosen to span LoRa demod thresholds (SF12 = -20, SF7 = -7.5)
--- with 5 buckets of headroom above SF7 for "easy decode" signal.
--- The decode helper returns the BIN CENTER so EWMAs/comparisons treat
--- quantization as fair rounding, not systematic bias toward bin lower edge.
-local function bucket_of_snr_4b(snr_db)
-  local b = math.floor((snr_db + 20) / 2)
-  if b < 0 then b = 0 end
-  if b > 15 then b = 15 end
-  return b
-end
-
-local function snr_of_bucket_4b(bucket)
-  return -19 + bucket * 2  -- -19, -17, ..., +9, +11 (bin centers)
 end
 
 -- Update a per-neighbor SNR EWMA in-place. First sample seeds the EWMA
@@ -2232,10 +2237,15 @@ function on_init(self, config)
   -- with more nodes than max_entries get a rotating page each fire,
   -- driven by self.beacon_offset; rt_merge at receivers fills in entries
   -- as it hears them across rounds.
-  self.beacon_max_bytes   = config.beacon_max_bytes   or 200
-  -- Header is 4 bytes ('B' + network_id_byte + src + n); entries 4 bytes each.
+  -- Default 151 bytes = 4-byte header + 49 × 3-byte entries. Pre-bit-pack
+  -- the default was 200 bytes (49 × 4-byte entries). Keeping the 49-entry
+  -- count parity AND realising the per-entry shrink (4→3 B) means each
+  -- beacon is now ~24.5% smaller airtime. Scenarios that want more
+  -- entries per page can bump beacon_max_bytes (e.g., 200 → 65 entries).
+  self.beacon_max_bytes   = config.beacon_max_bytes   or 151
+  -- Header is 4 bytes ('B' + network_id_byte + src + n); entries 3 bytes each.
   self.beacon_max_entries = math.max(1,
-    math.floor((self.beacon_max_bytes - 4) / 4))
+    math.floor((self.beacon_max_bytes - 4) / 3))
   -- Radio params for airtime calculation. The runtime injects per-node
   -- resolved values via `_sim_bw_hz` and `_sim_cr` so the script's
   -- airtime math matches what the radio actually does (otherwise s03's

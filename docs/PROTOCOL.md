@@ -111,33 +111,45 @@ All frames begin with a 1-byte ASCII tag for cheap dispatch. Bit fields
 within bytes are MSB-first within each byte. Multi-byte numeric fields
 are little-endian (lo byte first) where applicable.
 
-### 3.1 Beacon (`'B'`) — 4 + 4n bytes
+### 3.1 Beacon (`'B'`) — 4 + 3n bytes
 
 ```
-byte:  0      1                  2     3   4..(4+4n)
+byte:  0      1                  2     3   4..(4+3n)
        ┌───┬─────────────────┬─────┬───┬───────────────────────────┐
-       │'B'│ network_id(4hi) │ src │ n │ entries × n × 4 bytes     │
+       │'B'│ network_id(4hi) │ src │ n │ entries × n × 3 bytes     │
        │   │ reserved (4lo)  │     │   │                           │
        └───┴─────────────────┴─────┴───┴───────────────────────────┘
 
-each entry (4 bytes):
-       ┌──────┬──────┬───────────┬──────┐
-       │ dest │ next │ score_i8  │ hops │
-       └──────┴──────┴───────────┴──────┘
+each entry (3 bytes, bit-packed):
+       ┌──────┬──────┬─────────────────────────┐
+       │ dest │ next │ score_bucket_4 │ hops_4 │
+       └──────┴──────┴────────────────┴────────┘
 ```
 
 - `network_id` (4 bits): admin-managed mesh identifier. Receivers
   reject foreign-network beacons before any rt_merge work.
 - `src` (8 bits): beacon sender's node id.
 - `n` (8 bits): entry count in this page (capped by
-  `beacon_max_entries`, default 49 for a 200-byte cap).
+  `beacon_max_entries`, default 49 for a 151-byte cap).
 - `entries[i].dest` (8 bits): destination this entry routes to.
 - `entries[i].next` (8 bits): the sender's next-hop for `dest`. Used
   by receivers for **3-cycle prune** (see §5.2).
-- `entries[i].score_i8` (8 bits, two's complement): chain-min SNR in
-  dB along the advertised path. Range −128..+127.
-- `entries[i].hops` (8 bits): hop count along the advertised path.
-  Routes with `hops > 8` rejected at the receiver.
+- `entries[i].score_bucket_4` (4 bits, hi nibble of byte 2): chain-min
+  SNR quantized to a 4-bit bucket via `bucket_of_snr_4b` (16 buckets,
+  2 dB resolution, range −20..+10 dB). Same encoding used for ACK
+  piggyback SNR feedback for consistency. Decoded via
+  `snr_of_bucket_4b` to bucket center.
+- `entries[i].hops` (4 bits, lo nibble of byte 2): hop count along the
+  advertised path. Routes with `hops > 8` rejected at the receiver.
+
+**Pre-bit-pack:** entries were 4 bytes (`dest + next + score_i8(8) +
+hops(8)`); default beacon was 200 bytes (49 × 4-byte entries). Bit-
+packing entries to 3 bytes shrinks the default beacon to 151 bytes
+(−24.5% airtime) while preserving the 49-entry-per-page count.
+Scenarios that want denser pages can bump `beacon_max_bytes` to 200
+(→ 65 entries/page) or 255 (→ ~83 entries/page, LoRa PHY max).
+Score precision drops from 1 dB to 2 dB — fine for routing decisions
+since per-packet LoRa SNR variance is typically 1-3 dB anyway.
 
 ### 3.2 RTS (`'R'`) — 8 bytes
 
