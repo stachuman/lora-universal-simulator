@@ -490,5 +490,84 @@ def test_duty_cycle_respects_warmup_since_ms():
         os.unlink(path)
 
 
+# ---- routing diversity ---------------------------------------------------
+
+def test_routing_diversity_counts_cascades_per_flight():
+    """Three flights:
+       - flight (1,1): originator enqueue, then 2 cascades, then delivered
+       - flight (1,2): originator enqueue, 0 cascades (primary worked)
+       - flight (1,3): originator enqueue, 4 cascades
+    Plus one snapshot per node with rt_dst=10, candidates=30 (3.0/dst)."""
+    events = [
+        _emit(node=1, t_ms=1000, et="tx_enqueue",
+              origin=1, origin_seq=1, payload="m1"),
+        _emit(node=1, t_ms=1500, et="path_cascade",
+              origin=1, origin_seq=1, msg_id=1, trigger="rts_giveup"),
+        _emit(node=1, t_ms=2000, et="path_cascade",
+              origin=1, origin_seq=1, msg_id=1, trigger="rts_giveup"),
+
+        _emit(node=1, t_ms=3000, et="tx_enqueue",
+              origin=1, origin_seq=2, payload="m2"),
+        # no cascades for (1,2) — primary worked
+
+        _emit(node=1, t_ms=4000, et="tx_enqueue",
+              origin=1, origin_seq=3, payload="m3"),
+        *[_emit(node=1, t_ms=4500 + 100*i, et="path_cascade",
+                origin=1, origin_seq=3, msg_id=3, trigger="rts_giveup")
+          for i in range(4)],
+
+        _emit(node=1, t_ms=5000, et="node_state_snapshot",
+              blind_count=0, queue_depth=0, deferred_count=0,
+              has_pending_tx=False, has_pending_rx=False,
+              rt_dst_count=10, rt_total_candidates=30),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_routing_diversity(path)
+        # 3 flights, cascade counts: [2, 0, 4]
+        assert sorted(r["flight_cascades"]) == [0, 2, 4]
+        # 1 snapshot, candidates/dst = 3.0
+        assert r["snapshot_ratios"] == [3.0]
+    finally:
+        os.unlink(path)
+
+
+def test_routing_diversity_ignores_forwarder_enqueues():
+    """Only originator-side tx_enqueue (node == origin) starts a flight.
+    Forwarder enqueues for the same key must not double-count."""
+    events = [
+        _emit(node=1, t_ms=1000, et="tx_enqueue",
+              origin=1, origin_seq=1, payload="m1"),
+        # forwarder enqueue at a different node — must NOT create a 2nd flight
+        _emit(node=3, t_ms=1100, et="tx_enqueue",
+              origin=1, origin_seq=1, depth=1, payload="m1"),
+        _emit(node=1, t_ms=1500, et="path_cascade",
+              origin=1, origin_seq=1, msg_id=1, trigger="rts_giveup"),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_routing_diversity(path)
+        assert r["flight_cascades"] == [1]
+    finally:
+        os.unlink(path)
+
+
+def test_routing_diversity_handles_no_snapshots():
+    """When snapshots aren't emitted (instrumentation off), the section
+    must not crash and the print path must say so."""
+    events = [
+        _emit(node=1, t_ms=1000, et="tx_enqueue",
+              origin=1, origin_seq=1, payload="m1"),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_routing_diversity(path)
+        assert r["snapshot_ratios"] == []
+        # Must not raise
+        analyze.print_section_16(r)
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

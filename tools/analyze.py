@@ -1043,6 +1043,110 @@ def print_section_15(r: dict) -> None:
                   f"{pct_budget:>8.1f}% {pct_total:>8.1f}%")
 
 
+# ---- Section 16: routing-option diversity + cascade depth ----------------
+
+def section_routing_diversity(events_path: str, since_ms: int = 0) -> dict:
+    """Routing-table diversity (candidates per destination) + actual
+    cascade usage per flight. Together these tell whether MAX_RT_CANDIDATES
+    is the binding constraint:
+
+      • If candidates/dst saturates the cap AND cascade depth is high,
+        flights are running out of alternatives — raising the cap
+        (and ensuring discovery to populate the new slots) would help.
+      • If candidates/dst is well below the cap, the cap isn't binding —
+        the limiting factor is discovery (Q-frames, BCN reach), not the
+        cap itself.
+
+    Reads node_state_snapshot for per-node rt diversity, and
+    path_cascade / tx_blind_alt emits for per-flight cascade events.
+    Originator-side tx_enqueue defines the universe of flights so
+    primary-only flights (zero cascade events) count correctly.
+    """
+    snapshot_ratios: list[float] = []
+    last_snapshot_per_node: dict = {}
+    flight_cascades: dict = {}    # (origin, seq) -> int (cascade event count)
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+
+        if et == "node_state_snapshot":
+            dst = d.get("rt_dst_count", 0) or 0
+            cand = d.get("rt_total_candidates", 0) or 0
+            if dst > 0:
+                snapshot_ratios.append(cand / dst)
+                last_snapshot_per_node[e.get("node")] = (dst, cand)
+
+        elif et == "tx_enqueue" and e.get("node") == d.get("origin"):
+            key = (d.get("origin"), d.get("origin_seq"))
+            if key[0] is not None and key not in flight_cascades:
+                flight_cascades[key] = 0
+
+        elif et == "path_cascade":
+            key = (d.get("origin"), d.get("origin_seq"))
+            if key in flight_cascades:
+                flight_cascades[key] += 1
+
+    snapshot_ratios.sort()
+    return {
+        "snapshot_ratios":  snapshot_ratios,
+        "last_per_node":    last_snapshot_per_node,
+        "flight_cascades":  list(flight_cascades.values()),
+    }
+
+
+def print_section_16(r: dict) -> None:
+    print("\n=== (16) routing-option diversity ===")
+    ratios = r["snapshot_ratios"]
+    if not ratios:
+        print("  (no node_state_snapshot events — instrumentation off?)")
+        return
+    n = len(ratios)
+    def q(p: float) -> float:
+        return ratios[min(n - 1, max(0, int(p * n)))]
+    print(f"  candidates per destination (n={n} snapshots across run):")
+    print(f"    min  {ratios[0]:>5.2f}   p25  {q(0.25):>5.2f}   "
+          f"median {q(0.50):>5.2f}   p75 {q(0.75):>5.2f}   "
+          f"max  {ratios[-1]:>5.2f}")
+
+    if r["last_per_node"]:
+        # Last snapshot per node — what each node had at sim end
+        per_node = sorted(
+            c / d for d, c in r["last_per_node"].values() if d > 0
+        )
+        if per_node:
+            pn = len(per_node)
+            print(f"  last-snapshot candidates/dst (n={pn} nodes, sim end):")
+            print(f"    min  {per_node[0]:>5.2f}   "
+                  f"median {per_node[pn//2]:>5.2f}   "
+                  f"max  {per_node[-1]:>5.2f}")
+
+    fc = r["flight_cascades"]
+    if fc:
+        total = len(fc)
+        primary_only = sum(1 for c in fc if c == 0)
+        one_alt      = sum(1 for c in fc if c == 1)
+        two_three    = sum(1 for c in fc if 2 <= c <= 3)
+        four_plus    = sum(1 for c in fc if c >= 4)
+        print(f"  cascade depth per flight (n={total} originator-enqueued flights):")
+        print(f"    primary only (0 cascades): {primary_only:>4} "
+              f"({100*primary_only/total:.0f}%)")
+        print(f"    1 cascade:                 {one_alt:>4} "
+              f"({100*one_alt/total:.0f}%)")
+        print(f"    2-3 cascades (1 cycle):    {two_three:>4} "
+              f"({100*two_three/total:.0f}%)")
+        print(f"    4+ cascades (multi-cycle): {four_plus:>4} "
+              f"({100*four_plus/total:.0f}%)")
+        # Pithy interpretation
+        if primary_only < total * 0.1 and four_plus > total * 0.1:
+            print(f"  Diversity is binding: nearly all flights need alts and "
+                  f"{four_plus}/{total} cycle through them multiple times. "
+                  f"Raising MAX_RT_CANDIDATES (currently 3) could help — but "
+                  f"only if discovery populates the new slots.")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -1145,6 +1249,8 @@ def main() -> None:
     print_section_14(section_lifetime_waste(deliv))
 
     print_section_15(section_duty_cycle(cfg, args.events, warmup_end_ms))
+
+    print_section_16(section_routing_diversity(args.events, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 
