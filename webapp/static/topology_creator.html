@@ -349,6 +349,22 @@
     return '#dc2626';                     // red    — no link
   }
 
+  // Line weight matched to the same thresholds as snrColor so the
+  // viewer can rank link quality at a glance without reading dB
+  // numbers. Wide+solid = "will work", medium = "can work at fast SF",
+  // thin = "marginal SF12 only", thin+dashed = "no chance even if
+  // physically present".
+  function snrWidth(snr) {
+    if (!Number.isFinite(snr)) return 1.0;
+    if (snr >= 5)    return 4.0;
+    if (snr >= -7.5) return 2.5;
+    if (snr >= -20)  return 1.5;
+    return 1.0;
+  }
+  function snrDash(snr) {
+    return (Number.isFinite(snr) && snr < -20) ? '4,4' : null;
+  }
+
   // ── Path-loss presets ────────────────────────────────────
   window.applyPreset = function(key) {
     // Realistic-physics extensions: tx/rx offset sigmas and asymmetry
@@ -470,7 +486,10 @@
           const color = snrColor(snr);
           const line = L.polyline(
             [[nodes[i].lat, nodes[i].lon], [nodes[j].lat, nodes[j].lon]],
-            { color, weight: 1.5, opacity: 0.7, interactive: true }
+            {
+              color, weight: snrWidth(snr), opacity: 0.75,
+              dashArray: snrDash(snr), interactive: true,
+            }
           );
           line.bindTooltip(
             nodes[i].name + ' ↔ ' + nodes[j].name + ': ' + snr.toFixed(1) + ' dB',
