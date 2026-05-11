@@ -343,7 +343,32 @@ A is the obvious starting point — directly delivers the airtime saving the pro
 
 ---
 
-## 5. End-to-end delivery ACK (optional, per-message)
+## 5. End-to-end delivery ACK (optional, per-message) (IMPLEMENTED)
+
+**Status — IMPLEMENTED**. See `scenarios/dv_dual_sf.lua` header doc block
+"End-to-end delivery ACK (per-message opt-in)" for the full design.
+Verification in `test/t34_e2e_ack.json`.
+
+Mechanism summary:
+- Payload header extended from 2 bytes to 3 bytes: `[flags][seq_lo][seq_hi]`.
+- Flag bits: `E2E_FLAG_ACK_REQUESTED` (0x01), `E2E_FLAG_IS_ACK` (0x02).
+- New send variant `send_e2e <dst> <text>` sets the request bit.
+- Originator records `pending_e2e[seq] = {sent_at, dst, text}` on send.
+- Destination, on delivered with request bit set, enqueues a tiny return
+  DATA frame back to origin with `IS_ACK` flag + body = `[acked_seq_lo,
+  acked_seq_hi]`. Forwarders carry it transparently as normal DATA.
+- Origin, on receiving DATA with `IS_ACK` flag, matches `acked_seq` against
+  `pending_e2e`: emit `delivered_confirmed` (success) or `e2e_ack_unmatched`
+  (duplicate / late). 1-s drain loop prunes pending_e2e past
+  `e2e_ack_ttl_ms` (default 60 s) → emit `e2e_ack_timeout`.
+
+E2E ACK total wire cost: ~10 B payload per hop × full RTS-CTS-DATA-ACK
+chain ≈ 600 ms round-trip airtime on a 3-hop route. Opt-in per-message
+so bulk traffic doesn't pay it.
+
+The original problem statement (preserved for context) follows.
+
+---
 
 **Problem.** The hop-by-hop K-frame ACK tells the originator only that the immediately-next forwarder received the DATA. If a forwarder mid-path drops the message, the originator's K-ack still succeeded — the loss is silent. Important user messages (payments, status confirmations) have no way to verify actual delivery.
 
@@ -470,18 +495,129 @@ The plain variant requires plaintext `origin` in the `E` frame header so forward
 - Forwarders should be able to route without holding decryption keys (privacy from the routing layer).
 
 **Possible directions (none committed).**
-- **E2E layer**: ChaCha20-Poly1305 with pre-shared key per (origin, dst) pair. 12 B nonce + 16 B MAC = 28 B overhead per frame. Acceptable for a 50-150 B payload, marginal for tiny status messages.
-- **Frame auth**: short truncated MAC (4-8 B) on RTS/CTS/ACK/BCN using a network-wide pre-shared key. Forwarders verify before relaying; spoofed frames silently drop. Per-frame cost: 4-8 B + small CPU.
-- **Key bootstrap**: per-network PSK distributed out-of-band (real Meshtastic does this — QR code at deployment time). Per-pair E2E keys via Diffie-Hellman over the mesh (first contact cost is high but amortized over the relationship).
-- **Forward secrecy**: rotate the network-wide PSK periodically (e.g., daily) via key-derivation from a master + epoch counter. Each node holds the master and computes current key.
-- **Replay protection**: per-pair sequence number window (we already have `origin_seq` for dedup — could extend the window check to also reject "old" sequences as replay attempts).
+- **E2E layer (LoRa-tuned, see §8.1 for full design)**: ChaCha20 with **4-byte truncated Poly1305 MAC**, **2-byte per-peer message counter on wire**, and **implicit nonce derived from (counter ∥ dst ∥ msg_id)**. Net wire cost = +3 B per DATA frame (was +28 B with standard ChaCha20-Poly1305). No on-wire session identifier — MAC trial-verify at the destination IS the key-selection step. The traditional 128-bit MAC is overkill at LoRa's PHY rate — see §8 "MAC sizing under LoRa rate limit" below.
+- **Frame auth**: 4 B truncated MAC on RTS and BCN using a network-wide PSK. CTS/ACK skip explicit MAC — they're stateful replies matched against an already-authenticated RTS, so a spoofed CTS/ACK without that prior state gets dropped at the matching layer.
+- **Key bootstrap**: per-network PSK distributed out-of-band (real Meshtastic does this — QR code at deployment time). Per-pair E2E keys via X25519 ECDH at first contact (~50 ms on Cortex-M0, **once per peer ever**, NOT per-message).
+- **Forward secrecy**: **deliberately not provided** in this design. `session_key` is derived once via X25519+HKDF at first contact and reused until peers re-key (e.g., counter wrap at 65,536 messages, or explicit user action). Rationale: on a handheld LoRa device, the message archive is stored locally in plaintext — an attacker who compromises the device gets the message history directly, so daily-rotated forward secrecy provides marginal real-world value and would require time-sync we want to avoid. If forward secrecy becomes required for a specific deployment, layer in an epoch counter via NTP/GPS time or peer-clock-gossip — out of scope for the base proposal.
+- **Replay protection**: per-peer message counter on the wire (2 bytes) does triple duty — nonce uniqueness for crypto, replay protection (strict monotonic check), and application-level dedup (replaces today's `origin_seq`). Composes with our existing `last_acked_from` dedup machinery.
+
+**MAC sizing under LoRa rate limit.** Standard internet-protocol advice (128-bit MAC) assumes adversaries doing ~10⁹ attempts/sec. LoRa SF8 caps attempts at ~20/sec per channel (50 ms airtime per frame). A 32-bit MAC gives 2⁻³² forgery probability per attempt → ~3 years to find a single forgery. A 64-bit MAC → ~30,000 years. **4-byte MAC is genuinely defensible for LoRa control + data plane** and is what §8.1 builds on. Cipher keys remain 128-256 bits — they sit in memory, costing zero on-wire bytes.
 
 **Open questions.**
-- Per-pair E2E keys (requires N² storage at large N) vs per-channel (smaller storage, weaker guarantees)?
-- Should the routing layer be cryptographically authenticated, or rely on physical-layer trust? Meshtastic doesn't auth routing; we could be more conservative.
-- Key rotation synchronization across the mesh — what happens during the rotation window when some nodes have updated and some haven't?
-- Hardware crypto acceleration availability — SX1262 doesn't have it, so all crypto runs on the host MCU.
-- Interaction with §6 channels and §7 multi-net (probably distinct key sets per channel and per network).
+- Per-pair E2E keys (requires N storage at each node, not N² — symmetric session_key is derived deterministically from the X25519 secret) vs per-channel (smaller storage, weaker guarantees). §8.1 takes the per-pair path; channels (§6) need separate group-key story.
+- Should the routing layer be cryptographically authenticated, or rely on physical-layer trust? Meshtastic doesn't auth routing; we could be more conservative — frame-auth on RTS + BCN, skip CTS/ACK as above.
+- Counter persistence across reboots — sender's `peer_send_counter[B]` MUST survive power-off (NV storage, ~2 B per peer). If the counter resets to 0 after reboot, B's strict-monotonic check would reject all subsequent messages until manual re-sync. Flash write-cycle budget is ample for typical traffic.
+- Counter wrap recovery — at 65,536 messages to a single peer (~18 years at 10 msg/day), peers must re-derive `session_key` via fresh X25519 ECDH against current pubkeys. Detection: sender approaching wrap emits a "re-key now" app-layer event; user accepts; both sides regenerate.
+- Hardware crypto acceleration availability — SX1262 doesn't have it, so all crypto runs on the host MCU. ChaCha20+Poly1305 is fast on M0/M4 (~2 µs/byte); X25519 ECDH is ~50 ms — acceptable once per peer first-contact, but we avoid it per-message.
+- Interaction with §6 channels and §7 multi-net (distinct key sets per channel and per network).
+
+### 8.1 Concrete per-pair DM crypto proposal
+
+**Problem statement.** A user on node A wants to send a confidential, authenticated message to node B. Forwarders along the route must not be able to read the payload, and (composing with §9 T2) must not be able to identify A as the originator. What does A need from B in practice, and what's on the wire?
+
+**What A needs from B (the practical answer).** B's long-term public key — 32 bytes, X25519. Acquired one of two ways:
+
+1. **Out-of-band, once at first contact.** B shows a QR code (or NFC tags); A scans. Contains B's pubkey + nickname + signature over the pair. Same UX pattern Signal/WhatsApp use for safety numbers.
+2. **In-mesh identity-card request.** A issues a `'?'` query frame (analogous to our Q-frame for routes) asking "anyone have B's identity card?". A neighbor with B's `'I'` (Identity) frame cached replies. A caches B's pubkey. First contact done — no per-message public-key crypto ever after this.
+
+**Per-peer setup (one-time, both sides compute independently).**
+```
+shared_secret = X25519(self_private, peer_public)      -- ~50 ms on Cortex-M0
+session_key   = HKDF(shared_secret, "msg", 32 bytes)   -- derived once, no time input
+```
+Both A and B arrive at the **same** `session_key` for this peer. Persisted to NV storage; reused until counter wrap or explicit re-key. **No clock or epoch needed** — the protocol does not require time sync between nodes, which matches MeshCore's operational model.
+
+**Per-message nonce uniqueness via on-wire counter.** Stream-cipher security requires every `(session_key, nonce)` pair to be used at most once. Without a clock to derive nonces from, we use a **2-byte per-peer message counter** sent on the wire: sender increments `peer_send_counter[B]` for each message; the counter feeds the nonce derivation AND serves as replay protection (strict monotonic at receiver) AND replaces today's `origin_seq` for app-layer dedup. Triple-duty primitive.
+
+**No on-wire session identifier.** Earlier drafts considered a 4-byte `session_id` to let B index directly into its key table. We don't need it — see "Why no session_id?" below. The 2-byte counter is the only crypto metadata on the wire.
+
+**Per-message flow (A sends "hello bob" to B).**
+```
+At A:
+  ctr         = ++peer_send_counter[B]                              -- NV-persisted
+  nonce       = derive(ctr || dst || msg_id)                        -- IMPLICIT (NOT on wire as a separate nonce field)
+  ciphertext  = ChaCha20(session_key, nonce, user_text)
+  mac         = Poly1305-truncated-4B(session_key, ciphertext || header_fields || ctr)
+  send: 'D' | src | dst | next | msg_id | ctr(2B) | ciphertext || mac(4B)
+
+Forwarders:
+  - route by `dst` as today; cache (msg_id, dst, prev_hop) for §5 reverse-path
+  - cannot decrypt (no session_key), cannot identify A (no `origin` on wire,
+    no per-pair tracking handle — ciphertext is fully opaque; ctr is per-peer
+    state visible only to someone who already knows the (A,B) relationship)
+
+At B (only when dst == self.id):
+  - read `ctr` from wire
+  - trial-verify MAC against each peer session_key (LRU sorted; usually first hit)
+  - first key that MAC-verifies → that's the peer → that's the originator
+  - check ctr > last_seen_counter[peer]; if not → drop as replay
+  - reconstruct implicit nonce from (ctr || self.id || msg_id), decrypt → get user_text
+  - update last_seen_counter[peer] = ctr; display "Message from A: hello bob"
+  - if no key verifies → drop silently (not for me, or corrupted)
+```
+
+**Why no session_id (the design call).** A previous draft added a 4-byte `session_id` to let B index directly into its key table. We removed it because:
+
+- **MAC verify IS the key-selection check.** Poly1305-truncated-4B verify is ~2 µs/byte on Cortex-M0. For a 100-byte payload: ~200 µs per peer. For 100 peers: 20 ms worst-case, ~100 µs typical (LRU sorted, first-match average). And this cost is paid **only at the destination** — forwarders route by `dst` and never trial-decrypt.
+- **No session_id is strictly more private.** A stable per-(A,B) tag on every frame gives passive observers a tracking handle. Without it, ciphertext is fully opaque — no linkability surface at the wire level. The 2-byte `ctr` we DO carry is per-peer state that varies every message; observers can see "two messages on this counter sequence" but not link sequences across peer pairs.
+- **Saves 4 bytes per DATA frame.** Combined with origin removal under §9 T2 and the 2-byte counter, net wire cost is +3 B over today's plaintext for confidentiality + authenticity + originator privacy.
+
+This matches the MeshCore approach more closely (no explicit per-pair tag on every frame; no clock requirement).
+
+**Wire-format diff vs current plaintext DATA.**
+
+| Field | Today | Proposed (§8.1 + §9 T2) |
+|---|---|---|
+| `'D'` tag | 1 B | 1 B |
+| `origin` | 1 B | **removed** (privacy §9) |
+| `src` | 1 B | 1 B |
+| `dst` | 1 B | 1 B |
+| `next` | 1 B | 1 B |
+| `msg_id` + reserved | 1 B | 1 B |
+| `origin_seq` (plaintext) | 2 B | **replaced by `ctr`** (2 B, same wire footprint, does crypto duty too) |
+| user_text | n B | n B (encrypted) |
+| MAC | — | **+4 B** |
+| **header total** | 6 B + 2 B origin_seq | 5 B + 2 B ctr + 4 B MAC |
+
+**Net per-message airtime cost: +3 bytes** for confidentiality + authenticity + originator privacy. (5 B header replaces 6 B; counter occupies the same 2 B that origin_seq did; +4 B MAC is the only true addition.)
+
+**Identity card frame (`'I'`) sketch.**
+```
+'I' | subject_id(1B) | subject_pubkey(32B) | timestamp(4B) | subject_sig(16B truncated)
+~ 54 bytes
+```
+Pull-based only (response to `'?'` query); NEVER pushed in BCN — would bloat. Receivers verify the embedded signature against the subject's known long-term key. Chicken-and-egg solved at the QR-code first-contact step.
+
+**Storage cost per node.**
+```
+self: 32 B identity_private + 32 B identity_public                        = 64 B
+per peer: 32 B peer_pubkey + 32 B session_key
+          + 2 B peer_send_counter + 2 B last_seen_counter (both NV)
+          + ~30 B bookkeeping                                              ≈ 98 B
+```
+100 peers → ~9.8 KB. Fits in typical microcontroller flash. The two 2-byte counters MUST be in NV storage (not just RAM) — counter persistence across power-off is what makes the protocol robust without a clock.
+
+**Per-message compute cost.** ChaCha20+Poly1305: ~2 µs/byte on M0/M4 → ~0.5 ms for a 200-byte frame. Negligible vs LoRa airtime (50 ms). X25519 ECDH happens **once per peer ever**, not per-message.
+
+**What this proposal deliberately does NOT do.**
+- No per-message public-key crypto. ECDH is first-contact only.
+- No identity-card flooding. `'I'` is pull-only via `'?'` query.
+- No 128-bit MAC. 32 bits is LoRa-appropriate (~3 years to forge one frame at PHY rate).
+- No explicit nonce on wire. Derived from the 2-byte counter + dst + msg_id.
+- **No clock or time-sync dependency.** Counter-based nonce uniqueness is what makes this possible — matches MeshCore's operational model where nodes work fine without time set.
+- **No forward secrecy** (deliberately — see honest limits below).
+- No long-term identity rotation. Pubkey IS identity; rotating pubkeys is a separate (more complex) story — out of scope here, can be layered on later.
+
+**Honest limits.**
+- DM-only. Multi-recipient channels (§6) need a separate group-key story.
+- Trust on first contact: stronger trust models (mutual attestation, web-of-trust) are app-layer.
+- Pubkey leak = identity exposure. Same property as Signal/WhatsApp. Mitigated by user-side device-security practices.
+- **No forward secrecy.** `session_key` is reused for the lifetime of the (A, B) relationship (until counter wrap or explicit re-key). If A's device is compromised and `session_key` is extracted, an attacker who archived past A↔B ciphertext can decrypt it. **Mitigation reasoning:** handheld LoRa devices store the plaintext message archive locally anyway — compromise of the device gives the attacker the archive directly, so daily-rotated forward secrecy provides marginal real-world benefit at the cost of requiring time-sync (which we don't want). If a specific deployment NEEDS forward secrecy, layer in an epoch counter from NTP/GPS/peer-gossip time — but it's not the base proposal.
+- Counter wrap at 65,536 messages → forced re-key via fresh X25519 ECDH against current pubkeys. At 10 msg/day per peer, that's ~18 years; longer than the device's hardware lifetime. Not a practical concern.
+- Counter persistence: requires NV storage at both sender and receiver. Flash write-cycle budget (~100k cycles on typical embedded flash) is ample for typical traffic.
+- Trial-MAC at destination: O(N) in peer count. For 100 peers ~20 ms worst-case, ~100 µs typical (LRU). For 1000+ peers consider a small bloom-filter pre-check keyed on `truncate(HMAC(session_key, ctr || dst))` — adds ~2 B/frame but reduces verification to ~O(1). Not needed for typical handset use (~tens of contacts).
+
+**Cross-references.** §9 T2 (origin removal — §8.1 makes it possible by using MAC verify itself as the implicit originator-identification step, no on-wire identifier needed), §5 E2E ACK privacy-compatible variant (reverse-path soft state ties back to msg_id+dst, which remain visible — composes cleanly with encrypted payload), §1 anti-spam behavioral variant (count-based fingerprinting still works because RTS/CTS counts don't depend on payload content).
 
 ---
 

@@ -412,6 +412,93 @@
 --   • Beacon advertise alt too (would double beacon size; tradeoff).
 --
 -- ============================================================================
+-- End-to-end delivery ACK (per-message opt-in)
+-- ============================================================================
+--
+-- The hop-by-hop K-frame ACK only tells the originator "the next forwarder
+-- received my DATA." If a forwarder mid-path drops the message after
+-- ACKing, the originator's K-ack still succeeded — silent loss. For
+-- important user messages (payments, status confirmations), the
+-- originator needs end-to-end confirmation.
+--
+-- DESIGN PRINCIPLES.
+--   • Opt-in per message — bulk chat doesn't pay the round-trip; only
+--     send_e2e marks a message as "I want confirmation."
+--   • Tiny ACK frame — total payload 5 bytes (3-byte header + 2-byte
+--     acked-seq), ~10 bytes on the wire. Routed via normal DATA mechanics
+--     so no new frame type, no new forwarding logic.
+--   • Reuses existing routing — destination acts as originator of a new
+--     short DATA flight back to the original origin. Forwarders see the
+--     E2E ACK as a normal DATA frame; only origin/destination know it's
+--     an ACK (via the IS_ACK flag in the payload header).
+--
+-- WIRE FORMAT.
+--   Payload header (originator + destination parse; forwarders treat
+--   opaque except for the seq field for dedup):
+--     byte 0 : flags
+--                bit 0 (E2E_FLAG_ACK_REQUESTED) — origin wants
+--                        end-to-end confirmation of this message
+--                bit 1 (E2E_FLAG_IS_ACK)         — this DATA payload IS
+--                        an E2E ACK (body has [acked_seq_lo, acked_seq_hi])
+--     bytes 1-2: origin_seq (this flight's per-originator 16-bit seq)
+--     bytes 3+: body (user_text for normal DATA; [acked_seq_lo,
+--                acked_seq_hi] for E2E ACK)
+--
+--   Both flag bits live in plaintext header bytes today. Under §9 T2
+--   privacy they'd move INSIDE the encrypted payload — wire format
+--   unchanged, just the parse happens after decryption.
+--
+-- FLOW.
+--   1. Originator calls "send_e2e <dst> <text>". on_command:
+--        - assigns origin_seq
+--        - records pending_e2e[seq] = {sent_at, dst, text}
+--        - emits e2e_ack_pending
+--        - enqueues the send with E2E_FLAG_ACK_REQUESTED set in payload
+--   2. The send travels via normal RTS-CTS-DATA-ACK chain to destination.
+--   3. Destination's on_recv "D" delivered branch:
+--        - parses flags + origin_seq + body
+--        - emits "delivered" with body as user_text (unchanged)
+--        - if E2E_FLAG_ACK_REQUESTED set: builds a return DATA payload
+--          with E2E_FLAG_IS_ACK and body=[acked_seq_lo, acked_seq_hi],
+--          enqueues it as a new send to the original origin
+--        - emits e2e_ack_tx_enqueued for analyzer/diagnostic
+--   4. The return DATA travels normally back to origin.
+--   5. Origin's on_recv "D" delivered branch:
+--        - parses flags, sees E2E_FLAG_IS_ACK
+--        - extracts acked_seq from body
+--        - looks up pending_e2e[acked_seq]
+--          - if present: emit delivered_confirmed, clear pending entry
+--          - if not: emit e2e_ack_unmatched (duplicate or already timed out)
+--        - does NOT emit "delivered" (this is an ACK, not user content)
+--        - does NOT trigger another E2E ACK (no recursion — IS_ACK and
+--          ACK_REQUESTED are independent bits; an E2E ACK never sets
+--          ACK_REQUESTED on its return frame)
+--   6. If origin's pending_e2e entry ages past e2e_ack_ttl_ms (default
+--      60 s) without seeing the ACK, the 1-s drain_loop emits
+--      e2e_ack_timeout for the app's "no answer received" UX.
+--
+-- COST.
+--   ~10-byte E2E ACK frame × (N hops × RTS-CTS-DATA-ACK chain) ≈
+--   significant but bounded airtime. For a 3-hop route at SF8 BW250,
+--   approximately 600 ms total round-trip airtime. Why opt-in: at scale,
+--   ACKing every flight doubles the airtime budget consumed per message.
+--
+-- COMPOSITION.
+--   • §1 anti-spam: an E2E ACK is itself a send-from-destination. It
+--     counts toward destination's own origination quota. If the
+--     destination is heavily rate-limited as an originator, its E2E
+--     ACKs are subject to the same enforcement — design feature, not
+--     bug (a heavy responder can't avoid its own rate cap).
+--   • §9 privacy T2: when origin moves into encrypted payload, the
+--     destination still has the origin's identity from decryption, so
+--     can construct the return E2E ACK. The forwarders carrying the
+--     ACK don't need to know it's an ACK — they just see DATA.
+--
+-- Tuning knob:
+--   e2e_ack_ttl_ms — how long pending_e2e entries live before
+--                    timeout (default 60 s).
+--
+-- ============================================================================
 -- Anti-spam: 1st-hop statistical rate-limit via passive RTS/CTS counting
 -- ============================================================================
 --
@@ -899,20 +986,62 @@ end
 -- unique end-to-end message id used for dedup at every receiving node.
 -- This is how a real firmware port works: app generates seq + text,
 -- hands bytes to mesh, mesh treats opaque, app strips on receive.
-local ORIGIN_SEQ_HDR_LEN = 2
+-- Originator payload header — 3 bytes, treated opaquely by the mesh
+-- layer but parsed at originator / destination:
+--   byte 0 : flags
+--             bit 0 = e2e_ack_requested  (origin wants confirmation of
+--                                          end-to-end delivery)
+--             bit 1 = is_e2e_ack          (this payload IS an E2E ACK
+--                                          — body is [acked_seq_lo,
+--                                          acked_seq_hi] not user text)
+--             bits 2-7 = reserved
+--   byte 1 : seq_lo  (this flight's per-originator 16-bit seq, low)
+--   byte 2 : seq_hi  (high byte)
+--   bytes 3+: body
+--             - if is_e2e_ack=0: user text
+--             - if is_e2e_ack=1: [acked_seq_lo][acked_seq_hi] (2 B)
+--
+-- Frame design rationale (see §5 in docs/ROADMAP.md):
+--   • Per-message opt-in via the e2e_ack_requested bit — bulk chat
+--     doesn't pay the round-trip; explicitly-marked important sends do.
+--   • E2E ACK is just a tiny DATA flight back to origin, routed via
+--     the normal data-plane mechanics. No new frame type needed; only
+--     payload-level discrimination via the is_e2e_ack bit.
+--   • E2E ACK payload total = 3 (header) + 2 (acked seq) = 5 bytes
+--     content + ~5 B DATA wire framing ≈ 10 B on the wire per hop.
+--   • Both bits are PLAINTEXT in the payload header today. Under §9 T2
+--     they'd move INSIDE the encrypted payload — wire format stays
+--     the same, the parse just happens after decryption.
+local ORIGIN_HDR_LEN = 3
+local E2E_FLAG_ACK_REQUESTED = 0x01
+local E2E_FLAG_IS_ACK        = 0x02
 
-local function pack_origin_seq(seq)
-  return string.char(seq % 256)
+local function pack_origin_hdr(seq, flags)
+  flags = flags or 0
+  return string.char(flags & 0xff)
+              .. string.char(seq % 256)
               .. string.char(math.floor(seq / 256) % 256)
 end
 
-local function parse_origin_seq(payload)
-  if #payload < ORIGIN_SEQ_HDR_LEN then return nil end
+local function parse_origin_hdr(payload)
+  if #payload < ORIGIN_HDR_LEN then return nil end
   return {
-    seq = payload:byte(1) + payload:byte(2) * 256,
-    user_text = payload:sub(ORIGIN_SEQ_HDR_LEN + 1),
+    flags     = payload:byte(1),
+    seq       = payload:byte(2) + payload:byte(3) * 256,
+    body      = payload:sub(ORIGIN_HDR_LEN + 1),
   }
 end
+
+-- Backward-compat aliases the rest of the script still references.
+-- parse_origin_seq returns {seq, user_text} in the SAME shape as before;
+-- callers that want flags use parse_origin_hdr directly.
+local function pack_origin_seq(seq) return pack_origin_hdr(seq, 0) end
+local function parse_origin_seq(payload)
+  local hdr = parse_origin_hdr(payload)
+  if hdr == nil then return nil end
+  return { seq = hdr.seq, user_text = hdr.body }
+end
+local ORIGIN_SEQ_HDR_LEN = ORIGIN_HDR_LEN   -- legacy name; sized 3 now
 
 -- NACK — 4 bytes:
 --   byte 0 : tag 'N'
@@ -3365,6 +3494,13 @@ function on_init(self, config)
   self.seen_origins       = {}
   self.seen_origin_ttl_ms = config.seen_origin_ttl_ms or 30000
   self.next_origin_seq    = 1   -- 16-bit per-origin counter for new sends
+  -- End-to-end ACK state. Originator-side per-message pending map keyed
+  -- by our own origin_seq. Set on send_e2e; cleared when matching E2E ACK
+  -- arrives (emit delivered_confirmed); pruned on TTL expiry (emit
+  -- e2e_ack_timeout). Cost per message: ~24 bytes of Lua table state
+  -- until ACK or TTL. See E2E ACK design in the header.
+  self.pending_e2e        = {}
+  self.e2e_ack_ttl_ms     = config.e2e_ack_ttl_ms or 60000   -- 1 min default
 
   self.name_to_id = {}
   self.id_to_name = {}
@@ -3410,9 +3546,28 @@ function on_init(self, config)
 
   -- Periodic 1s drain of self.deferred_sends — fires regardless of
   -- beacon traffic, so deferred originator sends have a deterministic
-  -- TTL-pruning + retry loop independent of the radio.
+  -- TTL-pruning + retry loop independent of the radio. Also prunes
+  -- pending_e2e entries that aged past e2e_ack_ttl_ms (emits
+  -- e2e_ack_timeout).
   local function drain_loop()
     try_drain_deferred(self)
+    local now = self:now()
+    for seq, info in pairs(self.pending_e2e) do
+      if now - info.sent_at_ms >= self.e2e_ack_ttl_ms then
+        self:emit("e2e_ack_timeout", {
+          origin     = self.id,
+          origin_seq = seq,
+          dst        = info.dst_id,
+          payload    = info.user_text,
+          ttl_ms     = self.e2e_ack_ttl_ms,
+          elapsed_ms = now - info.sent_at_ms,
+        })
+        self:log(string.format(
+          "e2e_ack_timeout seq=%d dst=%s elapsed=%dms (no E2E ACK in %dms)",
+          seq, info.dst_name, now - info.sent_at_ms, self.e2e_ack_ttl_ms))
+        self.pending_e2e[seq] = nil
+      end
+    end
     self:after(1000, drain_loop)
   end
   self:after(1000, drain_loop)
@@ -4186,16 +4341,18 @@ function on_recv(self, frame, meta)
     if d.next ~= self.id then return end
     if self.pending_rx == nil or d.msg_id ~= self.pending_rx.msg_id then return end
 
-    -- Parse the application-layer origin-seq header from the payload
-    -- bytes. Forwarders peek at the first 2 bytes to get the
-    -- (origin, origin_seq) end-to-end message id for dedup; the rest
-    -- is the user text the originator actually sent. A real-firmware
-    -- port works the same way: app prepends seq, mesh treats opaque,
-    -- app strips on receive. If parsing fails (truncated payload),
-    -- treat the whole payload as user_text and skip dedup.
-    local oh = parse_origin_seq(d.payload)
-    local user_text = oh and oh.user_text or d.payload
-    local origin_seq = oh and oh.seq or nil
+    -- Parse the application-layer origin-header from the payload bytes.
+    -- Forwarders peek to get (origin, origin_seq) for dedup; the rest is
+    -- the body (user text for normal DATA, or the acked-seq for E2E ACK).
+    -- A real-firmware port works the same way: app prepends header, mesh
+    -- treats opaque, app strips on receive. If parsing fails (truncated
+    -- payload), treat the whole payload as user_text and skip dedup.
+    local oh = parse_origin_hdr(d.payload)
+    local origin_seq    = oh and oh.seq   or nil
+    local flags         = oh and oh.flags or 0
+    local is_e2e_ack    = (flags & E2E_FLAG_IS_ACK)        ~= 0
+    local e2e_ack_req   = (flags & E2E_FLAG_ACK_REQUESTED) ~= 0
+    local user_text     = oh and oh.body or d.payload
 
     self:emit("data_rx", {
       origin     = d.origin,
@@ -4283,11 +4440,80 @@ function on_recv(self, frame, meta)
     local is_delivered = (d.dst == self.id)
 
     if is_delivered then
-      self:emit("delivered", {
-        origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
-      })
-      self:log(string.format("DELIVERED from %s: %q (seq=%s)",
-        name_of(self, d_origin), d_user_text, tostring(d_origin_seq)))
+      if is_e2e_ack then
+        -- This DATA is an end-to-end ACK delivered to us as the original
+        -- originator. Body carries the acked_seq (16-bit LE) — match
+        -- against pending_e2e and emit delivered_confirmed. Do NOT emit
+        -- "delivered" (this isn't user data; the analyzer's delivery
+        -- breakdown should only count true user payloads). Do NOT trigger
+        -- another E2E ACK (would loop).
+        if #d_user_text >= 2 then
+          local acked_seq = d_user_text:byte(1) + d_user_text:byte(2) * 256
+          local info = self.pending_e2e[acked_seq]
+          if info ~= nil then
+            self:emit("delivered_confirmed", {
+              origin     = self.id,         -- the original originator (us)
+              origin_seq = acked_seq,
+              dst        = info.dst_id,
+              payload    = info.user_text,
+              elapsed_ms = self:now() - info.sent_at_ms,
+              via_ack_from = d_origin,      -- the destination that ACK'd
+            })
+            self:log(string.format(
+              "delivered_confirmed acked_seq=%d dst=%s elapsed=%dms (E2E ACK from %s)",
+              acked_seq, info.dst_name, self:now() - info.sent_at_ms,
+              name_of(self, d_origin)))
+            self.pending_e2e[acked_seq] = nil
+          else
+            -- No matching pending_e2e — either we already received this
+            -- ACK (duplicate), already timed out, or never sent the
+            -- corresponding e2e. Cheap diagnostic emit for the analyzer.
+            self:emit("e2e_ack_unmatched", {
+              origin_seq = acked_seq, from = d_origin,
+            })
+          end
+        end
+      else
+        self:emit("delivered", {
+          origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
+        })
+        self:log(string.format("DELIVERED from %s: %q (seq=%s%s)",
+          name_of(self, d_origin), d_user_text, tostring(d_origin_seq),
+          e2e_ack_req and " [E2E-ack requested]" or ""))
+        if e2e_ack_req then
+          -- Schedule an E2E ACK send back to d_origin. The new flight
+          -- gets our own next_origin_seq; its payload header carries
+          -- IS_ACK flag and our own seq; its BODY is the 2-byte
+          -- acked-seq (the original sender's seq we're confirming).
+          -- The new flight goes through the normal RTS-CTS-DATA-ACK
+          -- mechanics — forwarders route it back to d_origin without
+          -- knowing it's an E2E ACK.
+          local ack_seq = self.next_origin_seq
+          self.next_origin_seq = (ack_seq + 1) % 65536
+          local body = string.char(d_origin_seq % 256)
+                     .. string.char(math.floor(d_origin_seq / 256) % 256)
+          local e2e_payload = pack_origin_hdr(ack_seq, E2E_FLAG_IS_ACK) .. body
+          table.insert(self.tx_queue, {
+            origin     = self.id,
+            dst_id     = d_origin,
+            dst_name   = name_of(self, d_origin),
+            payload    = e2e_payload,
+            user_text  = string.format("[E2E-ACK seq=%d]", d_origin_seq),
+            origin_seq = ack_seq,
+            enqueue_time_ms = self:now(),
+            requeue_count   = 0,
+            next_attempt_ms = 0,
+          })
+          self:emit("e2e_ack_tx_enqueued", {
+            origin = self.id, origin_seq = ack_seq,
+            dst = d_origin, acked_origin_seq = d_origin_seq,
+            depth = #self.tx_queue,
+          })
+          self:log(string.format(
+            "e2e_ack_tx_enqueued seq=%d acked=%d dst=%s",
+            ack_seq, d_origin_seq, name_of(self, d_origin)))
+        end
+      end
     end
 
     self:after(self.ack_air_ms + 1, function()
@@ -4392,8 +4618,23 @@ end
 -- mid-TX, or queued forwards ahead), the queue ensures the message will fire
 -- as soon as we're free — no more "ERROR: busy" rejection.
 function on_command(self, cmd_str)
-  local dst_name, text = cmd_str:match("^send (%S+) (.+)$")
-  if not dst_name then return "ERROR: usage: send <dst_name> <text>" end
+  -- Two send variants:
+  --   send     <dst> <text>   — best-effort, no end-to-end confirmation
+  --   send_e2e <dst> <text>   — request end-to-end ACK from destination;
+  --                              originator gets delivered_confirmed or
+  --                              e2e_ack_timeout. See E2E ACK design block
+  --                              in the header — wire format is the same,
+  --                              just one bit set in the payload header.
+  local want_e2e = false
+  local dst_name, text = cmd_str:match("^send_e2e (%S+) (.+)$")
+  if dst_name then
+    want_e2e = true
+  else
+    dst_name, text = cmd_str:match("^send (%S+) (.+)$")
+  end
+  if not dst_name then
+    return "ERROR: usage: send <dst_name> <text>  or  send_e2e <dst_name> <text>"
+  end
   local dst_id = self.name_to_id[dst_name]
   if dst_id == nil then return "ERROR: unknown dst: " .. dst_name end
   -- Stamp this user-message with our 16-bit per-origin sequence number.
@@ -4402,7 +4643,25 @@ function on_command(self, cmd_str)
   -- message id used by every receiving node for dedup.
   local seq = self.next_origin_seq
   self.next_origin_seq = (seq + 1) % 65536
-  local full_payload = pack_origin_seq(seq) .. text
+  local flags = want_e2e and E2E_FLAG_ACK_REQUESTED or 0
+  local full_payload = pack_origin_hdr(seq, flags) .. text
+  if want_e2e then
+    -- Register pending_e2e BEFORE enqueueing the send so a fast E2E ACK
+    -- (e.g. test scenario with 1-hop path) doesn't arrive before the
+    -- bookkeeping is in place.
+    self.pending_e2e[seq] = {
+      sent_at_ms = self:now(),
+      dst_id     = dst_id,
+      dst_name   = dst_name,
+      user_text  = text,
+    }
+    self:emit("e2e_ack_pending", {
+      origin = self.id, origin_seq = seq, dst = dst_id,
+      ttl_ms = self.e2e_ack_ttl_ms,
+    })
+    self:log(string.format("send_e2e: pending_e2e[%d] dst=%s ttl=%dms",
+      seq, dst_name, self.e2e_ack_ttl_ms))
+  end
   table.insert(self.tx_queue, {
     origin     = self.id,
     dst_id     = dst_id,
@@ -4417,11 +4676,13 @@ function on_command(self, cmd_str)
   self:emit("tx_enqueue", {
     origin = self.id, payload = text, origin_seq = seq,
     dst = dst_id, depth = #self.tx_queue,
+    e2e_ack_requested = want_e2e,
   })
-  self:log(string.format("send: queued dst=%s payload=%q seq=%d (queue depth=%d)",
-    dst_name, text, seq, #self.tx_queue))
+  self:log(string.format("send: queued dst=%s payload=%q seq=%d e2e=%s (queue depth=%d)",
+    dst_name, text, seq, tostring(want_e2e), #self.tx_queue))
   become_free(self)
-  return string.format("queued (depth=%d, seq=%d)", #self.tx_queue, seq)
+  return string.format("queued (depth=%d, seq=%d, e2e=%s)",
+    #self.tx_queue, seq, tostring(want_e2e))
 end
 
 -- on_radio_busy fires when the runtime defers a TX (LBT channel_busy or
