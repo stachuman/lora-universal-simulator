@@ -1,0 +1,49 @@
+{
+  "_name": "t33_anti_spam_rate_limit",
+  "_desc": "Anti-spam 1st-hop silent drop. spammer sends 10 messages in a 30s burst. neighbor (1st-hop) tracks RTS/CTS counts: after threshold (originator_max_per_window=3 over 10s window), neighbor SILENTLY drops further RTSes from spammer and emits rts_drop_originator_throttle for the analyzer. spammer self-monitors: own_origination count > self_warn_fraction × max triggers originator_self_over_budget emit. Verifies: (1) at least 1 rts_drop_originator_throttle from neighbor; (2) at least 1 originator_self_over_budget from spammer; (3) at least some early messages delivered (before threshold) — proves the throttle is rate-limit, not all-drop.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "spammer", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0,
+                  "originator_window_ms": 10000,
+                  "originator_max_per_window": 3,
+                  "originator_self_warn_fraction": 0.5 } },
+    { "name": "neighbor", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0,
+                  "originator_window_ms": 10000,
+                  "originator_max_per_window": 3 } },
+    { "name": "victim",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10],
+                  "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "spammer",  "to": "neighbor", "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "neighbor", "to": "victim",   "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 5000,  "node": "spammer", "command": "send victim s1" },
+    { "at_ms": 6000,  "node": "spammer", "command": "send victim s2" },
+    { "at_ms": 7000,  "node": "spammer", "command": "send victim s3" },
+    { "at_ms": 8000,  "node": "spammer", "command": "send victim s4" },
+    { "at_ms": 9000,  "node": "spammer", "command": "send victim s5" },
+    { "at_ms": 10000, "node": "spammer", "command": "send victim s6" },
+    { "at_ms": 11000, "node": "spammer", "command": "send victim s7" },
+    { "at_ms": 12000, "node": "spammer", "command": "send victim s8" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "neighbor", "emit_type": "rts_drop_originator_throttle", "value": "" },
+    { "type": "script_emit_contains", "node": "spammer",  "emit_type": "originator_self_over_budget", "value": "" },
+    { "type": "script_emit_contains", "node": "victim",   "emit_type": "delivered", "value": "" }
+  ]
+}

@@ -412,6 +412,107 @@
 --   • Beacon advertise alt too (would double beacon size; tradeoff).
 --
 -- ============================================================================
+-- Anti-spam: 1st-hop statistical rate-limit via passive RTS/CTS counting
+-- ============================================================================
+--
+-- A chatty originator can monopolise network capacity: at ~1% duty cycle,
+-- every forwarder along the multi-hop path also burns its own budget
+-- relaying. One node sending 200 messages/hr effectively crowds out
+-- everyone else even though the spammer only has its own 1% local budget.
+--
+-- WHO ENFORCES.  Only the 1st-hop neighbour of the originator. NOT the
+-- originator itself (a malicious modified firmware can't be trusted to
+-- self-limit). NOT deeper forwarders (they see aggregated traffic from
+-- many origins and would over-trigger on the heaviest-loaded forwarders
+-- — exactly the nodes doing the right thing). The 1st-hop invariant is
+-- structural: a node N is entitled to police direct sender X only when
+-- N observes traffic that physically came from X's radio.
+--
+-- HOW IT WORKS (privacy-preserving, no origin needed).  We never read
+-- the `origin` field — it may be encrypted away in §9 T2. Instead we
+-- count what we OBSERVE on routing_sf from each direct sender X over a
+-- sliding window (default 5 min):
+--
+--   R[X] = total RTS-tx events from X (any tag 'R' — RTS, RTS-fwd,
+--          RTS-rty all count, they're indistinguishable on the wire)
+--   C[X] = total CTS-tx events from X (tag 'C')
+--
+-- A legitimate forwarder emits one CTS per inbound flight and one RTS
+-- per outbound forward, so R[X] ≈ C[X] over time. An originator emits
+-- RTS without ever responding to inbound RTS, so C[X] ≈ 0 and the
+-- difference R[X] − C[X] is the "apparent origination count":
+--
+--   apparent_origination[X] = max(0, R[X] - C[X])
+--
+-- ENFORCEMENT.  When N receives an RTS from sender X, N evaluates:
+--   • Is apparent_origination[X] > originator_max_per_window
+--     (default 6 originations / 5 min)?
+--   • OR is total observed airtime > originator_airtime_share × N's
+--     own duty-cycle budget (default 0.25)?
+-- If either: SILENTLY DROP the RTS — no CTS reply, no NACK. The sender
+-- experiences rts_timeout, cascades to alt next-hops, all 1st-hop
+-- neighbours independently converge on the same rate-limit decision,
+-- so the spammer is effectively capped at ~72 originations/hr (the
+-- threshold) regardless of how many next-hops they try.
+--
+-- WHY SILENT DROP, NOT NACK.  A NACK costs N ~50 ms of N's own budget
+-- per attack frame — paying airtime to a spammer. Silent drop costs
+-- zero. The spammer's rts_timeout (~5 s) provides the rate-limit
+-- pressure for free. The diagnostic event `rts_drop_originator_throttle`
+-- fires so the analyzer can measure mechanism activity without the
+-- protocol paying airtime.
+--
+-- ORIGINATOR FEEDBACK.  Without a NACK signal, the spammer can't be
+-- explicitly told "you're rate-limited." Instead each originator
+-- self-monitors: track own_origination_count over the same window.
+-- On any terminal failure (path_cascade_exhausted / rts_giveup),
+-- if own_origination_count is high (over half the inbound threshold)
+-- OR own duty-cycle tier is STRAINED+, emit
+-- `originator_self_over_budget` for the app to surface as "your
+-- send may have failed because you're over your fair-share budget."
+-- This is best-effort UX, not authoritative.
+--
+-- WHY COUNT-BASED, NOT PER-RTS DETERMINISTIC.  A per-RTS rule like
+-- "look back 300 ms for CTS+ACK from this sender" was the first
+-- proposal but is broken by collisions: if N misses a forwarder's
+-- ACK due to a collision on that frame, N would classify the next
+-- forwarder-RTS as origination and false-positive. The count-based
+-- rule absorbs single-event noise statistically — a missed CTS
+-- shifts R-C by 1, which the threshold tolerates.
+--
+-- EVASION ARITHMETIC.  A spammer trying to dodge the classifier by
+-- emitting fake CTS-tx before each spam RTS pays ~50 ms additional
+-- airtime per attack. The total-airtime backstop (originator_airtime_share)
+-- catches the evader at lower volumes than legitimate origination,
+-- so evasion is sub-economic.
+--
+-- KNOWN LIMITATIONS.
+--   • Statistical false-positives: a legitimate forwarder hit by a
+--     collision burst can briefly exceed threshold; window decay
+--     recovers them automatically.
+--   • Statistical false-negatives: a clever low-rate spammer can
+--     evade the origination-count metric. The airtime backstop
+--     catches extreme volumes; low-rate spam is harder to detect.
+--   • Move-and-reset: a spammer changing neighbourhoods resets each
+--     new 1st-hop's per-sender window. Mitigations (gossip,
+--     cryptographic identity binding) deferred to §8 frame-auth.
+--
+-- COMPOSITION.
+--   • §9 privacy (T2): the classifier doesn't read origin → fully
+--     compatible with origin encrypted in payload.
+--   • §8 cryptography (frame-auth MAC): would eliminate
+--     false-positives/negatives at cost of per-frame MAC verify;
+--     this script's behavioral classifier is what works before §8.
+--   • Existing budget NACK (§ duty-cycle tier): different mechanism,
+--     different state — composes cleanly.
+--
+-- Tuning knobs (config-level overrides; defaults in on_init):
+--   originator_window_ms          (300000 = 5 min)
+--   originator_max_per_window     (6 originations)
+--   originator_airtime_share      (0.25 = 25% of N's own budget)
+--   originator_self_warn_fraction (0.5  = self-warn at 3 originations)
+--
+-- ============================================================================
 -- F1 mitigation: receiver-blind-window awareness via passive CTS overhearing
 -- ============================================================================
 --
@@ -1097,6 +1198,118 @@ local function classify_blind(self, dst_id, current_next_hop, alts_tried, previo
   return "defer", remaining + 1
 end
 
+-- Anti-spam observation: append an event to per_sender_originator[X]'s
+-- sliding window, prune old entries. Called from on_recv when we observe
+-- an RTS or CTS frame from direct sender X. `kind` is "rts" or "cts".
+-- airtime_ms is the observed frame's airtime (estimated from frame
+-- bytes + the SF/BW the runtime gives us). msg_id is the frame's 4-bit
+-- msg_id — used for retry deduplication.
+--
+-- DEDUP. RTS frames are retried (RTS-rty) with the SAME msg_id as the
+-- original attempt. Counting retries as fresh originations would inflate
+-- the apparent rate dramatically (a legitimate originator with
+-- rts_max_retries=3 across K=3 alts = up to 12 R observations per
+-- message). We dedup by (kind, msg_id) within a retry window
+-- (default 10 s, longer than rts_max_retries × rts_timeout ≈ 6 s):
+-- repeated (kind, msg_id) inside the window refreshes the existing
+-- entry's timestamp, no new event added. Outside the window we treat
+-- it as a fresh observation (handles msg_id 4-bit wraparound at high
+-- send rates).
+--
+-- The mechanism doesn't reach into the wire `origin` field — works
+-- equally well under §9 T2 privacy where origin is encrypted in the
+-- payload. We only need to know who PHYSICALLY transmitted the frame
+-- (meta.src on the on_recv callback, which the LoRa runtime provides
+-- from the modem's RX metadata, not from the frame body).
+local function track_originator_observation(self, sender_id, kind, msg_id, airtime_ms)
+  if sender_id == nil then return end
+  if not self.per_sender_originator then return end   -- tracking disabled
+  local now = self:now()
+  local entry = self.per_sender_originator[sender_id]
+  if entry == nil then
+    entry = { events = {} }
+    self.per_sender_originator[sender_id] = entry
+  end
+  -- Prune events older than window.
+  local cutoff = now - self.originator_window_ms
+  local retry_window = self.originator_retry_dedup_ms or 10000
+  local kept = {}
+  local dedup_hit = nil
+  for _, ev in ipairs(entry.events) do
+    if ev.t >= cutoff then
+      if dedup_hit == nil and ev.kind == kind and ev.msg_id == msg_id
+         and (now - ev.t) < retry_window then
+        -- Same kind+msg_id within retry window — this is a retry of the
+        -- earlier observation, not a new origination. Refresh timestamp
+        -- (so the entry decays from the most recent observation, not
+        -- the first) and DON'T add a new event.
+        ev.t = now
+        dedup_hit = ev
+      end
+      table.insert(kept, ev)
+    end
+  end
+  if dedup_hit == nil then
+    table.insert(kept, {
+      t = now, kind = kind, msg_id = msg_id, air = airtime_ms or 0,
+    })
+  end
+  entry.events = kept
+end
+
+-- Compute the current state of sender X over the active sliding window.
+-- Returns (apparent_origination, total_airtime_ms, rts_count, cts_count).
+-- apparent_origination = max(0, rts_count - cts_count) — a legitimate
+-- forwarder has rts_count ≈ cts_count (one CTS per inbound flight, one
+-- RTS per outbound forward) so this is near 0; an originator has lots
+-- of RTS without CTS so it climbs.
+local function compute_originator_metric(self, sender_id)
+  if not self.per_sender_originator then return 0, 0, 0, 0 end
+  local entry = self.per_sender_originator[sender_id]
+  if entry == nil then return 0, 0, 0, 0 end
+  local now = self:now()
+  local cutoff = now - self.originator_window_ms
+  local rts, cts, air = 0, 0, 0
+  for _, ev in ipairs(entry.events) do
+    if ev.t >= cutoff then
+      air = air + (ev.air or 0)
+      if ev.kind == "rts" then rts = rts + 1
+      elseif ev.kind == "cts" then cts = cts + 1
+      end
+    end
+  end
+  local app_orig = rts - cts
+  if app_orig < 0 then app_orig = 0 end
+  return app_orig, air, rts, cts
+end
+
+-- Originator self-rate-monitor: track count of this node's own
+-- issue_send calls in the sliding window. Used by the on-failure
+-- check that emits originator_self_over_budget so the app can surface
+-- "your send may have failed because you're over fair-share budget."
+local function self_originate_observe(self)
+  if not self.own_origination_events then return end
+  local now = self:now()
+  local cutoff = now - self.originator_window_ms
+  local kept = {}
+  for _, t in ipairs(self.own_origination_events) do
+    if t >= cutoff then table.insert(kept, t) end
+  end
+  table.insert(kept, now)
+  self.own_origination_events = kept
+end
+
+local function self_originate_count(self)
+  if not self.own_origination_events then return 0 end
+  local now = self:now()
+  local cutoff = now - self.originator_window_ms
+  local n = 0
+  for _, t in ipairs(self.own_origination_events) do
+    if t >= cutoff then n = n + 1 end
+  end
+  return n
+end
+
 -- Duty-cycle pre-check. Returns (ok, wait_ms). When ok=true, the TX may
 -- proceed; the runtime's airtime log will absorb it. When ok=false, the
 -- caller should self:after(wait_ms, retry_callback) and re-check on fire.
@@ -1697,6 +1910,47 @@ end
 -- and truly drops). trigger arg is "rts_giveup" or "ack_giveup" — used
 -- only for the cascade_requeue emit's diagnostics, NOT for the legacy
 -- emits in the false branch (caller still owns those).
+-- Originator self-monitoring: when a flight truly fails at the originator
+-- (cascade-requeue caps exhausted; all alts tried), emit a UX hint that
+-- the failure MAY be because this node is over its fair-share budget.
+-- The app layer can surface this as "your send may have been rate-limited
+-- — try again in a few minutes." It's a best-effort signal, not
+-- authoritative (the actual cause could be anything from radio drop to
+-- destination offline), but high own_origination_count + recent failure
+-- is a useful correlation.
+--
+-- Emitted only when:
+--   • px is ours (origin == self.id, previous_hop == nil)
+--   • own_origination_count > originator_self_warn_fraction × inbound threshold
+--     (default 0.5 × 6 = 3 originations in last 5 min)
+--     OR own duty-cycle tier is STRAINED+
+local function maybe_emit_self_over_budget(self, px, trigger)
+  if px == nil then return end
+  if px.origin ~= self.id then return end       -- not our own send
+  if px.previous_hop ~= nil then return end     -- we were forwarding
+  local own_count = self_originate_count(self)
+  local warn_count = math.max(1, math.floor(
+    self.originator_self_warn_fraction * (self.originator_max_per_window or 6)))
+  local tier = compute_budget_tier(self)
+  if own_count >= warn_count or tier >= BUDGET_TIER_STRAINED then
+    self:emit("originator_self_over_budget", {
+      origin        = self.id,
+      origin_seq    = px.origin_seq,
+      dst           = px.dst,
+      msg_id        = px.msg_id,
+      trigger       = trigger,                  -- "rts_giveup" / "ack_giveup" / etc.
+      own_originate_count_in_window = own_count,
+      warn_threshold_count          = warn_count,
+      duty_cycle_tier               = tier,
+      window_ms                     = self.originator_window_ms,
+      hint = "your send may have failed because you're over fair-share budget",
+    })
+    self:log(string.format(
+      "originator_self_over_budget msg=%d trigger=%s own_count=%d/%d tier=%d",
+      px.msg_id, trigger, own_count, warn_count, tier))
+  end
+end
+
 local function try_cascade_requeue(self, trigger)
   local px = self.pending_tx
   if px == nil then return false end
@@ -1900,6 +2154,7 @@ local function rts_timeout_fire(self, captured_msg_id)
     })
     self:log(string.format("path_cascade_exhausted msg=%d dst=%s tried=%d (rts_giveup)",
       captured_msg_id, name_of(self, self.pending_tx.dst), #tried_list))
+    maybe_emit_self_over_budget(self, self.pending_tx, "rts_giveup")
     self.pending_tx = nil
     become_free(self)
     return
@@ -1998,6 +2253,7 @@ local function ack_timeout_fire(self, captured_msg_id)
     })
     self:log(string.format("path_cascade_exhausted msg=%d dst=%s tried=%d (ack_giveup)",
       captured_msg_id, name_of(self, self.pending_tx.dst), #tried_list))
+    maybe_emit_self_over_budget(self, self.pending_tx, "ack_giveup")
     self.pending_tx = nil
     become_free(self)
     return
@@ -2195,6 +2451,13 @@ end
 -- when nil (forwarder direct path) we treat this as a fresh hop and
 -- start enqueue_time_ms = now, requeue_count = 0.
 issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop, queue_meta)
+  -- Anti-spam self-monitoring: count our own originations (origin ==
+  -- self.id; previous_hop == nil means we're not forwarding for someone
+  -- else). Used to emit originator_self_over_budget on terminal failure
+  -- so the app can surface "you may be over fair-share budget" UX.
+  if origin == self.id and previous_hop == nil then
+    self_originate_observe(self)
+  end
   local entry = self.rt[dst_id]
   if not entry then
     -- Forwarder mid-flight with no route: real failure (route went stale
@@ -2845,6 +3108,20 @@ function on_init(self, config)
   self.budget_blind_strained_ms  = config.budget_blind_strained_ms  or  60000   -- 1 min
   self.budget_blind_critical_ms  = config.budget_blind_critical_ms  or 180000   -- 3 min
   self.budget_blind_exhausted_ms = config.budget_blind_exhausted_ms or 300000   -- 5 min
+  -- Anti-spam — per-sender RTS/CTS counts over sliding window for the
+  -- 1st-hop statistical classifier. See header doc block "Anti-spam:
+  -- 1st-hop statistical rate-limit". Tracked here, enforced (silent
+  -- drop) inside the RTS handler. Thresholds tuned for chat-app
+  -- traffic (~10 msg/hr) being comfortably under, and 200 msg/hr
+  -- spam being caught immediately.
+  self.per_sender_originator        = {}
+  self.own_origination_events       = {}
+  self.originator_window_ms         = config.originator_window_ms         or 300000   -- 5 min
+  self.originator_max_per_window    = config.originator_max_per_window    or 6        -- ≈ 72/hr
+  self.originator_airtime_share     = config.originator_airtime_share     or 0.25     -- backstop
+  self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5    -- emit self-warning at half threshold
+  self.originator_retry_dedup_ms    = config.originator_retry_dedup_ms    or 10000    -- 10s — longer than typical RTS-rty cycle so retries dedup; <<window so msg_id wrap counts as fresh
+
   -- Proactive tier-aware routing: route_strictly_better applies
   -- TIER_SCORE_PENALTY_DB on top of raw SNR margin so candidates via
   -- saturated neighbours get demoted from primary at rt_merge time —
@@ -3320,6 +3597,14 @@ function on_recv(self, frame, meta)
   if tag == "R" then
     local r = parse_rts(frame)
     if not r then return end
+    -- Anti-spam observation FIRST: track this RTS in r.src's sliding
+    -- window even when the RTS isn't addressed to us (we're overhearing
+    -- broadcasts on routing_sf). All 1st-hop neighbours of an originator
+    -- accumulate independent evidence this way, so the spammer can't
+    -- evade by picking next-hops who don't observe enough.
+    track_originator_observation(self, meta.src, "rts", r.msg_id,
+      airtime_ms(self.routing_sf, self.bw_hz, self.cr,
+                 self.preamble_sym, #frame))
     if r.next ~= self.id then return end  -- not for us; silent discard
     -- Cross-network filter — drop foreign-network RTSes before any CTS
     -- work. Without this, two networks merging during enhanced RF
@@ -3426,6 +3711,42 @@ function on_recv(self, frame, meta)
       return
     end
 
+    -- Anti-spam 1st-hop check: if this sender's apparent-origination
+    -- rate (R-C over the sliding window) is over threshold, silently
+    -- drop the RTS — no CTS, no NACK. The sender experiences
+    -- rts_timeout, the cascade tries other next-hops, all 1st-hop
+    -- neighbours converge on the same rate-limit, and the spammer is
+    -- effectively capped at ~72 originations/hr regardless of how
+    -- many next-hops they try. Emit rts_drop_originator_throttle so
+    -- the analyzer can measure activity without the protocol paying
+    -- airtime. See header doc block "Anti-spam: 1st-hop statistical
+    -- rate-limit" for the full argument.
+    do
+      local app_orig, total_air, rts_n, cts_n =
+        compute_originator_metric(self, meta.src)
+      local airtime_cap_ms = math.floor(
+        self.originator_airtime_share * (self.duty_cycle_budget_ms or 36000))
+      if app_orig > self.originator_max_per_window
+         or total_air > airtime_cap_ms then
+        self:emit("rts_drop_originator_throttle", {
+          from = meta.src, msg_id = r.msg_id,
+          apparent_origination = app_orig,
+          airtime_ms           = total_air,
+          rts_count            = rts_n,
+          cts_count            = cts_n,
+          threshold_count      = self.originator_max_per_window,
+          threshold_airtime_ms = airtime_cap_ms,
+          window_ms            = self.originator_window_ms,
+        })
+        self:log(string.format(
+          "rts_drop_originator_throttle <- %s msg_id=%d (R-C=%d/%d over %dms, air=%dms/%dms)",
+          name_of(self, meta.src), r.msg_id,
+          app_orig, self.originator_max_per_window,
+          self.originator_window_ms, total_air, airtime_cap_ms))
+        return  -- silent drop; no CTS, no NACK
+      end
+    end
+
     -- Budget-aware NACK: if our duty-cycle budget is tier CRITICAL or
     -- EXHAUSTED, we likely can't carry this flight to completion (CTS
     -- + DATA-RX has no cost but ACK does, and we'd consume more budget
@@ -3521,6 +3842,15 @@ function on_recv(self, frame, meta)
   if tag == "C" then
     local c = parse_cts(frame)
     if not c then return end
+    -- Anti-spam: track this CTS in meta.src's sliding window. CTS is the
+    -- forwarder fingerprint — a legitimate forwarder emits ~1 CTS per
+    -- inbound flight, so over the window R[X] ≈ C[X] for forwarders;
+    -- an originator never CTSes (no inbound RTS to respond to) so
+    -- C[X] ≈ 0. See header doc block "Anti-spam: 1st-hop statistical
+    -- rate-limit".
+    track_originator_observation(self, meta.src, "cts", c.msg_id,
+      airtime_ms(self.routing_sf, self.bw_hz, self.cr,
+                 self.preamble_sym, #frame))
 
     -- F1 mitigation: every CTS — addressed to us or not — tells us its
     -- sender will be deaf on routing_sf for one DATA-RX window
@@ -3746,6 +4076,7 @@ function on_recv(self, frame, meta)
       self:log(string.format(
         "rts_giveup msg=%d dst=%s (budget_low caps hit)",
         self.pending_tx.msg_id, name_of(self, self.pending_tx.dst)))
+      maybe_emit_self_over_budget(self, self.pending_tx, "budget_low")
       self.pending_tx = nil
       become_free(self)
       return

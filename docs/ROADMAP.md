@@ -7,7 +7,41 @@ shape of the problem, not the solution. Linked-to-from
 
 ---
 
-## 1. Anti-spam: rate-limit at the 1st-hop neighbour
+## 1. Anti-spam: rate-limit at the 1st-hop neighbour (IMPLEMENTED)
+
+**Status — IMPLEMENTED** as silent-drop + originator self-monitoring.
+See `scenarios/dv_dual_sf.lua` header doc block "Anti-spam: 1st-hop
+statistical rate-limit" for full design, and `test/t33_anti_spam_rate_limit.json`
+for the verification scenario. Mechanism summary:
+
+- Per-direct-sender RTS/CTS observation counts over sliding 5-min
+  window (`originator_window_ms`), deduplicated by msg_id within
+  a 10-s retry window (`originator_retry_dedup_ms`) so retries
+  don't inflate counts.
+- `apparent_origination[X] = max(0, distinct_RTS_msgs[X] - distinct_CTS_msgs[X])`.
+- Enforcement: **silent drop** of inbound RTS when over threshold
+  (`originator_max_per_window = 6`, ≈ 72/hr) OR airtime backstop
+  exceeded (`originator_airtime_share = 25%` of N's own duty cycle).
+  No NACK — preserves N's airtime budget. Diagnostic emit
+  `rts_drop_originator_throttle` for the analyzer.
+- Originator UX feedback: spammer can't be told explicitly because
+  no NACK, so each originator self-monitors. On terminal failure
+  (path_cascade_exhausted / rts_giveup), if own origination count
+  exceeds `originator_self_warn_fraction × max_per_window` (default
+  half of inbound threshold = 3) OR own duty-cycle tier is STRAINED+,
+  emit `originator_self_over_budget` with a UX-friendly hint string.
+
+Measured impact on s04 (60-min, 360 sends, 16 active originators):
+delivery unchanged at ~52%; 141 silent drops total (down from 3505
+in a pre-dedup measurement); 94 self-over-budget emits caught
+legitimate "over fair-share but not necessarily malicious" senders.
+
+The original problem statement and design rationale (preserved for
+context) follows.
+
+---
+
+**Problem.** A single chatty originator can monopolise network capacity.
 
 **Problem.** A single chatty originator can monopolise network capacity.
 At ~1% per-node duty cycle, every forwarder along the originator's
@@ -319,17 +353,51 @@ A is the obvious starting point — directly delivers the airtime saving the pro
 - Cost of an E2E ACK is N hops × ~50 ms airtime per direction = significant on routes >3 hops.
 - Must not be the default — flooding every message with E2E ACK defeats the duty-cycle budget recovery we just spent weeks fixing.
 - E2E ACK can itself be lost; originator needs a timeout + (optional) retry policy.
+- **Must compose with §9 T2** — under T2, origin is encrypted and forwarders never see it. The ACK return path can't address `origin` directly. The privacy variant (below) solves this with reverse-path soft state.
+
+**Plain-origin variant (compatible with current header).**
+- 1-bit `e2e_ack_requested` flag in the DATA frame's payload header (already has 2 bytes for origin-seq; spare 1 bit there).
+- Destination, on accepting DATA (after current hop-by-hop K-ack), additionally sends a new frame `E` (end-to-end ACK) routed back to the originator using normal data-plane mechanics. The `E` frame is tiny: `'E' | dst-of-original (= the responder, 8) | origin-of-original (= the recipient of E, 8) | msg_id (4) | status (4)` ≈ 4 bytes.
+- Originator maintains `pending_e2e[(origin, origin_seq)] = { sent_at, ttl }`. On `E` rx → emit `delivered_confirmed`. On TTL expiry → emit `e2e_ack_timeout`. App layer decides retry / surface "not confirmed" to user.
+- Forwarders route `E` exactly like a normal RTS-DATA flight from dst to origin (uses existing rt[origin]). No special case.
+
+**Privacy-compatible variant (composes with §9 — origin encrypted).**
+The plain variant requires plaintext `origin` in the `E` frame header so forwarders can address the return route via `rt[origin]`. Under §9 T2 the originator's identity is encrypted and forwarders don't see it — so we need a return-routing mechanism that **doesn't carry origin on the wire**.
+
+**Mechanism — reverse-path soft state at forwarders.**
+- During the DATA forward leg, each forwarder F passively caches `(msg_id, dst, prev_hop)` with a short TTL (default 30 s — covers typical 3-5 hop round-trip with retries). Cache populated on RTS-rx (when F is the chosen next-hop), confirmed on DATA-rx, evicted at TTL or LRU pressure.
+- Destination Z, on accepting DATA with `e2e_ack_requested=1`, generates an `E` frame: `'E' | msg_id (4) | dst-of-original (= Z, 8) | status (4) | reserved` ≈ 3 bytes. **No origin field.** Z transmits to the prev_hop it received the DATA from (Z knows its own prev_hop from the RTS leg).
+- Forwarder F receives `E(msg_id, Z, status)` from next-hop direction. F looks up `(msg_id, Z)` in its reverse-path cache. **Cache hit** → forward `E` to cached `prev_hop`. **Cache miss** → silently drop (E2E ACK is best-effort by design; originator's timeout handles it).
+- Walks hop by hop back along the original forward path. At originator: `(msg_id, dst-of-original)` matches `pending_e2e[(msg_id, dst-of-original)]` → emit `delivered_confirmed`.
+
+**Why this works under T2.**
+- Origin name never appears in any header. Reverse routing is derived entirely from forward-path soft state — not address lookup.
+- Forwarder cache key `(msg_id, dst)` references values that were ALREADY visible on the forward DATA leg (both stay plaintext under T2 because forwarders need `dst` for next-hop selection). No new metadata exposed.
+- Soft state ages out automatically; no permanent identity-linking residue at any forwarder.
+
+**Cost.**
+- Per-forwarder cache: ~10-100 rows depending on traffic. Each row ≈ 4-bit `msg_id` + 8-bit `dst` + 8-bit `prev_hop` + 8-bit `ttl_word` = 28 bits + table overhead. Negligible vs `rt[]`.
+- `E`-frame airtime: 1 frame per return hop. Same as plain variant.
+
+**Known limitations of the privacy-compatible variant.**
+- `(msg_id, dst)` collisions: msg_id is 4 bits → 16 values. Two flights with the same `(msg_id, dst)` traversing the same forwarder F within TTL → collision. Most-recent-wins eviction means at most one originator gets the correct E; the other times out and (optionally) retries. Mitigation: when DATA carries `e2e_ack_requested=1`, originator could pick a less-collision-prone msg_id (e.g., from a separate 8-bit space gated by the flag). Not catastrophic at typical traffic densities.
+- Reverse-path TTL tuning: too short → cache miss on slow paths → ACK lost; too long → cache bloat + collision risk grows. 30 s default sized for 3-5 hop typical paths.
+- Forwarder restart loses cache → all in-flight E-acks for that forwarder's downstream traffic time out. One-time cost on forwarder reboot.
+- Path asymmetry: if the return path goes through different forwarders than the forward (asymmetric link quality, or forward-path forwarder went silent), the E-frame can't follow because cache only exists on the original forward path. Limitation by design — privacy-compatible E2E ACK is **path-coupled**.
 
 **Possible direction (not committed).**
-- 1-bit `e2e_ack_requested` flag in the DATA frame's payload header (already has 2 bytes for origin-seq; could spare 1 bit there).
-- Destination, on accepting DATA (after current hop-by-hop K-ack), additionally sends a new frame `E` (end-to-end ACK) routed back to the originator using normal data-plane mechanics. The `E` frame is tiny (just origin + origin_seq + 1 byte status).
-- Originator maintains `pending_e2e[(origin, origin_seq)] = { sent_at, ttl }`. On `E` rx → emit `delivered_confirmed`. On TTL expiry → emit `e2e_ack_timeout`. App layer decides retry / surface "not confirmed" to user.
+- Both variants share the wire flag (`e2e_ack_requested`) and the originator's `pending_e2e` state machine. They differ only in how forwarders route the `E` reply.
+- Plain variant first (deployable today against current headers). Behavioural switch to privacy-compatible variant when §9 T2 lands.
+- Default TTL: 30 s. Default retry policy: app-layer (originator stack surfaces `delivered_confirmed` / `e2e_ack_timeout` events, doesn't auto-retry).
+- Reverse-path cache: 64-row LRU per forwarder; eviction = LRU + TTL-driven sweep on `become_free`.
 
 **Open questions.**
-- Does the `E` frame use full RTS-CTS-DATA-ACK or a fast-path single-frame? Single-frame is cheaper but less reliable (no CTS = ~5% loss); full-path doubles the cost of the original message.
-- Default TTL? 30 s for typical 3-hop routes, longer for known-deep meshes.
-- Retry policy: should the originator's stack auto-retry the original message on E2E timeout, or always surface to app?
-- Composability with the existing `delivered` script_emit — that fires at the destination, which already implies the DATA reached. The E2E ACK is for the *originator's* knowledge.
+- Does the `E` frame use full RTS-CTS-DATA-ACK or a fast-path single-frame? Single-frame ~5% loss probability per hop; full-path doubles airtime. **Recommendation: fast-path** — E2E ACK is already best-effort, and the originator's timeout+retry handles loss. Halves return-path airtime cost.
+- Should originators auto-retry on E2E timeout, or always surface to the app layer? **Recommendation: surface only.** Auto-retry compounds airtime under bad conditions (the very condition that caused the original loss). App-layer can decide.
+- Reverse-path cache populated on RTS-rx (more time, slight over-caching for flights F doesn't end up forwarding) or on DATA-rx (more accurate, less coverage)? RTS-rx populate, DATA-rx confirm — un-confirmed entries evicted at half TTL.
+- Composability with the existing `delivered` script_emit: `delivered` fires at the destination (always), `delivered_confirmed` fires at the originator (only when `e2e_ack_requested=1` AND the E-frame returned). Two distinct events, no conflict.
+
+**Cross-references.** §1 anti-spam (E2E ACK is rate-limited like any other origination), §8 cryptography (E-frame can carry a short MAC under network-PSK auth — prevents spoofed acks-of-success), §9 privacy (the privacy-compatible variant is the answer to "does T2 break E2E ACK?" — answer: no, but it requires reverse-path soft state at forwarders).
 
 ---
 
@@ -461,8 +529,10 @@ realistic ceiling).**
 - Q frame: replace `src` with an ephemeral cookie that the receiver
   returns in its triggered BCN (requester matches without persistent
   identity).
-- E2E ACK (§5): use a return-cookie mechanism instead of plaintext
-  origin.
+- E2E ACK (§5): use **reverse-path soft state at forwarders** so the
+  return `E` frame walks back along the original path without naming
+  the origin (see §5 privacy-compatible variant for the full
+  mechanism).
 
 **What T2 structurally can't fix.**
 - BCN exposes node existence. Every node BCNs its own `src`. Anyone
