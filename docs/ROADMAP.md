@@ -50,26 +50,61 @@ This has two structural properties:
 **Privacy-compatible variant (composes with §9 — origin encrypted).**
 The plain variant requires plaintext `origin` to identify the spammer.
 If origin moves into the encrypted payload (§9 T2), we lose direct
-attribution. But we can preserve anti-spam via **behavioral
-fingerprinting** without reading origin:
+attribution. But we can preserve anti-spam via **statistical
+behavioral fingerprinting** without reading origin.
 
-- A legitimate forwarder's RTS-tx is preceded by **its own CTS-tx +
-  ACK-tx** within ~300 ms (the full RTS-CTS-DATA-ACK chain — all on
-  routing_sf, all broadcast, all observable to neighbours in range).
-- An originator's RTS-tx is preceded by **no CTS+ACK from this sender**.
-- Classification rule at N: for each RTS-tx from direct sender X, look
-  back ~300 ms in N's RX history. If X performed CTS-tx and ACK-tx in
-  that window → forwarding. Else → originating.
-- Cap: per-X fresh-origination rate (e.g., 6 originations / 5-min
-  window) PLUS a per-X total-airtime backstop catching either pattern
-  at extreme volumes.
+Observation: a legitimate forwarder always emits one CTS-tx per
+inbound flight (responding to RTS-rx from upstream) AND one RTS-tx per
+outbound forward. Over any window, a true forwarder's
+`CTS-tx ≈ RTS-tx`. An originator emits RTS-tx with no inbound RTS to
+respond to, so `CTS-tx ≈ 0`. This is a **count-based metric over a
+sliding window**, NOT a per-RTS deterministic check.
 
-Why evasion is self-defeating: a spammer trying to dodge the
-originator classifier by emitting fake CTS+ACK before each spam RTS
-pays **3× the airtime** per spam (CTS ~50 ms + ACK ~50 ms + RTS ~50 ms
-instead of RTS alone). The evader hits the per-sender total-airtime
-backstop sooner than they would by cooperating. So the protocol is
-self-enforcing without needing to read `origin`.
+Why count-based, not per-RTS: a per-RTS rule like "look back 300 ms
+for CTS+ACK from this sender" is broken by collisions. If N misses
+the forwarder's ACK due to a collision (we measured ~5,500 collisions
+out of ~7,000 drops on s04 — non-trivial rate), N would classify the
+subsequent forwarder RTS as origination and false-positive. The
+count-based rule absorbs single-observation misses statistically: a
+missed CTS shifts one of R[X] or C[X] by 1, threshold is set to
+tolerate this.
+
+**Mechanism.**
+- Per direct sender X, sliding window (default 5 min):
+  - `R[X]` = total RTS-tx observed from X
+  - `C[X]` = total CTS-tx observed from X
+  - `apparent_origination[X] = max(0, R[X] - C[X])`
+- Detection: if `apparent_origination[X] / window > orig_rate_threshold`
+  (default 1 origination/min = 6 per 5-min window), mark X
+  rate-limited.
+- Enforcement: on subsequent RTS-tx from X with no CTS-tx from X in
+  the recent ~5 s (= almost certainly originating *now*), NACK with
+  `reason = originator_throttle`. The longer-window count drives the
+  rate-limit decision; the short-window check just gates which
+  specific RTS to NACK (so we don't NACK X's forwarder RTSes when X is
+  rate-limited as an originator).
+- Plus a per-X total-airtime backstop (e.g., 1/4 of N's duty cycle
+  budget) catching any node — forwarder OR originator — pushing
+  absurd volumes.
+
+Evasion arithmetic stays positive: a spammer dodging the classifier
+by emitting fake CTS-tx before each spam RTS pays **2× the airtime**
+per attack (CTS ~50 ms + RTS ~50 ms vs RTS alone). The total-airtime
+backstop catches the evader sooner than they'd hit by cooperating.
+The evade ratio shrunk from 3× (CTS+ACK fakery) to 2× (CTS-only
+fakery) when we relaxed the per-RTS rule, but stays sub-economic.
+
+**Known limitations of the behavioral variant.**
+- Statistical false-positives: a legitimate forwarder hit by a
+  collision burst can briefly exceed the origination-rate threshold.
+  Recovery is automatic — window decays, ratio recovers, rate-limit
+  lifts. Not catastrophic but visible.
+- Statistical false-negatives: a clever low-rate spammer with good
+  timing can evade indefinitely. The total-airtime backstop catches
+  extreme volumes; low-volume spam is harder to detect this way.
+- A cryptographically-authenticated origin (§8 frame-auth MAC) would
+  eliminate both error classes at the cost of per-frame MAC verify.
+  The behavioral variant is what works *before* §8 lands.
 
 **Possible direction (not committed).**
 - Default to plain-origin variant; switch to behavioral variant
