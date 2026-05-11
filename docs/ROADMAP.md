@@ -167,97 +167,281 @@ per-origin to per-sender behaviorally classified).
 
 ---
 
-## 2. Mobile nodes (source/destination only)
+## 2. Mobile nodes (two-tier — intra-leaf refresh + cross-leaf re-association)
 
-**Problem.** Today every node is a potential forwarder. Mobile nodes
-(handhelds moving between coverage zones) cause routing-table churn:
-their direct routes age in and out as they move, and if they ALSO
-forward, every other node has to track moving topology in real time.
-Routing-table thrash is the worst failure mode we've seen on s04 (60
-min, 138 nodes — but compounded by mobility).
+**Problem.** Mobile nodes (handhelds moving between coverage zones) cause routing-table thrash on two timescales:
+1. **Intra-leaf** — user walks around within their leaf network; direct neighbours shift; routes aging in and out.
+2. **Inter-leaf** — user physically moves between leaf networks (cross-city travel, relocation); their entire address context changes.
 
-**What we want.** A `mobile` flag on nodes that:
-- Excludes the node from forwarding (it appears as src/dst only).
-- Marks routes through them in neighbours' rt[] so the routing layer
-  knows not to route OTHER traffic via a mobile node.
-- Triggers a beacon when the mobile node detects its neighbour set has
-  shifted (so neighbours' rt entries don't lag the actual topology).
+Routing-table thrash compounded by mobility is the worst failure mode observed on s04 (60 min, 138 nodes). The mobile design has to handle the common case (intra-leaf walking) WITHOUT breaking the rare case (cross-leaf travel).
 
-**Constraints.**
-- Mobile flag must be on the wire (or derived from on-wire signal) so
-  neighbours can mark routes accordingly.
-- Mobile beacon-on-change must not become a beacon storm (deduplicate /
-  rate-limit).
-- Must compose with rt_aging_ttl_neighbor_ms — mobile direct entries
-  probably need shorter neighbor TTL.
+**Design principle.** Most user mobility is intra-leaf and frequent. Cross-leaf is rare (vacation, relocation). The protocol covers intra-leaf as a first-class concern; cross-leaf is handled with a lightweight app-layer notification pattern that requires no new protocol primitives beyond the existing §7.1 DATA frame.
 
-**Possible direction (not committed).**
-- Per-node `is_mobile` config flag (defaults to false).
-- BCN frame gains an `is_mobile` bit (currently 3 reserved bits left
-  in nid_byte after the budget-tier work).
-- Mobile nodes silently drop inbound RTS where `origin != self.id` and
-  `dst != self.id` (= forward request) — same pattern as the
-  pending_tx silent drop.
-- rt_merge: when receiving a beacon with `is_mobile=true`, set
-  `entry.candidates[i].is_mobile_next_hop = true`.
-- route_strictly_better: if a candidate's `next_hop` is marked mobile
-  AND the route's destination is NOT that mobile node, apply a
-  heavy score penalty (effectively "don't relay through mobiles").
-- Mobile node detects neighbour-set change by tracking its own
-  `rt[]` direct entries: when a 1-hop entry ages out OR a new one is
-  added, schedule a triggered beacon (with the existing
-  beacon_trigger_jitter machinery).
+**Mobile and gateway are mutually exclusive.** Gateways (§7.2 / §7.3) require stable network membership for TDM scheduling and cross-layer rt[] maintenance. Mobile by definition lacks stable membership. Enforced at on_init: `is_mobile=1` AND `is_gateway=1` is a config error.
 
-**Open questions.**
-- Auto-detect mobility (frequent neighbour changes → flag as mobile)
-  vs. explicit config flag? Explicit is simpler.
-- What's the right neighbour-change threshold for the triggered
-  beacon? One change every N minutes vs. instantaneous?
-- Should mobile nodes ALSO downgrade their own BCN cadence (they're
-  burning battery)?
+### Tier 1 — Intra-leaf mobility
+
+The user moves within their leaf's coverage area. Their `(leaf_id, leaf-local node_id)` stays the same; only their physical position and direct-neighbour set shift.
+
+**Mechanism.**
+- Per-node `is_mobile` config flag (default false).
+- BCN gains `is_mobile` bit (in the reserved nibble of byte 2, alongside `self_gateway_flag` from §7.2).
+- Mobile nodes SILENTLY DROP inbound RTS where `dst != self.id` AND `origin != self.id` (= forwarding request from someone else for a third party). Same silent-drop pattern as `rts_drop_pending_tx`. Diagnostic emit: `rts_drop_mobile_no_forward`.
+- `route_strictly_better`: candidates whose `next_hop` is mobile AND whose route's `dest != next_hop` get a heavy score penalty (`mobile_route_penalty_db`, default 20). Effectively excludes mobiles from being selected as relay hops for third-party traffic. (Mobiles are still picked as next-hop when they ARE the destination — degenerate case.)
+- Mobile node detects its own neighbour-set shift: when 1-hop direct entries in its rt[] age out OR new direct neighbours appear within `mobile_change_window_ms`, schedule a triggered BCN (existing `beacon_trigger_jitter` machinery). Throttled by `mobile_neighbor_change_threshold` to avoid storms.
+- Reduced direct-neighbour TTL on mobile nodes: `mobile_rt_aging_neighbor_ms` (default 5 min, vs 30 min for static nodes). Stale routes through mobiles age out faster.
+
+**Composes with §1 anti-spam** without changes: per-1st-hop counters reset naturally as alice's set of direct neighbours shifts; each new neighbour starts fresh observation counts.
+
+### Tier 2 — Cross-leaf mobility (rare; app-layer assisted)
+
+When alice's mobile leaves Gdansk leaf and joins Kraków leaf:
+
+1. **Departure detection.** Alice's device notices the radio environment changed dramatically: `>= mobile_leaf_change_threshold` (default 50%) of recent direct neighbours aged out within `mobile_leaf_change_window_ms` (default 60 s) AND new neighbours started appearing with foreign-leaf BCNs. Heuristic; not authoritative.
+
+2. **New-leaf address allocation (collision-detected random pick).**
+   - Alice listens for `mobile_join_listen_ms` (default 30 s) in the new leaf's BCN traffic. Records all `src` IDs heard.
+   - Picks a random leaf-local node_id from the unused range (1..255 minus the heard set).
+   - TXes her own BCN with the chosen ID + `is_mobile=1`.
+   - If a leaf-local peer responds within `mobile_join_collision_window_ms` (default 5 s) with "collision: I'm already at that ID", alice picks another and retries.
+   - After successful join: alice updates her own `(leaf_id, node_id)` config to the new values.
+
+3. **App-layer "I moved" notification to contacts.** Alice's app sends an encrypted DATA message to each contact in her address book:
+   ```
+   { type: "address_update", new_leaf_id: 27, new_node_id: 87 }
+   ```
+   Reuses §7.1 DATA mechanics; encrypted under the existing per-pair `session_key` (which is identity-derived and survives the move). The notification is itself a normal DATA frame — if alice's contacts are in another leaf, the notification crosses hierarchies via gateways, same machinery as any other cross-leaf send.
+
+4. **Contacts update address books.** Bob receives "alice moved to (27, 87)" → his app updates the entry. Future sends to alice use the new address.
+
+5. **Stale-address sends in transit.**
+   - Bob's send dispatched BEFORE he received the address-update notification: routes to old address `(33, 12)`, alice not there, cascade-exhaustion at the old leaf, drop. Bob's app surfaces the failure (or auto-retries with the new address if still pending).
+   - Bob's send AFTER receiving the notification: uses new address; succeeds.
+
+**No new protocol primitives needed.** The "I moved" notification is a normal §7.1 DATA frame. Cross-leaf address allocation is local heuristic + BCN observation. Failure recovery is app-layer.
+
+### Composition with other roadmap items
+
+| Subsystem | Mobility impact | Action needed |
+|---|---|---|
+| **§7.1 hierarchical DATA** | alice's `(leaf_id, leaf-local)` is volatile across moves | Address-update notification mechanism (app-layer, uses §7.1 DATA) |
+| **§7.2 BCN** | `is_mobile` bit consumes 1 reserved bit in BCN header byte 2 | +0 wire bytes (uses existing reserved space alongside `self_gateway_flag`) |
+| **§7.3 inter-layer TDM** | mobile cannot be gateway; no TDM scheduling | Enforce `is_mobile && is_gateway` is a config error at on_init |
+| **§1 anti-spam** | per-1st-hop counters reset naturally as alice's neighbour set shifts | No protocol change — works as-is |
+| **§5 E2E ACK** | reverse-path soft state at forwarders breaks if originator moves during ACK round-trip | Default 60 s `e2e_ack_ttl_ms` covers most move-windows; if alice moves mid-flight, ACK lost, originator times out → `e2e_ack_timeout` event surfaces to app |
+| **§8.1 crypto** | `session_key` is identity-derived; `ctr` per-pair persisted in NV | **Crypto survives moves with zero ceremony** — only routing has to find alice |
+
+### What this design deliberately doesn't solve
+
+- **Discovery of moved contacts WITHOUT alice's "I moved" notification.** If alice moves and can't reach her contacts immediately (battery, connectivity), they keep stale addresses until alice reaches out. Acceptable for rare-cross-leaf.
+- **Seamless mid-conversation move.** A real-time exchange interrupted by alice's leaf change WILL drop messages between her departure and the address-update propagation. Acceptable for non-realtime LoRa mesh use.
+- **Group/channel membership when mobile.** Group chats (§6) where members move are an open question; deferred to §6 design.
+- **HLR-style permanent home address.** Cellular-network-style "always reachable at your home address" is NOT in this design. Senders need updated addresses; old addresses fail.
+- **Auto-detection of mobile vs static.** Explicit `is_mobile` config flag only. No "frequent neighbour changes → auto-flag as mobile" inference (would require statistical thresholds and could misclassify; explicit is simpler).
+
+### Tunables
+
+| Key | Default | Purpose |
+|---|---|---|
+| `is_mobile` | false | Per-node config flag; mutually exclusive with `is_gateway` |
+| `mobile_neighbor_change_threshold` | 0.5 | Fraction of recent direct neighbours that must shift to fire a triggered BCN |
+| `mobile_change_window_ms` | 60000 | Window over which intra-leaf neighbour shifts are evaluated |
+| `mobile_rt_aging_neighbor_ms` | 300000 (5 min) | Reduced direct-neighbour TTL when emitter is `is_mobile=1` (vs static node's 30 min) |
+| `mobile_route_penalty_db` | 20 | Score penalty applied in `route_strictly_better` when a candidate's next_hop is mobile AND not the destination |
+| `mobile_leaf_change_threshold` | 0.5 | Fraction of recent neighbours that must shift to infer leaf change |
+| `mobile_leaf_change_window_ms` | 60000 | Window over which leaf-change inference is evaluated |
+| `mobile_join_listen_ms` | 30000 | Listen window after entering a new leaf, gathering occupied IDs |
+| `mobile_join_collision_window_ms` | 5000 | Wait time for collision NACK after announcing chosen ID |
+
+### Implementation cost estimate
+
+- `is_mobile` config + BCN bit-pack: ~20 lines
+- Forwarding refusal at mobile (silent-drop on RTS-rx): ~15 lines
+- `route_strictly_better` mobile-penalty: ~10 lines
+- Triggered BCN on neighbour-set shift: ~40 lines
+- Reduced rt_aging TTL for mobile-neighbour entries: ~10 lines
+- Cross-leaf join state machine (listen + pick + collision-retry): ~80 lines
+- App-layer "I moved" message scaffolding (mostly app-layer, but needs DATA-payload type discrimination): ~30 lines
+- Tests: intra-leaf mobile-doesn't-forward, mobile-route-penalty, mobile-trigger-BCN, cross-leaf join + collision detection, address-update notification: ~150 lines
+
+**Cross-references.** §7.1 (cross-leaf address-update uses normal DATA), §7.2 (`is_mobile` bit packs into BCN's reserved nibble alongside `self_gateway_flag`), §7.3 (mobile excludes gateway), §1 (anti-spam unaffected), §5 (E2E ACK during move can time out), §8.1 (crypto identity is mobility-stable).
 
 ---
 
-## 3. Public channel (broadcast alternative)
+## 3. Channels (unified primitive — public, group, private)
 
-**Problem.** Traditional mesh "public channel" = flood. Every message
-reaches every node. In a dense network at ~1% duty cycle, a single
-flood saturates the entire network's airtime budget for tens of
-seconds. Pure flood is not a serious option at the densities we
-simulate.
+**Problem.** Mesh networks need multi-recipient communication beyond per-pair DM (§7.1, §8.1): public alerts, friend group chats, family/team private discussions. Pure flood is not viable (saturates duty cycle in dense meshes); per-recipient unicast doesn't scale beyond ~5 members. We need ONE multi-recipient primitive with policy variations for the three flavors.
 
-**What we want.** A broadcast-style capability for "this message is
-intended for many recipients" use cases (chat-rooms, status broadcasts,
-alerts) that does NOT consume the entire network's airtime budget.
+**Design principle.** A SINGLE wire-level delivery mechanism — **the multicast DATA frame defined in §7.5** — serves all three channel flavors. The two modes of §7.5 cover the spectrum:
 
-**Constraints.**
-- Must reach interested receivers (subscribers to the channel /
-  topic).
-- Must NOT consume disproportionate airtime — duty cycle is hard.
-- Must respect per-node duty cycle.
-- No assumption of central coordinator.
+- `dst_count > 0` (explicit-list multicast) → group / private channels
+- `dst_count == 0` (multicast-to-all) → public channels
 
-**Possible directions (none committed; all viable).**
+**Public / group / private differ ONLY in (a) crypto choice, (b) admission policy, and (c) which §7.5 mode they use** — all of these are app-layer / config concerns layered on top of the same wire primitive.
 
-| Approach | Idea | Trade-off |
+This consolidates what was previously sketched in §3 (public broadcast) and §6 (ad-hoc channels) into one coherent design built on §7.5.
+
+### The three flavors
+
+| Flavor | §7.5 mode | Membership | Crypto | Discovery | Use case |
+|---|---|---|---|---|---|
+| **Public** | `dst_count = 0` (multicast-to-all) | Open (anyone listens / posts) | None — plaintext | Channel ID published openly (well-known list, app config) | System alerts, weather, emergency, public announcements |
+| **Group** | `dst_count > 0` (explicit list) | Anyone with the channel PSK | Symmetric channel PSK (ChaCha20+MAC) | Channel ID + PSK distributed at invitation (QR code, in-app share); recipient list known to originator | Friend group chat, team coordination, neighborhood watch |
+| **Private** | `dst_count > 0` (explicit list) | Strict member-list, signed by admin | Group PSK + per-message author signature (Ed25519) | Member-list managed by admin, distributed via signed announcement | Family chat, sensitive discussion |
+
+### Channel ID (1 byte)
+
+Channel ID is **not on the wire** as a separate field — it's encoded INSIDE the encrypted payload (group/private) or inside the plaintext payload (public). The wire-level multicast frame (§7.5) doesn't need to know the channel ID — it just needs to know who to deliver to (explicit list) or "everyone" (multicast-to-all).
+
+**Reason this works:**
+- Recipients (whether explicit list or "all") decrypt/parse the payload to discover the channel ID
+- App layer routes to the appropriate channel handler based on the channel ID
+- Non-recipients in multicast-to-all mode simply ignore channel-IDs they don't subscribe to (app-layer filter)
+
+This keeps the wire format minimal — no special channel-frame-type at the protocol layer.
+
+### Encrypted body structure
+
+The body inside the §7.5 multicast frame:
+
+| Flavor | Inner payload structure |
+|---|---|
+| **Public** | `channel_id(1B) | user_text(N)` — plaintext; no encryption needed (anyone receiving multicast-to-all sees it; app-layer filter by channel ID) |
+| **Group** | `ChaCha20(channel_psk, derive_nonce(ctr, channel_id), [channel_id(1B) | user_text(N)]) + MAC(4B)` — symmetric group key |
+| **Private** | `ChaCha20(channel_psk, ...) + Ed25519_sig(author_id_key, ciphertext truncated to 16 B)` — sig replaces MAC; verifies author identity against channel's known member-list |
+
+For private channels, the author identity is in the encrypted body:
+```
+inner = author_pubkey_hash(2B) | channel_id(1B) | user_text(N) | author_signature(16B truncated)
+```
+
+Author's pubkey is one of the channel's known member identities. Verifier checks signature against each known member's pubkey; first match identifies author. 16-byte truncated Ed25519 sig gives 2⁻¹²⁸ forgery probability — strong enough.
+
+### Delivery via §7.5 multicast
+
+All channel messages are sent as §7.5 multicast frames. The mode chosen depends on the channel flavor:
+
+**Public channel send:**
+```
+Sender encodes: channel_id + user_text (plaintext)
+Sender issues §7.5 multicast with dst_count = 0 (multicast-to-all)
+Mesh delivers to every reachable node via loose-tree-on-all-rt[] forwarding
+Every receiving node: app-layer checks if it subscribes to channel_id;
+  if yes, deliver to app; if no, drop silently
+```
+
+**Group / private channel send:**
+```
+Sender knows the channel's current member list (from QR-share or app-layer manifest)
+Sender encrypts payload with channel PSK (group) or PSK+sig (private)
+Sender issues §7.5 multicast with dst_count = N, dst_list = current members
+Mesh delivers via explicit-list loose-tree forwarding to those specific members
+Receiving members trial-verify MAC/sig and decrypt
+```
+
+**This means forwarders need ZERO channel-specific state.** They just route §7.5 multicast frames. The channel layer is purely at the endpoints (senders + recipients). 
+
+### Open problem: subscriber discovery for group/private channels
+
+The §7.5 explicit-list mode REQUIRES the originator to know the recipient list. For group/private channels with stable membership (QR-share at invite time), this is fine — the app maintains the list locally.
+
+But three scenarios need design attention:
+- **New member joins**: how do other members learn the new member is now a recipient?
+- **Member leaves / is removed**: how do other members stop including them in their dst_list?
+- **Member-list sync across the group**: what happens when alice's local member-list disagrees with bob's?
+
+This is the still-open subscriber-discovery problem. Options to be discussed:
+- App-layer "membership manifest" distributed at join, refreshed on changes (each member maintains own list; updates via signed broadcast)
+- Server-registry (per §3 server discussion) — single source of truth
+- Bloom filter in BCN — approximate; useful only for hint-based discovery
+- Pull-based query when sender doesn't know membership
+
+**For now, this is parked as a separate design item — see "Open problems" below.**
+
+### Cross-leaf channel bridging (configured gateway)
+
+Channels are intra-leaf by design. Cross-leaf bridging requires explicit operator configuration at gateways. The gateway receives the §7.5 multicast frame in one leaf, translates encryption if needed, and re-emits as a multicast frame in the destination leaf.
+
+**Gateway configuration:**
+```
+bridge_channels = [
+  { src_leaf=33, src_ch=3, dst_leaf=27, dst_ch=7, src_psk=..., dst_psk=... },
+  { src_leaf=27, src_ch=7, dst_leaf=33, dst_ch=3, src_psk=..., dst_psk=... },  -- reverse direction
+]
+```
+
+**Gateway behavior** on receiving a channel-3 multicast in leaf 33:
+1. Decrypt using leaf-33 channel-3 PSK (or skip if public)
+2. Read out channel_id from decrypted payload
+3. Re-encrypt using leaf-27 channel-7 PSK (or skip if public)
+4. Emit §7.5 multicast in leaf 27 with the destination list translated to leaf-27 member IDs (for group/private; or `dst_count=0` for public-channel-bridging)
+
+**The gateway is a TRUSTED INTERMEDIARY** for channels — it sees plaintext during translation. Different from §7.1 DM where end-to-end confidentiality means gateways can't read user content. **For channels, bridge-by-trust is the design** (real-world IRC/Discord bridges work this way).
+
+For PUBLIC channels: bridging is trivial — gateway just relays plaintext between configured (src_leaf, src_ch) ↔ (dst_leaf, dst_ch) pairs, possibly with channel_id remapping. Uses `dst_count=0` multicast-to-all on both sides.
+
+### Open problems (parked for separate discussion)
+
+The unified §7.5-based delivery is settled, but **subscriber discovery for group/private channels** is still open:
+
+1. **New-member onboarding** — how does an existing member learn that bob just joined channel X?
+2. **Member-list sync** — what happens when alice's local member-list for channel X differs from carol's?
+3. **Member removal** — how does the group propagate "bob is out" + new PSK to remaining members securely?
+4. **Stale-member handling** — if alice sends to {bob, carol, dave} but dave has left and rotated keys, dave still gets the frame but can't decrypt; no harm done, but he sees "garbage from alice"
+
+Possible directions (TBD):
+- App-layer "membership manifest" — each member maintains the list locally; updates via signed broadcast from admin
+- Server-registry (per the §3 server discussion) — single source of truth queried before send
+- Bloom filter in BCN — approximate; useful as a hint but not authoritative
+- Pull-based query — sender asks "members of channel X?" before send, caches the answer
+
+These belong to a follow-up design pass; the §7.5 delivery mechanism is independent of whichever discovery method we choose.
+
+### Composition with other roadmap items
+
+| Subsystem | Channel impact |
+|---|---|
+| **§7.1 DATA** | Channel messages don't use unicast DATA — they always go through §7.5 multicast |
+| **§7.2 BCN** | **No mandatory subscription extension needed** for the multicast-based design. Optional BCN subscription advertisement remains useful if a discovery-by-BCN approach is later chosen, but it's not baseline. |
+| **§7.3 inter-layer** | Channels are intra-leaf; cross-leaf bridging is via configured gateway re-encryption — NOT via TDM scheduling. Channel messages stay at leaf SF. |
+| **§7.5 multicast** | **The delivery mechanism**. All three flavors use §7.5; differ only in `dst_count` and crypto. |
+| **§1 anti-spam** | Per-1st-hop counters apply unchanged — the originator of a channel message counts toward their own quota. Future: optional per-channel rate cap at forwarders. |
+| **§2 mobile** | Channel subscriptions are app-layer state carried with the user across moves; member-list sync needed (see open problems). |
+| **§5 E2E ACK** | Channel messages skip E2E ACK (no single recipient). `E2E_ACK_REQ` MUST be 0 for channel multicast. |
+| **§7.4 RTS / CTS / ACK** | Channel multicast still uses standard hop-level RTS-CTS-DATA-ACK chain at each split point. |
+| **§8.1 crypto** | Channel uses LEAF-LOCAL group PSK (not §8.1's per-pair X25519 keys). Distribution is operational (QR code at channel join). Forward secrecy not provided. |
+| **§9 T2 privacy** | dst_list (when present) is plaintext on wire (forwarders need it for routing). Channel ID lives INSIDE encrypted payload — observers don't learn which channel is being used. Sender identity within encrypted body is hidden. |
+
+### What this design deliberately doesn't solve
+
+- **Reliability guarantees** for channel messages. Best-effort, no per-subscriber ACK. Lost messages stay lost. Apps that need reliability must use unicast DM (§7.1) instead.
+- **Cross-leaf channels without operator setup.** Bridging requires manual gateway configuration. No auto-discovery.
+- **Per-channel rate limiting beyond §1 anti-spam.** Future enhancement.
+- **Forward secrecy** for channel messages. Same trade as §8.1 — channel PSK is reused; rotation requires re-distribution.
+- **Member removal in private channels.** Hard problem (removed member still has old PSK). Requires PSK rotation + redistribution to remaining members. App-layer concern; protocol provides the wire to deliver the new key.
+- **Subscriber discovery for group/private channels** — parked, see "Open problems" above.
+- **Channel discovery primitive** — no "list nearby active channels" mechanism. Channel IDs are well-known (public) or invitation-distributed (group/private).
+- **Coverage of newly-joined nodes for public channels.** Public channels use multicast-to-all (§7.5 `dst_count=0`) which only reaches nodes in `rt[]`. New joiners not yet in `rt[]` miss public broadcasts until BCN propagation completes (~5 min).
+
+### Tunables
+
+(Most tunables live at §7.5 multicast. Channel-specific tunables:)
+
+| Key | Default | Purpose |
 |---|---|---|
-| **Hop-limited controlled flood** | TTL on the broadcast frame; nodes suppress re-broadcast probabilistically | Simple; bounds but doesn't eliminate the flood cost |
-| **Topic-based subscription** | Subscribers advertise interest in topics via beacon. Originators send only along paths to known subscribers. | Best scaling; adds substantial protocol surface (topic ID, subscription state, sub-tree construction) |
-| **Recipient-list multicast** | Originator picks N specific destinations and sends N unicasts in parallel. No actual broadcast on the wire. | Trivial; degrades to flood when N is large |
-| **Shared-tree multicast** | Build a per-topic spanning tree; broadcast follows tree edges only. | Mid-complexity; tree maintenance overhead |
+| `channel_rate_cap_per_min` | 10 | (Future) per-channel rate limit at forwarders; prevents single channel saturating |
+| `channel_member_list_max` | 64 | App-layer cap on members per channel (depends on member-list-sync mechanism chosen) |
 
-**Recommendation.** Avoid pure flood. Lean toward topic-based with
-selective forwarding for the chat-room use case; recipient-list for
-small-N (≤ 5) status broadcasts.
+### Implementation cost estimate
 
-**Open questions.**
-- Where does subscription state live? Bit-vector in beacon (limited
-  topic space), or separate subscription frame?
-- Forwarder behaviour when topic state is stale: forward conservatively
-  or drop?
-- Delivery guarantees: best-effort with no ACKs (cheap), or per-subscriber
-  ACK (expensive at scale)?
-- How does this compose with the budget NACK?
+- Channel encoding/decoding inside §7.5 payload (channel_id field + flavor-specific crypto): ~80 lines
+- Group PSK + per-message Ed25519 signing for private channels: ~100 lines (depends on chosen ed25519 implementation)
+- App-layer dispatch on incoming multicast based on channel_id: ~30 lines
+- Gateway cross-leaf bridge config + re-encryption: ~80 lines
+- Subscriber-discovery mechanism (TBD which approach): ~150-300 lines depending on choice
+- Tests: public/group/private message flow, cross-leaf bridge, member-list verification, stale-member behavior: ~200 lines
+
+**Cross-references.** §6 (consolidated into this section), §7.5 (THE delivery mechanism — all flavors use multicast), §7.1 (multicast frame is a §7.1 DATA variant), §7.2 (BCN unchanged for channels), §7.3 (intra-leaf only), §1 (per-1st-hop anti-spam unchanged), §2 (mobile subscriptions need member-list sync), §8.1 (channel PSK independent of per-pair session keys), §9 (channel ID hidden in encrypted body; only dst_list visible).
 
 ---
 
@@ -426,30 +610,18 @@ The plain variant requires plaintext `origin` in the `E` frame header so forward
 
 ---
 
-## 6. On-demand (ad-hoc) channels
+## 6. ~~On-demand (ad-hoc) channels~~ — consolidated into §3
 
-(Complements §3 — public channel covers always-on system-wide topics; this section covers ad-hoc dynamic subscriptions.)
+This section was originally drafted as a separate "ad-hoc channels" concept. It has been **consolidated into §3 (Channels — unified primitive)** as part of the redesign that unified public, group, and private channels under a single protocol mechanism.
 
-**Problem.** Real-world use cases need temporary group communication: a chat thread that lasts a few hours, an emergency-alert channel that activates during incidents, a coordination channel for a specific event. Pre-configuring all possible channels into every node is impractical and burns memory; we need a way to spin up a channel dynamically and tear it down when done.
+The original §6 distinction (public = always-on system-wide; ad-hoc = temporary group) was an artifact of treating them as separate protocols. Under the unified §3 design, both cases are the same primitive — they differ only in (a) how the channel ID is distributed (public = well-known; ad-hoc = QR/invitation), (b) whether the channel has a PSK, and (c) whether the operator has configured cross-leaf bridging for it.
 
-**What we want.** A small group of nodes can subscribe to an ad-hoc channel by ID, exchange messages within the channel, and disband by letting state age out — without central coordinator or pre-distributed configuration.
+See §3 for the full unified design. Specific concerns originally raised here are addressed in §3 as follows:
 
-**Constraints.**
-- Channel-ID format must be collision-resistant (collision = unrelated traffic crosses).
-- Subscription state must have a TTL — abandoned channels can't accumulate forever.
-- No flooding: a message to channel X should reach only subscribers, not the whole mesh.
-
-**Possible direction (not committed).**
-- **Channel ID** = 32-bit random (24-bit topic + 8-bit creator id) — collision-resistant under reasonable load.
-- **Subscribe frame** `S` — node announces "I subscribe to channel X". Neighbours add `sub_table[X] += {self.id}` with TTL (e.g., 5 min, refreshed by periodic re-subscribe).
-- **Send-to-channel**: originator emits `T` (topic-data) frame addressed to channel X. Forwarders consult their `sub_table[X]` — if ≥ 1 subscribed neighbour, forward; else drop. Multiple subscribers → forwarder unicasts to each (no broadcast at wire layer).
-- **Unsubscribe**: explicit leave frame, OR let TTL handle it.
-
-**Open questions.**
-- Memory bound: how many simultaneous channels can a node carry in `sub_table`? Probably 16-32 reasonable for handheld hardware.
-- Channel discovery: how does a new node find an active channel? In-band advertisement (channels in beacon?) or external bootstrap (QR code, app-layer)?
-- Per-channel rate limits to prevent a single channel from monopolising airtime?
-- How does this interact with §1 anti-spam? Probably channel-aware: per-(origin, channel) budget instead of just per-origin.
+- **Channel-ID collision resistance:** channels are leaf-scoped per §3 design, so 1-byte channel IDs are sufficient (256 channels per leaf). For globally-unique ad-hoc channel naming, app-layer can hash a longer name to a 1-byte ID with local-scope collision detection.
+- **Subscription state TTL:** §3 specifies "subscriptions persist while node is BCN-visible; aged out when rt[] entry ages out." No separate TTL knob needed.
+- **No flooding:** §3 uses subscriber-driven forwarding via `sub_table` populated from neighbor BCNs.
+- **Channel rate limits:** §3 reserves `channel_rate_cap_per_min` as a future tunable; for now, §1 anti-spam's per-1st-hop counters apply unchanged.
 
 ---
 
@@ -955,6 +1127,227 @@ The behavioral classifier (`R[X]` and `C[X]` distinct-msg_id counts per direct s
 - `pack_cts` / `parse_cts`, `pack_ack`, `pack_nack` semantic rename: ~10 lines each
 - Pending state keying migration (`msg_id` → `ctr_lo`): ~30 lines across the matching helpers
 - Tests: RTS round-trip for each `addr_len` value (0, 1, 2), CTS/ACK matching with new ctr semantics, cross-layer RTS with hierarchical dst: ~80 lines
+
+### 7.5 Multicast DATA frame (two modes: explicit-list AND multicast-to-all)
+
+**Problem statement.** Multi-recipient delivery (group DMs, channel messages, public broadcasts) needs an efficient wire-level primitive. Two unsatisfying defaults:
+
+1. **N-unicast** — originator sends N separate per-pair-encrypted frames. Body duplicated N times. Wasteful.
+2. **Naive flood** — every node rebroadcasts. Collision storms. Probabilistic suppression heuristics needed. ~N TXs but with high collision risk and tuning complexity.
+
+**The unified solution: multicast with explicit OR implicit destination list.** A single wire format and forwarding algorithm covers both small-group and broadcast cases via the value of `dst_count`:
+
+- **`dst_count > 0` (explicit-list mode)**: dst_list carries specific recipients. Each forwarder groups them by next-hop direction using `rt[]`, splits and forwards. Loose-tree.
+- **`dst_count == 0` (multicast-to-all mode)**: no dst_list. Means "every node reachable via my `rt[]`". Each forwarder groups its ENTIRE `rt[]` by next-hop direction, splits and forwards. Loose-tree-to-all. This IS the public-broadcast mechanism.
+
+**Forwarders need no per-channel or per-group state — just `rt[]`.** The frame's `dst_count` and (if present) `dst_list` are the only routing signals.
+
+**Wire format (in-leaf only; `addr_len = 0`).** Cross-leaf multicast falls back to per-destination unicast at gateway boundaries.
+
+```
+byte:  0   1                       2     3            4..(3+dst_count)         (4+dst_count)..(end)
+       ┌───┬──────────────────────┬─────┬────────────┬────────────────────────┬──────────────────┐
+       │'D'│ addr_len = 0  (4 hi) │ next│ dst_count  │ dst_list               │ ctr (2 B) +      │
+       │   │ E2E_ACK_REQ   (1)    │     │ (8 bits)   │ (omitted if            │ ciphertext + MAC │
+       │   │ E2E_IS_ACK    (1)    │     │            │  dst_count==0;         │ (n + 4 B)        │
+       │   │ IS_MULTICAST  (1)    │     │ 0 = "all"  │  else 1 B/dst)         │                  │
+       │   │ reserved      (1)    │     │ N = list   │                        │                  │
+       └───┴──────────────────────┴─────┴────────────┴────────────────────────┴──────────────────┘
+```
+
+**Two modes:**
+
+| `dst_count` | Semantic | Use case |
+|---|---|---|
+| **0** | Multicast-to-all (every node in forwarder's `rt[]`) | Public channels, system-wide broadcasts |
+| **1..N** | Multicast-to-explicit-list | Group DMs, channel messages with known members |
+
+**Frame-budget math (255 B LoRa max).**
+
+```
+fixed_overhead = 'D'(1) + flags(1) + next(1) + dst_count(1) + ctr(2) + MAC(4) = 10 B
+body_budget    = 255 - 10 - dst_count - body_size
+```
+
+**Explicit-list mode practical limits:**
+
+| Body size | Max `dst_count` per frame at fast SF |
+|---|---|
+| 50 B | ~195 |
+| 100 B | ~145 |
+| 150 B | ~95 |
+| 200 B | ~45 |
+
+At slower SFs (SF11/SF12) the practical max can drop to ~50-100 B per frame, severely restricting explicit-list mode. Use multicast-to-all (`dst_count=0`) for large recipient sets to sidestep this entirely — no dst_list bytes, same frame size as a unicast DATA.
+
+**For lists larger than per-frame budget:** the originator splits at SEND time, issuing multiple multicast frames each with a subset of `dst_list` (possibly all to the same first-hop direction). Each downstream split happens naturally via the forwarding algorithm.
+
+**Constraints:**
+- `addr_len` MUST be 0 — multicast is intra-leaf
+- `dst_count == 0` means "all reachable nodes"; dst_list field is omitted
+- `E2E_ACK_REQ` MUST be 0 (no single recipient → no E2E ACK)
+- `E2E_IS_ACK` MUST be 0 (multicast frames are never themselves ACKs)
+
+**Forwarding algorithm (handles both modes uniformly).**
+
+```
+At forwarder F, on receiving multicast DATA:
+
+1. Deliver locally if recipient:
+     if dst_count == 0:
+       deliver locally (we're a recipient — "all" includes us)
+     elif self.id is in dst_list:
+       deliver locally
+     (else: we're just a forwarder, no local delivery)
+
+2. Determine the working set:
+     if dst_count == 0:
+       working_set = { entry.dest for entry in rt[] }     -- ALL reachable nodes
+       working_set -= {self.id}
+     else:
+       working_set = dst_list - {self.id}
+   if working_set is empty: done.
+
+3. Group by next-hop direction:
+     by_next = {}
+     for d in working_set:
+       if rt[d] is missing: skip d (no route; drop silently)
+       hop = rt[d].next_hop
+       by_next[hop].append(d)
+
+4. For each (next_hop, subset) in by_next:
+     if next_hop != frame.previous_hop:    -- prevent echoes
+       if dst_count == 0:
+         send multicast-to-all frame (dst_count=0, no dst_list) to next_hop
+       else:
+         send multicast frame with dst_list=subset to next_hop
+```
+
+The "all" mode doesn't even carry the list — each forwarder reconstructs it from local `rt[]` on the fly. Saves wire bytes; relies on `rt[]` being current.
+
+**Deduplication.** Standard `seen_origins` (§10) dedup applies — `(originator, ctr)` catches duplicates if topology causes the same multicast frame to arrive via two paths. Same mechanism for both modes.
+
+**Worked example — explicit list (30 recipients, body ≈ 50 B).**
+
+```
+P's rt[]:
+  {s1..s10} reachable via next_hop A
+  {s11..s20} reachable via next_hop B
+  {s21..s30} reachable via next_hop C
+
+P sends 3 multicast frames (dst_count > 0):
+  → A: dst_list = [s1..s10], ctr=X, ciphertext
+  → B: dst_list = [s11..s20], same ctr, same ciphertext
+  → C: dst_list = [s21..s30], same ctr, same ciphertext
+
+(...continues recursively, splitting at each hop.)
+```
+
+**Worked example — multicast-to-all (public broadcast).**
+
+```
+P's rt[] has 99 reachable nodes, grouped by first-hop direction:
+  {25 dests} via A, {30 dests} via B, {25 dests} via C, {19 dests} via D
+
+P sends 4 multicast-to-all frames (dst_count = 0):
+  → A: no dst_list, ctr=X, ciphertext
+  → B: same
+  → C: same
+  → D: same
+
+Each first-hop forwarder receives, computes ITS rt[]-grouped subset
+(naturally excluding the direction it came from), and continues.
+
+Total frames: ~N-1 = ~99 (one per spanning-tree edge).
+Frame size: same as unicast DATA (no dst_list overhead).
+```
+
+**Wire-cost comparison (100-node leaf, multicast-to-all vs flood).**
+
+| Mechanism | Total TXs | Frame size | Collision risk |
+|---|---|---|---|
+| Naive flood | ~N = ~100 | small (no dst_list) | **High** — many nodes try to rebroadcast same frame around the same time |
+| Multicast-to-all (`dst_count=0`) | ~N-1 = ~99 | same (no dst_list) | **Low** — only specific nodes per direction forward at each tree level |
+| Pure flood with probabilistic suppression | < ~N (some skip) | small | Medium (suppression heuristics tune the trade-off) |
+
+**Multicast-to-all beats naive flood on every axis except: nodes NOT in current `rt[]` (newly joined). Flood catches them via radio reach; multicast-to-all doesn't. Mitigation: new joiner's BCN propagates within ~5 min, then subsequent public broadcasts reach them.**
+
+**Wire-cost comparison (explicit-list mode, 30 recipients, body ≈ 50 B).**
+
+| Strategy | Originator-side frames | Total network airtime (rough) |
+|---|---|---|
+| N-unicast (30 separate DM flights) | 30 frames | ~1920 B at originator + downstream forwards |
+| Subscriber-driven loose-tree (BCN sub_table) | 3 frames (one per direction) | ~30-40 hops total airtime |
+| **Multicast explicit-list (§7.5)** | **3 frames** | **~30-40 hops total airtime** (comparable to loose-tree) |
+| Pure flood | N/A (everyone rebroadcasts) | ~100+ hops, collision risk |
+
+Explicit-list multicast achieves loose-tree's airtime efficiency **without forwarders tracking subscriptions.**
+
+**Crypto compatibility.**
+
+Multicast assumes a SINGLE ciphertext that all recipients can decrypt. Compatible with:
+- **Plaintext** (no encryption — public-channel messages)
+- **Group PSK** (channel/group key shared by all recipients)
+- **Pre-shared group session_key** (small fixed groups with negotiated common key)
+
+NOT compatible with §8.1 per-pair `session_keys` (different recipients have different keys). For per-pair encryption to multiple recipients, fall back to N-unicast.
+
+This means multicast naturally pairs with **§3 channel mechanics** (group PSK for group/private; plaintext for public).
+
+**Where multicast wins.**
+
+| Use case | Why multicast helps |
+|---|---|
+| Public channel (multicast-to-all mode) | One frame per direction at each hop; same airtime as flood but with deterministic spanning-tree delivery and no collision storms |
+| Group DM (3-15 friends, originator sends to all) | Body shared across recipients in same direction; no group-state at forwarders |
+| Channel delivery when subscribers are known (explicit-list) | Sender includes member list; mesh delivers via loose-tree |
+| App-defined groups (ad-hoc subset of contacts) | Originator picks recipients per send; no standing channel state needed |
+
+**Where multicast loses.**
+
+| Use case | Why multicast doesn't help |
+|---|---|
+| Very large explicit lists (100+ recipients with non-trivial body) | dst_list eats the per-frame budget; use multicast-to-all instead OR subscriber-driven |
+| §8.1 per-pair DM to multiple | Different `session_keys`; can't share ciphertext; falls back to N-unicast |
+| Recipient list unknown at originator (explicit-list case) | Discovery problem unsolved by multicast (must come from elsewhere — server, Bloom, pull query) |
+| Reaching nodes not in any rt[] (newly joined, off-grid) | Multicast-to-all misses them until BCN propagation. Naive flood would catch them. |
+
+**Composition with the rest of the protocol.**
+
+| Subsystem | Composition |
+|---|---|
+| **§7.1 DATA** | Multicast is a flag-variant; same `ctr`, MAC, encryption mechanics; same per-hop RTS/CTS/DATA/ACK chain |
+| **§7.2 BCN** | No BCN change — multicast uses existing `rt[]` for direction-grouping |
+| **§7.3 inter-layer** | Cross-leaf multicast falls back to per-destination unicast at gateway, OR operator-configured channel-bridge per §3 |
+| **§7.4 RTS/CTS/ACK** | Standard hop-level handshake at each splitter (RTS carries `IS_MULTICAST` flag) |
+| **§3 channels** | Multicast IS the unified delivery mechanism for all three channel flavors (public via `dst_count=0`; group/private via explicit list). |
+| **§5 E2E ACK** | Skipped for multicast (no single recipient — same rule as channels) |
+| **§9 T2 privacy** | dst_list (when present) is plaintext on wire (forwarders need it for routing). Originator identity in encrypted body. Same trade as unicast `dst`. |
+| **§1 anti-spam** | Each multicast frame counts as one origination at the 1st-hop neighbour (same as any DATA). Sending a multicast to N recipients = ONE origination, not N. Natural rate-amortization. |
+
+**What this design deliberately doesn't solve.**
+
+- **Recipient discovery** for explicit-list mode. Multicast assumes the originator already knows the list. Discovery is a separate concern (still open for group/private channels — see §3).
+- **Per-pair-encrypted DM to multiple recipients.** Falls back to N-unicast.
+- **Member-set changes mid-flight.** If a recipient is removed from the group between when the originator picks the list and when delivery completes, that recipient still receives the frame (and may be unable to decrypt if their key was rotated out).
+- **Reaching nodes not in `rt[]`** under multicast-to-all (newly joined; gap until next BCN cycle).
+
+**Tunables.**
+
+| Key | Default | Purpose |
+|---|---|---|
+| `multicast_max_dst_count` | computed from SF + body | Per-SF cap on destinations per multicast frame (frame-budget guardrail); originator splits if needed |
+| `multicast_drop_unroutable` | true | If `rt[d]` is missing at a forwarder, silently drop `d` from the subset (vs. flooding all neighbors) |
+
+**Implementation cost estimate.**
+
+- `pack_data` / `parse_data` multicast variant (both modes): ~60 lines
+- Forwarding algorithm (group-by-next-hop, fan-out, dst_count=0 specialization): ~70 lines
+- Local-delivery branch (when self is recipient in either mode): ~25 lines
+- Group-PSK crypto integration (for channel use case): ~50 lines
+- Tests: explicit-list multicast round-trip, multicast-to-all coverage, fan-out at splitter, dedup at diamond, drop-unroutable, gateway boundary fallback: ~200 lines
+
+**Cross-references.** §7.1 (unicast DATA shares the encryption + MAC structure), §3 (channels are the primary use case for multicast; both modes used), §10 in PROTOCOL.md (origin-level dedup via `seen_origins` catches duplicates), §1 (each multicast frame = one origination at 1st-hop counters), §9 (originator identity in encrypted body; dst_list visible to forwarders for routing).
 
 ---
 
