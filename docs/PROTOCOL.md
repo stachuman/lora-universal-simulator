@@ -20,10 +20,11 @@ coexist on the same channel via a 4-bit `network_id` filter.
 4. [Per-neighbor SNR EWMA + ACK piggyback](#4-per-neighbor-snr-ewma--ack-piggyback)
 5. [Routing — distance-vector with K=3 alts](#5-routing--distance-vector-with-k3-alts)
 6. [Beacon plane](#6-beacon-plane)
-7. [Data plane — happy path](#7-data-plane--happy-path)
+7. [Data plane — happy path](#7-data-plane--happy-path) — incl. **§7.4 End-to-end delivery ACK**
 8. [Data plane — failure modes](#8-data-plane--failure-modes)
 9. [Cross-network filtering (`network_id`)](#9-cross-network-filtering-network_id)
 10. [Origin-level dedup](#10-origin-level-dedup)
+10a. [Anti-spam — 1st-hop statistical rate-limit](#10a-anti-spam--1st-hop-statistical-rate-limit)
 11. [Half-duplex, LBT, duty cycle](#11-half-duplex-lbt-duty-cycle) — incl. **§11.5 budget tiers**, **§11.6 node_state_snapshot**
 11a. [Bootstrap UX (cold-start joiners)](#11a-bootstrap-ux-cold-start-joiners)
 12. [Lifecycle: on_init + on_recv + on_radio_busy](#12-lifecycle-on_init--on_recv--on_radio_busy)
@@ -208,14 +209,36 @@ byte:  0   1     2     3    4     5                    6..
        │   │     │     │   │     │ msg_id (4 lo)     │             │
        └───┴─────┴─────┴───┴─────┴───────────────────┴─────────────┘
 
-payload = [origin_seq_lo(1)] [origin_seq_hi(1)] [user_text(N)]
+payload = [flags(1)] [origin_seq_lo(1)] [origin_seq_hi(1)] [body(N)]
+
+flags byte:
+  bit 0 = E2E_FLAG_ACK_REQUESTED   (origin wants end-to-end confirmation)
+  bit 1 = E2E_FLAG_IS_ACK           (this DATA payload IS an E2E ACK;
+                                      body = [acked_seq_lo, acked_seq_hi])
+  bits 2-7 = reserved
 ```
 
 - Mesh header fields (origin, src, dst, next, msg_id) are sized as in
   RTS.
-- `payload` is opaque to the mesh layer. Forwarders relay it byte-for-
-  byte. The application layer at the originator prepends a 16-bit
-  `origin_seq`; receivers parse this for dedup (see §10).
+- `payload` is opaque to the mesh layer at forwarders — they relay it
+  byte-for-byte. Origin and destination parse the 3-byte originator
+  header (1 B flags + 2 B `origin_seq`), then dispatch on the flags
+  byte for normal-DATA vs E2E-ACK handling. See §7.4 for full E2E ACK
+  semantics.
+- `origin_seq` is the 16-bit per-originator sequence for dedup (see §10).
+- `body` interpretation depends on flags:
+  - `IS_ACK=0` (normal DATA): body is opaque user text.
+  - `IS_ACK=1` (E2E ACK return frame): body is exactly 2 bytes —
+    `[acked_seq_lo, acked_seq_hi]` — the `origin_seq` being acked.
+
+**Wire-compat note.** The payload header grew from 2 B (just
+`origin_seq`) to 3 B (flags + `origin_seq`). All existing flows set
+`flags=0`, so a hypothetical legacy parser that re-read the first byte
+as `origin_seq_lo` would see 0 there — semantically wrong but doesn't
+crash; the actual `origin_seq` would be misread as `(seq>>8, body[0])`.
+This is a hard format break; all nodes upgrade in lockstep. For the
+simulator (single codebase) this is a non-issue. The flag bits become
+encrypted under §9 T2 — wire framing unchanged.
 
 ### 3.5 ACK (`'K'`) — 2 bytes
 
@@ -507,6 +530,39 @@ format.
 | `cascade_requeue_backoff_cap_ms` | 30000 | Backoff caps at this value |
 | `cascade_requeue_total_max_ms` | **60000** | Total wallclock cap; older items drop. (Was 120000 pre-D3 — tightened after measuring s04 successful-delivery max ~115s; 60s keeps most legitimate slow paths alive while killing 3-13 minute zombie cascades.) |
 | `cascade_requeue_load_threshold` | 0 | Local tx_queue depth above which the effective requeue budget starts shrinking (Phase D3) |
+
+### 5.7 Tier-aware routing (`route_strictly_better` penalty)
+
+Composes §11.5 budget tiers with `rt_merge`'s candidate ordering. The
+per-neighbour duty-cycle tier signal — set when a peer sends us a
+budget-NACK (§3.6 reason=`budget_low`) — propagates from the
+reactive blind-mark machinery into routing-table-level comparisons
+so saturated next-hops get DEMOTED from the primary slot, not just
+temporarily skipped during classify_blind.
+
+```
+TIER_SCORE_PENALTY_DB = { HEALTHY=0, STRAINED=2, CRITICAL=5, EXHAUSTED=20 }
+effective_score(c) = c.score - TIER_PENALTY_DB[get_tier(c.next_hop)]
+route_strictly_better uses effective_score wherever it used raw score
+```
+
+**State.**
+- `neighbor_budget_tier[X]` — last-known tier of peer X.
+- `neighbor_budget_tier_set_at[X]` — when set.
+- `neighbor_budget_tier_ttl_ms` — expiry (default 5 min). After this,
+  `get_neighbor_tier(X)` returns HEALTHY → saturated peers return to
+  the primary pool when no fresh NACKs arrive.
+
+**Set on:** budget NACK reception (§3.6 reason=`budget_low`), alongside
+the `blind_until` mark.
+
+**Pays off when:** load is **asymmetrically distributed** — some hubs
+have slack, others are saturated. The proactive demotion shifts
+traffic to the slack. On a fully-saturated mesh (s04 60-min, every
+active hub near its cap) the mechanism still fires (`rt_update` 148 →
+821, 5.5× shuffle) but throughput is bounded by physics, not topology
+diversity — delivery stays flat. The instrumentation is valuable as a
+diagnostic for future scenarios with asymmetric load.
 
 ---
 
@@ -850,6 +906,86 @@ Three categories, each with different LBT timing constraints:
 All three set `pending_tx` (where applicable) BEFORE the actual emit,
 so peer NACK / busy-replies match the right msg_id.
 
+### 7.4 End-to-end delivery ACK (opt-in per-message)
+
+The hop-by-hop K-frame ACK (§3.5) only confirms that the *immediate
+next forwarder* received the DATA. If a forwarder mid-path drops the
+message after sending its K-ack — disk full, app crash, queue
+overrun, route change — the originator's K-ack still succeeded and
+the loss is silent. For important user messages (payments, status
+confirmations) the originator needs end-to-end confirmation.
+
+**Design.** Opt-in per message. The originator sets
+`E2E_FLAG_ACK_REQUESTED` in the DATA payload header (§3.4). The
+destination, on accepting delivery, sends a small return DATA frame
+back to the originator with `E2E_FLAG_IS_ACK=1` and body =
+`[acked_seq_lo, acked_seq_hi]`. The return frame travels via normal
+data-plane mechanics (RTS/CTS/DATA/ACK + routing) — no new frame
+type, no new forwarding logic. Only origin and destination know it's
+an ACK; intermediate forwarders see ordinary DATA.
+
+**Originator flow.**
+```
+Originator calls send_e2e <dst> <text>:
+  - allocate origin_seq
+  - record pending_e2e[seq] = { sent_at, dst, text }
+  - emit e2e_ack_pending
+  - enqueue with E2E_FLAG_ACK_REQUESTED set in payload header
+```
+
+**Destination flow (on `delivered` of a DATA with ACK_REQUESTED).**
+```
+Parse payload header → flags + origin_seq + body
+Emit `delivered` (body=user_text) — unchanged
+If E2E_FLAG_ACK_REQUESTED:
+  - build return payload: flags=E2E_FLAG_IS_ACK, seq=new own seq,
+    body=[acked_seq_lo, acked_seq_hi] (the original sender's seq)
+  - enqueue as a new send back to the original origin
+  - emit e2e_ack_tx_enqueued (analyzer / diagnostic)
+Note: the return frame never sets ACK_REQUESTED — no recursion.
+```
+
+**Originator flow on receiving the E2E ACK.**
+```
+on_recv "D" → delivered branch:
+  - parse flags → E2E_FLAG_IS_ACK set
+  - extract acked_seq from body
+  - look up pending_e2e[acked_seq]:
+      - present: emit delivered_confirmed, clear pending entry
+      - absent : emit e2e_ack_unmatched (duplicate or already timed out)
+  - DO NOT emit a normal `delivered` (this is an ACK, not user content)
+  - DO NOT trigger another E2E ACK (IS_ACK bit prevents recursion)
+```
+
+**Timeout.** The 1-s drain loop (existing) prunes `pending_e2e`
+entries older than `e2e_ack_ttl_ms` (default 60 s) and emits
+`e2e_ack_timeout`. The app layer decides whether to retry, surface
+"no answer received", or fall back to assumed delivery.
+
+**Cost.** E2E ACK return payload = 3 B header + 2 B acked-seq = 5 B
+content. On wire: ~10 B per hop (DATA framing). At SF8 BW250 a 3-hop
+round-trip is roughly 600 ms total airtime. This is **why it's
+opt-in** — at scale, ACKing every flight doubles the airtime budget
+consumed per message.
+
+**Composition.**
+- **§1 anti-spam:** an E2E ACK is itself an origination from the
+  destination's radio. It counts toward the destination's own
+  fair-share quota — design feature, not bug (a heavy responder can't
+  avoid its own rate cap).
+- **§9 privacy T2:** when origin moves into the encrypted payload, the
+  destination still has the origin's identity from decryption, so it
+  can still construct the return ACK. Forwarders carrying the ACK
+  don't need to know it's an ACK — they just see DATA.
+- **§5.6 cascade-requeue:** an E2E ACK is a normal DATA send, so it
+  participates in the full cascade-alt machinery. If the return path
+  is congested, the ACK can fail like any other flight — `e2e_ack_timeout`
+  surfaces this at the originator.
+
+**Tuning knob.** `e2e_ack_ttl_ms` (default 60000 ms) — how long
+`pending_e2e` entries live before timeout. Sized for typical 3-5 hop
+round-trip with retries; longer for known-deep meshes.
+
 ---
 
 ## 8. Data plane — failure modes
@@ -1049,23 +1185,27 @@ RTS — the check is implicit.
 End-to-end uniqueness is provided by `(origin_node_id, origin_seq)`:
 
 - `origin_node_id`: 8-bit field in DATA's mesh header.
-- `origin_seq`: 16-bit application-layer sequence number, prepended
-  to the DATA payload as `[seq_lo, seq_hi]`. Originator increments per
-  send; never wraps in any realistic deployment lifetime (65k sends
-  per node).
+- `origin_seq`: 16-bit application-layer sequence number, second and
+  third bytes of the 3-byte originator payload header (§3.4 —
+  `[flags, seq_lo, seq_hi]`). Originator increments per send; never
+  wraps in any realistic deployment lifetime (65k sends per node).
 
 Receiving a DATA frame:
 
 ```
 on_recv 'D' (matches pending_rx):
-  parse origin_seq from first 2 payload bytes
+  parse origin payload header → flags + origin_seq + body
   ack the frame regardless (sender clears pending_tx)
   if (d.origin, origin_seq) in seen_origins:
     emit dup_drop
     return  (don't deliver-twice or forward-twice)
   record (d.origin, origin_seq) in seen_origins with TTL
   if dst == self.id:
-    emit delivered (payload = user_text)
+    if flags.E2E_FLAG_IS_ACK:
+      handle E2E ACK arrival (see §7.4)
+    else:
+      emit delivered (payload = body = user_text)
+      if flags.E2E_FLAG_ACK_REQUESTED: enqueue return E2E ACK (§7.4)
   else (forwarder):
     after ack_air_ms+1: enqueue forward; become_free
 ```
@@ -1078,6 +1218,80 @@ Default TTL: `seen_origin_ttl_ms = 30 s`. Catches:
 
 The dedup acts BEFORE delivery / forwarding but AFTER the ACK is sent,
 so the previous hop always clears its pending_tx.
+
+---
+
+## 10a. Anti-spam — 1st-hop statistical rate-limit
+
+Every node N tracks, per direct-radio sender X, two distinct-msg_id
+sliding-window counts over `originator_window_ms` (default 5 min):
+
+- `R[X]` = distinct RTS msg_ids from X.
+- `C[X]` = distinct CTS msg_ids from X.
+
+Same-msg_id retries within `originator_retry_dedup_ms` (default 10 s)
+count once each — a legitimate originator's `rts_max_retries × K`
+alts don't inflate R[X].
+
+```
+apparent_origination[X] = max(0, R[X] - C[X])
+```
+
+A legitimate forwarder emits 1 CTS per inbound flight AND 1 RTS per
+outbound forward → `R[X] ≈ C[X]` → `apparent_origination[X] ≈ 0`.
+An originator emits RTS without ever responding to inbound RTS →
+`C[X] ≈ 0` → `apparent_origination[X] = R[X]`.
+
+**Enforcement.** On `on_recv 'R'` from direct sender X:
+
+```
+if apparent_origination[X] > originator_max_per_window
+   OR sender_airtime[X] > originator_airtime_share × my_duty_cycle_budget:
+  emit rts_drop_originator_throttle
+  return  (SILENT DROP — no NACK; preserves N's own airtime budget)
+```
+
+No NACK because emitting one would consume our airtime budget on the
+very condition we're trying to push back against. The spammer
+experiences `rts_timeout` and cascades through alts; every 1st-hop
+neighbour converges on the same rate-limit decision independently,
+so the cap is effectively network-wide.
+
+**Originator self-monitoring (UX feedback).** Since silent drop gives
+no explicit signal, each originator tracks its own origination count.
+On any terminal failure (`path_cascade_exhausted` or `rts_giveup`):
+
+```
+if own_origination_count > originator_self_warn_fraction × originator_max_per_window
+   OR my_duty_cycle_tier >= STRAINED:
+  emit originator_self_over_budget (UX hint: "your send may have failed
+    because you're over fair-share budget")
+```
+
+**Why 1st-hop only.** A deeper forwarder sees aggregated traffic from
+many origins and would over-trigger on the heaviest-loaded forwarders
+(which are doing the right thing). The 1st-hop invariant says: a node
+N can attribute X's traffic to X **only when N hears a frame directly
+from X's radio with `sender == X == origin`**. Forwarded frames (where
+on-wire sender ≠ origin) are skipped — N has no way to distinguish
+legitimate forwarding from origin-fingerprint there.
+
+**Privacy-compatible.** The classifier observes physical-layer
+`meta.src`, not the wire `origin` field. Composes with §9 T2
+(origin-in-encrypted-payload) without changes.
+
+**Measured impact** (s04 60-min, 360 sends, 16 active originators):
+delivery unchanged at ~52%; 141 silent drops total (down from 3505 in
+a pre-dedup measurement — the msg_id dedup cut false positives by
+96%); 94 self-over-budget emits caught legitimate "over fair-share
+but not necessarily malicious" senders.
+
+**Configuration knobs** — see §14.4a.
+
+**Cross-references.** §9 (privacy-compatible variant from the start),
+§11.5 (budget tiers — feed into self-monitoring threshold), §7.4 (E2E
+ACK counts toward destination's own quota — by design, a heavy
+responder can't avoid its own cap).
 
 ---
 
@@ -1461,6 +1675,11 @@ expectations) subscribe by event_type.
 | `q_rx` | Q decoded; receiver matches network_id | `from`, `dest` |
 | `forward_fail` | Forwarder dropped (no route, no budget, etc.) | `origin`, `dst`, `reason` |
 | `retune_for_data` | RX retuned for DATA reception | `from`, `msg_id`, `chosen_data_sf` |
+| `e2e_ack_pending` | Originator registered a `send_e2e` and is waiting for E2E ACK (§7.4) | `dst`, `origin_seq`, `ttl_ms` |
+| `e2e_ack_tx_enqueued` | Destination enqueued the return E2E ACK frame (§7.4) | `to`, `acked_seq` |
+| `delivered_confirmed` | Originator received the E2E ACK matching a pending send (§7.4) | `dst`, `acked_seq`, `rtt_ms` |
+| `e2e_ack_unmatched` | E2E ACK arrived but no matching `pending_e2e` entry (§7.4) | `from`, `acked_seq`, `reason` (`duplicate` / `already_timed_out`) |
+| `e2e_ack_timeout` | Pending E2E ACK exceeded `e2e_ack_ttl_ms` (§7.4) | `dst`, `origin_seq`, `waited_ms` |
 
 ### 13.3 Failure / cascade
 
@@ -1480,6 +1699,13 @@ expectations) subscribe by event_type.
 | `blind_observed` | CTS overheard, blind_until extended | `for_node`, `until_ms`, `chosen_data_sf` |
 | `tx_blind_defer` | Deferring TX because next-hop is blind | `dst`, `next_hop`, `delay_ms`, `source` |
 | `tx_blind_alt` | Switching to alt because primary is blind | `dst`, `from_next`, `to_next` |
+
+### 13.4a Anti-spam (1st-hop rate-limit, §10a)
+
+| Event | Trigger | Key data |
+|---|---|---|
+| `rts_drop_originator_throttle` | RTS silently dropped because direct sender exceeded fair-share quota | `from`, `msg_id`, `apparent_origination`, `airtime_share` |
+| `originator_self_over_budget` | On terminal failure, originator's own send count is over half-threshold OR own duty tier ≥ STRAINED — UX hint emitted | `origin_count`, `threshold`, `tier`, `hint` |
 
 ### 13.5 LBT / duty cycle / runtime
 
@@ -1546,6 +1772,7 @@ the JSON scenario). Defaults shown.
 | `cascade_requeue_total_max_ms` | 60000 | Phase C — total wallclock cap; older items drop (was 120000 pre-D3) |
 | `cascade_requeue_load_threshold` | 0 | Phase D3 — local tx_queue depth above which the effective requeue budget shrinks (§5.6) |
 | `state_snapshot_period_ms` | 60000 | Period for `node_state_snapshot` event (§11.6); 0 = disable |
+| `e2e_ack_ttl_ms` | 60000 | E2E delivery ACK pending-entry TTL at originator (§7.4) — after this, emit `e2e_ack_timeout` |
 
 ### 14.4 Channel access
 
@@ -1562,6 +1789,21 @@ the JSON scenario). Defaults shown.
 | `budget_blind_strained_ms` | 60000 (1 min) | Sender-side blind window after STRAINED budget-NACK |
 | `budget_blind_critical_ms` | 180000 (3 min) | Same, for CRITICAL |
 | `budget_blind_exhausted_ms` | 300000 (5 min) | Same, for EXHAUSTED |
+| `neighbor_budget_tier_ttl_ms` | 300000 (5 min) | Tier-aware routing — last-known peer tier expires after this; saturated peers return to primary pool when no fresh NACK |
+
+### 14.4a Anti-spam (1st-hop rate-limit)
+
+Reactive count-based originator throttle at every 1st-hop neighbour.
+Works under §9 T2 privacy (observes physical-layer `meta.src`, not the
+wire `origin`).
+
+| Key | Default | Description |
+|---|---|---|
+| `originator_window_ms` | 300000 (5 min) | Sliding window for per-direct-sender RTS/CTS observation counts |
+| `originator_max_per_window` | 6 | Apparent-origination threshold per window (≈72/hr); over → silent-drop inbound RTS |
+| `originator_airtime_share` | 0.25 | Per-sender airtime backstop; > this fraction of N's own duty cycle → silent-drop regardless of count |
+| `originator_retry_dedup_ms` | 10000 | Same-msg_id retries within this window count as ONE origination (don't inflate `R[X]` with retries) |
+| `originator_self_warn_fraction` | 0.5 | Originator's self-monitor threshold = this × `originator_max_per_window`; on terminal failure, emit `originator_self_over_budget` |
 
 ### 14.5 Mesh / network
 
