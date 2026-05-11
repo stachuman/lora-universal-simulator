@@ -1147,6 +1147,140 @@ def print_section_16(r: dict) -> None:
                   f"only if discovery populates the new slots.")
 
 
+# ---- Section 17: anti-spam activity --------------------------------------
+
+def section_anti_spam(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """1st-hop rate-limit silent drops + originator self-warnings.
+
+    Two emit families track the anti-spam mechanism (see
+    scenarios/dv_dual_sf.lua header doc block "Anti-spam: 1st-hop
+    statistical rate-limit"):
+
+      • rts_drop_originator_throttle — silent drop by a 1st-hop neighbour
+        when apparent_origination[X] > threshold OR airtime > backstop.
+        Fields: from (sender id), apparent_origination, airtime_ms,
+        threshold_count, threshold_airtime_ms.
+
+      • originator_self_over_budget — self-warning emitted by a node
+        on its own terminal failure when own_originate_count >= warn
+        threshold OR duty_cycle_tier >= STRAINED. Fields: origin,
+        trigger ('rts_giveup' | 'ack_giveup' | 'budget_low'),
+        own_originate_count_in_window, duty_cycle_tier.
+
+    Detection of which trigger fired the silent drop (count vs airtime
+    backstop) is by comparing the observed values against thresholds
+    in the emit. If apparent_origination > threshold_count → count
+    trigger; if airtime_ms > threshold_airtime_ms → airtime backstop.
+    Both can be true simultaneously.
+    """
+    name_by_idx = {i: n.get("name", f"#{i}")
+                   for i, n in enumerate(cfg.get("nodes", []))}
+
+    drops_by_sender: Counter = Counter()
+    drop_count_trigger = 0
+    drop_airtime_trigger = 0
+    drop_both_triggers = 0
+    max_app_orig_per_sender: dict = {}    # sender -> max apparent_origination ever observed
+
+    self_warns_by_origin: Counter = Counter()
+    self_warn_by_trigger: Counter = Counter()
+    self_warn_by_tier: Counter = Counter()
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "rts_drop_originator_throttle":
+            sender = d.get("from")
+            drops_by_sender[sender] += 1
+            app_orig = d.get("apparent_origination", 0)
+            air = d.get("airtime_ms", 0)
+            thr_count = d.get("threshold_count", 0)
+            thr_air   = d.get("threshold_airtime_ms", 0)
+            count_hit   = app_orig > thr_count
+            airtime_hit = air > thr_air
+            if count_hit and airtime_hit:
+                drop_both_triggers += 1
+            elif count_hit:
+                drop_count_trigger += 1
+            elif airtime_hit:
+                drop_airtime_trigger += 1
+            prev = max_app_orig_per_sender.get(sender, 0)
+            if app_orig > prev:
+                max_app_orig_per_sender[sender] = app_orig
+        elif et == "originator_self_over_budget":
+            origin = d.get("origin")
+            self_warns_by_origin[origin] += 1
+            self_warn_by_trigger[d.get("trigger", "?")] += 1
+            self_warn_by_tier[d.get("duty_cycle_tier", -1)] += 1
+
+    def resolve(node_id):
+        if isinstance(node_id, int):
+            return name_by_idx.get(node_id, f"#{node_id}")
+        return str(node_id) if node_id is not None else "?"
+
+    # max_app_orig_by_name keeps the max for ALL senders that produced
+    # drops, keyed by display name. Print path uses it to annotate the
+    # top-N-by-drop-count table; previous version returned only the
+    # top-5-by-max which led to "max R-C seen: 0" for senders that
+    # were heavy by count but not by single-window peak.
+    max_app_orig_by_name: dict = {}
+    for s, v in max_app_orig_per_sender.items():
+        max_app_orig_by_name[resolve(s)] = v
+    return {
+        "total_drops":             sum(drops_by_sender.values()),
+        "unique_senders_throttled": len(drops_by_sender),
+        "drops_by_sender":         [(resolve(s), c) for s, c in drops_by_sender.most_common(5)],
+        "drop_count_trigger":      drop_count_trigger,
+        "drop_airtime_trigger":    drop_airtime_trigger,
+        "drop_both_triggers":      drop_both_triggers,
+        "max_app_orig_by_name":    max_app_orig_by_name,
+        "total_self_warns":        sum(self_warns_by_origin.values()),
+        "self_warns_by_origin":    [(resolve(o), c) for o, c in self_warns_by_origin.most_common(5)],
+        "self_warn_by_trigger":    dict(self_warn_by_trigger),
+        "self_warn_by_tier":       dict(self_warn_by_tier),
+    }
+
+
+def print_section_17(r: dict) -> None:
+    print("\n=== (17) anti-spam activity ===")
+    if r["total_drops"] == 0 and r["total_self_warns"] == 0:
+        print("  (no anti-spam events — clean run)")
+        return
+
+    print(f"  rts_drop_originator_throttle events: {r['total_drops']}")
+    if r["total_drops"] > 0:
+        print(f"  unique senders rate-limited:         {r['unique_senders_throttled']}")
+        print(f"  trigger breakdown:")
+        print(f"    count threshold only:       {r['drop_count_trigger']}")
+        print(f"    airtime backstop only:      {r['drop_airtime_trigger']}")
+        print(f"    both count + airtime:       {r['drop_both_triggers']}")
+        if r["drops_by_sender"]:
+            print(f"  top rate-limited senders:")
+            for name, n in r["drops_by_sender"]:
+                max_ao = r["max_app_orig_by_name"].get(name, 0)
+                print(f"    {name:<24} {n:>5} drops   (max R-C seen: {max_ao})")
+
+    print(f"\n  originator_self_over_budget events:  {r['total_self_warns']}")
+    if r["total_self_warns"] > 0:
+        if r["self_warn_by_trigger"]:
+            print(f"  triggered by:")
+            for trig, c in sorted(r["self_warn_by_trigger"].items(),
+                                  key=lambda kv: -kv[1]):
+                print(f"    {trig:<22} {c}")
+        if r["self_warns_by_origin"]:
+            print(f"  top self-warning originators:")
+            for name, c in r["self_warns_by_origin"]:
+                print(f"    {name:<24} {c} warns")
+        if r["self_warn_by_tier"]:
+            tier_name = {0: "HEALTHY", 1: "STRAINED",
+                         2: "CRITICAL", 3: "EXHAUSTED"}
+            print(f"  by duty-cycle tier at time of warn:")
+            for tier, c in sorted(r["self_warn_by_tier"].items()):
+                print(f"    {tier_name.get(tier, f'tier_{tier}'):<14} {c}")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -1251,6 +1385,8 @@ def main() -> None:
     print_section_15(section_duty_cycle(cfg, args.events, warmup_end_ms))
 
     print_section_16(section_routing_diversity(args.events, warmup_end_ms))
+
+    print_section_17(section_anti_spam(args.events, cfg, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 

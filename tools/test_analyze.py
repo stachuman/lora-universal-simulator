@@ -569,5 +569,96 @@ def test_routing_diversity_handles_no_snapshots():
         os.unlink(path)
 
 
+# ---- anti-spam activity --------------------------------------------------
+
+def test_anti_spam_counts_drops_by_sender_and_trigger():
+    """Three silent drops:
+       - sender 5 at apparent_origination=7, airtime=2000, thr_count=6 thr_air=9000
+         → count trigger only
+       - sender 5 at apparent_origination=8, airtime=2500
+         → count trigger only (sender 5 totals 2)
+       - sender 7 at apparent_origination=3, airtime=12000, thr_count=6 thr_air=9000
+         → airtime trigger only
+    Plus two self-warns from origins 2 and 3.
+    """
+    cfg = {"nodes": [{"name": f"n{i}"} for i in range(10)]}
+    events = [
+        _emit(node=1, t_ms=1000, et="rts_drop_originator_throttle",
+              **{"from": 5, "msg_id": 0, "apparent_origination": 7,
+                 "airtime_ms": 2000, "threshold_count": 6,
+                 "threshold_airtime_ms": 9000}),
+        _emit(node=1, t_ms=2000, et="rts_drop_originator_throttle",
+              **{"from": 5, "msg_id": 1, "apparent_origination": 8,
+                 "airtime_ms": 2500, "threshold_count": 6,
+                 "threshold_airtime_ms": 9000}),
+        _emit(node=2, t_ms=3000, et="rts_drop_originator_throttle",
+              **{"from": 7, "msg_id": 5, "apparent_origination": 3,
+                 "airtime_ms": 12000, "threshold_count": 6,
+                 "threshold_airtime_ms": 9000}),
+        _emit(node=2, t_ms=4000, et="originator_self_over_budget",
+              origin=2, origin_seq=4, msg_id=4, trigger="rts_giveup",
+              own_originate_count_in_window=4, duty_cycle_tier=1),
+        _emit(node=3, t_ms=5000, et="originator_self_over_budget",
+              origin=3, origin_seq=2, msg_id=2, trigger="ack_giveup",
+              own_originate_count_in_window=5, duty_cycle_tier=2),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_anti_spam(path, cfg)
+        assert r["total_drops"] == 3
+        assert r["unique_senders_throttled"] == 2
+        # n5 should be top drop count with 2
+        assert r["drops_by_sender"][0] == ("n5", 2)
+        # Trigger split: 2 by count-only, 1 by airtime-only
+        assert r["drop_count_trigger"]   == 2
+        assert r["drop_airtime_trigger"] == 1
+        assert r["drop_both_triggers"]   == 0
+        # Max app_orig per sender: n5 saw 8, n7 saw 3
+        max_dict = r["max_app_orig_by_name"]
+        assert max_dict["n5"] == 8
+        assert max_dict["n7"] == 3
+        # Self-warns
+        assert r["total_self_warns"] == 2
+        assert r["self_warn_by_trigger"] == {"rts_giveup": 1, "ack_giveup": 1}
+        assert r["self_warn_by_tier"]    == {1: 1, 2: 1}
+    finally:
+        os.unlink(path)
+
+
+def test_anti_spam_both_triggers_when_count_and_airtime_exceeded():
+    """When a single drop exceeds BOTH thresholds, count it under
+    'both', not double-counted under either single trigger."""
+    cfg = {"nodes": [{"name": "n0"}, {"name": "n1"}]}
+    events = [
+        _emit(node=0, t_ms=1000, et="rts_drop_originator_throttle",
+              **{"from": 1, "msg_id": 0, "apparent_origination": 10,
+                 "airtime_ms": 15000, "threshold_count": 6,
+                 "threshold_airtime_ms": 9000}),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_anti_spam(path, cfg)
+        assert r["drop_both_triggers"]   == 1
+        assert r["drop_count_trigger"]   == 0
+        assert r["drop_airtime_trigger"] == 0
+    finally:
+        os.unlink(path)
+
+
+def test_anti_spam_clean_run_emits_nothing():
+    """No anti-spam events → section reports clean run, no crash."""
+    cfg = {"nodes": [{"name": "n0"}]}
+    events = [_emit(node=0, t_ms=1000, et="tx_enqueue",
+                    origin=0, origin_seq=1, payload="x")]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_anti_spam(path, cfg)
+        assert r["total_drops"] == 0
+        assert r["total_self_warns"] == 0
+        analyze.print_section_17(r)   # must not crash
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
