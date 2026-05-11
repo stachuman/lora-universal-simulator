@@ -476,6 +476,486 @@ The plain variant requires plaintext `origin` in the `E` frame header so forward
 - Should the bridging policy be operator-configured (whitelist) or dynamic (route quality)?
 - Compose with §8 cryptography — cross-network traffic probably needs different key material.
 
+### 7.1 Concrete encrypted hierarchical DATA frame (synthesis of §7 + §8.1 + §9 T2)
+
+**Problem statement.** Combine multi-network routing (§7), end-to-end encryption (§8.1), and originator anonymity (§9 T2) into a single concrete DATA frame that supports:
+1. Hierarchical routing across nested networks (leaf → city → region → country → global)
+2. End-to-end confidentiality + authenticity with no on-wire key/session identifier
+3. Originator anonymity from forwarders (no `origin` on wire)
+4. No clock dependency (counter-based crypto nonces)
+5. Backward extensibility for E2E ACK (§5) and future flags
+
+**Addressing model.**
+
+- Node IDs stay 1 byte (current spec, 256 nodes per leaf network)
+- 4-bit `addr_len` field (currently called `network_id`) indicates how many hierarchy boundaries the destination is above the leaf:
+  - `addr_len=0`: destination is local-leaf → 1-byte `dst`
+  - `addr_len=1`: cross-region (one layer up + down) → 2-byte `dst = [region_net, dst_leaf_local]`
+  - `addr_len=2`: two-layer crossing → 3-byte `dst`
+  - …each layer adds 1 byte
+- Layer naming convention (reserved values of an as-yet-unnamed hierarchy register; precise level labels still subject to revision):
+  - layer 15 = leaf (end-user devices)
+  - layer 14 = city / regional cluster
+  - layer 13 = inter-region
+  - layer 12 = inter-country (etc.; values 0-12 reserved for future hierarchy)
+- Layer-14 (and above) network IDs are **globally unique within their layer** — each city has a single 1-byte identifier (e.g., Gdansk=33, Elblag=35), valid across the whole hierarchy. 256 layer-14 networks max.
+- Each gateway peels the front byte of `dst` on cross-layer transition and decrements `addr_len`. Final hop receives `addr_len=0` + 1-byte `dst`.
+
+**Wire format.**
+```
+byte:  0   1                       2      3..(3+addr_len)        (4+addr_len)..(5+addr_len)    rest
+       ┌───┬──────────────────────┬──────┬──────────────────────┬──────────────────────────────┬──────────────────┐
+       │'D'│ addr_len      (4 hi) │ next │ dst                  │ ctr (2 B, little-endian)     │ ciphertext + MAC │
+       │   │ E2E_ACK_REQ   (1)    │      │ (addr_len + 1 bytes, │                              │ (n + 4 bytes)    │
+       │   │ E2E_IS_ACK    (1)    │      │  hierarchical path)  │                              │                  │
+       │   │ reserved      (2)    │      │                      │                              │                  │
+       └───┴──────────────────────┴──────┴──────────────────────┴──────────────────────────────┴──────────────────┘
+```
+
+**Field semantics.**
+
+| Field | Bytes | Plaintext? | Purpose |
+|---|---|---|---|
+| `'D'` tag | 1 | yes | Frame-type dispatch (kept full byte for now; bit-pack candidate later) |
+| `addr_len` (4 hi) + E2E flags (2) + reserved (2) | 1 | yes | Hierarchy boundary count + E2E ACK flags |
+| `next` | 1 | yes | Immediate next-hop receiver (LoRa has no PHY addressing — frame is broadcast on channel) |
+| `dst` (variable) | addr_len + 1 | yes | Hierarchical destination path; gateways peel front byte + decrement addr_len |
+| `ctr` | 2 (LE) | yes | Per-(origin, destination) counter — triple duty: crypto nonce entropy, replay protection, hop-level match (low nibble echoed by CTS/ACK as today's msg_id slot) |
+| ciphertext | n | **encrypted** | Inner plaintext = `(src_full_address, body)`; ChaCha20(session_key, nonce, inner) |
+| MAC | 4 | yes | Poly1305-truncated-4B; receiver trial-verifies against each peer session_key (LRU) |
+
+**Implicit nonce derivation** (no on-wire nonce field):
+```
+nonce = HKDF-Expand(session_key, "nonce" || ctr || dst || addr_len, 12 B)
+```
+
+**Encrypted inner-payload structure:**
+```
+src_address_len (1 byte) | src_address (src_address_len + 1 bytes) | body
+```
+Where `body` is `user_text` for normal DATA, or `[acked_ctr_lo, acked_ctr_hi]` if `E2E_IS_ACK=1`.
+
+**Wire-cost vs today's plaintext DATA.**
+
+| Scenario | Today | Proposed |
+|---|---|---|
+| In-leaf (`addr_len=0`) | 6 B header + 2 B origin_seq + n | **10 B + n** (+2 B for full crypto + privacy) |
+| Cross-region (`addr_len=1`) | n/a | **11 B + n** |
+| Two-hop hierarchy (`addr_len=2`) | n/a | **12 B + n** |
+| Each additional hierarchy hop | n/a | +1 B |
+
+**What's removed from today's DATA wire.**
+
+- `orig` (1 B) — moved inside encrypted payload (§9 T2 privacy)
+- `src` (1 B previous-hop) — derivable from `pending_rx.from` set during RTS-CTS handshake (composes with §5 E2E ACK reverse-path soft state via the same `pending_rx` info)
+- `msg_id` field (1 B byte slot) — replaced by `ctr`; CTS/ACK echo `ctr & 0xF` for hop-level match (same 1/16 collision space as today's 4-bit msg_id)
+- `origin_seq` (2 B plaintext) — replaced by `ctr` which does triple duty (crypto nonce, replay protection, app dedup)
+
+**Worked example: Alice (Gdansk #33, local 12) → Bob (Elblag #35, local 101).**
+
+```
+Step 1 — Alice TX in Gdansk leaf:
+  D | 0x10 (addr_len=1, no E2E flags) | next=G_out | dst=[35, 101] | ctr=0x1234 | ciphertext + MAC
+                                                       ↑                ↑
+                                            target: Elblag(35) / Bob(101)  Alice's counter to Bob
+
+Step 2 — Gdansk-leaf forwarders see addr_len=1, dst[0]=35:
+  Route toward G_out (= Alice's leaf-to-layer14 bridging neighbor).
+
+Step 3 — G_out (Gdansk-leaf + layer-14 gateway) peels dst[0]=35, decrements
+  addr_len 1→0, re-emits in layer-14 network:
+  D | 0x00 (addr_len=0) | next=G_in | dst=[101] | ctr=0x1234 | (unchanged ciphertext + MAC)
+
+Step 4 — Layer-14 routes to G_in (= Elblag's layer-14+leaf gateway).
+
+Step 5 — G_in switches into Elblag leaf:
+  D | 0x00 | next=Bob's-leaf-prev-hop | dst=[101] | ctr=0x1234 | ...
+
+Step 6 — Elblag-leaf routes to local 101 = Bob.
+
+Step 7 — Bob receives:
+  - trial-verify MAC against his peer session_keys (LRU)
+  - first key that verifies → that's Alice's session_key → that's the originator
+  - reconstruct implicit nonce, decrypt ciphertext
+  - inner payload: src_address_len=1, src_address=[33, 12], body="hello bob"
+  - display "Message from Alice (Gdansk #33, local 12)"
+  - if E2E_ACK_REQ flag: build return frame
+      D | 0x11 (addr_len=1, IS_ACK=1) | next=... | dst=[33, 12] | ctr=Bob's-counter-to-Alice
+      ciphertext = (src_address_len=1, src_address=[35, 101], body=[acked_ctr_lo, acked_ctr_hi])
+```
+
+**Privacy properties.**
+
+| Observation | Visible to passive observer? |
+|---|---|
+| Frame is DATA (vs RTS/CTS/etc) | yes |
+| Frame is going to/from `next` (next hop) | yes (radio fact) |
+| Destination's hierarchical position (`addr_len + dst`) | yes |
+| Sender wants E2E ACK | yes (E2E_ACK_REQ flag in plaintext) |
+| Message is an E2E ACK | yes (E2E_IS_ACK flag in plaintext) |
+| Originator identity | **NO** (inside encrypted payload) |
+| Message content | **NO** (encrypted) |
+| Which (origin, destination) pair (the relationship) | **NO** (no session_id on wire) |
+| Long-term linkability across days/sessions | **NO** (session_key derived once, but ciphertext is opaque; no per-pair tag) |
+
+**Compositions.**
+
+- **§5 E2E ACK** (privacy-compatible variant) — uses `pending_rx.from` + `(ctr, dst)` reverse-path soft state at forwarders. No source-on-wire needed.
+- **§8.1 crypto** — provides the per-pair session_key + identity card mechanism. `ctr` is the per-pair message counter derived in §8.1.
+- **§9 T2 privacy** — `src` and `orig` both removed from DATA wire; only `next` and `dst` are addressing-related plaintext.
+- **§1 anti-spam** — RTS/CTS observation counts work unchanged because msg_id (= `ctr & 0xF` echo) is still present at the hop-level RTS-CTS handshake.
+- **§7 multi-network** — `addr_len + dst` IS the multi-network addressing. Gateways are nodes whose BCN advertises bridging capability (gateway-discovery design pending in **BCN re-engineering**, separate work item).
+
+**What's NOT yet decided / open work.**
+
+- **BCN re-engineering** is the next major design item. Current BCN advertises self + routes within a single network. With hierarchical routing it needs to:
+  - Advertise bridging capability ("I'm a layer-14 gateway, reachable from this leaf")
+  - Cross-layer route advertisement OR pull-based route discovery via `?` queries
+  - Avoid foreign-network pollution (today's `network_id` filter dropped foreign frames; the new model needs cryptographic/structural equivalent)
+  - Anti-flooding: gateways MUST NOT advertise every foreign destination; only "I can reach layer-N network X"
+- **Gateway policy** — automatic (any node with multi-network PSKs becomes bridge) vs explicit operator config. Deferred to implementation.
+- **Layer naming finalization** — values 0-13 reserved; precise role labels still TBD.
+- **Layer-14 ID allocation** — globally unique 1-byte IDs across all layer-14 networks. Allocation mechanism (registry, claim-and-defend, etc.) is operational/social, not protocol.
+
+**Implementation cost estimate.**
+- Wire format change: substantial (DATA layout, RTS/CTS update for ctr echo). Touches `pack_data`/`parse_data`, `pack_rts`/`parse_rts`, `pack_cts`/`parse_cts`, `pack_ack`/`parse_ack`.
+- Crypto primitives: ChaCha20 + Poly1305 + HKDF + X25519. ~300-500 lines pulling from an existing library (libsodium / monocypher) or compact in-Lua reference.
+- Gateway logic: peel-and-re-emit at network boundary. ~100 lines.
+- Identity card / `?` query frame: ~80 lines (mirrors Q frame mechanics).
+- Tests: per-message round-trip, multi-hop traversal, dup-MAC dedup, replay rejection, peer-key rotation, gateway boundary. ~200 lines test scenarios.
+
+### 7.2 BCN re-engineering for hierarchical routing
+
+**Problem statement.** Today's BCN advertises `(src, [dest, next, score, hops])` entries — all 1-byte node IDs within a single network. Under §7.1's hierarchical model, BCN needs to:
+1. Indicate which leaf network the emitter belongs to (replacement for today's `network_id` filter role, which was repurposed in DATA as `addr_len`)
+2. Mark which destinations in the BCN are gateways (members of higher layers)
+3. Advertise the emitter's own gateway capability and its per-layer activity schedule (for single-radio TDM, see §7.3)
+4. Stay wire-cost-neutral vs today for non-gateway leaf BCNs
+
+**Wire format.**
+
+```
+byte:  0   1                          2                                    3      4..(end)
+       ┌───┬──────────────────────────┬────────────────────────────────────┬─────┬────────────────────────────────┐
+       │'B'│ has_schedule  (1 hi)     │ leaf_id           (4 hi)           │ src │ if has_schedule:               │
+       │   │ reserved      (3)        │ self_gateway_flag (1)              │     │   layer_count (1 B)            │
+       │   │ n_entries     (4 lo)     │ reserved          (3 lo)           │     │   schedule_record × layer_count│
+       │   │ (0xF = extended n)       │                                    │     │ [n_extended if n_entries==0xF] │
+       │   │                          │                                    │     │ route entry × n (3 B each)     │
+       └───┴──────────────────────────┴────────────────────────────────────┴─────┴────────────────────────────────┘
+
+Route entry (3 bytes — same size as today):
+       ┌──────┬──────┬─────────────────────────────────────────────────────────┐
+       │ dest │ next │ score_bucket(4 hi) | hops(3) | is_gateway(1 lo)         │
+       │ (8)  │ (8)  │                                                         │
+       └──────┴──────┴─────────────────────────────────────────────────────────┘
+
+Schedule record (4 bytes — per upper layer this gateway bridges to):
+       ┌───────────────────────┬─────────┬──────────────────┬──────────────────┐
+       │ layer (4 hi)          │ sf (8)  │ duration_100ms   │ offset_from_bcn  │
+       │ + reserved (4 lo)     │         │ (8 bits)         │ (8 bits, sec)    │
+       └───────────────────────┴─────────┴──────────────────┴──────────────────┘
+```
+
+**Field semantics.**
+
+| Field | Bits | Purpose |
+|---|---|---|
+| `'B'` tag | 8 | unchanged |
+| `has_schedule` | 1 | if 1, schedule records follow byte 3 (gateway emitter with TDM schedule for upper layers) |
+| `n_entries` | 4 | route entry count; sentinel 0xF means "read 1-byte n_extended after schedule (if any)" |
+| `leaf_id` | 4 | emitter's leaf-network ID (replaces today's `network_id` filter role); receivers drop foreign-leaf BCNs |
+| `self_gateway_flag` | 1 | emitter is a gateway (= member of some upper layer); fast bootstrap before others advertise me |
+| `src` | 8 | emitter's leaf-local node ID (unchanged from today) |
+| route `dest`, `next` | 8+8 | unchanged from today |
+| route `score_bucket` | 4 | unchanged: SNR bucket, 2 dB resolution |
+| route `hops` | 3 | reduced from 4 bits (protocol caps at 8 hops anyway → 3 bits = 0-7 is fine) |
+| route `is_gateway` | 1 | this destination is a gateway (member of some upper layer); propagates transitively via `rt_merge` |
+| schedule `layer` | 4 | upper layer this record describes (14, 13, 12, etc.) |
+| schedule `sf` | 8 | SF used on that layer (could shrink to 4 bits later) |
+| schedule `duration_100ms` | 8 | how long the gateway is active on this layer per visit (0.1 - 25.5 s) |
+| schedule `offset_from_bcn` | 8 | seconds from THIS BCN's reception to the next layer-window opening (0-255 s); receiver anchors on its local `bcn_rx_time` |
+
+**Schedule record interpretation (clock-sync-free).**
+
+Each receiver R notes the local time `bcn_rx_time` when it received this BCN. For each schedule record:
+- Next window opens at `R's local time = bcn_rx_time + offset_from_bcn × 1 s`
+- Window duration: `duration_100ms × 100 ms`
+- Repetition period: implicit — refreshed on each subsequent BCN (no explicit period field needed)
+
+R re-anchors at every BCN reception. Drift between BCNs is bounded by clock-drift over typical 5-min BCN periods (sub-second drift), negligible for window-sizing in 1-25 s range.
+
+**Wire-cost comparison.**
+
+| Scenario | Today | New |
+|---|---|---|
+| Plain leaf, 5 routes | 4 + 15 = **19 B** | 4 + 15 = **19 B** (same) |
+| Plain leaf, 49 routes | 4 + 147 = **151 B** | 4 + 1 + 147 = **152 B** (+1 B for n_extended marker) |
+| Gateway leaf with no schedule (= permanent on this layer, no TDM), 5 routes, 3 gateway destinations | n/a | **19 B** (gateway info is bits — zero wire cost) |
+| Gateway with TDM schedule, 1 upper layer, 5 routes | n/a | 4 + 1 + 4 + 15 = **24 B** (+5 B for layer_count + schedule record) |
+| Multi-layer gateway (2 upper layers via TDM), 8 routes | n/a | 4 + 1 + 8 + 24 = **37 B** |
+
+**Gateway capability is effectively free for non-TDM gateways.** Only nodes that need to advertise their layer-switching schedule pay the 4 B/layer overhead. A node that is permanently on a single layer (e.g., a dedicated layer-14 hub with no leaf participation) has `has_schedule=0` and pays nothing extra.
+
+**How a leaf node consumes the information.**
+
+1. **rt_merge** processes each entry: `rt[dest]` candidate stores `is_gateway` flag alongside score/hops/next_hop.
+2. **Schedule cache**: when a BCN from a direct neighbor has `has_schedule=1`, receiver stores the schedule records keyed by `(src_id, layer)`. On each BCN re-reception, re-anchor against current `bcn_rx_time`. Stale schedules (no BCN heard in 2× period) → drop.
+3. **Cross-network send (alice → bob in another network):** alice's app constructs `addr_len = N, dst = [...]` (see §7.1). The local routing layer treats the frame as "destined for any gateway":
+   - Pick an `rt[]` candidate with `is_gateway=1`, best score
+   - Standard local routing toward that gateway
+   - The chosen gateway takes over at the network boundary
+4. **Detail discovery (rare).** If multiple gateways are present and alice needs to know which specific one bridges to a particular upper-layer network, she sends an app-layer DATA query (encrypted, normal mechanics) — `{type: "gateway_lookup", layer: 14, net: 35}`. Gateway responds with `{answer: yes/no/via X}`. This is RARE because most deployments have static topology config OR a single gateway per leaf.
+
+**Cross-references.** §7.1 (DATA frame uses `addr_len + dst` whose routing is driven by `is_gateway` markers from this BCN), §7.3 (inter-layer TDM mechanics consume the schedule records), §6.5 (stale-route aging applies to gateway entries like any other route).
+
+**Open questions (deferred).**
+- Self-update of schedule records (when a gateway changes its TDM cadence, peers learn from the next BCN — no explicit "schedule changed" mechanism; just continuous refresh).
+- Layer-14 (and higher) BCNs use the SAME format with semantics shifted (src = layer-14 ID, is_gateway = "member of layer-13", etc.). Recursive design.
+
+### 7.3 Inter-layer routing protocol (single-radio TDM)
+
+**Problem statement.** A gateway node participates in two or more layers (e.g., leaf SF7 + layer-14 SF11). A single LoRa radio can only be tuned to ONE (SF, frequency) at any instant. To support multi-layer gateway participation on consumer-grade hardware (no dual-radio), the protocol needs a time-division scheme — the gateway alternates between layers on a known schedule, and peers consult that schedule to time their interactions.
+
+**Hybrid scheduling (the chosen mechanism).**
+
+- **Primary layer:** the gateway's default state (typically the leaf layer where most of its traffic lives, e.g., SF7).
+- **Periodic upper-layer sweep:** every `T_period` seconds, the gateway retunes to upper-layer SF for `duration` seconds. During the sweep:
+  - Receives upper-layer BCNs (maintains its upper-layer `rt[]`)
+  - Emits its own upper-layer BCN if scheduled
+  - Available for inbound RTS from upper-layer peers
+- **On-demand retune for outbound TX:** if the gateway has a queued frame for upper-layer forwarding AND is currently on its primary layer, it can opportunistically retune to upper layer to transmit, then return. This is in addition to the periodic sweep.
+
+**Schedule announcement (via gateway's BCN, §7.2).**
+
+The gateway's BCN includes schedule records — one per upper layer it participates in. Receivers anchor schedules against `bcn_rx_time` (no clock sync). Example: a gateway with schedule `{layer=14, sf=11, duration=200, offset=30}` is on layer-14 SF11 from `bcn_rx_time + 30 s` for 20 seconds, repeating from each subsequent BCN.
+
+**Listen-on-overlap (intra-upper-layer hops).**
+
+When two gateways G_a and G_b in the same upper layer need to communicate, both must be on that layer simultaneously. Their schedules are independent (each picks its own offset, no coordination).
+
+Mechanism:
+- G_a's BCN announces its layer-14 schedule
+- G_b receives G_a's BCN, computes G_a's L14 window (relative to G_b's local time)
+- G_b similarly knows its own layer-14 schedule
+- For G_b to TX to G_a on layer 14: G_b waits for a time when BOTH are on layer 14 (= intersection of their windows)
+- If windows don't currently overlap: G_b queues the frame; over a few BCN cycles, schedule drift OR adaptive offset shifting (gateway picks offset to align with observed peer schedules) creates overlap
+- Cascade-requeue total-wallclock cap applies (§5.6); frames that can't find overlap within ~minutes drop with `cross_layer_giveup`
+
+**Layer-15 peer active avoidance.**
+
+A non-gateway leaf node N that wants to RTS to G (gateway) consults G's schedule. If `self.now()` is inside G's upper-layer window:
+- G is currently on upper-layer SF, NOT on G's leaf SF
+- An RTS to G on leaf SF will not get a CTS (G is deaf)
+- N **defers** TX until G's leaf-active period resumes
+- Avoids wasted RTS airtime
+
+Implementation: pre-check in `tx_initiating` for `next == gateway`:
+```
+if next is a known gateway with schedule AND self.now() is inside gateway's upper-layer window:
+  defer until window closes + small jitter
+```
+
+This composes with existing LBT defer and duty-cycle pre-check.
+
+**Single shared duty-cycle budget.**
+
+A gateway's 1% duty cycle applies to its radio TX regardless of which layer it's on. Heavy upper-layer TX consumes the same budget that intra-leaf TX would. This is the physical reality of a shared radio — no virtualization. Composes with §11.5 budget tiers naturally: a gateway running near its budget cap signals STRAINED/CRITICAL on the per-message-NACK path, regardless of which layer the inbound RTS came in on.
+
+**Worked example (full end-to-end).**
+
+```
+Alice (Gdansk leaf, 3 hops from G_out) → Bob (Elblag, via G_out → G_in):
+
+Step 1 — Alice TX at her local time T0 (Gdansk leaf, SF7):
+  D | addr_len=1 | next=neighbor-X | dst=[35, 101] | ctr | ciphertext + MAC
+  
+Step 2 — Local Gdansk-leaf hops forward toward G_out (~200-500 ms).
+  Frame arrives at N (G_out's direct leaf neighbor) at N's local time T_N.
+
+Step 3 — N has G_out's schedule. N consults:
+  G_out is on L14 SF11 from T_N + 25 s to T_N + 45 s (relative to N's clock).
+  
+  Sub-case (a) — T_N is BEFORE the window:
+    N queues the frame. At T_N + 25 s, N retunes to SF11.
+    N RTS-CTS-DATA-ACKs to G_out on SF11. ~1-2 s.
+    Returns to leaf SF7.
+  
+  Sub-case (b) — T_N is INSIDE the window (lucky timing):
+    N immediately retunes to SF11, RTSes to G_out. As above.
+  
+  Sub-case (c) — T_N is AFTER the window:
+    N queues; next BCN refresh from G_out re-anchors the schedule for ~5 min later.
+
+Step 4 — G_out has the frame on layer 14. G_out's L14 rt[] tells it:
+  "Next hop toward net 35 = some L14 peer P." 
+  G_out is currently in its OWN L14 window. P is also a layer-14 node with its own L14 schedule advertised in P's L14 BCN.
+  G_out checks P's L14 schedule for overlap with G_out's current window.
+  If overlap: G_out RTS-CTS-DATAs to P on layer 14.
+  If no overlap: G_out queues the frame for the next overlapping window.
+
+Step 5 — Frame eventually reaches G_in (= layer-14 node bridging to Elblag leaf).
+  G_in's payload-peel logic: addr_len 1→0, dst = [101].
+  G_in retunes to its own primary (Elblag leaf SF7) at next L15 window.
+
+Step 6 — G_in RTS-CTS-DATAs to Bob's neighbor in Elblag leaf.
+  Local Elblag-leaf hops to Bob (~200-500 ms).
+
+Step 7 — Bob receives. Decrypts. Done.
+
+Latency budget:
+  - Intra-leaf hops: ~500 ms (typical)
+  - Wait for L14 window: 0 - T_period (worst case ~5 min)
+  - Layer-14 traversal: depends on gateway-density; ~10 s per hop at SF11
+  - Wait for L15 window at G_in: 0 - T_period
+  - Intra-Elblag-leaf hops: ~500 ms
+  Total: ~10 s best case, ~10 min worst case for one-shot delivery.
+```
+
+Acceptable for non-realtime use cases (chat, status, alerts). Not for sub-second-latency needs (which LoRa generally isn't suited for anyway).
+
+**Cost / capacity considerations.**
+
+| Concern | Impact | Mitigation |
+|---|---|---|
+| Layer-14 traffic crowds L15 capacity at gateway | Shared duty-cycle budget; heavy cross-layer use reduces local L15 throughput | §11.5 budget tiers signal saturation; senders learn via NACK and re-route |
+| L15 peers wait for gateway's L15-active windows | Up to `duration` of dead time per cycle | Active avoidance keeps peers from wasting airtime; queue-and-retry handles the wait |
+| Schedule drift between gateways | Two gateways' schedules drift apart, breaking established overlap | BCN refresh re-anchors on each reception; adaptive offset (gateway shifts to align with observed peer activity) is optional optimization |
+| Lost upper-layer BCNs (heard outside our sweep) | Stale upper-layer rt[] | Standard rt_aging applies; gateway's L14 rt[] has slightly higher staleness floor (proportional to sweep gap) |
+| Multi-hop L14 with non-overlapping schedules | Each hop pays its own wait-for-overlap | Cascade-requeue total wallclock cap (§5.6) kills truly impassable paths; works as backpressure |
+
+**Cross-references.** §7.1 (DATA frame consumes hierarchical `dst` that drives this routing), §7.2 (BCN carries schedule records that this protocol consumes), §5.6 cascade-requeue (handles bounded waits for cross-layer overlap), §11.5 budget tiers (gateway's shared duty cycle naturally signals saturation under load).
+
+**Open questions (deferred to implementation).**
+- Adaptive schedule offset: should gateways auto-shift to align with observed peer schedules? Pure local optimization; no protocol-level coordination needed.
+- Layer-14 (and higher) using completely separate frequency sub-bands? Out of scope for the base proposal — we assume shared frequency, different SFs.
+- Dual-radio hardware support: out of scope; future "professional" deployments could parallelise. Protocol design works either way.
+
+**Implementation cost estimate.**
+- BCN parse/pack extension for schedule records: ~30 lines
+- Schedule cache + drift tracking at receivers: ~80 lines
+- TDM scheduling state machine at gateway (sweep timer, retune logic, return-to-primary): ~150 lines
+- L15 active-avoidance pre-check in `tx_initiating`: ~30 lines
+- Inter-layer queue + overlap detection: ~100 lines
+- Tests: schedule drift, overlap windows, missed sweep recovery, cross-layer delivery, schedule advertisement: ~150 lines
+
+### 7.4 Control-plane frame updates (RTS / CTS / ACK / NACK)
+
+**Problem statement.** With §7.1 (encrypted hierarchical DATA), §7.2 (BCN re-engineering), and §7.3 (inter-layer TDM) in place, the supporting control-plane frames need adjustment: RTS must carry the variable hierarchical `dst`, and the matching-ID slot in CTS/ACK/NACK needs to align with the new `ctr` field that replaces `msg_id`.
+
+#### RTS — substantial change
+
+**Today (8 bytes):**
+```
+'R' | origin(1) | src(1) | dst(1) | next(1) | network_id(4)+msg_id(4) | sf_bitmap(1) | payload_len(1)
+```
+
+**Proposed:**
+```
+byte:  0   1     2      3                          4..(4+addr_len)         (5+addr_len)       (6+addr_len)    (7+addr_len)
+       ┌───┬─────┬─────┬──────────────────────────┬───────────────────────┬───────────────────┬──────────────┬──────────────┐
+       │'R'│ src │ next│ addr_len    (4 hi)       │ dst                   │ ctr_lo (4 hi)     │ sf_bitmap    │ payload_len  │
+       │   │     │     │ leaf_id     (4 lo)       │ (addr_len + 1 bytes)  │ reserved (4 lo)   │ (8)          │ (8)          │
+       └───┴─────┴─────┴──────────────────────────┴───────────────────────┴───────────────────┴──────────────┴──────────────┘
+```
+
+**Field-by-field changes:**
+
+| Field | Today | New | Why |
+|---|---|---|---|
+| `origin` | 1 B plaintext | **REMOVED** | §9 T2 — originator anonymity; the receiver of the eventual DATA learns origin from encrypted payload via MAC trial-verify |
+| `src` (prev-hop) | 1 B | **kept 1 B** | RTS is the FIRST hop-level frame; receiver has no `pending_rx` yet, MUST know who's asking |
+| `dst` | 1 B | **variable, `addr_len + 1` B** | Hierarchical destination per §7.1 |
+| `next` | 1 B | **kept 1 B** | Radio-level addressing (unchanged) |
+| `network_id` (4 bits) | 4 bits | **renamed `leaf_id`, kept 4 bits** | Same role: drop foreign-leaf RTS before CTS work |
+| `msg_id` (4 bits) | 4 bits | **replaced by `ctr_lo` (4 bits)** | Low nibble of the full 16-bit `ctr` carried in DATA; hop-level match identifier |
+| `sf_bitmap` | 1 B | **kept 1 B** | unchanged |
+| `payload_len` | 1 B | **kept 1 B** | unchanged |
+
+**Size:**
+- `addr_len=0` (in-leaf): **8 B** — same as today, despite gaining hierarchical capability
+- `addr_len=1` (cross-region): **9 B**
+- `addr_len=2`: **10 B**
+- Each additional hierarchy hop: **+1 B**
+
+We dropped `origin` (1 B) and absorbed it into the variable `dst` field. In-leaf RTS size unchanged; cross-network adds 1 B per hierarchy hop.
+
+**Why `ctr_lo` (4 bits) in RTS and not full ctr?** Hop-level matching only needs 4 bits — at any moment a single `pending_tx` / `pending_rx` per peer (1/16 stale-collision is acceptable, same as today's `msg_id`). The full 16-bit `ctr` ships with DATA where the destination needs it for nonce reconstruction. No wire redundancy.
+
+#### CTS — relabel only (size unchanged)
+
+**Today (2 bytes):**
+```
+'C' | msg_id(4hi) | chosen_data_sf-5(3) | reserved(1)
+```
+
+**Proposed (2 bytes):**
+```
+'C' | ctr_lo(4hi) | chosen_data_sf-5(3) | reserved(1)
+```
+
+Pure semantic rename. Forwarder's / originator's `pending_tx` is keyed on the same 4-bit value, derived from the outbound DATA's `ctr` instead of an independent `msg_id` counter.
+
+#### ACK — relabel only (size unchanged)
+
+**Today (2 bytes):**
+```
+'K' | msg_id(4hi) | snr_bucket(4lo)
+```
+
+**Proposed (2 bytes):**
+```
+'K' | ctr_lo(4hi) | snr_bucket(4lo)
+```
+
+Same rename. SNR-bucket piggyback for `snr_ewma_out` (§4 of PROTOCOL.md) works identically.
+
+#### NACK — relabel only (size unchanged)
+
+**Today (4 bytes):**
+```
+'N' | reason(4hi)+msg_id(4lo) | payload_lo | payload_hi
+```
+
+**Proposed (4 bytes):**
+```
+'N' | reason(4hi)+ctr_lo(4lo) | payload_lo | payload_hi
+```
+
+Reason byte interpretation unchanged (`BUSY_RX=0`, `BUDGET=1`, future reasons reserved). Payload semantics depend on reason, as today.
+
+#### Summary
+
+| Frame | Today size | New size (addr_len=0) | Change |
+|---|---|---|---|
+| RTS | 8 B | **8 B** | `origin` dropped; `dst` made variable; `msg_id` → `ctr_lo` |
+| CTS | 2 B | **2 B** | `msg_id` → `ctr_lo` (rename) |
+| ACK | 2 B | **2 B** | `msg_id` → `ctr_lo` (rename) |
+| NACK | 4 B | **4 B** | `msg_id` → `ctr_lo` (rename) |
+| DATA (§7.1) | 8 B + n | **10 B + n** | Crypto + MAC + ctr; hierarchical dst (+1 B per hop) |
+
+**The whole control plane stays wire-compact.** In-leaf control overhead is unchanged from today; hierarchy hops cost 1 B per layer in DATA + RTS only. CTS/ACK/NACK are flow-bound (match against `pending_tx`/`pending_rx`) and don't need to carry the hierarchical path.
+
+**Pending state at hops.**
+
+- Sender's `pending_tx` (outbound flight): keyed on full `ctr` (or `(next, ctr_lo)` is enough at hop-level since only one pending_tx exists at a time per next-hop)
+- Receiver's `pending_rx` (inbound flight): keyed on `(src, ctr_lo)`. Set on RTS-rx, cleared on DATA-rx or expiry
+- `last_acked_from` cache: keyed on `(src, ctr_lo)`; TTL same as today (10 s default)
+
+All hop-level matching uses 4 bits, same collision space as today's `msg_id`. No behavioral change.
+
+**Composition with §1 anti-spam.**
+
+The behavioral classifier (`R[X]` and `C[X]` distinct-msg_id counts per direct sender) continues to work — it observes RTS and CTS observations and dedups by the 4-bit slot, which is still present (just renamed `ctr_lo`). No change to anti-spam mechanics.
+
+**Cross-references.** §7.1 (DATA carries the full `ctr` whose low nibble flows back through CTS/ACK), §7.2 (BCN format unchanged by control-plane updates), §7.3 (inter-layer RTS use the same format, just at different SF), §1 anti-spam (RTS/CTS observation counts unchanged), §3.6 in PROTOCOL.md (NACK reason byte semantics preserved).
+
+**Implementation cost estimate.**
+- `pack_rts` / `parse_rts` variable-length dst handling: ~50 lines
+- `pack_cts` / `parse_cts`, `pack_ack`, `pack_nack` semantic rename: ~10 lines each
+- Pending state keying migration (`msg_id` → `ctr_lo`): ~30 lines across the matching helpers
+- Tests: RTS round-trip for each `addr_len` value (0, 1, 2), CTS/ACK matching with new ctr semantics, cross-layer RTS with hierarchical dst: ~80 lines
+
 ---
 
 ## 8. Cryptography
@@ -512,6 +992,8 @@ The plain variant requires plaintext `origin` in the `E` frame header so forward
 - Interaction with §6 channels and §7 multi-net (distinct key sets per channel and per network).
 
 ### 8.1 Concrete per-pair DM crypto proposal
+
+> **See also §7.1** for the synthesis of this crypto proposal with hierarchical routing (§7) and originator anonymity (§9 T2) into a single concrete DATA frame.
 
 **Problem statement.** A user on node A wants to send a confidential, authenticated message to node B. Forwarders along the route must not be able to read the payload, and (composing with §9 T2) must not be able to identify A as the originator. What does A need from B in practice, and what's on the wire?
 
@@ -622,6 +1104,8 @@ per peer: 32 B peer_pubkey + 32 B session_key
 ---
 
 ## 9. Privacy / originator anonymity (T2)
+
+> **See also §7.1** for the concrete DATA frame realizing T2 in combination with hierarchical routing and crypto.
 
 **Problem.** Every RTS and DATA frame today carries `origin` as a
 plaintext 1-byte field at byte 1 (see `pack_rts`, `pack_data` in
