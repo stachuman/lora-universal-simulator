@@ -7,7 +7,7 @@ shape of the problem, not the solution. Linked-to-from
 
 ---
 
-## 1. Per-originator airtime budget (anti-spam)
+## 1. Anti-spam: rate-limit at the 1st-hop neighbour
 
 **Problem.** A single chatty originator can monopolise network capacity.
 At ~1% per-node duty cycle, every forwarder along the originator's
@@ -16,34 +16,85 @@ node sending 50 messages/min effectively consumes airtime across N
 forwarders × 1 hop each. Origin A's traffic crowds out everyone else
 even though A only has its own 1% local budget.
 
-**What we want.** Per-originator fair-share enforcement, applied at
-forwarders: the share of my own budget I'm willing to spend forwarding
-A's traffic is bounded.
+**Design constraint.** Enforcement must happen at the **1st-hop
+neighbour**, NOT at the originator (a malicious modified firmware
+can't be trusted to self-limit) and NOT at deeper forwarders (they see
+aggregated traffic from many origins and would over-trigger on the
+heaviest-loaded forwarders, which are doing the right thing).
 
-**Constraints.**
-- Per-origin state at each forwarder must be cheap (no per-flight
-  history; sliding-window airtime counter at most).
-- Reaction has to be informative — the originator needs feedback that
-  it's being throttled so it can back off (or the user-facing app can
-  show the rate-limit signal).
-- Must compose with the existing budget NACK (don't conflict).
+The 1st-hop invariant: a node N is entitled to track/police origin X
+**only when N hears a frame directly from X's radio with `sender == X
+== origin`**. Forwarded frames (where the on-wire sender is not the
+origin) are skipped — N has no way to distinguish legitimate
+forwarding from origin-fingerprint there.
+
+This has two structural properties:
+1. **Attack-resistant**: a malicious firmware can lie about its own
+   rate but can't hide its TX from physical neighbours. The neighbours
+   measure what's on the wire.
+2. **Distributed enforcement at the right scope**: every 1st-hop
+   neighbour of X polices independently. X's traffic is bounded by the
+   *most strict* of its direct neighbours.
+
+**Plain-origin variant (compatible with current header).**
+- State: per-direct-neighbour sliding-window airtime counter, populated
+  only on RX where `sender == origin == X`.
+- Detection: opportunistic check on receive; if window sum exceeds
+  `self.duty_cycle_budget_ms × fair_share_fraction` (default 1/16 =
+  ~6% of N's own budget), mark X as rate-limited.
+- Enforcement: on subsequent RTS with `sender == origin == X` and X in
+  rate-limited set, emit NACK with `reason = originator_throttle`.
+- Recovery: window naturally decays; if X stops, X drops below
+  threshold and is unmarked. Self-healing.
+
+**Privacy-compatible variant (composes with §9 — origin encrypted).**
+The plain variant requires plaintext `origin` to identify the spammer.
+If origin moves into the encrypted payload (§9 T2), we lose direct
+attribution. But we can preserve anti-spam via **behavioral
+fingerprinting** without reading origin:
+
+- A legitimate forwarder's RTS-tx is preceded by **its own CTS-tx +
+  ACK-tx** within ~300 ms (the full RTS-CTS-DATA-ACK chain — all on
+  routing_sf, all broadcast, all observable to neighbours in range).
+- An originator's RTS-tx is preceded by **no CTS+ACK from this sender**.
+- Classification rule at N: for each RTS-tx from direct sender X, look
+  back ~300 ms in N's RX history. If X performed CTS-tx and ACK-tx in
+  that window → forwarding. Else → originating.
+- Cap: per-X fresh-origination rate (e.g., 6 originations / 5-min
+  window) PLUS a per-X total-airtime backstop catching either pattern
+  at extreme volumes.
+
+Why evasion is self-defeating: a spammer trying to dodge the
+originator classifier by emitting fake CTS+ACK before each spam RTS
+pays **3× the airtime** per spam (CTS ~50 ms + ACK ~50 ms + RTS ~50 ms
+instead of RTS alone). The evader hits the per-sender total-airtime
+backstop sooner than they would by cooperating. So the protocol is
+self-enforcing without needing to read `origin`.
 
 **Possible direction (not committed).**
-- Forwarders track per-origin airtime spent forwarding over the last N
-  minutes (sliding window).
-- Threshold: `forwarded[origin] > my_budget × fair_share` (fair_share ≈
-  1/known_originators, or some pessimistic 1/8 if we don't track
-  population).
-- Over threshold → NACK with new `reason=originator_throttle` + origin
-  airtime fraction.
-- Originator interprets the NACK as backpressure on that destination
-  via this path; rate-limit at the application layer.
+- Default to plain-origin variant; switch to behavioral variant
+  conditionally on §9 T2 deployment.
+- NACK reason 2 = `originator_throttle`; payload byte 0 = observed
+  fraction × 16 (so the origin's app can show "rate limited by network
+  — X/16 of fair share consumed").
+- Sliding window default: 5 min. Fair share default: 1/16 of N's
+  duty-cycle budget.
 
 **Open questions.**
-- TTL on the per-origin counter? Match the 1 h duty-cycle window?
-- Should originators also self-limit, or rely on network feedback?
-- Do we need a separate NACK reason or extend `reason=budget_low` with
-  an origin field?
+- Sliding-window length: 5 min responsive; 1 h (matching duty cycle)
+  smoother but evade-by-move is easier.
+- Per-1st-hop tracking can be reset by the origin moving between
+  neighbour clusters. Mitigations (gossip, cross-1st-hop sharing) cost
+  airtime and add collusion surface — flagged as a known limitation.
+- Forwarder identification under T2 privacy without behavioral
+  fingerprint: would require cryptographic proof of origination
+  (signed frames, §8), much heavier.
+
+**Cross-references.** Composes with §8 cryptography (signed frames
+would make origin-attribution authoritative even with encryption) and
+§9 privacy (the behavioral variant is the answer to "does T2 break
+anti-spam?" — answer: no, but it changes the granularity from
+per-origin to per-sender behaviorally classified).
 
 ---
 
@@ -153,17 +204,73 @@ small-N (≤ 5) status broadcasts.
 - Must coexist with non-compressed legacy frames during rollout.
 
 **Possible directions (none committed).**
+- **BCN — run-length on `next_hop`**: nodes typically advertise many destinations via a small set of dominant next-hops; group consecutive entries sharing a next-hop and encode the next-hop once per group. Concrete proposal worked through in §4.1 below.
 - **BCN — differential page encoding**: each BCN-page emits only entries whose (dest_id, score, hops) tuple changed since the same node's last advertisement of that dest. Already partly done via the dirty-flag mechanism for advertisement priority; extending to actual on-wire delta would require per-receiver dictionary state.
 - **BCN — variable-length node IDs**: small node IDs (frequent neighbours) get 1-byte encoding, distant IDs get 2-byte (varint or escape-byte trick). Trade-off: parser complexity vs ~25% byte reduction in dense neighbourhoods.
 - **DATA — app-layer dictionaries**: known message types (status, beacons-on-channel, alerts) compress against a pre-shared dictionary. Generic chat-text compression is marginal at <100 B payload — fixed dictionary overhead dominates LZ77 or Huffman wins.
 - **DATA — bit-pack the application protocol** (similar to what we did for the wire protocol): if the application has structured fields with small value ranges, encode them in bits rather than bytes.
+
+**Why not LZW / gzip / zstd on small frames?** Generic compressors need ~100+ bytes before their own header overhead breaks even — our control frames (BCN 4+3n, RTS 8 B, CTS/ACK 2 B) are well under that floor. Even zstd's shared-dictionary mode targets 50-200 B inputs. LZW specifically inflates: its initial 9-bit-over-256-alphabet code width adds ~12% on every symbol, and the dictionary never gets populated enough on a 19 B beacon to amortize that. Worse, LZW operates on byte boundaries; our bit-packed entries cross byte boundaries differently each time, so a repeated 10-bit `next_hop` lands in different bit-positions and byte-LZW literally doesn't see it as repetition. **Domain-specific encoding (the bullets above) is the only thing that wins at this size.** Generic compression is a candidate ONLY for DATA frames carrying ≥ 200 B of natural-language-ish content.
 
 **Open questions.**
 - Is the gain worth the codec complexity for the simulator's purposes? The runtime models airtime exactly; compression would just reduce bytes. Maybe just measure achievable compression ratios offline (run zstd over captured payloads) and document the headroom without implementing in-protocol.
 - Should we add a `compressed` bit in the frame header to gate the path?
 - Per-link compression (negotiated) vs global protocol decision?
 
-**Recommendation.** Defer in-protocol compression. Measure achievable ratios on real payloads offline first; in-protocol codec only if measurements show >20% savings AND the failure mode is byte-limited (not symbol-limited).
+**Recommendation.** Defer in-protocol compression. Measure achievable ratios on real payloads offline first; in-protocol codec only if measurements show >20% savings AND the failure mode is byte-limited (not symbol-limited). The §4.1 BCN run-length proposal is the most concrete and lowest-complexity candidate — implement first if the s04 BCN airtime fraction stays high after other optimisations land.
+
+### 4.1 BCN run-length on `next_hop` (concrete proposal)
+
+**Observation.** A node's BCN entries cluster around a small set of dominant next-hops. In a star topology, nearly all entries share `next_hop = gateway`. In typical mesh, 49 entries are usually distributed across 3-5 distinct next-hops. The current 3 B/entry encoding repeats the 8-bit `next_hop` field for every entry — a clear redundancy.
+
+**Wire format.** Adds a `compressed` flag in byte 1's reserved low nibble. Flag=0 keeps existing 3 B/entry layout (no inflation when compression doesn't help). Flag=1 switches to grouped encoding:
+
+```
+Header (size unchanged, 4 B):
+byte 0: 'B'
+byte 1: network_id (4 hi) | flag_compressed (1) | reserved (3 lo)
+byte 2: src (8)
+byte 3: n (8)            -- semantic entry count, regardless of encoding
+
+flag_compressed = 1 body — sequence of groups, each:
+  byte g+0: next_hop (8)
+  byte g+1: group_count (8)            -- entries sharing this next_hop
+  bytes g+2..: group_count × 2 bytes   -- per entry: dest(8) | score_bucket(4 hi) | hops(4 lo)
+```
+
+**Encoder logic.**
+1. Build the entries list dirty-first (existing differential semantics, capped at `max_entries`).
+2. Sort the SELECTED entries by `next_hop` — preserves dirty-first selection; within the selection, sorting maximizes group runs.
+3. Compute uncompressed size (`4 + 3n`) and compressed size (`4 + 2g + 2n`, where g = distinct next_hops).
+4. Emit whichever is smaller; set `flag_compressed` accordingly. Break-even: compressed wins when `g < n/2` (i.e., average group size > 2).
+
+**Decoder logic.** `parse_beacon` reads `flag_compressed` from byte 1. Flag=0 → existing 3-byte loop. Flag=1 → walk groups, expanding each to (dest, group's next_hop, score, hops). Receivers downstream of `parse_beacon` (`rt_merge`, route scoring) see no difference.
+
+**Savings (49-entry BCN, default cap).**
+
+| Distinct next_hops | Uncompressed | Compressed | Saving |
+|---|---|---|---|
+| 1 (star/gateway) | 151 B | 4 + 2 + 98 = **104 B** | −31% |
+| 3 (typical mesh) | 151 B | 4 + 6 + 98 = **108 B** | −28% |
+| 8 (well-connected) | 151 B | 4 + 16 + 98 = **118 B** | −22% |
+| 25 (sparse uniform) | 151 B | 4 + 50 + 98 = 152 B | flag=0, **0%** |
+
+Worst-case auto-detected and flagged uncompressed (no inflation cost, only the 1-byte tax of always carrying the flag — and that's a free reused reserved bit).
+
+**Open design question.** What to do with the saved bytes:
+- (A) **Shrink BCN airtime**: keep `beacon_max_entries=49`; compressed BCN goes 151 B → ~110 B average. Direct ~27% airtime reduction. Simplest.
+- (B) **Pack more entries per BCN**: replace entries cap with byte-budget cap (~151 B). Same airtime, but ~65 entries per page when compression helps → faster RT propagation, faster differential drain. Bigger refactor.
+- (C) **Hybrid**: byte-budget cap; encoder packs until budget hit. Combines both. Most code change.
+
+A is the obvious starting point — directly delivers the airtime saving the proposal exists to capture.
+
+**Composability.**
+- With **§5.6 cascade-requeue** / **§11.5 budget tiers**: smaller BCNs free duty-cycle budget for forwards, so budget tiers stay in HEALTHY longer. Pure win.
+- With **§6.2 max-idle override + B+C composite**: composite filter still applies — compression doesn't change WHEN we send BCNs, only how big they are.
+- With **§6.4 differential beacons**: dirty-first selection unchanged (sort happens AFTER selection). No semantic change.
+- With **legacy/uncompressed peers**: incompatible at the wire layer. The `flag_compressed` bit is in the existing reserved nibble; old parsers that ignore the nibble would parse the body as flat entries → garbage routes. Rollout requires synchronized network-wide upgrade. For the simulator (single codebase, all nodes) this is a non-issue. For real deployment, gate behind a network-wide config flag.
+
+**Implementation cost estimate.** ~80 lines in `pack_beacon`/`parse_beacon` plus ~30 lines of test coverage (round-trip identity, all-same-next, all-distinct-next, mixed). One test scenario needed for the airtime measurement on s04.
 
 ---
 
@@ -272,6 +379,82 @@ small-N (≤ 5) status broadcasts.
 - Key rotation synchronization across the mesh — what happens during the rotation window when some nodes have updated and some haven't?
 - Hardware crypto acceleration availability — SX1262 doesn't have it, so all crypto runs on the host MCU.
 - Interaction with §6 channels and §7 multi-net (probably distinct key sets per channel and per network).
+
+---
+
+## 9. Privacy / originator anonymity (T2)
+
+**Problem.** Every RTS and DATA frame today carries `origin` as a
+plaintext 1-byte field at byte 1 (see `pack_rts`, `pack_data` in
+`scenarios/dv_dual_sf.lua`). BCN exposes `src` at byte 2. Any node in
+radio range can build a transcript of who-talked-to-whom. Even with
+§8 cryptography (encrypted payload), the metadata leaks identity and
+traffic patterns to passive observers and to forwarders.
+
+**What we want.** MeshCore-equivalent originator anonymity: forwarders
+and observers see frames moving through the network but can't link
+them to a specific origin without the destination's private key.
+Three privacy tiers exist conceptually:
+
+| Tier | What | Cost | Gives | Doesn't give |
+|---|---|---|---|---|
+| T1 — payload-only encryption (Meshtastic-equivalent) | ChaCha20-Poly1305 origin↔dst with PSK; headers plaintext | ~28 B/frame | Message-content confidentiality | Origin metadata public; traffic analysis trivial |
+| **T2 — origin moved into encrypted payload** | Strip origin from RTS/DATA headers; place inside encrypted blob. Forwarders see only (prev_hop, dst, next_hop, msg_id). | T1 cost + small refactor (dedup re-keyed) | Origin invisible to passive observers AND forwarders. MeshCore-style. | BCN src still exposes node membership; timing patterns still leak (alice's daily rhythm visible) |
+| T3 — onion-routed source paths | Origin computes full path; encrypts each hop's instructions per-hop key | ~20-30 B header per hop → 5-hop = 100-150 B header. Breaks LoRa frame budget. Requires global topology at origin. | Full origin anonymity from forwarders + observers | Collapses our current distance-vector model entirely |
+
+**Constraints.**
+- LoRa frame budget. T3 doesn't fit — period.
+- Routing must keep working without forwarders knowing origin. Today,
+  forwarders use origin only for the `forward_queued` event metadata —
+  it's not actually load-bearing. Dedup re-keys cleanly to
+  `(prev_hop, msg_id)` (the `last_acked_from` machinery is already
+  there).
+- Must compose with §1 anti-spam (see analysis there — behavioral
+  fingerprint preserves anti-spam under T2 without reading origin).
+- Cover-traffic to defeat timing analysis is incompatible with our
+  duty cycle. Not achievable within this protocol family.
+
+**Possible direction — T2 (not committed, recommended as the
+realistic ceiling).**
+- Drop `origin` from RTS byte 1 and DATA byte 1; recover those bytes
+  (RTS goes 8 B → 7 B, DATA header 6 B → 5 B — small airtime
+  win as bonus).
+- Encrypt user payload with ChaCha20-Poly1305; place
+  `(origin, origin_seq, user_text)` in the encrypted blob.
+- Re-key forwarder dedup to `(prev_hop, msg_id)` instead of
+  `(origin, msg_id)`. Mostly already there via `last_acked_from`.
+- Q frame: replace `src` with an ephemeral cookie that the receiver
+  returns in its triggered BCN (requester matches without persistent
+  identity).
+- E2E ACK (§5): use a return-cookie mechanism instead of plaintext
+  origin.
+
+**What T2 structurally can't fix.**
+- BCN exposes node existence. Every node BCNs its own `src`. Anyone
+  in range knows you exist on this network. Pseudonym rotation could
+  mask long-term identity but the act of advertising "I'm reachable
+  for routes" can't be hidden if routing stays passive.
+  Anonymity-of-existence is a different protocol entirely
+  (gossip-only with no advertising — incompatible with our routing).
+- Traffic-flow timing leaks. If alice's BCNs go quiet at the moment a
+  DATA flight starts hopping toward bob, an observer infers alice→bob
+  without ever reading the origin field. Mitigation requires cover
+  traffic, which duty cycle won't afford.
+
+**Open questions.**
+- Pseudonym rotation cadence for BCN `src` (daily? hourly? per-
+  cluster-discovery cycle?). Too short → routing tables can't follow
+  the rotation. Too long → static identifier defeats the rotation
+  goal.
+- How does T2 compose with §6 (channels) and §7 (multi-network)?
+  Channel subscription, network bridging — both currently rely on
+  identity. Need explicit design for each.
+- Should the routing-table dedup re-keying to `(prev_hop, msg_id)`
+  apply universally, or only when T2 is active per a config flag?
+
+**Cross-references.** §1 anti-spam (behavioral fingerprint variant
+preserves rate-limiting under T2), §5 E2E ACK (return-cookie design),
+§8 cryptography (T2 is one layer of §8's confidentiality story).
 
 ---
 
