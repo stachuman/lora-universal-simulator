@@ -1315,22 +1315,60 @@ end
 --      so a longer path is materially more failure-prone even at a
 --      marginally better per-link SNR.
 -- Returns false on full tie (caller decides via slot/n2_hop logic).
-local function route_strictly_better(a, b, viab_db)
-  local av = a.score >= viab_db
-  local bv = b.score >= viab_db
+-- Budget-tier score penalty (dB). Subtracts from the candidate's SNR
+-- margin so a CRITICAL route has to be substantially better than a
+-- HEALTHY alt to win the primary slot. Tier 0 = HEALTHY (no penalty),
+-- 1 = STRAINED, 2 = CRITICAL, 3 = EXHAUSTED.
+local TIER_SCORE_PENALTY_DB = { [0] = 0.0, [1] = 2.0, [2] = 5.0, [3] = 20.0 }
+
+-- Read this node's belief about neighbour `node_id`'s budget tier.
+-- Returns 0 (HEALTHY) if no mark or TTL expired. Updated by the budget
+-- NACK reception handler; expires via neighbor_budget_tier_ttl_ms so
+-- a saturated neighbour eventually returns to the primary pool if no
+-- fresh NACKs arrive. Self-defence against ossifying out a peer that
+-- recovered without us hearing it.
+local function get_neighbor_tier(self, node_id)
+  if node_id == nil or not self.neighbor_budget_tier then return 0 end
+  local tier = self.neighbor_budget_tier[node_id]
+  if not tier or tier == 0 then return 0 end
+  local set_at = (self.neighbor_budget_tier_set_at
+                  and self.neighbor_budget_tier_set_at[node_id]) or 0
+  local ttl = self.neighbor_budget_tier_ttl_ms or 300000
+  if self:now() - set_at >= ttl then
+    self.neighbor_budget_tier[node_id] = nil
+    if self.neighbor_budget_tier_set_at then
+      self.neighbor_budget_tier_set_at[node_id] = nil
+    end
+    return 0
+  end
+  return tier
+end
+
+-- Tier-aware effective score: c.score minus the dB penalty for its
+-- next_hop's known budget tier. Use this anywhere we previously
+-- compared raw c.score, so the routing table tracks usable capacity
+-- not just radio quality.
+local function effective_score(self, c)
+  local tier = get_neighbor_tier(self, c.next_hop)
+  return c.score - (TIER_SCORE_PENALTY_DB[tier] or 0)
+end
+
+local function route_strictly_better(self, a, b, viab_db)
+  local a_score = effective_score(self, a)
+  local b_score = effective_score(self, b)
+  local av = a_score >= viab_db
+  local bv = b_score >= viab_db
   if av and not bv then return true end
   if bv and not av then return false end
   if av and bv then
-    -- both viable: hops-first, score breaks ties (RIP/OSPF/AODV order)
+    -- both viable: hops-first, effective_score breaks ties (RIP/OSPF/AODV order)
     if a.hops < b.hops then return true end
     if a.hops > b.hops then return false end
-    return a.score > b.score
+    return a_score > b_score
   else
-    -- both non-viable: score-first (least-worst link), hops breaks ties.
-    -- Hops-first here would prefer a 1-hop dead link over a 2-hop slightly-
-    -- less-dead path; that's worse, so flip the order in this tier.
-    if a.score > b.score then return true end
-    if a.score < b.score then return false end
+    -- both non-viable: effective_score-first (least-worst link), hops breaks ties.
+    if a_score > b_score then return true end
+    if a_score < b_score then return false end
     return a.hops < b.hops
   end
 end
@@ -1348,7 +1386,15 @@ end
 -- prioritises dirty entries for the next emission so route changes
 -- propagate within one beacon period instead of waiting for the
 -- sliding-offset rotation to come around.
-local function rt_merge(rt, dest_id, cand, viab_db)
+local function rt_merge(self, rt, dest_id, cand, viab_db)
+  -- Sort callback (closure over self/viab_db). Uses effective_score
+  -- inside route_strictly_better so neighbour tier penalties shape
+  -- the routing table itself, not just runtime next-hop selection.
+  local function sort_fn(a, b)
+    return route_strictly_better(self, a, b, viab_db) or
+           (not route_strictly_better(self, b, a, viab_db)
+            and effective_score(self, a) > effective_score(self, b))
+  end
   local entry = rt[dest_id]
   if entry == nil then
     rt[dest_id] = { candidates = { cand }, dirty = true }   -- new dest
@@ -1358,13 +1404,10 @@ local function rt_merge(rt, dest_id, cand, viab_db)
   -- Match-by-next_hop: refresh in place if cand strictly better.
   for i, c in ipairs(entry.candidates) do
     if c.next_hop == cand.next_hop then
-      if route_strictly_better(cand, c, viab_db) then
+      if route_strictly_better(self, cand, c, viab_db) then
         local was_primary = (i == 1)
         entry.candidates[i] = cand
-        table.sort(entry.candidates, function(a, b)
-          return route_strictly_better(a, b, viab_db) or
-                 (not route_strictly_better(b, a, viab_db) and a.score > b.score)
-        end)
+        table.sort(entry.candidates, sort_fn)
         local now_primary = (entry.candidates[1].next_hop == cand.next_hop)
         if now_primary then
           entry.dirty = true                                  -- primary refresh
@@ -1385,10 +1428,7 @@ local function rt_merge(rt, dest_id, cand, viab_db)
   -- New next_hop, room to spare.
   if #entry.candidates < MAX_RT_CANDIDATES then
     table.insert(entry.candidates, cand)
-    table.sort(entry.candidates, function(a, b)
-      return route_strictly_better(a, b, viab_db) or
-             (not route_strictly_better(b, a, viab_db) and a.score > b.score)
-    end)
+    table.sort(entry.candidates, sort_fn)
     if entry.candidates[1].next_hop == cand.next_hop then
       entry.dirty = true                                      -- new candidate became primary
       return "promote"
@@ -1399,14 +1439,11 @@ local function rt_merge(rt, dest_id, cand, viab_db)
   -- Full table — replace the worst (last in sorted order) only if cand
   -- strictly beats it.
   local worst = entry.candidates[#entry.candidates]
-  if not route_strictly_better(cand, worst, viab_db) then
+  if not route_strictly_better(self, cand, worst, viab_db) then
     return "no_change"
   end
   entry.candidates[#entry.candidates] = cand
-  table.sort(entry.candidates, function(a, b)
-    return route_strictly_better(a, b, viab_db) or
-           (not route_strictly_better(b, a, viab_db) and a.score > b.score)
-  end)
+  table.sort(entry.candidates, sort_fn)
   if entry.candidates[1].next_hop == cand.next_hop then
     entry.dirty = true                                        -- displaced into primary
     return "promote"
@@ -2808,6 +2845,16 @@ function on_init(self, config)
   self.budget_blind_strained_ms  = config.budget_blind_strained_ms  or  60000   -- 1 min
   self.budget_blind_critical_ms  = config.budget_blind_critical_ms  or 180000   -- 3 min
   self.budget_blind_exhausted_ms = config.budget_blind_exhausted_ms or 300000   -- 5 min
+  -- Proactive tier-aware routing: route_strictly_better applies
+  -- TIER_SCORE_PENALTY_DB on top of raw SNR margin so candidates via
+  -- saturated neighbours get demoted from primary at rt_merge time —
+  -- not just temporarily skipped by classify_blind. Set on budget NACK
+  -- reception; expires after neighbor_budget_tier_ttl_ms so a peer
+  -- that recovers without us hearing it eventually returns to the
+  -- primary pool.
+  self.neighbor_budget_tier         = {}
+  self.neighbor_budget_tier_set_at  = {}
+  self.neighbor_budget_tier_ttl_ms  = config.neighbor_budget_tier_ttl_ms or 300000   -- 5 min
   -- Inter-frame gap between CTS RX and DATA TX (originator side). The
   -- simulator's set_rx_sf is instantaneous, but real hardware needs a
   -- handful of µs to settle on the new SF — pad with 5ms by default.
@@ -3203,7 +3250,7 @@ function on_recv(self, frame, meta)
     -- primary) to avoid spamming on every refresh round.
     do
       local cand = { next_hop = b.src, score = meta.snr, hops = 1, last_seen_ms = now }
-      local action = rt_merge(self.rt, b.src, cand, self.routing_snr_floor_db)
+      local action = rt_merge(self, self.rt, b.src, cand, self.routing_snr_floor_db)
       if action == "new" or action == "promote" then
         self:emit("rt_update", { dest = b.src, next = b.src, score = meta.snr, hops = 1, slot = "primary" })
         self:log(string.format("rt[%s] direct → primary, snr=%.1f dB hops=1",
@@ -3238,7 +3285,7 @@ function on_recv(self, frame, meta)
             hops     = combined_hops,
             last_seen_ms = now,
           }
-          local action = rt_merge(self.rt, e.dest, cand, self.routing_snr_floor_db)
+          local action = rt_merge(self, self.rt, e.dest, cand, self.routing_snr_floor_db)
           if action == "new" or action == "promote" then
             self:emit("rt_update", {
               dest = e.dest, next = b.src,
@@ -3651,6 +3698,15 @@ function on_recv(self, frame, meta)
           node = from_id, until_ms = end_ms, reason = "nack_budget", tier = tier,
         })
       end
+      -- Persistent tier mark: drives route_strictly_better's tier
+      -- penalty so candidates via this neighbour get demoted in the
+      -- routing table beyond the blind_until window. The blind window
+      -- is short-term ("don't try right now"); the tier mark is
+      -- routing-grade ("this peer is congested, prefer alternates
+      -- when comparing routes"). TTL on neighbor_budget_tier_ttl_ms
+      -- so a recovered peer eventually climbs back.
+      self.neighbor_budget_tier[from_id] = tier
+      self.neighbor_budget_tier_set_at[from_id] = self:now()
       self:emit("nack_rx", {
         origin = self.pending_tx.origin,
         payload = self.pending_tx.user_text,
