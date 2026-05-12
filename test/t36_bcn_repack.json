@@ -1,6 +1,6 @@
 {
   "_name": "t36_bcn_repack",
-  "_desc": "Linear topology alice→bob→carol. Verifies new BCN byte-1 flags and route-entry encoding (hops-1, is_gateway bit) still propagate routes correctly via DV beacon. Asserts carol learns route to alice via bob through normal BCN propagation and a multi-hop send delivers.",
+  "_desc": "Linear topology alice→bob→carol with bob configured as is_gateway=true. Verifies new BCN byte-1 flags (self_gateway bit, propagated is_gateway bit in route entries) and route-entry encoding (hops-1) still propagate routes correctly via DV beacon. Asserts carol learns route to alice via bob through normal BCN propagation and a multi-hop send delivers. Bob's is_gateway=true config exercises both the self_gateway_flag in bob's BCN and the is_gateway bit in alice/carol's re-advertisement of routes that include bob — encoder/decoder coverage of the bit in TRUE state.",
   "simulation": {
     "duration_ms": 30000,
     "step_ms": 1,
@@ -12,7 +12,7 @@
     { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
       "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 3000, "quiet_threshold_ms": 0 } },
     { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 3000, "quiet_threshold_ms": 0 } },
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 3000, "quiet_threshold_ms": 0, "is_gateway": true } },
     { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
       "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 3000, "quiet_threshold_ms": 0 } }
   ],

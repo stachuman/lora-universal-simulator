@@ -900,6 +900,7 @@ local function parse_beacon(frame)
   local n   = frame:byte(4)   -- n_entries (unchanged 8-bit width)
   local pos = 5               -- next byte after n_entries
   if out.has_schedule then
+    if #frame < pos then return nil end           -- need at least the layer_count byte
     local layer_count = frame:byte(pos)
     pos = pos + 1
     -- skip layer_count × 4 bytes (schedule records — runtime path not implemented yet)
@@ -1811,6 +1812,7 @@ local function rt_merge(self, rt, dest_id, cand, viab_db)
       -- Equal/worse but same next_hop: refresh metadata, no order change.
       c.last_seen_ms = cand.last_seen_ms
       c.n2_hop       = cand.n2_hop
+      c.is_gateway   = cand.is_gateway      -- identity metadata, not a ranking input
       return "no_change"
     end
   end
