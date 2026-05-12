@@ -300,16 +300,16 @@ Special cases:
 
 ### 3.6 NACK (`'N'`) — 3 bytes
 
-Shrunk from 4→3 bytes (ROADMAP §7.0.5). The fourth byte (payload_hi)
-was dropped; the remaining payload byte encodes per-reason data with
-sufficient fidelity for all current use-cases.
+Shrunk from 4→3 bytes (ROADMAP §7.0.5). The fourth byte of the old
+encoding was dropped; the remaining payload byte encodes per-reason
+data with sufficient fidelity for all current use-cases.
 
 ```
 byte:  0   1                       2
-       ┌───┬───────────────────┬─────────────────┐
-       │'N'│ reason   (4 hi)   │ payload         │
-       │   │ ctr_lo   (4 lo)   │ (reason-specific│
-       └───┴───────────────────┴─────────────────┘
+       ┌───┬───────────────────┬───────────────────┐
+       │'N'│ reason   (4 hi)   │ payload           │
+       │   │ ctr_lo   (4 lo)   │ (reason-specific) │
+       └───┴───────────────────┴───────────────────┘
 ```
 
 - `ctr_lo` (4 bits, lo nibble of byte 1): RTS's `ctr_lo` being NACKed.

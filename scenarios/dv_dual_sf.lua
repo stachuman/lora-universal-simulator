@@ -1063,8 +1063,7 @@ local ORIGIN_SEQ_HDR_LEN = ORIGIN_HDR_LEN   -- legacy name; sized 3 now
 local NACK_REASON_BUSY_RX = 0
 local NACK_REASON_BUDGET  = 1
 
-local NACK_BUSY_QUANTUM_MS          = 16   -- granularity of BUSY_RX payload
-local NACK_BUDGET_HEADROOM_BUCKETS  = 16   -- headroom 0..15 → 0..100%
+local NACK_BUSY_QUANTUM_MS = 16   -- granularity of BUSY_RX payload
 
 -- NACK — 3 bytes:
 --   byte 0 : tag 'N'
