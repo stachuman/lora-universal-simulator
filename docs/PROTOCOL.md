@@ -8,7 +8,7 @@ The protocol is **distance-vector routing on a control SF + per-hop
 unicast handshake on an adaptive data SF**. Hop-level reliability is
 achieved through an explicit RTS/CTS/DATA/ACK exchange. Routing is
 maintained through periodic + triggered beacons. Two networks can
-coexist on the same channel via a 4-bit `network_id` filter.
+coexist on the same channel via a 4-bit `leaf_id` filter.
 
 ---
 
@@ -22,7 +22,7 @@ coexist on the same channel via a 4-bit `network_id` filter.
 6. [Beacon plane](#6-beacon-plane)
 7. [Data plane — happy path](#7-data-plane--happy-path) — incl. **§7.4 End-to-end delivery ACK**
 8. [Data plane — failure modes](#8-data-plane--failure-modes)
-9. [Cross-network filtering (`network_id`)](#9-cross-network-filtering-network_id)
+9. [Cross-network filtering (`leaf_id`)](#9-cross-network-filtering-leaf_id)
 10. [Origin-level dedup](#10-origin-level-dedup)
 10a. [Anti-spam — 1st-hop statistical rate-limit](#10a-anti-spam--1st-hop-statistical-rate-limit)
 11. [Half-duplex, LBT, duty cycle](#11-half-duplex-lbt-duty-cycle) — incl. **§11.5 budget tiers**, **§11.6 node_state_snapshot**
@@ -117,7 +117,7 @@ are little-endian (lo byte first) where applicable.
 ```
 byte:  0      1                  2     3   4..(4+3n)
        ┌───┬─────────────────┬─────┬───┬───────────────────────────┐
-       │'B'│ network_id(4hi) │ src │ n │ entries × n × 3 bytes     │
+       │'B'│ leaf_id(4hi) │ src │ n │ entries × n × 3 bytes     │
        │   │ reserved (4lo)  │     │   │                           │
        └───┴─────────────────┴─────┴───┴───────────────────────────┘
 
@@ -127,7 +127,7 @@ each entry (3 bytes, bit-packed):
        └──────┴──────┴────────────────┴────────┘
 ```
 
-- `network_id` (4 bits): admin-managed mesh identifier. Receivers
+- `leaf_id` (4 bits): admin-managed mesh identifier. Receivers
   reject foreign-network beacons before any rt_merge work.
 - `src` (8 bits): beacon sender's node id.
 - `n` (8 bits): entry count in this page (capped by
@@ -157,8 +157,8 @@ since per-packet LoRa SNR variance is typically 1-3 dB anyway.
 ```
 byte:  0   1     2     3    4     5                    6           7
        ┌───┬─────┬─────┬───┬─────┬───────────────────┬───────────┬─────────────┐
-       │'R'│ orig│ src │dst│ next│ network_id (4hi) │ sf_bitmap │ payload_len │
-       │   │     │     │   │     │ msg_id (4 lo)    │           │             │
+       │'R'│ orig│ src │dst│ next│ leaf_id (4hi) │ sf_bitmap │ payload_len │
+       │   │     │     │   │     │ ctr_lo (4 lo)    │           │             │
        └───┴─────┴─────┴───┴─────┴───────────────────┴───────────┴─────────────┘
 ```
 
@@ -168,9 +168,9 @@ byte:  0   1     2     3    4     5                    6           7
 - `dst` (8 bits): end-to-end destination.
 - `next` (8 bits): immediate next-hop receiver. Receivers other than
   `next` drop the RTS silently.
-- `network_id` (4 bits): mesh identifier. Receivers reject foreign-
+- `leaf_id` (4 bits): mesh identifier. Receivers reject foreign-
   network RTSes before any CTS work.
-- `msg_id` (4 bits): per-(originator) flight counter, wraps at 16.
+- `ctr_lo` (4 bits): per-(originator) flight counter, wraps at 16.
   Combined with `last_acked_from`'s 10s TTL gives correct hop-level
   retry dedup at any realistic send rate.
 - `sf_bitmap` (8 bits): bit `i` set means SF `i+5` is acceptable for
@@ -184,20 +184,20 @@ byte:  0   1     2     3    4     5                    6           7
 ```
 byte:  0   1
        ┌───┬───────────────────────────────────┐
-       │'C'│ msg_id (4 hi)                     │
+       │'C'│ ctr_lo (4 hi)                     │
        │   │ chosen_data_sf - 5 (3)            │
        │   │ reserved (1)                      │
        └───┴───────────────────────────────────┘
 ```
 
-- `msg_id` (4 bits): echoes the RTS's msg_id. Originator matches
-  against `pending_tx.msg_id`.
+- `ctr_lo` (4 bits): echoes the RTS's ctr_lo. Originator matches
+  against `pending_tx.ctr_lo`.
 - `chosen_data_sf` (3 bits, encoded as offset from 5): SF the
   receiver picked for the DATA leg. Range 5..12 → encoded 0..7.
 - `reserved` (1 bit): set to 0.
 
-No `network_id` — CTS is matched at the originator by
-`pending_tx.msg_id`, which was set after the originator's already-
+No `leaf_id` — CTS is matched at the originator by
+`pending_tx.ctr_lo`, which was set after the originator's already-
 validated RTS.
 
 ### 3.4 DATA (`'D'`) — 6 bytes header + n bytes payload
@@ -206,7 +206,7 @@ validated RTS.
 byte:  0   1     2     3    4     5                    6..
        ┌───┬─────┬─────┬───┬─────┬───────────────────┬─────────────┐
        │'D'│ orig│ src │dst│ next│ reserved (4 hi)   │ payload     │
-       │   │     │     │   │     │ msg_id (4 lo)     │             │
+       │   │     │     │   │     │ ctr_lo (4 lo)     │             │
        └───┴─────┴─────┴───┴─────┴───────────────────┴─────────────┘
 
 payload = [flags(1)] [origin_seq_lo(1)] [origin_seq_hi(1)] [body(N)]
@@ -218,7 +218,7 @@ flags byte:
   bits 2-7 = reserved
 ```
 
-- Mesh header fields (origin, src, dst, next, msg_id) are sized as in
+- Mesh header fields (origin, src, dst, next, ctr_lo) are sized as in
   RTS.
 - `payload` is opaque to the mesh layer at forwarders — they relay it
   byte-for-byte. Origin and destination parse the 3-byte originator
@@ -245,16 +245,16 @@ encrypted under §9 T2 — wire framing unchanged.
 ```
 byte:  0   1
        ┌───┬───────────────────────────────────┐
-       │'K'│ msg_id (4 hi)                     │
+       │'K'│ ctr_lo (4 hi)                     │
        │   │ snr_bucket (4 lo)                 │
        └───┴───────────────────────────────────┘
 ```
 
-- `msg_id` (4 bits): echoes the DATA's msg_id.
+- `ctr_lo` (4 bits): echoes the DATA's ctr_lo.
 - `snr_bucket` (4 bits): receiver's quantized DATA-leg SNR. 16
   buckets, 2 dB bins, range −20..+10 dB. Bucket `n` represents bin
   center `−19 + 2n` dB. Bucket 15 is the "no info" sentinel when
-  the sender called `pack_ack(msg_id, nil)`.
+  the sender called `pack_ack(ctr_lo, nil)`.
 
 The originator/forwarder feeds the decoded SNR into
 `snr_ewma_out[next_hop]` — outbound link-quality estimate, separate
@@ -265,14 +265,14 @@ from `snr_ewma_in` (inbound).
 ```
 byte:  0   1     2      3
        ┌───┬─────┬──────┬───────────────────────────────────┐
-       │'Q'│ src │ dest │ network_id (4 hi)                 │
+       │'Q'│ src │ dest │ leaf_id (4 hi)                 │
        │   │     │      │ reserved (4 lo)                   │
        └───┴─────┴──────┴───────────────────────────────────┘
 ```
 
 - `src` (8 bits): the requester's node id.
 - `dest` (8 bits): destination they want a route for.
-- `network_id` (4 bits): mesh identifier. Receivers reject foreign-
+- `leaf_id` (4 bits): mesh identifier. Receivers reject foreign-
   network Q frames.
 
 One-hop only — receivers don't forward Q frames. Direct neighbours that
@@ -304,11 +304,11 @@ Special cases:
 byte:  0   1                       2                3
        ┌───┬───────────────────┬─────────────────┬─────────────────┐
        │'N'│ reason   (4 hi)   │ payload_lo      │ payload_hi      │
-       │   │ msg_id   (4 lo)   │                 │                 │
+       │   │ ctr_lo   (4 lo)   │                 │                 │
        └───┴───────────────────┴─────────────────┴─────────────────┘
 ```
 
-- `msg_id` (4 bits): RTS's msg_id being NACKed.
+- `ctr_lo` (4 bits): RTS's ctr_lo being NACKed.
 - `reason` (4 bits, hi nibble of byte 1): which NACK variant this is.
   Currently defined:
   - **0 = `BUSY_RX`** — legacy receiver-busy signal. Payload is
@@ -828,31 +828,31 @@ on_command "send bob hello"
     start_rts_timeout
     tx 'R' on routing_sf       routing_sf
                           ─R──>
-                                on_recv "R", network_id ok, next == self.id
+                                on_recv "R", leaf_id ok, next == self.id
                                 ↓
                                 set_rx_sf(data_sf)              data_sf
-                                pending_rx = {from=alice, msg_id, ...}
+                                pending_rx = {from=alice, ctr_lo, ...}
                                 start_pending_rx_expiry
-                                pack_cts(msg_id, chosen_sf)
+                                pack_cts(ctr_lo, chosen_sf)
                                 tx 'C' on data_sf
                           <─C──
-on_recv "C", matches pending_tx.msg_id              data_sf
+on_recv "C", matches pending_tx.ctr_lo              data_sf
 cancel rts_timeout
 after cts_to_data_gap_ms:
   pack_data → tx 'D' on data_sf
   set_rx_sf(routing_sf)        routing_sf
   start_ack_timeout
                           ─D──>
-                                on_recv "D", matches pending_rx.msg_id
+                                on_recv "D", matches pending_rx.ctr_lo
                                 ↓
                                 cancel pending_rx_expiry
                                 set_rx_sf(routing_sf)           routing_sf
                                 pending_rx = nil
-                                last_acked_from[alice] = {msg_id, t_ms}
-                                pack_ack(msg_id, meta.snr) →
+                                last_acked_from[alice] = {ctr_lo, t_ms}
+                                pack_ack(ctr_lo, meta.snr) →
                                 tx 'K' on routing_sf
                           <─K──
-on_recv "K", matches pending_tx.msg_id
+on_recv "K", matches pending_tx.ctr_lo
 cancel ack_timeout
 update snr_ewma_out[bob] from k.snr_db
 pending_tx = nil; become_free
@@ -904,7 +904,7 @@ Three categories, each with different LBT timing constraints:
 | **FLOOD** | BCN | Routed through `tx_flood`. LBT-defers up to `flood_lbt_max_defer_ms`, then drops the page (`tx_flood_skipped`). Stale routing info isn't worth queueing. |
 
 All three set `pending_tx` (where applicable) BEFORE the actual emit,
-so peer NACK / busy-replies match the right msg_id.
+so peer NACK / busy-replies match the right ctr_lo.
 
 ### 7.4 End-to-end delivery ACK (opt-in per-message)
 
@@ -1001,9 +1001,9 @@ senders to make wrong decisions. Now silent-drop with
 
 ```
 on_recv 'R' at receiver:
-  if pending_rx busy + DIFFERENT (sender or msg_id):
+  if pending_rx busy + DIFFERENT (sender or ctr_lo):
     emit nack_tx
-    pack_nack(r.msg_id, busy_for = pending_rx_expires_in)
+    pack_nack(r.ctr_lo, busy_for = pending_rx_expires_in)
     tx 'N' on data_sf
   elif pending_tx busy:
     emit rts_drop_pending_tx          ← silent drop, no NACK
@@ -1014,7 +1014,7 @@ on_recv 'R' at receiver:
 Originator on receiving NACK:
 
 ```
-on_recv 'N', matches pending_tx.msg_id:
+on_recv 'N', matches pending_tx.ctr_lo:
   cancel rts_timeout
   mark NACK sender blind for busy_for_ms (so retries defer)
   if busy_for ≤ NACK_WAIT_THRESHOLD_MS (2 s default):
@@ -1033,10 +1033,10 @@ busy node is the originator's only target).
 ### 8.2 RTS already acked (sender retried after losing previous ACK)
 
 ```
-on_recv 'R' with last_acked_from[r.src].msg_id == r.msg_id
+on_recv 'R' with last_acked_from[r.src].ctr_lo == r.ctr_lo
        AND (now − last_acked_from[r.src].t_ms) < last_acked_ttl_ms (10 s):
   emit rts_already_acked
-  pack_ack(r.msg_id, meta.snr) → tx 'K' on routing_sf
+  pack_ack(r.ctr_lo, meta.snr) → tx 'K' on routing_sf
   return  (skip CTS + DATA)
 ```
 
@@ -1044,7 +1044,7 @@ The sender's previous ACK was lost; they retried the RTS. We re-send
 the ACK so they clear pending_tx without us reprocessing or
 forwarding the message twice.
 
-The 10s TTL is what makes 4-bit msg_id safe under wraparound: at any
+The 10s TTL is what makes 4-bit ctr_lo safe under wraparound: at any
 plausible per-sender send rate, 16 sends take much longer than 10 s,
 so the cache never false-positives on a wrapped id.
 
@@ -1053,9 +1053,9 @@ so the cache never false-positives on a wrapped id.
 ```
 on_recv 'R' with pending_rx ~= nil AND
             pending_rx.from == r.src AND
-            pending_rx.msg_id == r.msg_id:
+            pending_rx.ctr_lo == r.ctr_lo:
   emit rts_rx_dup
-  pack_cts(r.msg_id, pending_rx.chosen_data_sf)
+  pack_cts(r.ctr_lo, pending_rx.chosen_data_sf)
   tx 'C' on routing_sf  (CTS-dup label)
   restart pending_rx_expiry
 ```
@@ -1147,7 +1147,7 @@ pending_rx_expiry_fire:
 
 ---
 
-## 9. Cross-network filtering (`network_id`)
+## 9. Cross-network filtering (`leaf_id`)
 
 A 4-bit network identifier in BCN and RTS lets multiple LoRa meshes
 coexist on the same channel. Receivers reject foreign-network frames
@@ -1155,11 +1155,11 @@ coexist on the same channel. Receivers reject foreign-network frames
 
 ```
 on_recv 'B':
-  if b.network_id ~= self.network_id: return  (silent drop)
+  if b.leaf_id ~= self.leaf_id: return  (silent drop)
   ... rt_merge ...
 
 on_recv 'R':
-  if r.network_id ~= self.network_id: return  (silent drop)
+  if r.leaf_id ~= self.leaf_id: return  (silent drop)
   ... CTS / forwarding logic ...
 ```
 
@@ -1170,11 +1170,11 @@ propagation events (30-40 km tropo ducting) would:
 2. Pollute routing tables with foreign nodes (decisions to route via
    non-existent neighbors → flights fail with `rts_giveup`).
 
-`network_id` is **externally managed** (admin sets `config.network_id`
+`leaf_id` is **externally managed** (admin sets `config.leaf_id`
 per node). 4 bits = 16 distinct meshes — sufficient for any 30-40 km
 propagation circle in practice.
 
-CTS/DATA/ACK/NACK don't carry `network_id` because they're matched
+CTS/DATA/ACK/NACK don't carry `leaf_id` because they're matched
 against `pending_tx`/`pending_rx` state set by an already-validated
 RTS — the check is implicit.
 
@@ -1223,13 +1223,13 @@ so the previous hop always clears its pending_tx.
 
 ## 10a. Anti-spam — 1st-hop statistical rate-limit
 
-Every node N tracks, per direct-radio sender X, two distinct-msg_id
+Every node N tracks, per direct-radio sender X, two distinct-ctr_lo
 sliding-window counts over `originator_window_ms` (default 5 min):
 
 - `R[X]` = distinct RTS msg_ids from X.
 - `C[X]` = distinct CTS msg_ids from X.
 
-Same-msg_id retries within `originator_retry_dedup_ms` (default 10 s)
+Same-ctr_lo retries within `originator_retry_dedup_ms` (default 10 s)
 count once each — a legitimate originator's `rts_max_retries × K`
 alts don't inflate R[X].
 
@@ -1282,7 +1282,7 @@ legitimate forwarding from origin-fingerprint there.
 
 **Measured impact** (s04 60-min, 360 sends, 16 active originators):
 delivery unchanged at ~52%; 141 silent drops total (down from 3505 in
-a pre-dedup measurement — the msg_id dedup cut false positives by
+a pre-dedup measurement — the ctr_lo dedup cut false positives by
 96%); 94 self-over-budget emits caught legitimate "over fair-share
 but not necessarily malicious" senders.
 
@@ -1556,11 +1556,11 @@ Per-node state populated:
 | `tx_queue` | array | Queued sends, drained by become_free |
 | `tx_stash` | table | label → frame for on_radio_busy retry |
 | `blind_until` | table | nbr → absolute_ms (F1 mitigation) |
-| `last_acked_from` | table | sender → {msg_id, t_ms} (RTS dedup) |
+| `last_acked_from` | table | sender → {ctr_lo, t_ms} (RTS dedup) |
 | `seen_origins` | table | (origin, seq) → t_ms (end-to-end dedup) |
 | `snr_ewma_in` / `snr_ewma_out` | table | nbr → SNR estimate |
 | `last_rx_routing_sf_ms` | int | Beacon throttle witness |
-| `network_id` | int | 4-bit mesh identifier |
+| `leaf_id` | int | 4-bit mesh identifier |
 | `next_msg_id` | int | 4-bit per-flight counter |
 
 ### 12.2 on_recv
@@ -1650,31 +1650,31 @@ expectations) subscribe by event_type.
 | `send_deferred` | Originator has no rt[dst] yet — held in defer queue | `origin`, `dst`, `dst_name`, `ttl_ms`, `depth` |
 | `send_drained` | Deferred send drained back to tx_queue (route appeared) | `origin`, `dst`, `waited_ms` |
 | `send_giveup` | Defer TTL elapsed without route appearing | `origin`, `dst`, `waited_ms`, `reason` |
-| `rts_tx` | RTS emitted | `origin`, `dst`, `next`, `msg_id`, `sf_bitmap` |
+| `rts_tx` | RTS emitted | `origin`, `dst`, `next`, `ctr_lo`, `sf_bitmap` |
 | `rts_retry` | tx_rts_retry fired | `reason`, `attempt` |
-| `rts_rx` | RTS decoded, addressed to us | `from`, `dst`, `msg_id`, `chosen_data_sf`, `rx_snr`, `ewma_snr` |
-| `rts_rx_dup` | Duplicate RTS while pending_rx active | `from`, `msg_id` |
-| `rts_already_acked` | Cached ack short-circuit | `from`, `msg_id` |
-| `rts_drop_no_sf` | RTS bitmap intersection empty | `from`, `msg_id`, `sf_bitmap` |
-| `rts_drop_pending_tx` | Silent-drop RTS while we're busy as sender (§8.1) | `from`, `msg_id` |
-| `cts_tx` | CTS emitted | `to`, `msg_id`, `chosen_data_sf` |
-| `cts_rx` | CTS decoded, matches pending_tx | `from`, `msg_id`, `chosen_data_sf` |
-| `cts_invalid_sf` | Receiver picked an SF outside our bitmap | `from`, `msg_id`, `chosen_data_sf` |
-| `data_tx` | DATA emitted | `dst`, `next`, `msg_id`, `payload` |
-| `data_rx` | DATA decoded, matches pending_rx | `from`, `msg_id`, `len` |
-| `data_rx_timeout` | pending_rx_expiry fired | `from`, `msg_id` |
-| `ack_tx` | ACK emitted | `to`, `msg_id`, `data_snr` |
-| `ack_rx` | ACK decoded, matches pending_tx | `from`, `msg_id`, `data_snr_db` |
+| `rts_rx` | RTS decoded, addressed to us | `from`, `dst`, `ctr_lo`, `chosen_data_sf`, `rx_snr`, `ewma_snr` |
+| `rts_rx_dup` | Duplicate RTS while pending_rx active | `from`, `ctr_lo` |
+| `rts_already_acked` | Cached ack short-circuit | `from`, `ctr_lo` |
+| `rts_drop_no_sf` | RTS bitmap intersection empty | `from`, `ctr_lo`, `sf_bitmap` |
+| `rts_drop_pending_tx` | Silent-drop RTS while we're busy as sender (§8.1) | `from`, `ctr_lo` |
+| `cts_tx` | CTS emitted | `to`, `ctr_lo`, `chosen_data_sf` |
+| `cts_rx` | CTS decoded, matches pending_tx | `from`, `ctr_lo`, `chosen_data_sf` |
+| `cts_invalid_sf` | Receiver picked an SF outside our bitmap | `from`, `ctr_lo`, `chosen_data_sf` |
+| `data_tx` | DATA emitted | `dst`, `next`, `ctr_lo`, `payload` |
+| `data_rx` | DATA decoded, matches pending_rx | `from`, `ctr_lo`, `len` |
+| `data_rx_timeout` | pending_rx_expiry fired | `from`, `ctr_lo` |
+| `ack_tx` | ACK emitted | `to`, `ctr_lo`, `data_snr` |
+| `ack_rx` | ACK decoded, matches pending_tx | `from`, `ctr_lo`, `data_snr_db` |
 | `ack_snr_feedback` | snr_ewma_out updated from ACK piggyback | `from`, `data_snr_db`, `snr_bucket`, `ewma_out` |
-| `nack_tx` | NACK emitted | `to`, `msg_id`, `reason` (`busy_rx` or `budget_low`), plus per-reason: `busy_for_ms` OR `tier` |
-| `nack_rx` | NACK decoded, matches pending_tx | `from`, `msg_id`, `reason`, plus per-reason: `busy_for_ms` OR `tier`, `blind_ms` |
+| `nack_tx` | NACK emitted | `to`, `ctr_lo`, `reason` (`busy_rx` or `budget_low`), plus per-reason: `busy_for_ms` OR `tier` |
+| `nack_rx` | NACK decoded, matches pending_tx | `from`, `ctr_lo`, `reason`, plus per-reason: `busy_for_ms` OR `tier`, `blind_ms` |
 | `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `origin_seq` |
 | `dup_drop` | Duplicate (origin, origin_seq) | `origin`, `origin_seq` |
 | `forward_queued` | Forwarder enqueued the relay | `origin`, `dst` |
 | `q_tx` | Q (RREQ-route) emitted by sender (§3.7) | `dst`, `dst_name` |
-| `q_rx` | Q decoded; receiver matches network_id | `from`, `dest` |
+| `q_rx` | Q decoded; receiver matches leaf_id | `from`, `dest` |
 | `forward_fail` | Forwarder dropped (no route, no budget, etc.) | `origin`, `dst`, `reason` |
-| `retune_for_data` | RX retuned for DATA reception | `from`, `msg_id`, `chosen_data_sf` |
+| `retune_for_data` | RX retuned for DATA reception | `from`, `ctr_lo`, `chosen_data_sf` |
 | `e2e_ack_pending` | Originator registered a `send_e2e` and is waiting for E2E ACK (§7.4) | `dst`, `origin_seq`, `ttl_ms` |
 | `e2e_ack_tx_enqueued` | Destination enqueued the return E2E ACK frame (§7.4) | `to`, `acked_seq` |
 | `delivered_confirmed` | Originator received the E2E ACK matching a pending send (§7.4) | `dst`, `acked_seq`, `rtt_ms` |
@@ -1685,12 +1685,12 @@ expectations) subscribe by event_type.
 
 | Event | Trigger | Key data |
 |---|---|---|
-| `rts_giveup` | RTS exhausted retries | `origin`, `dst`, `msg_id`, `last_next_hop` |
-| `data_ack_giveup` | ACK timeout exhausted | `origin`, `dst`, `msg_id` |
+| `rts_giveup` | RTS exhausted retries | `origin`, `dst`, `ctr_lo`, `last_next_hop` |
+| `data_ack_giveup` | ACK timeout exhausted | `origin`, `dst`, `ctr_lo` |
 | `path_cascade` | Switching to next alt after K=3 cascade fired | `from_next`, `to_next`, `attempt`, `trigger` |
 | `path_cascade_exhausted` | All K alts tried AND requeue caps hit (§5.6) | `dst`, `tried`, `trigger` |
-| `cascade_requeue` | All K alts tried; pushed back to tx_queue with backoff (§5.6) | `dst`, `msg_id`, `requeue_count`, `backoff_ms`, `total_age_ms`, `trigger` |
-| `cascade_load_skip` | Cascade-requeue dropped early due to local load (§5.6 Phase D3) | `dst`, `msg_id`, `queue_depth`, `load_threshold`, `effective_max` |
+| `cascade_requeue` | All K alts tried; pushed back to tx_queue with backoff (§5.6) | `dst`, `ctr_lo`, `requeue_count`, `backoff_ms`, `total_age_ms`, `trigger` |
+| `cascade_load_skip` | Cascade-requeue dropped early due to local load (§5.6 Phase D3) | `dst`, `ctr_lo`, `queue_depth`, `load_threshold`, `effective_max` |
 
 ### 13.4 F1 blind-window mitigation
 
@@ -1704,7 +1704,7 @@ expectations) subscribe by event_type.
 
 | Event | Trigger | Key data |
 |---|---|---|
-| `rts_drop_originator_throttle` | RTS silently dropped because direct sender exceeded fair-share quota | `from`, `msg_id`, `apparent_origination`, `airtime_share` |
+| `rts_drop_originator_throttle` | RTS silently dropped because direct sender exceeded fair-share quota | `from`, `ctr_lo`, `apparent_origination`, `airtime_share` |
 | `originator_self_over_budget` | On terminal failure, originator's own send count is over half-threshold OR own duty tier ≥ STRAINED — UX hint emitted | `origin_count`, `threshold`, `tier`, `hint` |
 
 ### 13.5 LBT / duty cycle / runtime
@@ -1802,14 +1802,14 @@ wire `origin`).
 | `originator_window_ms` | 300000 (5 min) | Sliding window for per-direct-sender RTS/CTS observation counts |
 | `originator_max_per_window` | 6 | Apparent-origination threshold per window (≈72/hr); over → silent-drop inbound RTS |
 | `originator_airtime_share` | 0.25 | Per-sender airtime backstop; > this fraction of N's own duty cycle → silent-drop regardless of count |
-| `originator_retry_dedup_ms` | 10000 | Same-msg_id retries within this window count as ONE origination (don't inflate `R[X]` with retries) |
+| `originator_retry_dedup_ms` | 10000 | Same-ctr_lo retries within this window count as ONE origination (don't inflate `R[X]` with retries) |
 | `originator_self_warn_fraction` | 0.5 | Originator's self-monitor threshold = this × `originator_max_per_window`; on terminal failure, emit `originator_self_over_budget` |
 
 ### 14.5 Mesh / network
 
 | Key | Default | Description |
 |---|---|---|
-| `network_id` | 0 | 4-bit mesh identifier; receivers reject foreign |
+| `leaf_id` | 0 | 4-bit mesh identifier; receivers reject foreign |
 
 ### 14.6 Runtime-injected (don't override unless you know why)
 
@@ -1829,7 +1829,7 @@ wire `origin`).
 
 8-bit short node IDs are a **simulator-only convenience**. In a real
 deployment with hardware-derived IDs, two networks would routinely
-have overlapping short IDs. `network_id` filters at the mesh layer
+have overlapping short IDs. `leaf_id` filters at the mesh layer
 prevent the immediate failures, but doesn't solve the underlying
 "how does a new node get a unique short ID at boot" question.
 
@@ -1843,9 +1843,9 @@ The intended path: two-tier addressing (LoRaWAN OTAA-style):
 This is its own design phase — see
 `memory/project_address_assignment_unfinished.md`.
 
-### 15.2 BCN msg_id dedup not protected by network_id alone
+### 15.2 BCN ctr_lo dedup not protected by leaf_id alone
 
-The network_id filter prevents foreign beacons from being merged into
+The leaf_id filter prevents foreign beacons from being merged into
 the routing table. But on-air collisions during enhanced propagation
 events still happen — two networks' beacons collide, both fail to
 decode, no rt damage but airtime is burned.

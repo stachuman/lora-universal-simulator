@@ -5,22 +5,22 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [network_id(4)|reserved(4)](1), src(1), n(1), entries × n × {dest(1), next(1), [score_bucket_4|hops_4](1)}  →  4+3n B |
--- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [network_id(4)|msg_id(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
--- | `'C'` | CTS    | `C`, [msg_id(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
--- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|msg_id(4)](1), payload(n)  →  6+n B |
--- | `'K'` | ACK    | `K`, [msg_id(4)|snr_bucket(4)](1)  →  2 B                                       |
--- | `'N'` | NACK   | `N`, [reserved(4)|msg_id(4)](1), busy_for_ms_lo(1), busy_for_ms_hi(1)  →  4 B  |
--- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [network_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
+-- | `'B'` | Beacon | `B`, [leaf_id(4)|reserved(4)](1), src(1), n(1), entries × n × {dest(1), next(1), [score_bucket_4|hops_4](1)}  →  4+3n B |
+-- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [leaf_id(4)|ctr_lo(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
+-- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
+-- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|ctr_lo(4)](1), payload(n)  →  6+n B |
+-- | `'K'` | ACK    | `K`, [ctr_lo(4)|snr_bucket(4)](1)  →  2 B                                       |
+-- | `'N'` | NACK   | `N`, [reserved(4)|ctr_lo(4)](1), busy_for_ms_lo(1), busy_for_ms_hi(1)  →  4 B  |
+-- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [leaf_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
 --
--- All control frames carry a 4-bit msg_id (per-(originator) flight
+-- All control frames carry a 4-bit ctr_lo (per-(originator) flight
 -- counter, wraps at 16; dedup tolerated by last_acked_from's 10s TTL).
--- network_id (4 bits, externally managed) appears in BCN and RTS — the
+-- leaf_id (4 bits, externally managed) appears in BCN and RTS — the
 -- two frames that gate routing decisions. Receivers reject foreign-
 -- network BCN/RTS before doing any work, preventing duplicate-CTS,
 -- routing-table-pollution, and wasted-flight failure modes during
 -- enhanced RF propagation events. CTS/DATA/ACK/NACK don't carry
--- network_id because they're matched against pending_tx/pending_rx
+-- leaf_id because they're matched against pending_tx/pending_rx
 -- state set by an already-validated RTS (the check is implicit).
 --
 -- RTS's sf_bitmap byte (offset 7) is a per-flight bitmap of allowed data SFs:
@@ -213,27 +213,27 @@
 --     pending_tx, retunes RX to data_sf, starts rts_timeout
 --
 --   NEXT-HOP (on_recv 'R' with next == self.id):
---     • last_acked_from[r.src] == r.msg_id  → re-tx ACK on routing_sf,
+--     • last_acked_from[r.src] == r.ctr_lo  → re-tx ACK on routing_sf,
 --                                              return (sender retried after
 --                                              losing previous ACK)
---     • pending_rx busy + same (from,msg_id) → re-tx CTS-dup, restart
+--     • pending_rx busy + same (from,ctr_lo) → re-tx CTS-dup, restart
 --                                              pending_rx_expiry, return
 --     • pending_rx busy + different sender   → emit rts_rejected_busy
---     • else: set_rx_sf(data_sf); pending_rx = {from,origin,dst,msg_id};
+--     • else: set_rx_sf(data_sf); pending_rx = {from,origin,dst,ctr_lo};
 --             start_pending_rx_expiry; tx 'C' on data_sf
 --
---   ORIGINATOR/FORWARDER (on_recv 'C' matching pending_tx.msg_id):
+--   ORIGINATOR/FORWARDER (on_recv 'C' matching pending_tx.ctr_lo):
 --     1. cancel rts_timeout (avoid spurious retry on the same tick)
 --     2. after cts_to_data_gap_ms: tx 'D' on data_sf, set_rx_sf(routing_sf),
 --                                   start_ack_timeout (covers DATA airtime
 --                                   + ACK airtime). Keep pending_tx until
 --                                   ACK or ack_timeout fires.
 --
---   NEXT-HOP (on_recv 'D' matching pending_rx.msg_id, next == self.id):
+--   NEXT-HOP (on_recv 'D' matching pending_rx.ctr_lo, next == self.id):
 --     1. parse application-layer origin-seq header from d.payload to get
 --        (origin_seq, user_text)
 --     2. cancel pending_rx_expiry; set_rx_sf(routing_sf); pending_rx = nil
---     3. cache last_acked_from[d.src] = d.msg_id; tx 'K' on routing_sf
+--     3. cache last_acked_from[d.src] = d.ctr_lo; tx 'K' on routing_sf
 --     4. ORIGIN-LEVEL DEDUP: if (d.origin, origin_seq) seen recently,
 --        emit dup_drop and return — ACK was already sent; we just don't
 --        deliver-twice or forward-twice. Catches DV routing loops and
@@ -243,7 +243,7 @@
 --        else (forward) → after ack_air_ms+1: enqueue forward (preserving
 --        the full payload bytes incl. the seq header), become_free
 --
---   ORIGINATOR/FORWARDER (on_recv 'K' matching pending_tx.msg_id):
+--   ORIGINATOR/FORWARDER (on_recv 'K' matching pending_tx.ctr_lo):
 --     • cancel ack_timeout; pending_tx = nil; become_free
 --
 -- Retries (per-hop):
@@ -261,7 +261,7 @@
 --     • retries_left==0 → emit data_ack_giveup, clear pending_tx, become_free
 --   pending_rx_expiry_fire — DATA didn't arrive after CTS:
 --     • clear pending_rx, retune to routing_sf, emit data_rx_timeout, become_free
---   tx_rts_retry: re-tx RTS with same msg_id (via tx_initiating, so still
+--   tx_rts_retry: re-tx RTS with same ctr_lo (via tx_initiating, so still
 --   LBT-gated) and re-arm rts_timeout. The receiver's rts_already_acked /
 --   rts_rx_dup paths handle whatever state it's in (still expecting DATA,
 --   or already acked).
@@ -347,8 +347,8 @@
 -- Beacons advertise only candidates[1] (single best route per dest).
 --
 -- Receiver-side NACK triggers (in on_recv 'R' with next == self.id):
---   1. last_acked_from[r.src] == r.msg_id  → re-ACK on routing_sf, return
---   2. pending_rx busy + same (from,msg_id) → CTS-dup, restart expiry
+--   1. last_acked_from[r.src] == r.ctr_lo  → re-ACK on routing_sf, return
+--   2. pending_rx busy + same (from,ctr_lo) → CTS-dup, restart expiry
 --   3. pending_rx busy + different sender   → NACK on data_sf, busy_for =
 --      max(0, set_at + pending_rx_expiry_ms − now)
 --   4. pending_tx in flight                  → REMOVED. Used to NACK with a
@@ -361,7 +361,7 @@
 -- already retuned to data_sf after its RTS-tx, awaiting CTS. NACK and CTS
 -- share the channel logically — they're the two possible admissions.
 --
--- Sender-side NACK (on_recv 'N' matching pending_tx.msg_id):
+-- Sender-side NACK (on_recv 'N' matching pending_tx.ctr_lo):
 -- After the pending_tx receiver-side trigger was removed, this only fires
 -- for pending_rx NACKs (case 3 above). Behaviour unchanged:
 --   • cancel rts_timeout
@@ -698,7 +698,7 @@
 --     pending_rx, it emits rts_rejected_busy (script-side event only) and
 --     stays silent on-air. The sender has no signal — only the absent CTS,
 --     leading to rts_timeout retries on the same dead path. A small
---     "BSY" frame on routing_sf carrying the requesting msg_id would let
+--     "BSY" frame on routing_sf carrying the requesting ctr_lo would let
 --     the sender immediately switch tactics: pick an alternate next-hop,
 --     queue locally, or back off longer than rts_busy_retry_ms.
 --     This needs (a) a second-best route in self.rt[dest] (today the table
@@ -742,11 +742,11 @@
 -- hear gets merged via rt_merge as before.
 -- BCN — 4-byte header + n × 3-byte entries:
 --   byte 0 : tag 'B'
---   byte 1 : network_id (4 hi nibble) | reserved (4 lo nibble)
+--   byte 1 : leaf_id (4 hi nibble) | reserved (4 lo nibble)
 --   byte 2 : src (8)
 --   byte 3 : n (8)
 --   entries (3 B each): dest(8) + next(8) + (score_bucket_4 << 4 | hops_4)(8)
--- network_id (4 bits): same field as RTS. Receivers reject foreign-
+-- leaf_id (4 bits): same field as RTS. Receivers reject foreign-
 -- network beacons before rt_merge so foreign nodes don't pollute our
 -- routing tables.
 -- Per-entry score is the 4-bit SNR bucket (16 levels, 2 dB resolution,
@@ -799,7 +799,7 @@ local function pack_beacon(node, max_entries, offset)
     table.insert(all_dests, dest_id)
   end
   table.sort(all_dests)
-  local nid_byte = (node.network_id & 0xf) << 4
+  local nid_byte = (node.leaf_id & 0xf) << 4
   local total = #all_dests
   if total == 0 then
     return "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(0),
@@ -882,7 +882,7 @@ local function parse_beacon(frame)
     table.insert(entries, { dest = dest, next = nxt, score = score, hops = hops })
     pos = pos + 3
   end
-  return { network_id = nid, src = src, entries = entries }
+  return { leaf_id = nid, src = src, entries = entries }
 end
 
 -- Update a per-neighbor SNR EWMA in-place. First sample seeds the EWMA
@@ -909,11 +909,11 @@ end
 --   byte 2 : src    (8)
 --   byte 3 : dst    (8)
 --   byte 4 : next   (8)
---   byte 5 : network_id (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 5 : leaf_id (4 hi nibble) | ctr_lo (4 lo nibble)
 --   byte 6 : sf_bitmap (8)
 --   byte 7 : payload_len (8)
-local function pack_rts(network_id, origin, src, dst, next_hop, msg_id, sf_bitmap, payload_len)
-  local b5 = ((network_id & 0xf) << 4) | (msg_id & 0xf)
+local function pack_rts(leaf_id, origin, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len)
+  local b5 = ((leaf_id & 0xf) << 4) | (ctr_lo & 0xf)
   return "R" .. string.char(origin) .. string.char(src) .. string.char(dst)
               .. string.char(next_hop)
               .. string.char(b5)
@@ -925,12 +925,12 @@ local function parse_rts(frame)
   if #frame < 8 or frame:sub(1,1) ~= "R" then return nil end
   local b5 = frame:byte(6)
   return {
-    network_id  = (b5 >> 4) & 0xf,
+    leaf_id  = (b5 >> 4) & 0xf,
     origin      = frame:byte(2),
     src         = frame:byte(3),
     dst         = frame:byte(4),
     next        = frame:byte(5),
-    msg_id      = b5 & 0xf,
+    ctr_lo      = b5 & 0xf,
     sf_bitmap   = frame:byte(7),
     payload_len = frame:byte(8),
   }
@@ -938,10 +938,10 @@ end
 
 -- CTS — 2 bytes, bit-packed:
 --   byte 0 : tag 'C'
---   byte 1 : msg_id (4 hi nibble) | (chosen_data_sf - 5) (3) | reserved (1)
-local function pack_cts(msg_id, chosen_data_sf)
+--   byte 1 : ctr_lo (4 hi nibble) | (chosen_data_sf - 5) (3) | reserved (1)
+local function pack_cts(ctr_lo, chosen_data_sf)
   local sf_off = (chosen_data_sf - 5) & 0x7
-  local b1 = ((msg_id & 0xf) << 4) | (sf_off << 1)
+  local b1 = ((ctr_lo & 0xf) << 4) | (sf_off << 1)
   return "C" .. string.char(b1)
 end
 
@@ -949,17 +949,17 @@ local function parse_cts(frame)
   if #frame < 2 or frame:sub(1,1) ~= "C" then return nil end
   local b1 = frame:byte(2)
   return {
-    msg_id         = (b1 >> 4) & 0xf,
+    ctr_lo         = (b1 >> 4) & 0xf,
     chosen_data_sf = ((b1 >> 1) & 0x7) + 5,
   }
 end
 
 -- ACK — 2 bytes, bit-packed:
 --   byte 0 : tag 'K'
---   byte 1 : msg_id (4 hi nibble) | snr_bucket (4 lo nibble)
-local function pack_ack(msg_id, snr_db)
+--   byte 1 : ctr_lo (4 hi nibble) | snr_bucket (4 lo nibble)
+local function pack_ack(ctr_lo, snr_db)
   local bucket = (snr_db ~= nil) and bucket_of_snr_4b(snr_db) or 15
-  local b1 = ((msg_id & 0xf) << 4) | (bucket & 0xf)
+  local b1 = ((ctr_lo & 0xf) << 4) | (bucket & 0xf)
   return "K" .. string.char(b1)
 end
 
@@ -968,7 +968,7 @@ local function parse_ack(frame)
   local b1 = frame:byte(2)
   local bucket = b1 & 0xf
   return {
-    msg_id      = (b1 >> 4) & 0xf,
+    ctr_lo      = (b1 >> 4) & 0xf,
     snr_db      = snr_of_bucket_4b(bucket),
     snr_bucket  = bucket,
   }
@@ -1045,7 +1045,7 @@ local ORIGIN_SEQ_HDR_LEN = ORIGIN_HDR_LEN   -- legacy name; sized 3 now
 
 -- NACK — 4 bytes:
 --   byte 0 : tag 'N'
---   byte 1 : reason (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 1 : reason (4 hi nibble) | ctr_lo (4 lo nibble)
 --   byte 2-3 : payload (interpretation depends on reason)
 --
 -- Reasons:
@@ -1063,13 +1063,13 @@ local ORIGIN_SEQ_HDR_LEN = ORIGIN_HDR_LEN   -- legacy name; sized 3 now
 local NACK_REASON_BUSY_RX = 0
 local NACK_REASON_BUDGET  = 1
 
-local function pack_nack(msg_id, reason, payload_lo, payload_hi)
+local function pack_nack(ctr_lo, reason, payload_lo, payload_hi)
   reason = reason or NACK_REASON_BUSY_RX
   payload_lo = payload_lo or 0
   payload_hi = payload_hi or 0
   if payload_lo < 0 then payload_lo = 0 elseif payload_lo > 255 then payload_lo = 255 end
   if payload_hi < 0 then payload_hi = 0 elseif payload_hi > 255 then payload_hi = 255 end
-  local byte1 = ((reason & 0xf) << 4) | (msg_id & 0xf)
+  local byte1 = ((reason & 0xf) << 4) | (ctr_lo & 0xf)
   return "N" .. string.char(byte1)
               .. string.char(payload_lo)
               .. string.char(payload_hi)
@@ -1081,7 +1081,7 @@ local function parse_nack(frame)
   local reason = (b1 >> 4) & 0xf
   local p_lo, p_hi = frame:byte(3), frame:byte(4)
   local r = {
-    msg_id      = b1 & 0xf,
+    ctr_lo      = b1 & 0xf,
     reason      = reason,
     payload_lo  = p_lo,
     payload_hi  = p_hi,
@@ -1096,15 +1096,15 @@ end
 --   byte 0 : tag 'Q'
 --   byte 1 : src (8) — the requester
 --   byte 2 : dest (8) — destination they want a route for
---   byte 3 : network_id (4 hi nibble) | reserved (4 lo nibble)
+--   byte 3 : leaf_id (4 hi nibble) | reserved (4 lo nibble)
 -- One-hop route query. Direct neighbours that have rt[dest] mark it
 -- dirty + schedule a triggered beacon (the differential beacon
 -- mechanism then prioritises that dest in the next emission).
 -- Receivers without rt[dest] silent-drop. Dedup at responder via
 -- self.q_responded_to keyed by (src, dest); dedup at sender via
 -- self.q_queried keyed by dest.
-local function pack_q(network_id, src, dest)
-  local b3 = (network_id & 0xf) << 4
+local function pack_q(leaf_id, src, dest)
+  local b3 = (leaf_id & 0xf) << 4
   return "Q" .. string.char(src) .. string.char(dest) .. string.char(b3)
 end
 
@@ -1113,7 +1113,7 @@ local function parse_q(frame)
   return {
     src        = frame:byte(2),
     dest       = frame:byte(3),
-    network_id = (frame:byte(4) >> 4) & 0xf,
+    leaf_id = (frame:byte(4) >> 4) & 0xf,
   }
 end
 
@@ -1123,12 +1123,12 @@ end
 --   byte 2 : src    (8)
 --   byte 3 : dst    (8)
 --   byte 4 : next   (8)
---   byte 5 : reserved (4 hi nibble) | msg_id (4 lo nibble)
+--   byte 5 : reserved (4 hi nibble) | ctr_lo (4 lo nibble)
 --   byte 6+: payload
-local function pack_data(origin, src, dst, next_hop, msg_id, payload)
+local function pack_data(origin, src, dst, next_hop, ctr_lo, payload)
   return "D" .. string.char(origin) .. string.char(src) .. string.char(dst)
               .. string.char(next_hop)
-              .. string.char(msg_id & 0xf)
+              .. string.char(ctr_lo & 0xf)
               .. payload
 end
 
@@ -1139,7 +1139,7 @@ local function parse_data(frame)
     src     = frame:byte(3),
     dst     = frame:byte(4),
     next    = frame:byte(5),
-    msg_id  = frame:byte(6) & 0xf,
+    ctr_lo  = frame:byte(6) & 0xf,
     payload = frame:sub(7),
   }
 end
@@ -1149,10 +1149,10 @@ end
 -- Frame-header lengths (excluding payload). Computed from the wire-format
 -- table at top of file so airtime predictions stay precise as we extend the
 -- protocol — bump these if the frame layout changes.
-local RTS_LEN = 8       -- 'R' + origin + src + dst + next + (network_id<<4|msg_id) + sf_bitmap + payload_len
-local CTS_LEN = 2       -- 'C' + (msg_id<<4 | (sf-5)<<1 | reserved_1)
+local RTS_LEN = 8       -- 'R' + origin + src + dst + next + (leaf_id<<4|ctr_lo) + sf_bitmap + payload_len
+local CTS_LEN = 2       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | reserved_1)
 local DATA_HDR_LEN = 6  -- 'D' + origin + src + dst + next + (reserved_4|msg_id_4) (payload follows)
-local ACK_LEN = 2       -- 'K' + (msg_id<<4 | snr_bucket)
+local ACK_LEN = 2       -- 'K' + (ctr_lo<<4 | snr_bucket)
 local NACK_LEN = 4      -- 'N' + (reserved_4|msg_id_4) + busy_for_ms_lo + busy_for_ms_hi
 local Q_LEN    = 4      -- 'Q' + src + dest + (network_id_4|reserved_4)
 
@@ -1331,18 +1331,18 @@ end
 -- sliding window, prune old entries. Called from on_recv when we observe
 -- an RTS or CTS frame from direct sender X. `kind` is "rts" or "cts".
 -- airtime_ms is the observed frame's airtime (estimated from frame
--- bytes + the SF/BW the runtime gives us). msg_id is the frame's 4-bit
--- msg_id — used for retry deduplication.
+-- bytes + the SF/BW the runtime gives us). ctr_lo is the frame's 4-bit
+-- ctr_lo — used for retry deduplication.
 --
--- DEDUP. RTS frames are retried (RTS-rty) with the SAME msg_id as the
+-- DEDUP. RTS frames are retried (RTS-rty) with the SAME ctr_lo as the
 -- original attempt. Counting retries as fresh originations would inflate
 -- the apparent rate dramatically (a legitimate originator with
 -- rts_max_retries=3 across K=3 alts = up to 12 R observations per
--- message). We dedup by (kind, msg_id) within a retry window
+-- message). We dedup by (kind, ctr_lo) within a retry window
 -- (default 10 s, longer than rts_max_retries × rts_timeout ≈ 6 s):
--- repeated (kind, msg_id) inside the window refreshes the existing
+-- repeated (kind, ctr_lo) inside the window refreshes the existing
 -- entry's timestamp, no new event added. Outside the window we treat
--- it as a fresh observation (handles msg_id 4-bit wraparound at high
+-- it as a fresh observation (handles ctr_lo 4-bit wraparound at high
 -- send rates).
 --
 -- The mechanism doesn't reach into the wire `origin` field — works
@@ -1350,7 +1350,7 @@ end
 -- payload. We only need to know who PHYSICALLY transmitted the frame
 -- (meta.src on the on_recv callback, which the LoRa runtime provides
 -- from the modem's RX metadata, not from the frame body).
-local function track_originator_observation(self, sender_id, kind, msg_id, airtime_ms)
+local function track_originator_observation(self, sender_id, kind, ctr_lo, airtime_ms)
   if sender_id == nil then return end
   if not self.per_sender_originator then return end   -- tracking disabled
   local now = self:now()
@@ -1366,9 +1366,9 @@ local function track_originator_observation(self, sender_id, kind, msg_id, airti
   local dedup_hit = nil
   for _, ev in ipairs(entry.events) do
     if ev.t >= cutoff then
-      if dedup_hit == nil and ev.kind == kind and ev.msg_id == msg_id
+      if dedup_hit == nil and ev.kind == kind and ev.ctr_lo == ctr_lo
          and (now - ev.t) < retry_window then
-        -- Same kind+msg_id within retry window — this is a retry of the
+        -- Same kind+ctr_lo within retry window — this is a retry of the
         -- earlier observation, not a new origination. Refresh timestamp
         -- (so the entry decays from the most recent observation, not
         -- the first) and DON'T add a new event.
@@ -1380,7 +1380,7 @@ local function track_originator_observation(self, sender_id, kind, msg_id, airti
   end
   if dedup_hit == nil then
     table.insert(kept, {
-      t = now, kind = kind, msg_id = msg_id, air = airtime_ms or 0,
+      t = now, kind = kind, ctr_lo = ctr_lo, air = airtime_ms or 0,
     })
   end
   entry.events = kept
@@ -1559,7 +1559,7 @@ end
 --      announcement when a fresher one will fire shortly.
 --
 -- All three still set pending_tx (where applicable) BEFORE the actual emit,
--- so peer NACK / busy-replies still match the right msg_id; the LBT defer
+-- so peer NACK / busy-replies still match the right ctr_lo; the LBT defer
 -- only delays when the bits hit the air.
 
 -- Used by INITIATING-DIRECTED frames (RTS, NACK). LBT-gated, but only as
@@ -1805,7 +1805,7 @@ end
 local function gen_msg_id(self)
   -- 4-bit per-(originator) flight counter, wraps at 16. The 4-bit RTS
   -- field can no longer carry the historic node_id<<8 prefix; per-msg
-  -- uniqueness is recoverable from (node, msg_id, time) tuples in event
+  -- uniqueness is recoverable from (node, ctr_lo, time) tuples in event
   -- logs. Hop-level dedup uses last_acked_from with a TTL to handle
   -- wraparound at any realistic send rate.
   local mid = self.next_msg_id & 0xf
@@ -1972,7 +1972,7 @@ local function set_size(t)
   return n
 end
 
--- Re-send the current pending_tx's RTS with the same msg_id. Shared by
+-- Re-send the current pending_tx's RTS with the same ctr_lo. Shared by
 -- rts_timeout_fire (CTS lost) and ack_timeout_fire (DATA-ACK lost): both
 -- recover by re-running the dance from the beginning. Caller must have
 -- already decremented retries_left and confirmed the giveup case.
@@ -1990,20 +1990,20 @@ local function tx_rts_retry(self, reason)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
-      msg_id = px.msg_id, next_hop = px.next, delay_ms = val_b,
+      ctr_lo = px.ctr_lo, next_hop = px.next, delay_ms = val_b,
       source = "tx_rts_retry", reason = reason,
     })
     self:log(string.format("tx_blind_defer (tx_rts_retry) msg=%d -> %s deferred %dms",
-      px.msg_id, name_of(self, px.next), val_b))
+      px.ctr_lo, name_of(self, px.next), val_b))
     self:after(val_b, function() tx_rts_retry(self, reason) end)
     return
   elseif action_b == "alt" then
     self:emit("tx_blind_alt", {
       origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
-      msg_id = px.msg_id, from_next = px.next, to_next = val_b,
+      ctr_lo = px.ctr_lo, from_next = px.next, to_next = val_b,
     })
     self:log(string.format("tx_blind_alt (tx_rts_retry) msg=%d %s -> %s",
-      px.msg_id, name_of(self, px.next), name_of(self, val_b)))
+      px.ctr_lo, name_of(self, px.next), name_of(self, val_b)))
     px.alts_tried[px.next] = true   -- mark previous next_hop as tried
     px.next = val_b
     px.retries_left = effective_rts_max_retries(self, px.requeue_count)
@@ -2011,20 +2011,20 @@ local function tx_rts_retry(self, reason)
 
   -- payload_len lets the receiver size its pending_rx_expiry to the
   -- actual DATA airtime instead of max_payload_bytes worst-case.
-  local rts = pack_rts(self.network_id, px.origin, self.id, px.dst, px.next, px.msg_id,
+  local rts = pack_rts(self.leaf_id, px.origin, self.id, px.dst, px.next, px.ctr_lo,
                        self.allowed_sf_bitmap, #px.payload)
   self:emit("rts_retry", {
     origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
     dst = px.dst, next = px.next,
-    msg_id = px.msg_id, retries_left = px.retries_left, reason = reason,
+    ctr_lo = px.ctr_lo, retries_left = px.retries_left, reason = reason,
   })
-  self:log(string.format("rts_retry -> %s msg_id=%d (retries_left=%d reason=%s)",
-    name_of(self, px.next), px.msg_id, px.retries_left, reason))
+  self:log(string.format("rts_retry -> %s ctr_lo=%d (retries_left=%d reason=%s)",
+    name_of(self, px.next), px.ctr_lo, px.retries_left, reason))
   tx_initiating(self, rts, {
     sf    = self.routing_sf,
     label = "RTS-rty",
     info  = string.format("retry next=%s msg=%d retries_left=%d reason=%s",
-      name_of(self, px.next), px.msg_id, px.retries_left, reason),
+      name_of(self, px.next), px.ctr_lo, px.retries_left, reason),
   }, function() start_rts_timeout(self) end)
   -- RX stays on routing_sf — both CTS and NACK are control-plane responses
   -- on routing_sf now, no retune needed until DATA is about to TX.
@@ -2066,7 +2066,7 @@ local function maybe_emit_self_over_budget(self, px, trigger)
       origin        = self.id,
       origin_seq    = px.origin_seq,
       dst           = px.dst,
-      msg_id        = px.msg_id,
+      ctr_lo        = px.ctr_lo,
       trigger       = trigger,                  -- "rts_giveup" / "ack_giveup" / etc.
       own_originate_count_in_window = own_count,
       warn_threshold_count          = warn_count,
@@ -2076,7 +2076,7 @@ local function maybe_emit_self_over_budget(self, px, trigger)
     })
     self:log(string.format(
       "originator_self_over_budget msg=%d trigger=%s own_count=%d/%d tier=%d",
-      px.msg_id, trigger, own_count, warn_count, tier))
+      px.ctr_lo, trigger, own_count, warn_count, tier))
   end
 end
 
@@ -2123,7 +2123,7 @@ local function try_cascade_requeue(self, trigger)
       payload        = px.user_text,
       origin_seq     = px.origin_seq,
       dst            = px.dst,
-      msg_id         = px.msg_id,
+      ctr_lo         = px.ctr_lo,
       requeue_count  = next_count,
       queue_depth    = queue_depth,
       load_threshold = self.cascade_requeue_load_threshold,
@@ -2133,7 +2133,7 @@ local function try_cascade_requeue(self, trigger)
     })
     self:log(string.format(
       "cascade_load_skip msg=%d dst=%s queue=%d eff_max=%d/%d (load adaptive drop, trigger=%s)",
-      px.msg_id, name_of(self, px.dst), queue_depth,
+      px.ctr_lo, name_of(self, px.dst), queue_depth,
       effective_max, self.cascade_requeue_max, trigger))
     return false
   end
@@ -2162,7 +2162,7 @@ local function try_cascade_requeue(self, trigger)
     payload       = px.user_text,
     origin_seq    = px.origin_seq,
     dst           = px.dst,
-    msg_id        = px.msg_id,
+    ctr_lo        = px.ctr_lo,
     requeue_count = next_count,
     backoff_ms    = backoff_ms,
     total_age_ms  = total_age_ms,
@@ -2170,7 +2170,7 @@ local function try_cascade_requeue(self, trigger)
   })
   self:log(string.format(
     "cascade_requeue msg=%d dst=%s -> back of queue (#%d, age=%dms, backoff=%dms, trigger=%s)",
-    px.msg_id, name_of(self, px.dst), next_count, total_age_ms, backoff_ms, trigger))
+    px.ctr_lo, name_of(self, px.dst), next_count, total_age_ms, backoff_ms, trigger))
   return true
 end
 
@@ -2178,7 +2178,7 @@ end
 -- defer (when busy as receiver of someone else's data).
 local function rts_timeout_fire(self, captured_msg_id)
   if self.pending_tx == nil then return end
-  if self.pending_tx.msg_id ~= captured_msg_id then return end
+  if self.pending_tx.ctr_lo ~= captured_msg_id then return end
 
   if self.pending_rx ~= nil then
     self:log(string.format("rts_retry_deferred (busy as receiver) msg=%d",
@@ -2202,7 +2202,7 @@ local function rts_timeout_fire(self, captured_msg_id)
     self:emit("tx_blind_defer", {
       origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      msg_id = captured_msg_id, next_hop = self.pending_tx.next,
+      ctr_lo = captured_msg_id, next_hop = self.pending_tx.next,
       delay_ms = val_b, source = "rts_timeout",
     })
     self:log(string.format("tx_blind_defer (rts_timeout) msg=%d -> %s deferred %dms",
@@ -2215,7 +2215,7 @@ local function rts_timeout_fire(self, captured_msg_id)
     self:emit("tx_blind_alt", {
       origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      msg_id = captured_msg_id,
+      ctr_lo = captured_msg_id,
       from_next = self.pending_tx.next, to_next = val_b,
     })
     self:log(string.format("tx_blind_alt (rts_timeout) msg=%d %s -> %s",
@@ -2240,7 +2240,7 @@ local function rts_timeout_fire(self, captured_msg_id)
         origin     = self.pending_tx.origin,
         payload    = self.pending_tx.user_text,
         origin_seq = self.pending_tx.origin_seq,
-        dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+        dst        = self.pending_tx.dst, ctr_lo = captured_msg_id,
         from_next  = prev_next, to_next = next_hop,
         attempt    = set_size(self.pending_tx.alts_tried),
         trigger    = "rts_giveup",
@@ -2270,7 +2270,7 @@ local function rts_timeout_fire(self, captured_msg_id)
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+      dst        = self.pending_tx.dst, ctr_lo = captured_msg_id,
       tried      = tried_list, trigger = "rts_giveup",
     })
     self:emit("rts_giveup", {
@@ -2279,7 +2279,7 @@ local function rts_timeout_fire(self, captured_msg_id)
       origin_seq = self.pending_tx.origin_seq,
       dst        = self.pending_tx.dst,
       next       = self.pending_tx.next,
-      msg_id     = captured_msg_id,
+      ctr_lo     = captured_msg_id,
     })
     self:log(string.format("path_cascade_exhausted msg=%d dst=%s tried=%d (rts_giveup)",
       captured_msg_id, name_of(self, self.pending_tx.dst), #tried_list))
@@ -2301,7 +2301,7 @@ local function rts_timeout_fire(self, captured_msg_id)
     tx_rts_retry(self, "cts_timeout")
   else
     self:after(jitter, function()
-      if self.pending_tx ~= nil and self.pending_tx.msg_id == captured then
+      if self.pending_tx ~= nil and self.pending_tx.ctr_lo == captured then
         tx_rts_retry(self, "cts_timeout")
       end
     end)
@@ -2318,7 +2318,7 @@ end
 -- last_acked_from cache (or a fresh dance starts cleanly).
 local function ack_timeout_fire(self, captured_msg_id)
   if self.pending_tx == nil then return end
-  if self.pending_tx.msg_id ~= captured_msg_id then return end
+  if self.pending_tx.ctr_lo ~= captured_msg_id then return end
 
   if self.pending_rx ~= nil then
     -- Mid-RX of someone else's flight; defer briefly.
@@ -2342,7 +2342,7 @@ local function ack_timeout_fire(self, captured_msg_id)
         origin     = self.pending_tx.origin,
         payload    = self.pending_tx.user_text,
         origin_seq = self.pending_tx.origin_seq,
-        dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+        dst        = self.pending_tx.dst, ctr_lo = captured_msg_id,
         from_next  = prev_next, to_next = next_hop,
         attempt    = set_size(self.pending_tx.alts_tried),
         trigger    = "ack_giveup",
@@ -2369,7 +2369,7 @@ local function ack_timeout_fire(self, captured_msg_id)
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      dst        = self.pending_tx.dst, msg_id = captured_msg_id,
+      dst        = self.pending_tx.dst, ctr_lo = captured_msg_id,
       tried      = tried_list, trigger = "ack_giveup",
     })
     self:emit("data_ack_giveup", {
@@ -2378,7 +2378,7 @@ local function ack_timeout_fire(self, captured_msg_id)
       origin_seq = self.pending_tx.origin_seq,
       dst        = self.pending_tx.dst,
       next       = self.pending_tx.next,
-      msg_id     = captured_msg_id,
+      ctr_lo     = captured_msg_id,
     })
     self:log(string.format("path_cascade_exhausted msg=%d dst=%s tried=%d (ack_giveup)",
       captured_msg_id, name_of(self, self.pending_tx.dst), #tried_list))
@@ -2396,7 +2396,7 @@ local function ack_timeout_fire(self, captured_msg_id)
     tx_rts_retry(self, "ack_timeout")
   else
     self:after(jitter, function()
-      if self.pending_tx ~= nil and self.pending_tx.msg_id == captured then
+      if self.pending_tx ~= nil and self.pending_tx.ctr_lo == captured then
         tx_rts_retry(self, "ack_timeout")
       end
     end)
@@ -2416,12 +2416,12 @@ start_rts_timeout = function(self)
     self.rts_timeout_handle = nil
   end
   -- F1 mitigation safety net: exponential backoff per retry attempt.
-  -- attempt_idx = how many retries we've already burned on this msg_id.
+  -- attempt_idx = how many retries we've already burned on this ctr_lo.
   -- Fresh budget (issue_send / NACK alt / blind alt) → attempt_idx = 0
   -- → base timeout. Each subsequent retry doubles up to RTS_TIMEOUT_BACKOFF_CAP.
   local attempt_idx = self.rts_max_retries - self.pending_tx.retries_left
   local timeout_ms = rts_timeout_for_attempt(self.rts_timeout_ms, attempt_idx)
-  local captured_msg_id = self.pending_tx.msg_id
+  local captured_msg_id = self.pending_tx.ctr_lo
   self.rts_timeout_handle = self:after(timeout_ms, function()
     self.rts_timeout_handle = nil
     rts_timeout_fire(self, captured_msg_id)
@@ -2448,7 +2448,7 @@ start_ack_timeout = function(self)
                               self.preamble_sym,
                               DATA_HDR_LEN + #self.pending_tx.payload)
   local delay = data_air + self.ack_air_ms
-  local captured_msg_id = self.pending_tx.msg_id
+  local captured_msg_id = self.pending_tx.ctr_lo
   self.ack_timeout_handle = self:after(delay, function()
     self.ack_timeout_handle = nil
     ack_timeout_fire(self, captured_msg_id)
@@ -2460,13 +2460,13 @@ end
 -- DATA freezes the receiver permanently.
 local function pending_rx_expiry_fire(self, captured_msg_id)
   if self.pending_rx == nil then return end
-  if self.pending_rx.msg_id ~= captured_msg_id then return end
+  if self.pending_rx.ctr_lo ~= captured_msg_id then return end
   self:emit("data_rx_timeout", {
     origin = self.pending_rx.origin,
     -- payload + origin_seq unknown — DATA never arrived
-    from = self.pending_rx.from, msg_id = captured_msg_id,
+    from = self.pending_rx.from, ctr_lo = captured_msg_id,
   })
-  self:log(string.format("data_rx_timeout from=%s msg_id=%d -> clearing pending_rx",
+  self:log(string.format("data_rx_timeout from=%s ctr_lo=%d -> clearing pending_rx",
     name_of(self, self.pending_rx.from), captured_msg_id))
   self:set_rx_sf(self.routing_sf)
   self.pending_rx = nil
@@ -2504,7 +2504,7 @@ start_pending_rx_expiry = function(self)
                               self.preamble_sym, DATA_HDR_LEN + pl)
   local expiry_ms = cts_air + self.cts_to_data_gap_ms + data_air
   self.pending_rx.expiry_ms = expiry_ms   -- stash for NACK busy_for_ms calc
-  local captured_msg_id = self.pending_rx.msg_id
+  local captured_msg_id = self.pending_rx.ctr_lo
   self.pending_rx_expiry_handle = self:after(expiry_ms, function()
     self.pending_rx_expiry_handle = nil
     pending_rx_expiry_fire(self, captured_msg_id)
@@ -2628,7 +2628,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
       self.q_queried[dst_id] = now_q
       self:emit("q_tx", { dst = dst_id, dst_name = dst_name })
       self:log(string.format("q_tx -> dst=%s (route query)", dst_name))
-      tx_initiating(self, pack_q(self.network_id, self.id, dst_id), {
+      tx_initiating(self, pack_q(self.leaf_id, self.id, dst_id), {
         sf    = self.routing_sf,
         label = "Q",
         info  = string.format("dst=%s", dst_name),
@@ -2689,7 +2689,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     origin       = origin,
     dst          = dst_id,
     next         = primary_next,
-    msg_id       = mid,
+    ctr_lo       = mid,
     payload      = payload,        -- full bytes (origin-seq hdr + user_text)
     user_text    = user_text,      -- for emit + log clarity
     origin_seq   = origin_seq,     -- end-to-end message id (with origin)
@@ -2707,15 +2707,15 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
   }
   -- payload_len includes the 2-byte origin-seq header — see pack_rts.
-  local rts = pack_rts(self.network_id, origin, self.id, dst_id, primary_next, mid,
+  local rts = pack_rts(self.leaf_id, origin, self.id, dst_id, primary_next, mid,
                        self.allowed_sf_bitmap, #payload)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   self:emit("rts_tx", {
     origin = origin, payload = user_text, origin_seq = origin_seq,
-    dst = dst_id, next = primary_next, msg_id = mid,
+    dst = dst_id, next = primary_next, ctr_lo = mid,
     sf_bitmap = self.allowed_sf_bitmap,
   })
-  self:log(string.format("rts_tx -> %s msg_id=%d origin=%s seq=%d (sf_bitmap=0x%02x)",
+  self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s seq=%d (sf_bitmap=0x%02x)",
     name_of(self, primary_next), mid, name_of(self, origin), origin_seq,
     self.allowed_sf_bitmap))
   tx_initiating(self, rts, {
@@ -2843,7 +2843,7 @@ local function send_beacon_page(self, kind)
                                               self.beacon_max_entries,
                                               self.beacon_offset)
   local total  = rt_count(self.rt)
-  local page_n = frame:byte(4)              -- byte 4 = n (post-network_id-header)
+  local page_n = frame:byte(4)              -- byte 4 = n (post-leaf_id-header)
   self:emit("beacon_tx", {
     n_entries = page_n, rt_total = total,
     offset = self.beacon_offset, next_offset = new_offset,
@@ -3249,7 +3249,7 @@ function on_init(self, config)
   self.originator_max_per_window    = config.originator_max_per_window    or 6        -- ≈ 72/hr
   self.originator_airtime_share     = config.originator_airtime_share     or 0.25     -- backstop
   self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5    -- emit self-warning at half threshold
-  self.originator_retry_dedup_ms    = config.originator_retry_dedup_ms    or 10000    -- 10s — longer than typical RTS-rty cycle so retries dedup; <<window so msg_id wrap counts as fresh
+  self.originator_retry_dedup_ms    = config.originator_retry_dedup_ms    or 10000    -- 10s — longer than typical RTS-rty cycle so retries dedup; <<window so ctr_lo wrap counts as fresh
 
   -- Proactive tier-aware routing: route_strictly_better applies
   -- TIER_SCORE_PENALTY_DB on top of raw SNR margin so candidates via
@@ -3401,9 +3401,9 @@ function on_init(self, config)
   -- mid-flight; lost-route mid-flight is a real failure).
   self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, origin_seq, queued_at_ms}
   self.send_defer_ttl_ms  = config.send_defer_ttl_ms or 30000
-  -- Hop-level RTS-retry dedup. {sender_id → {msg_id, t_ms}}; lookups
+  -- Hop-level RTS-retry dedup. {sender_id → {ctr_lo, t_ms}}; lookups
   -- treat entries older than self.last_acked_ttl_ms as missing so the
-  -- 4-bit msg_id wrap (every 16 sends per sender) doesn't false-pos
+  -- 4-bit ctr_lo wrap (every 16 sends per sender) doesn't false-pos
   -- at slow send rates. TTL well above any flight-retry window
   -- (rts_max_retries × rts_timeout ≈ 1.5 s) and well below the wrap
   -- interval at any plausible per-sender send rate.
@@ -3412,7 +3412,7 @@ function on_init(self, config)
   -- 4-bit network identifier — externally managed (admin sets per node).
   -- Receivers reject foreign-network BCN/RTS at the routing layer
   -- before doing CTS/DATA work. 0 = default mesh; 1..15 = distinct meshes.
-  self.network_id        = config.network_id or 0
+  self.leaf_id        = config.leaf_id or 0
   -- Stale-route aging — two-tier TTL by hop class.
   --
   -- Per-candidate last_seen_ms is refreshed by rt_merge whenever a
@@ -3659,7 +3659,7 @@ function on_recv(self, frame, meta)
     -- pollute our routing table. Same field as RTS, same admin-managed
     -- 4-bit space. Silent drop (no event spam — expected during
     -- enhanced propagation events).
-    if b.network_id ~= self.network_id then return end
+    if b.leaf_id ~= self.leaf_id then return end
     self:emit("beacon_rx", { src = b.src, n_entries = #b.entries })
 
     local now = self:now()
@@ -3757,7 +3757,7 @@ function on_recv(self, frame, meta)
     -- broadcasts on routing_sf). All 1st-hop neighbours of an originator
     -- accumulate independent evidence this way, so the spammer can't
     -- evade by picking next-hops who don't observe enough.
-    track_originator_observation(self, meta.src, "rts", r.msg_id,
+    track_originator_observation(self, meta.src, "rts", r.ctr_lo,
       airtime_ms(self.routing_sf, self.bw_hz, self.cr,
                  self.preamble_sym, #frame))
     if r.next ~= self.id then return end  -- not for us; silent discard
@@ -3765,58 +3765,58 @@ function on_recv(self, frame, meta)
     -- work. Without this, two networks merging during enhanced RF
     -- propagation would waste airtime on duplicate CTSes and pollute
     -- routing decisions.
-    if r.network_id ~= self.network_id then return end
+    if r.leaf_id ~= self.leaf_id then return end
 
     -- Sender is retrying an RTS for a DATA we already received and acked
     -- (their previous ACK was lost in flight). Re-send the ACK directly
     -- — no CTS, no DATA — so they can clear pending_tx without us
     -- reprocessing/duplicating the message. last_acked_from holds the
-    -- most recent acked msg_id per sender, scoped by TTL so the 4-bit
-    -- msg_id wrap (every 16 sends per sender) doesn't false-positive at
+    -- most recent acked ctr_lo per sender, scoped by TTL so the 4-bit
+    -- ctr_lo wrap (every 16 sends per sender) doesn't false-positive at
     -- slow send rates.
     local cached = self.last_acked_from[r.src]
-    if cached and cached.msg_id == r.msg_id
+    if cached and cached.ctr_lo == r.ctr_lo
        and (self:now() - cached.t_ms) < self.last_acked_ttl_ms then
       self:emit("rts_already_acked", {
         origin = r.origin,    -- payload unknown — RTS frame doesn't carry it
-        from = r.src, msg_id = r.msg_id,
+        from = r.src, ctr_lo = r.ctr_lo,
       })
-      self:log(string.format("rts_already_acked <- %s msg_id=%d -> re-sending ACK",
-        name_of(self, r.src), r.msg_id))
+      self:log(string.format("rts_already_acked <- %s ctr_lo=%d -> re-sending ACK",
+        name_of(self, r.src), r.ctr_lo))
       -- Piggyback the current RTS's SNR — this isn't the original DATA's
       -- SNR (we don't have it any more), but it's a valid fresh sample of
       -- the same link, so the sender's outbound EWMA still benefits.
-      local ack = pack_ack(r.msg_id, meta.snr)
+      local ack = pack_ack(r.ctr_lo, meta.snr)
       tx_with_retry(self, ack, {
         sf    = self.routing_sf,
         label = "K-dup",
-        info  = string.format("re-ACK to=%s msg=%d", name_of(self, r.src), r.msg_id),
+        info  = string.format("re-ACK to=%s msg=%d", name_of(self, r.src), r.ctr_lo),
       })
       return
     end
 
     if self.pending_rx ~= nil then
-      -- Duplicate RTS from the same originator for the same msg_id: their
+      -- Duplicate RTS from the same originator for the same ctr_lo: their
       -- previous CTS may have been lost, or DATA was sent and ACK was
       -- lost (and our pending_rx hasn't expired yet). Re-send the CTS so
       -- they can re-attempt DATA.
-      if self.pending_rx.from == r.src and self.pending_rx.msg_id == r.msg_id then
+      if self.pending_rx.from == r.src and self.pending_rx.ctr_lo == r.ctr_lo then
         self:emit("rts_rx_dup", {
           origin = r.origin,    -- payload unknown at RTS phase
-          from = r.src, msg_id = r.msg_id,
+          from = r.src, ctr_lo = r.ctr_lo,
         })
-        self:log(string.format("rts_rx_dup <- %s msg_id=%d -> resending CTS (sf=%d)",
-          name_of(self, r.src), r.msg_id, self.pending_rx.chosen_data_sf))
-        local cts = pack_cts(r.msg_id, self.pending_rx.chosen_data_sf)
+        self:log(string.format("rts_rx_dup <- %s ctr_lo=%d -> resending CTS (sf=%d)",
+          name_of(self, r.src), r.ctr_lo, self.pending_rx.chosen_data_sf))
+        local cts = pack_cts(r.ctr_lo, self.pending_rx.chosen_data_sf)
         self:emit("cts_tx", {
-          origin = r.origin, to = r.src, msg_id = r.msg_id, dup = true,
+          origin = r.origin, to = r.src, ctr_lo = r.ctr_lo, dup = true,
           chosen_data_sf = self.pending_rx.chosen_data_sf,
         })
         tx_with_retry(self, cts, {
           sf    = self.routing_sf,
           label = "CTS-dup",
           info  = string.format("re-CTS to=%s msg=%d sf=%d",
-            name_of(self, r.src), r.msg_id, self.pending_rx.chosen_data_sf),
+            name_of(self, r.src), r.ctr_lo, self.pending_rx.chosen_data_sf),
         })
         -- Reset pending_rx_expiry — the sender is still trying, so give
         -- DATA another full window to arrive.
@@ -3833,20 +3833,20 @@ function on_recv(self, frame, meta)
       local busy_for = self.pending_rx.set_at_ms + expiry - now
       if busy_for < 0 then busy_for = 0 end
       if busy_for > 65535 then busy_for = 65535 end
-      local nack = pack_nack(r.msg_id, NACK_REASON_BUSY_RX,
+      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUSY_RX,
         busy_for % 256, math.floor(busy_for / 256) % 256)
       self:emit("nack_tx", {
         origin = r.origin,    -- the inbound RTS's flight, not our pending_rx's
-        to = r.src, msg_id = r.msg_id, busy_for_ms = busy_for, reason = "pending_rx",
+        to = r.src, ctr_lo = r.ctr_lo, busy_for_ms = busy_for, reason = "pending_rx",
       })
-      self:log(string.format("nack_tx -> %s msg_id=%d busy_for=%dms (busy with pending_rx from %s/%d)",
-        name_of(self, r.src), r.msg_id, busy_for,
-        name_of(self, self.pending_rx.from), self.pending_rx.msg_id))
+      self:log(string.format("nack_tx -> %s ctr_lo=%d busy_for=%dms (busy with pending_rx from %s/%d)",
+        name_of(self, r.src), r.ctr_lo, busy_for,
+        name_of(self, self.pending_rx.from), self.pending_rx.ctr_lo))
       tx_initiating(self, nack, {
         sf    = self.routing_sf,
         label = "NACK",
         info  = string.format("to=%s msg=%d busy_for=%dms reason=pending_rx",
-          name_of(self, r.src), r.msg_id, busy_for),
+          name_of(self, r.src), r.ctr_lo, busy_for),
       })
       return
     end
@@ -3860,8 +3860,8 @@ function on_recv(self, frame, meta)
       -- sender's rts_timeout fires after ~5 s and the existing
       -- tx_blind_alt / cascade machinery walks to the next-hop.
       self:emit("rts_drop_pending_tx", {
-        origin = r.origin, from = r.src, msg_id = r.msg_id,
-        our_pending_msg_id = self.pending_tx.msg_id,
+        origin = r.origin, from = r.src, ctr_lo = r.ctr_lo,
+        our_pending_msg_id = self.pending_tx.ctr_lo,
       })
       return
     end
@@ -3884,7 +3884,7 @@ function on_recv(self, frame, meta)
       if app_orig > self.originator_max_per_window
          or total_air > airtime_cap_ms then
         self:emit("rts_drop_originator_throttle", {
-          from = meta.src, msg_id = r.msg_id,
+          from = meta.src, ctr_lo = r.ctr_lo,
           apparent_origination = app_orig,
           airtime_ms           = total_air,
           rts_count            = rts_n,
@@ -3894,8 +3894,8 @@ function on_recv(self, frame, meta)
           window_ms            = self.originator_window_ms,
         })
         self:log(string.format(
-          "rts_drop_originator_throttle <- %s msg_id=%d (R-C=%d/%d over %dms, air=%dms/%dms)",
-          name_of(self, meta.src), r.msg_id,
+          "rts_drop_originator_throttle <- %s ctr_lo=%d (R-C=%d/%d over %dms, air=%dms/%dms)",
+          name_of(self, meta.src), r.ctr_lo,
           app_orig, self.originator_max_per_window,
           self.originator_window_ms, total_air, airtime_cap_ms))
         return  -- silent drop; no CTS, no NACK
@@ -3915,19 +3915,19 @@ function on_recv(self, frame, meta)
     -- is a stalled flight that the sender must rts_timeout out of.
     local my_tier = compute_budget_tier(self)
     if my_tier >= BUDGET_TIER_CRITICAL then
-      local nack = pack_nack(r.msg_id, NACK_REASON_BUDGET, my_tier, 0)
+      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUDGET, my_tier, 0)
       self:emit("nack_tx", {
-        origin = r.origin, to = r.src, msg_id = r.msg_id,
+        origin = r.origin, to = r.src, ctr_lo = r.ctr_lo,
         reason = "budget_low", tier = my_tier,
       })
       self:log(string.format(
-        "nack_tx -> %s msg_id=%d reason=budget_low tier=%d",
-        name_of(self, r.src), r.msg_id, my_tier))
+        "nack_tx -> %s ctr_lo=%d reason=budget_low tier=%d",
+        name_of(self, r.src), r.ctr_lo, my_tier))
       tx_initiating(self, nack, {
         sf    = self.routing_sf,
         label = "NACK",
         info  = string.format("to=%s msg=%d reason=budget tier=%d",
-          name_of(self, r.src), r.msg_id, my_tier),
+          name_of(self, r.src), r.ctr_lo, my_tier),
       })
       return
     end
@@ -3944,29 +3944,29 @@ function on_recv(self, frame, meta)
     local chosen_sf  = select_data_sf(snr_for_sf, r.sf_bitmap, self.sf_margin_db)
     if chosen_sf == nil then
       self:emit("rts_drop_no_sf", {
-        origin = r.origin, from = r.src, msg_id = r.msg_id,
+        origin = r.origin, from = r.src, ctr_lo = r.ctr_lo,
         sf_bitmap = r.sf_bitmap,
       })
-      self:log(string.format("rts_drop_no_sf <- %s msg_id=%d (empty sf_bitmap)",
-        name_of(self, r.src), r.msg_id))
+      self:log(string.format("rts_drop_no_sf <- %s ctr_lo=%d (empty sf_bitmap)",
+        name_of(self, r.src), r.ctr_lo))
       return
     end
 
     self:emit("rts_rx", {
       origin = r.origin,    -- payload unknown at RTS phase
-      from = r.src, dst = r.dst, msg_id = r.msg_id,
+      from = r.src, dst = r.dst, ctr_lo = r.ctr_lo,
       sf_bitmap = r.sf_bitmap, chosen_data_sf = chosen_sf,
       rx_snr = meta.snr, ewma_snr = snr_for_sf,
     })
     self:log(string.format(
-      "rts_rx <- %s (origin=%s dst=%s msg_id=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
+      "rts_rx <- %s (origin=%s dst=%s ctr_lo=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
       name_of(self, r.src), name_of(self, r.origin), name_of(self, r.dst),
-      r.msg_id, r.sf_bitmap, meta.snr, chosen_sf))
+      r.ctr_lo, r.sf_bitmap, meta.snr, chosen_sf))
     self.pending_rx = {
       from        = r.src,
       origin      = r.origin,
       dst         = r.dst,
-      msg_id      = r.msg_id,
+      ctr_lo      = r.ctr_lo,
       set_at_ms   = self:now(),       -- for NACK busy_for_ms calc
       chosen_data_sf = chosen_sf,     -- DATA leg's SF; receiver retunes after CTS-tx
       payload_len = r.payload_len,    -- size pending_rx_expiry to actual DATA airtime
@@ -3974,18 +3974,18 @@ function on_recv(self, frame, meta)
     -- Arm the expiry timer so a never-arriving DATA can't freeze us.
     start_pending_rx_expiry(self)
 
-    local cts = pack_cts(r.msg_id, chosen_sf)
+    local cts = pack_cts(r.ctr_lo, chosen_sf)
     self:emit("cts_tx", {
-      origin = r.origin, to = r.src, msg_id = r.msg_id,
+      origin = r.origin, to = r.src, ctr_lo = r.ctr_lo,
       chosen_data_sf = chosen_sf,
     })
-    self:log(string.format("cts_tx -> %s msg_id=%d chose SF%d (on routing SF%d)",
-      name_of(self, r.src), r.msg_id, chosen_sf, self.routing_sf))
+    self:log(string.format("cts_tx -> %s ctr_lo=%d chose SF%d (on routing SF%d)",
+      name_of(self, r.src), r.ctr_lo, chosen_sf, self.routing_sf))
     tx_with_retry(self, cts, {
       sf    = self.routing_sf,
       label = "CTS",
       info  = string.format("to=%s msg=%d chosen_sf=%d",
-        name_of(self, r.src), r.msg_id, chosen_sf),
+        name_of(self, r.src), r.ctr_lo, chosen_sf),
     })
     -- After CTS-tx completes, the runtime resumes RX on whatever we set
     -- here. Retune now so DATA on chosen_sf will land cleanly.
@@ -4003,7 +4003,7 @@ function on_recv(self, frame, meta)
     -- an originator never CTSes (no inbound RTS to respond to) so
     -- C[X] ≈ 0. See header doc block "Anti-spam: 1st-hop statistical
     -- rate-limit".
-    track_originator_observation(self, meta.src, "cts", c.msg_id,
+    track_originator_observation(self, meta.src, "cts", c.ctr_lo,
       airtime_ms(self.routing_sf, self.bw_hz, self.cr,
                  self.preamble_sym, #frame))
 
@@ -4031,7 +4031,7 @@ function on_recv(self, frame, meta)
     end
 
     if self.pending_tx == nil then return end
-    if c.msg_id ~= self.pending_tx.msg_id then return end
+    if c.ctr_lo ~= self.pending_tx.ctr_lo then return end
 
     -- CTS matched — cancel the rts_timeout. Without this, the timer fires
     -- on the same tick (rts_timeout_ms = exact RTS+CTS airtime) before the
@@ -4048,7 +4048,7 @@ function on_recv(self, frame, meta)
     if not sf_in_bitmap(self.allowed_sf_bitmap, c.chosen_data_sf) then
       self:emit("cts_invalid_sf", {
         origin = self.pending_tx.origin, payload = self.pending_tx.payload,
-        from = c.src or self.pending_tx.next, msg_id = c.msg_id,
+        from = c.src or self.pending_tx.next, ctr_lo = c.ctr_lo,
         chosen_data_sf = c.chosen_data_sf,
       })
       return
@@ -4059,13 +4059,13 @@ function on_recv(self, frame, meta)
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      from = self.pending_tx.next, msg_id = c.msg_id,
+      from = self.pending_tx.next, ctr_lo = c.ctr_lo,
       chosen_data_sf = c.chosen_data_sf,
     })
 
     local gap = self.cts_to_data_gap_ms or 5
-    self:log(string.format("cts_rx <- %s msg_id=%d chose SF%d -> waiting %dms then DATA",
-      name_of(self, self.pending_tx.next), c.msg_id, c.chosen_data_sf, gap))
+    self:log(string.format("cts_rx <- %s ctr_lo=%d chose SF%d -> waiting %dms then DATA",
+      name_of(self, self.pending_tx.next), c.ctr_lo, c.chosen_data_sf, gap))
     -- Capture the snapshot so the timer fire still has the right
     -- pending_tx context if anything mutates it (e.g., a forward dance
     -- starting concurrently — shouldn't happen in scenario A, but be safe).
@@ -4073,23 +4073,23 @@ function on_recv(self, frame, meta)
     self:after(gap, function()
       -- pending_tx may have been cleared by an ack_timeout giveup or
       -- another path between cts_rx and the gap-expiry; bail if so.
-      if self.pending_tx == nil or self.pending_tx.msg_id ~= px.msg_id then
+      if self.pending_tx == nil or self.pending_tx.ctr_lo ~= px.ctr_lo then
         return
       end
-      local d = pack_data(px.origin, self.id, px.dst, px.next, px.msg_id, px.payload)
+      local d = pack_data(px.origin, self.id, px.dst, px.next, px.ctr_lo, px.payload)
       self:emit("data_tx", {
         origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
-        dst = px.dst, next = px.next, msg_id = px.msg_id, len = #px.payload,
+        dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
         sf = px.chosen_data_sf,
       })
-      self:log(string.format("data_tx -> %s msg_id=%d payload=%q on SF%d (ACK on SF%d)",
-        name_of(self, px.next), px.msg_id, px.payload, px.chosen_data_sf, self.routing_sf))
+      self:log(string.format("data_tx -> %s ctr_lo=%d payload=%q on SF%d (ACK on SF%d)",
+        name_of(self, px.next), px.ctr_lo, px.payload, px.chosen_data_sf, self.routing_sf))
       tx_with_retry(self, d, {
         sf    = px.chosen_data_sf,
         label = "DATA",
         info  = string.format("origin=%s dst=%s next=%s msg=%d sf=%d payload=%q",
           name_of(self, px.origin), name_of(self, px.dst),
-          name_of(self, px.next), px.msg_id, px.chosen_data_sf, px.payload),
+          name_of(self, px.next), px.ctr_lo, px.chosen_data_sf, px.payload),
       })
       -- Sender's RX has been on routing_sf throughout — no retune needed.
       -- DATA TX uses the per-tx sf override; the modem's RX state is
@@ -4103,7 +4103,7 @@ function on_recv(self, frame, meta)
     local k = parse_ack(frame)
     if not k then return end
     if self.pending_tx == nil then return end
-    if k.msg_id ~= self.pending_tx.msg_id then return end
+    if k.ctr_lo ~= self.pending_tx.ctr_lo then return end
 
     -- ACK matched. Cancel the ack_timeout, clear pending_tx, drain the
     -- queue. The ack_timeout retry path (re-RTS on ack-loss) is what
@@ -4126,7 +4126,7 @@ function on_recv(self, frame, meta)
     if ack_src ~= nil and k.snr_db ~= nil then
       update_snr_ewma(self.snr_ewma_out, ack_src, k.snr_db, self.snr_ewma_alpha)
       self:emit("ack_snr_feedback", {
-        from = ack_src, msg_id = k.msg_id,
+        from = ack_src, ctr_lo = k.ctr_lo,
         data_snr_db = k.snr_db, snr_bucket = k.snr_bucket,
         ewma_out = self.snr_ewma_out[ack_src],
       })
@@ -4135,11 +4135,11 @@ function on_recv(self, frame, meta)
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      from = self.pending_tx.next, msg_id = k.msg_id,
+      from = self.pending_tx.next, ctr_lo = k.ctr_lo,
       data_snr_db = k.snr_db,
     })
-    self:log(string.format("ack_rx <- %s msg_id=%d data_snr=%.1fdB -> hop complete",
-      name_of(self, self.pending_tx.next), k.msg_id, k.snr_db or 0))
+    self:log(string.format("ack_rx <- %s ctr_lo=%d data_snr=%.1fdB -> hop complete",
+      name_of(self, self.pending_tx.next), k.ctr_lo, k.snr_db or 0))
     self.pending_tx = nil
     become_free(self)
     return
@@ -4149,7 +4149,7 @@ function on_recv(self, frame, meta)
     local n = parse_nack(frame)
     if not n then return end
     if self.pending_tx == nil then return end
-    if n.msg_id ~= self.pending_tx.msg_id then return end
+    if n.ctr_lo ~= self.pending_tx.ctr_lo then return end
 
     -- NACK matched: chosen next-hop can't take us right now. Cancel the
     -- rts_timeout (NACK is a faster, definitive signal). NACK rides on
@@ -4196,12 +4196,12 @@ function on_recv(self, frame, meta)
         origin = self.pending_tx.origin,
         payload = self.pending_tx.user_text,
         origin_seq = self.pending_tx.origin_seq,
-        from = self.pending_tx.next, msg_id = n.msg_id,
+        from = self.pending_tx.next, ctr_lo = n.ctr_lo,
         reason = "budget_low", tier = tier, blind_ms = blind_ms,
       })
       self:log(string.format(
-        "nack_rx <- %s msg_id=%d reason=budget_low tier=%d -> blind for %dms",
-        name_of(self, self.pending_tx.next), n.msg_id, tier, blind_ms))
+        "nack_rx <- %s ctr_lo=%d reason=budget_low tier=%d -> blind for %dms",
+        name_of(self, self.pending_tx.next), n.ctr_lo, tier, blind_ms))
       -- Push pending_tx back to the queue via the existing cascade-requeue
       -- helper. That gives us the full cap suite (cascade_requeue_max,
       -- cascade_requeue_total_max_ms wallclock, load-adaptive shrink) so
@@ -4218,7 +4218,7 @@ function on_recv(self, frame, meta)
         origin     = self.pending_tx.origin,
         payload    = self.pending_tx.user_text,
         origin_seq = self.pending_tx.origin_seq,
-        dst        = self.pending_tx.dst, msg_id = self.pending_tx.msg_id,
+        dst        = self.pending_tx.dst, ctr_lo = self.pending_tx.ctr_lo,
         tried      = {}, trigger = "budget_low",
       })
       self:emit("rts_giveup", {
@@ -4226,11 +4226,11 @@ function on_recv(self, frame, meta)
         payload = self.pending_tx.user_text,
         origin_seq = self.pending_tx.origin_seq,
         dst    = self.pending_tx.dst,
-        next   = self.pending_tx.next, msg_id = self.pending_tx.msg_id,
+        next   = self.pending_tx.next, ctr_lo = self.pending_tx.ctr_lo,
       })
       self:log(string.format(
         "rts_giveup msg=%d dst=%s (budget_low caps hit)",
-        self.pending_tx.msg_id, name_of(self, self.pending_tx.dst)))
+        self.pending_tx.ctr_lo, name_of(self, self.pending_tx.dst)))
       maybe_emit_self_over_budget(self, self.pending_tx, "budget_low")
       self.pending_tx = nil
       become_free(self)
@@ -4242,10 +4242,10 @@ function on_recv(self, frame, meta)
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      from = self.pending_tx.next, msg_id = n.msg_id, busy_for_ms = n.busy_for_ms,
+      from = self.pending_tx.next, ctr_lo = n.ctr_lo, busy_for_ms = n.busy_for_ms,
     })
-    self:log(string.format("nack_rx <- %s msg_id=%d busy_for=%dms",
-      name_of(self, self.pending_tx.next), n.msg_id, n.busy_for_ms))
+    self:log(string.format("nack_rx <- %s ctr_lo=%d busy_for=%dms",
+      name_of(self, self.pending_tx.next), n.ctr_lo, n.busy_for_ms))
 
     -- Mark the NACK sender as blind for the busy_for_ms window. F1 already
     -- populates blind_until from overheard CTS; NACK is even more
@@ -4285,15 +4285,15 @@ function on_recv(self, frame, meta)
     -- successful exchange once the receiver is free.
     local NACK_WAIT_THRESHOLD_MS = 2000
     if n.busy_for_ms <= NACK_WAIT_THRESHOLD_MS then
-      local captured = self.pending_tx.msg_id
+      local captured = self.pending_tx.ctr_lo
       -- Add small jitter on top of busy_for_ms to decorrelate multiple
       -- senders all NACKed by the same receiver — without it they
       -- thunder back in unison the moment the receiver frees up.
       local wait_ms = n.busy_for_ms + 1 + self:rand(0, self.retry_jitter_ms + 1)
-      self:log(string.format("nack_wait msg_id=%d for %dms (busy_for=%d, same next-hop)",
+      self:log(string.format("nack_wait ctr_lo=%d for %dms (busy_for=%d, same next-hop)",
         captured, wait_ms, n.busy_for_ms))
       self:after(wait_ms, function()
-        if self.pending_tx ~= nil and self.pending_tx.msg_id == captured then
+        if self.pending_tx ~= nil and self.pending_tx.ctr_lo == captured then
           tx_rts_retry(self, "nack_wait")
         end
       end)
@@ -4325,11 +4325,11 @@ function on_recv(self, frame, meta)
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
       origin_seq = self.pending_tx.origin_seq,
-      dst = self.pending_tx.dst, msg_id = self.pending_tx.msg_id,
+      dst = self.pending_tx.dst, ctr_lo = self.pending_tx.ctr_lo,
       busy_for_ms = n.busy_for_ms, depth = #self.tx_queue,
     })
-    self:log(string.format("tx_requeued msg_id=%d busy_for=%dms (no alt, long wait)",
-      self.pending_tx.msg_id, n.busy_for_ms))
+    self:log(string.format("tx_requeued ctr_lo=%d busy_for=%dms (no alt, long wait)",
+      self.pending_tx.ctr_lo, n.busy_for_ms))
     self.pending_tx = nil
     become_free(self)
     return
@@ -4339,7 +4339,7 @@ function on_recv(self, frame, meta)
     local d = parse_data(frame)
     if not d then return end
     if d.next ~= self.id then return end
-    if self.pending_rx == nil or d.msg_id ~= self.pending_rx.msg_id then return end
+    if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
 
     -- Parse the application-layer origin-header from the payload bytes.
     -- Forwarders peek to get (origin, origin_seq) for dedup; the rest is
@@ -4360,18 +4360,18 @@ function on_recv(self, frame, meta)
       origin_seq = origin_seq,
       from       = d.src,
       dst        = d.dst,
-      msg_id     = d.msg_id,
+      ctr_lo     = d.ctr_lo,
       len        = #d.payload,
     })
     self:log(string.format(
-      "data_rx <- %s (origin=%s seq=%s dst=%s msg_id=%d, %d bytes) -> back to SF%d",
+      "data_rx <- %s (origin=%s seq=%s dst=%s ctr_lo=%d, %d bytes) -> back to SF%d",
       name_of(self, d.src), name_of(self, d.origin),
       tostring(origin_seq), name_of(self, d.dst),
-      d.msg_id, #d.payload, self.routing_sf))
+      d.ctr_lo, #d.payload, self.routing_sf))
 
     -- DATA decoded. Cancel the pending_rx_expiry, retune RX, clear
     -- pending_rx. Then immediately TX the per-hop ACK on routing_sf and
-    -- cache (sender, msg_id) so future retried RTS-from-this-sender
+    -- cache (sender, ctr_lo) so future retried RTS-from-this-sender
     -- short-circuits to a re-ACK without re-processing the DATA.
     if self.pending_rx_expiry_handle then
       self:cancel(self.pending_rx_expiry_handle)
@@ -4380,23 +4380,23 @@ function on_recv(self, frame, meta)
     self:set_rx_sf(self.routing_sf)
     self.pending_rx = nil
 
-    self.last_acked_from[d.src] = { msg_id = d.msg_id, t_ms = self:now() }
+    self.last_acked_from[d.src] = { ctr_lo = d.ctr_lo, t_ms = self:now() }
     -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
     -- bucket. Sender uses it to maintain its outbound link-quality EWMA
     -- to us (which we can't see because we're at the receiving end);
     -- gives the sender a closed-loop signal for routing decisions and
     -- (future) per-neighbor RTS bitmap trimming.
-    local ack = pack_ack(d.msg_id, meta.snr)
+    local ack = pack_ack(d.ctr_lo, meta.snr)
     self:emit("ack_tx", {
       origin = d.origin, payload = user_text, origin_seq = origin_seq,
-      to = d.src, msg_id = d.msg_id, data_snr = meta.snr,
+      to = d.src, ctr_lo = d.ctr_lo, data_snr = meta.snr,
     })
-    self:log(string.format("ack_tx -> %s msg_id=%d (on routing SF%d)",
-      name_of(self, d.src), d.msg_id, self.routing_sf))
+    self:log(string.format("ack_tx -> %s ctr_lo=%d (on routing SF%d)",
+      name_of(self, d.src), d.ctr_lo, self.routing_sf))
     tx_with_retry(self, ack, {
       sf    = self.routing_sf,
       label = "ACK",
-      info  = string.format("to=%s msg=%d", name_of(self, d.src), d.msg_id),
+      info  = string.format("to=%s msg=%d", name_of(self, d.src), d.ctr_lo),
     })
 
     -- Origin-level dedup. Now that the ACK is on its way (the
@@ -4412,7 +4412,7 @@ function on_recv(self, frame, meta)
       if exp and exp > now_ms then
         self:emit("dup_drop", {
           origin = d.origin, payload = user_text, origin_seq = origin_seq,
-          from = d.src, msg_id = d.msg_id,
+          from = d.src, ctr_lo = d.ctr_lo,
         })
         self:log(string.format(
           "dup_drop <- %s (origin=%s seq=%d, already seen — ACK only)",
@@ -4564,7 +4564,7 @@ function on_recv(self, frame, meta)
     local q = parse_q(frame)
     if not q then return end
     -- Cross-network filter — drop foreign Q before any work.
-    if q.network_id ~= self.network_id then return end
+    if q.leaf_id ~= self.leaf_id then return end
     -- Don't respond to ourselves (loop guard).
     if q.src == self.id then return end
     -- Dedup: if we recently responded to the same (src, dest), skip.
