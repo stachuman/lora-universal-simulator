@@ -10,7 +10,7 @@
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
 -- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|ctr_lo(4)](1), payload(n)  →  6+n B |
 -- | `'K'` | ACK    | `K`, [ctr_lo(4)|snr_bucket(4)](1)  →  2 B                                       |
--- | `'N'` | NACK   | `N`, [reserved(4)|ctr_lo(4)](1), busy_for_ms_lo(1), busy_for_ms_hi(1)  →  4 B  |
+-- | `'N'` | NACK   | `N`, [reason(4)|ctr_lo(4)](1), payload(1)  →  3 B  |
 -- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [leaf_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
 --
 -- All control frames carry a 4-bit ctr_lo (per-(originator) flight
@@ -1043,53 +1043,60 @@ local function parse_origin_seq(payload)
 end
 local ORIGIN_SEQ_HDR_LEN = ORIGIN_HDR_LEN   -- legacy name; sized 3 now
 
--- NACK — 4 bytes:
+-- NACK — 3 bytes:
 --   byte 0 : tag 'N'
 --   byte 1 : reason (4 hi nibble) | ctr_lo (4 lo nibble)
---   byte 2-3 : payload (interpretation depends on reason)
+--   byte 2 : payload (reason-specific)
 --
 -- Reasons:
---   NACK_REASON_BUSY_RX (0): legacy pending_rx-busy signal.
---     payload = busy_for_ms (uint16 LE) — how long the receiver expects
---     to remain locked to its current pending_rx flight.
+--   NACK_REASON_BUSY_RX (0): pending_rx-busy signal.
+--     payload = busy_for_ms / 16  (quantized, 16 ms granularity, range 0..4080 ms)
+--     CEILING-divide so the reported window is never shorter than actual.
 --   NACK_REASON_BUDGET (1): duty-cycle budget is exhausted at the
 --     receiver. Don't keep retrying me — route around.
---     payload byte 0 = budget_tier (0..3), payload byte 1 = reserved.
+--     payload = tier(4 hi) | headroom_buckets(4 lo)
+--     tier 0..15; headroom_buckets 0..15 → 0..100% (value/15 × 100%).
 --
--- Reason 0 is the wire encoding the legacy code used (writing 0 in the
--- high nibble of byte 1 implicitly), so old receivers that ignore the
--- high nibble see exactly what they saw before. New receivers MUST
--- read reason to interpret payload correctly.
+-- Shrunk from 4→3 bytes per ROADMAP §7.0.5. busy_for_ms quantum = 16 ms
+-- (well below the 50 ms natural retry-jitter floor). Max range 4080 ms
+-- covers SF12 worst-case with 4× headroom.
 local NACK_REASON_BUSY_RX = 0
 local NACK_REASON_BUDGET  = 1
 
-local function pack_nack(ctr_lo, reason, payload_lo, payload_hi)
-  reason = reason or NACK_REASON_BUSY_RX
-  payload_lo = payload_lo or 0
-  payload_hi = payload_hi or 0
-  if payload_lo < 0 then payload_lo = 0 elseif payload_lo > 255 then payload_lo = 255 end
-  if payload_hi < 0 then payload_hi = 0 elseif payload_hi > 255 then payload_hi = 255 end
+local NACK_BUSY_QUANTUM_MS          = 16   -- granularity of BUSY_RX payload
+local NACK_BUDGET_HEADROOM_BUCKETS  = 16   -- headroom 0..15 → 0..100%
+
+-- NACK — 3 bytes:
+--   byte 0 : tag 'N'
+--   byte 1 : reason (4 hi) | ctr_lo (4 lo)
+--   byte 2 : payload (reason-specific)
+--             BUSY_RX:  busy_for_ms / 16  (0..4080 ms, 16 ms granularity)
+--             BUDGET:   tier (4 hi) | headroom_buckets (4 lo)
+local function pack_nack(ctr_lo, reason, payload)
+  reason  = reason or NACK_REASON_BUSY_RX
+  payload = payload or 0
+  if payload < 0 then payload = 0 elseif payload > 255 then payload = 255 end
   local byte1 = ((reason & 0xf) << 4) | (ctr_lo & 0xf)
-  return "N" .. string.char(byte1)
-              .. string.char(payload_lo)
-              .. string.char(payload_hi)
+  return "N" .. string.char(byte1) .. string.char(payload)
 end
 
 local function parse_nack(frame)
-  if #frame < 4 or frame:sub(1,1) ~= "N" then return nil end
+  if #frame < 3 or frame:sub(1,1) ~= "N" then return nil end
   local b1 = frame:byte(2)
+  local payload = frame:byte(3)
   local reason = (b1 >> 4) & 0xf
-  local p_lo, p_hi = frame:byte(3), frame:byte(4)
-  local r = {
-    ctr_lo      = b1 & 0xf,
-    reason      = reason,
-    payload_lo  = p_lo,
-    payload_hi  = p_hi,
-    -- Convenience aliases — interpretations per reason
-    busy_for_ms = (reason == NACK_REASON_BUSY_RX) and (p_lo + p_hi * 256) or nil,
-    budget_tier = (reason == NACK_REASON_BUDGET)  and p_lo                or nil,
+  local out = {
+    reason  = reason,
+    ctr_lo  = b1 & 0xf,
+    payload = payload,
   }
-  return r
+  if reason == NACK_REASON_BUSY_RX then
+    out.busy_for_ms = payload * NACK_BUSY_QUANTUM_MS
+  elseif reason == NACK_REASON_BUDGET then
+    out.budget_tier             = (payload >> 4) & 0xf
+    out.budget_headroom_buckets = payload & 0xf
+  end
+  return out
 end
 
 -- Q — RREQ-route, 4 bytes:
@@ -3833,8 +3840,9 @@ function on_recv(self, frame, meta)
       local busy_for = self.pending_rx.set_at_ms + expiry - now
       if busy_for < 0 then busy_for = 0 end
       if busy_for > 65535 then busy_for = 65535 end
-      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUSY_RX,
-        busy_for % 256, math.floor(busy_for / 256) % 256)
+      local busy_payload = math.floor((busy_for + NACK_BUSY_QUANTUM_MS - 1) / NACK_BUSY_QUANTUM_MS)
+      if busy_payload > 255 then busy_payload = 255 end
+      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUSY_RX, busy_payload)
       self:emit("nack_tx", {
         origin = r.origin,    -- the inbound RTS's flight, not our pending_rx's
         to = r.src, ctr_lo = r.ctr_lo, busy_for_ms = busy_for, reason = "pending_rx",
@@ -3915,7 +3923,7 @@ function on_recv(self, frame, meta)
     -- is a stalled flight that the sender must rts_timeout out of.
     local my_tier = compute_budget_tier(self)
     if my_tier >= BUDGET_TIER_CRITICAL then
-      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUDGET, my_tier, 0)
+      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUDGET, ((my_tier & 0xf) << 4) | 0)
       self:emit("nack_tx", {
         origin = r.origin, to = r.src, ctr_lo = r.ctr_lo,
         reason = "budget_low", tier = my_tier,

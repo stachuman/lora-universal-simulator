@@ -298,38 +298,47 @@ Special cases:
 - `q.dest == self.id`: someone's asking for ME; schedule triggered
   beacon (receivers learn us via the BCN src field, not entries).
 
-### 3.6 NACK (`'N'`) — 4 bytes
+### 3.6 NACK (`'N'`) — 3 bytes
+
+Shrunk from 4→3 bytes (ROADMAP §7.0.5). The fourth byte (payload_hi)
+was dropped; the remaining payload byte encodes per-reason data with
+sufficient fidelity for all current use-cases.
 
 ```
-byte:  0   1                       2                3
-       ┌───┬───────────────────┬─────────────────┬─────────────────┐
-       │'N'│ reason   (4 hi)   │ payload_lo      │ payload_hi      │
-       │   │ ctr_lo   (4 lo)   │                 │                 │
-       └───┴───────────────────┴─────────────────┴─────────────────┘
+byte:  0   1                       2
+       ┌───┬───────────────────┬─────────────────┐
+       │'N'│ reason   (4 hi)   │ payload         │
+       │   │ ctr_lo   (4 lo)   │ (reason-specific│
+       └───┴───────────────────┴─────────────────┘
 ```
 
-- `ctr_lo` (4 bits): RTS's ctr_lo being NACKed.
+- `ctr_lo` (4 bits, lo nibble of byte 1): RTS's `ctr_lo` being NACKed.
 - `reason` (4 bits, hi nibble of byte 1): which NACK variant this is.
   Currently defined:
-  - **0 = `BUSY_RX`** — legacy receiver-busy signal. Payload is
-    `busy_for_ms` (uint16 LE) — how long the receiver's `pending_rx`
-    will hold this slot.
-  - **1 = `BUDGET`** — receiver's duty-cycle budget tier is
-    CRITICAL or EXHAUSTED (§9.x). Payload byte 0 = `budget_tier`
-    (0..3), byte 1 = reserved.
+  - **0 = `BUSY_RX`** — receiver is holding `pending_rx` for a
+    different flight. Payload byte = `busy_for_ms / 16` (ceiling-divide
+    so the reported window is never *shorter* than actual). Range:
+    0..4080 ms at 16 ms granularity. The 16 ms quantum is well below the
+    natural retry-jitter floor (~50 ms); SF12 worst-case airtime is
+    ~1100 ms, giving 4× headroom before overflow.
+  - **1 = `BUDGET`** — receiver's duty-cycle tier is CRITICAL or
+    EXHAUSTED (§9.x). Payload byte = `tier(4 hi) | headroom_buckets(4 lo)`.
+    `tier` 0..15 (current tiers: NORMAL=0, STRAINED=1, CRITICAL=2,
+    EXHAUSTED=3); `headroom_buckets` 0..15 → 0–100% remaining budget
+    (value/15 × 100%). Pass 0 for headroom when unknown.
   - 2..15 reserved.
-- `payload_lo`, `payload_hi`: per-reason payload bytes; interpretation
-  per the table above.
 
-**Wire-compat note:** before the BUDGET reason was added, byte 1's high
-nibble was always 0 (`reason=BUSY_RX` implicitly). Old receivers that
-ignored that nibble see exactly the same bytes for BUSY_RX NACKs. New
-receivers MUST read `reason` to interpret payload correctly.
+**Payload decoding summary:**
 
-NACK rides on `data_sf` (BUSY_RX) or `routing_sf` (BUDGET — sender's
-RX is already on routing for the BCN-rejection path). The originator's
-RX state is whatever the sender's last retune left it on — most
-common case for BUSY_RX is data_sf since sender retuned post-RTS-tx.
+| reason | byte 2 encoding | decoded fields |
+|--------|-----------------|----------------|
+| BUSY_RX (0) | `busy_for_ms / 16` (uint8, ceiling) | `busy_for_ms = byte2 × 16` |
+| BUDGET  (1) | `tier[7:4] \| headroom[3:0]`  | `budget_tier`, `budget_headroom_buckets` |
+
+NACK rides on `routing_sf` for both reason variants. The originator's
+RX is already retuned to `data_sf` after its RTS-tx, but NACK is
+distinguished from CTS by its tag byte ('N' vs 'C'), so the originator
+hears it regardless of which SF it is listening on at that moment.
 
 ### 3.8 Frame-size summary
 
@@ -341,7 +350,7 @@ common case for BUSY_RX is data_sf since sender retuned post-RTS-tx.
 | CTS | 2 | fixed |
 | DATA | 6 + n | n = payload bytes (≤ `max_payload_bytes`) |
 | ACK | 2 | fixed |
-| NACK | 4 | fixed |
+| NACK | 3 | fixed |
 
 Per-flight control overhead (RTS + CTS + ACK) = **12 bytes**.
 
