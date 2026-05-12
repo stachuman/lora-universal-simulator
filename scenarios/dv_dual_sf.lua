@@ -6,7 +6,7 @@
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
 -- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), n_entries(1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}  →  4 + [1+4L]? + 3n B |
--- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [leaf_id(4)|ctr_lo(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
+-- | `'R'` | RTS    | `R`, src(1), next(1), [addr_len(3)|rsv(1)|leaf_id(4)](1), dst(1 when addr_len=0), [ctr_lo(4)|rsv(4)](1), sf_bitmap(1), payload_len(1)  →  8 B (in-leaf) |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
 -- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
 -- | `'K'` | ACK    | `K`, [ctr_lo(4)|snr_bucket(4)](1)  →  2 B                                       |
@@ -943,19 +943,23 @@ end
 -- (max_payload_bytes), which mattered when bodies range 10–200 bytes —
 -- real protocols can't afford to budget every flight at the absolute
 -- upper bound.
--- RTS — 8 bytes, bit-packed:
+-- RTS — 8 bytes (in-leaf, addr_len=0):
 --   byte 0 : tag 'R'
---   byte 1 : origin (8)
---   byte 2 : src    (8)
---   byte 3 : dst    (8)
---   byte 4 : next   (8)
---   byte 5 : leaf_id (4 hi nibble) | ctr_lo (4 lo nibble)
+--   byte 1 : src   (previous-hop, kept since first hop-level frame)
+--   byte 2 : next  (immediate next-hop receiver)
+--   byte 3 : addr_len(3 hi) | rsv(1) | leaf_id(4 lo)
+--   byte 4 : dst   (final destination; single byte when addr_len=0)
+--   byte 5 : ctr_lo(4 hi) | rsv(4 lo)
 --   byte 6 : sf_bitmap (8)
 --   byte 7 : payload_len (8)
-local function pack_rts(leaf_id, origin, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len)
-  local b5 = ((leaf_id & 0xf) << 4) | (ctr_lo & 0xf)
-  return "R" .. string.char(origin) .. string.char(src) .. string.char(dst)
+local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len)
+  local addr_len = 0
+  local b3 = ((addr_len & 0x07) << 5) | (leaf_id & 0x0f)
+  local b5 = (ctr_lo & 0x0f) << 4
+  return "R" .. string.char(src)
               .. string.char(next_hop)
+              .. string.char(b3)
+              .. string.char(dst)
               .. string.char(b5)
               .. string.char(sf_bitmap)
               .. string.char(payload_len % 256)
@@ -963,14 +967,17 @@ end
 
 local function parse_rts(frame)
   if #frame < 8 or frame:sub(1,1) ~= "R" then return nil end
+  local b3 = frame:byte(4)
+  local addr_len = (b3 >> 5) & 0x07
+  if addr_len ~= 0 then return nil end          -- hierarchy support deferred
+  local leaf_id = b3 & 0x0f
   local b5 = frame:byte(6)
   return {
-    leaf_id  = (b5 >> 4) & 0xf,
-    origin      = frame:byte(2),
-    src         = frame:byte(3),
-    dst         = frame:byte(4),
-    next        = frame:byte(5),
-    ctr_lo      = b5 & 0xf,
+    leaf_id     = leaf_id,
+    src         = frame:byte(2),
+    next        = frame:byte(3),
+    dst         = frame:byte(5),
+    ctr_lo      = (b5 >> 4) & 0x0f,
     sf_bitmap   = frame:byte(7),
     payload_len = frame:byte(8),
   }
@@ -1207,7 +1214,7 @@ end
 -- Frame-header lengths (excluding payload). Computed from the wire-format
 -- table at top of file so airtime predictions stay precise as we extend the
 -- protocol — bump these if the frame layout changes.
-local RTS_LEN = 8       -- 'R' + origin + src + dst + next + (leaf_id<<4|ctr_lo) + sf_bitmap + payload_len
+local RTS_LEN = 8       -- 'R' + src + next + [addr_len|rsv|leaf_id] + dst + [ctr_lo<<4|rsv] + sf_bitmap + payload_len
 local CTS_LEN = 2       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | reserved_1)
 local DATA_HDR_LEN = 6  -- 'D' + byte1 + next + dst + ctr_lo + ctr_hi (inner+MAC follow)
 -- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
@@ -2062,7 +2069,7 @@ local function tx_rts_retry(self, reason)
 
   -- payload_len lets the receiver size its pending_rx_expiry to the
   -- actual DATA airtime instead of max_payload_bytes worst-case.
-  local rts = pack_rts(self.leaf_id, px.origin, self.id, px.dst, px.next, px.ctr_lo,
+  local rts = pack_rts(self.leaf_id, self.id, px.dst, px.next, px.ctr_lo,
                        self.allowed_sf_bitmap, #px.payload + MAC_LEN)
   self:emit("rts_retry", {
     origin = px.origin, payload = px.user_text, ctr = px.ctr,
@@ -2514,8 +2521,7 @@ local function pending_rx_expiry_fire(self, captured_ctr_lo)
   if self.pending_rx == nil then return end
   if self.pending_rx.ctr_lo ~= captured_ctr_lo then return end
   self:emit("data_rx_timeout", {
-    origin = self.pending_rx.origin,
-    -- body + ctr unknown — DATA never arrived
+    -- origin unknown at RTS phase; populated from DATA on arrival
     from = self.pending_rx.from, ctr_lo = captured_ctr_lo,
   })
   self:log(string.format("data_rx_timeout from=%s ctr_lo=%d -> clearing pending_rx",
@@ -2766,7 +2772,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   -- Body size = #payload - 2 (stripping the 2-byte inner header from inner bytes).
   -- Equivalently: #payload + MAC_LEN (since payload already has 2-byte inner hdr).
   local payload_len = #payload + MAC_LEN
-  local rts = pack_rts(self.leaf_id, origin, self.id, dst_id, primary_next, mid,
+  local rts = pack_rts(self.leaf_id, self.id, dst_id, primary_next, mid,
                        self.allowed_sf_bitmap, payload_len)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   self:emit("rts_tx", {
@@ -3870,7 +3876,6 @@ function on_recv(self, frame, meta)
     if cached and cached.ctr_lo == r.ctr_lo
        and (self:now() - cached.t_ms) < self.last_acked_ttl_ms then
       self:emit("rts_already_acked", {
-        origin = r.origin,    -- payload unknown — RTS frame doesn't carry it
         from = r.src, ctr_lo = r.ctr_lo,
       })
       self:log(string.format("rts_already_acked <- %s ctr_lo=%d -> re-sending ACK",
@@ -3894,14 +3899,13 @@ function on_recv(self, frame, meta)
       -- they can re-attempt DATA.
       if self.pending_rx.from == r.src and self.pending_rx.ctr_lo == r.ctr_lo then
         self:emit("rts_rx_dup", {
-          origin = r.origin,    -- payload unknown at RTS phase
           from = r.src, ctr_lo = r.ctr_lo,
         })
         self:log(string.format("rts_rx_dup <- %s ctr_lo=%d -> resending CTS (sf=%d)",
           name_of(self, r.src), r.ctr_lo, self.pending_rx.chosen_data_sf))
         local cts = pack_cts(r.ctr_lo, self.pending_rx.chosen_data_sf)
         self:emit("cts_tx", {
-          origin = r.origin, to = r.src, ctr_lo = r.ctr_lo, dup = true,
+          to = r.src, ctr_lo = r.ctr_lo, dup = true,
           chosen_data_sf = self.pending_rx.chosen_data_sf,
         })
         tx_with_retry(self, cts, {
@@ -3929,7 +3933,6 @@ function on_recv(self, frame, meta)
       if busy_payload > 255 then busy_payload = 255 end
       local nack = pack_nack(r.ctr_lo, NACK_REASON_BUSY_RX, busy_payload)
       self:emit("nack_tx", {
-        origin = r.origin,    -- the inbound RTS's flight, not our pending_rx's
         to = r.src, ctr_lo = r.ctr_lo, busy_for_ms = busy_for, reason = "pending_rx",
       })
       self:log(string.format("nack_tx -> %s ctr_lo=%d busy_for=%dms (busy with pending_rx from %s/%d)",
@@ -3953,7 +3956,7 @@ function on_recv(self, frame, meta)
       -- sender's rts_timeout fires after ~5 s and the existing
       -- tx_blind_alt / cascade machinery walks to the next-hop.
       self:emit("rts_drop_pending_tx", {
-        origin = r.origin, from = r.src, ctr_lo = r.ctr_lo,
+        from = r.src, ctr_lo = r.ctr_lo,
         our_pending_ctr_lo = self.pending_tx.ctr_lo,
       })
       return
@@ -4010,7 +4013,7 @@ function on_recv(self, frame, meta)
     if my_tier >= BUDGET_TIER_CRITICAL then
       local nack = pack_nack(r.ctr_lo, NACK_REASON_BUDGET, ((my_tier & 0xf) << 4) | 0)
       self:emit("nack_tx", {
-        origin = r.origin, to = r.src, ctr_lo = r.ctr_lo,
+        to = r.src, ctr_lo = r.ctr_lo,
         reason = "budget_low", tier = my_tier,
       })
       self:log(string.format(
@@ -4037,7 +4040,7 @@ function on_recv(self, frame, meta)
     local chosen_sf  = select_data_sf(snr_for_sf, r.sf_bitmap, self.sf_margin_db)
     if chosen_sf == nil then
       self:emit("rts_drop_no_sf", {
-        origin = r.origin, from = r.src, ctr_lo = r.ctr_lo,
+        from = r.src, ctr_lo = r.ctr_lo,
         sf_bitmap = r.sf_bitmap,
       })
       self:log(string.format("rts_drop_no_sf <- %s ctr_lo=%d (empty sf_bitmap)",
@@ -4046,18 +4049,16 @@ function on_recv(self, frame, meta)
     end
 
     self:emit("rts_rx", {
-      origin = r.origin,    -- payload unknown at RTS phase
       from = r.src, dst = r.dst, ctr_lo = r.ctr_lo,
       sf_bitmap = r.sf_bitmap, chosen_data_sf = chosen_sf,
       rx_snr = meta.snr, ewma_snr = snr_for_sf,
     })
     self:log(string.format(
-      "rts_rx <- %s (origin=%s dst=%s ctr_lo=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
-      name_of(self, r.src), name_of(self, r.origin), name_of(self, r.dst),
+      "rts_rx <- %s (dst=%s ctr_lo=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
+      name_of(self, r.src), name_of(self, r.dst),
       r.ctr_lo, r.sf_bitmap, meta.snr, chosen_sf))
     self.pending_rx = {
       from        = r.src,
-      origin      = r.origin,
       dst         = r.dst,
       ctr_lo      = r.ctr_lo,
       set_at_ms   = self:now(),       -- for NACK busy_for_ms calc
@@ -4069,7 +4070,7 @@ function on_recv(self, frame, meta)
 
     local cts = pack_cts(r.ctr_lo, chosen_sf)
     self:emit("cts_tx", {
-      origin = r.origin, to = r.src, ctr_lo = r.ctr_lo,
+      to = r.src, ctr_lo = r.ctr_lo,
       chosen_data_sf = chosen_sf,
     })
     self:log(string.format("cts_tx -> %s ctr_lo=%d chose SF%d (on routing SF%d)",

@@ -176,27 +176,38 @@ Phase 2 packed entries to 3 bytes (−24.5% airtime). Phase 3 (this spec)
 repacked byte 1 to add flag bits and repacked entry byte 2 to add the
 `is_gateway` bit and use the `hops-1` encoding.
 
-### 3.2 RTS (`'R'`) — 8 bytes
+### 3.2 RTS (`'R'`) — 8 bytes (in-leaf)
+
+Per ROADMAP §7.0.3. `origin` removed from wire — destination identifies the
+originator from the inner DATA payload (Phase 4). Forwarders never needed origin
+on the RTS wire. Future cross-layer hops add +1 byte per boundary; addr_len
+encodes depth.
 
 ```
-byte:  0   1     2     3    4     5                    6           7
-       ┌───┬─────┬─────┬───┬─────┬───────────────────┬───────────┬─────────────┐
-       │'R'│ orig│ src │dst│ next│ leaf_id (4hi) │ sf_bitmap │ payload_len │
-       │   │     │     │   │     │ ctr_lo (4 lo)    │           │             │
-       └───┴─────┴─────┴───┴─────┴───────────────────┴───────────┴─────────────┘
+byte:  0   1    2    3                        4    5                   6           7
+       ┌───┬────┬────┬────────────────────────┬────┬───────────────────┬───────────┬─────────────┐
+       │'R'│ src│next│ addr_len (3 hi)        │dst │ ctr_lo (4 hi)     │ sf_bitmap │ payload_len │
+       │   │    │    │ rsv (1)                │    │ rsv (4 lo)        │           │             │
+       │   │    │    │ leaf_id (4 lo)         │    │                   │           │             │
+       └───┴────┴────┴────────────────────────┴────┴───────────────────┴───────────┴─────────────┘
 ```
 
-- `origin` (8 bits): end-to-end source (the originator, not relays).
-- `src` (8 bits): immediate sender of THIS RTS frame (the previous
-  hop). For an originator's first hop, `src == origin`.
-- `dst` (8 bits): end-to-end destination.
+- `src` (8 bits): immediate sender of THIS RTS frame (the previous hop).
+  Kept because this is the first hop-level frame; the receiver has no
+  `pending_rx` yet and needs to know who to CTS-reply to.
 - `next` (8 bits): immediate next-hop receiver. Receivers other than
   `next` drop the RTS silently.
-- `leaf_id` (4 bits): mesh identifier. Receivers reject foreign-
-  network RTSes before any CTS work.
-- `ctr_lo` (4 bits): per-(originator) flight counter, wraps at 16.
+- `addr_len` (3 bits, hi of byte 3): number of extra hierarchy-level bytes
+  that follow `dst`. Always `0` this phase (in-leaf only); hierarchy
+  support deferred.
+- `rsv` (1 bit, mid of byte 3): reserved, set to 0.
+- `leaf_id` (4 bits, lo of byte 3): mesh identifier. Receivers reject
+  foreign-network RTSes before any CTS work. Pattern-matches DATA byte 1
+  (both have `addr_len` in top 3 bits).
+- `dst` (8 bits): end-to-end destination; single byte when `addr_len=0`.
+- `ctr_lo` (4 bits, hi nibble of byte 5): per-flight counter, wraps at 16.
   Combined with `last_acked_from`'s 10s TTL gives correct hop-level
-  retry dedup at any realistic send rate.
+  retry dedup at any realistic send rate. Low nibble of byte 5 is reserved.
 - `sf_bitmap` (8 bits): bit `i` set means SF `i+5` is acceptable for
   the data leg. e.g., `0b00001110` = {SF6, SF7, SF8}.
 - `payload_len` (8 bits): byte count of the upcoming DATA inner bytes

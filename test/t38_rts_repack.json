@@ -1,0 +1,33 @@
+{
+  "_name": "t38_rts_repack",
+  "_desc": "Validates new RTS wire format (no origin field, byte 3 packs addr_len|rsv|leaf_id, ctr_lo in own byte). 3-node line topology; multi-hop send exercises the full RTS-CTS-DATA-ACK chain twice (alice→carol via bob).",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 23,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 8000,  "node": "alice", "command": "send carol first" },
+    { "at_ms": 18000, "node": "alice", "command": "send carol second" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "delivered", "value": "first" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "delivered", "value": "second" }
+  ]
+}
