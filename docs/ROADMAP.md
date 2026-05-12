@@ -648,6 +648,188 @@ See §3 for the full unified design. Specific concerns originally raised here ar
 - Should the bridging policy be operator-configured (whitelist) or dynamic (route quality)?
 - Compose with §8 cryptography — cross-network traffic probably needs different key material.
 
+### 7.0 Wire-format decisions (LOCKED 2026-05-12)
+
+The §7.1 DATA, §7.2 BCN, and §7.4 control-plane (RTS/CTS/ACK/NACK) layouts
+below are finalized at bit level. §7.5 multicast wire bits are reserved in
+DATA byte 1 (`IS_MULTICAST`) and the dst_count/dst_list field positions
+are claimed, but the forwarding algorithm + dedup tables stay TBD until
+multicast functionality is reviewed as a whole.
+
+`'Q'`, `'I'`, and `'?'` frames are out of scope for this round.
+
+Locked changes summarize as:
+
+| Frame | Today | Locked | Delta |
+|---|---|---|---|
+| BCN (49-entry, plain leaf) | 151 B | 151 B | 0 (re-pack only) |
+| BCN (gateway, 1 upper layer) | n/a | 156 B | +5 B (schedule record) |
+| RTS (in-leaf, `addr_len=0`) | 8 B | 8 B | 0 (re-pack) |
+| RTS (cross-region, `addr_len=1`) | n/a | 9 B | +1 B per hierarchy hop |
+| CTS | 2 B | 2 B | 0 (rename only) |
+| ACK | 2 B | 2 B | 0 (rename only) |
+| NACK | 4 B | **3 B** | **−1 B** (quantized busy_for_ms) |
+| DATA (in-leaf) | 8 B + n | 10 B + n | +2 B (crypto + privacy stubs) |
+
+Wide-spread renames:
+- `network_id` (4 bits, in BCN+RTS) → `leaf_id` (4 bits, same role)
+- `msg_id` (4 bits, in BCN+RTS+CTS+ACK+NACK+DATA) → `ctr_lo` (4 bits, low nibble of DATA's 16-bit `ctr`)
+
+#### 7.0.1 DATA — locked layout
+
+```
+byte 0: 'D'
+byte 1: addr_len(3 hi) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
+byte 2: next(8)
+
+if IS_MULTICAST == 0:
+  bytes 3..(3+addr_len): dst (addr_len + 1 bytes; front=highest layer, peeled at gateway)
+
+if IS_MULTICAST == 1 (MUST have addr_len == 0):
+  byte 3: dst_count(8)
+  bytes 4..(3 + dst_count): dst_list (dst_count bytes; OMITTED when dst_count==0)
+
+(then for both variants:)
+next 2: ctr (16 bits, little-endian)
+next n: ciphertext (plaintext payload until §8 crypto lands)
+last 4: MAC (zeros until §8 crypto lands)
+```
+
+Byte-1 bit positions (high→low):
+- bits 7-5: `addr_len` (3 bits, range 0..7 — covers all realistic hierarchy depths)
+- bit 4: reserved (gained from shrinking `addr_len` from 4 bits)
+- bit 3 (0x08): `E2E_ACK_REQ`
+- bit 2 (0x04): `E2E_IS_ACK`
+- bit 1 (0x02): `IS_MULTICAST`
+- bit 0 (0x01): reserved
+
+Encrypted inner payload structure (once §8 lands; for now treat as plaintext after the wire `ctr`):
+```
+inner = src_address_len(1) | src_address(src_address_len + 1) | body
+body  = user_text                       -- normal DATA
+      | [acked_ctr_lo, acked_ctr_hi]    -- if E2E_FLAG_IS_ACK
+```
+
+`ctr` semantics:
+- Per-(origin, dst) sender-maintained counter, 16-bit LE, NV-persisted both sides
+- Triple duty: crypto-nonce entropy + replay protection + app-layer dedup + source of `ctr_lo` for hop-level matching
+- Wrap at 65,536 → forced re-key (~18 years at 10 msg/day; not a practical concern)
+- Replay check at destination: strict monotonic — `ctr > last_seen_counter[peer]`
+- Hop-level echo: `ctr_lo = ctr & 0xF`, flows into CTS/ACK/NACK
+
+Local-delivery rule: when forwarder receives DATA with `addr_len==0` AND `IS_MULTICAST==0` AND `dst[0]==self.id` → deliver locally.
+
+E2E ACK return-path: destination decrypts payload, reads originator's full hierarchical address from inner `src_address`, constructs a return DATA frame addressed back via that address (`E2E_IS_ACK=1`, body=`[acked_ctr_lo, acked_ctr_hi]`). Forwarders route the return frame via standard `rt[]` lookups — **no special soft-state cache needed**. Composes with §9 T2 because origin's wire address is reconstructed at the destination post-decrypt, never traveling in plaintext on the forward leg.
+
+MAC coverage (implementation-deferred to §8 phase): end-to-end MAC covers `dst_at_origination` + `addr_len_at_origination` + other plaintext fields, NOT the gateway-peeled per-hop values. Gateways peel `dst[0]` but don't re-MAC.
+
+#### 7.0.2 BCN — locked layout
+
+```
+byte 0: 'B'
+byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
+byte 2: src(8)
+byte 3: n_entries(8)
+
+if has_schedule == 1:
+  byte 4: layer_count(8)
+  bytes 5..(4 + 4 × layer_count): schedule records (4 B each)
+
+(then n_entries route entries × 3 bytes each, contiguous)
+```
+
+Schedule record (4 bytes):
+```
+byte 0: layer(4 hi) | (sf - 5)(3) | rsv(1)
+byte 1: duration_100ms(8)         -- 0..25.5 s
+byte 2: offset_from_bcn(8)        -- 0..255 s from receiver's bcn_rx_time
+byte 3: reserved(8)               -- future: period override, channel, TX power, etc.
+```
+
+Route entry (3 bytes):
+```
+byte 0: dest(8)
+byte 1: next(8)
+byte 2: score_bucket(4 hi) | (hops - 1)(3) | is_gateway(1 lo)
+```
+
+`hops` encoding: wire stores `hops - 1` (range 0..7), in-memory `rt[]` stores `hops` (range 1..8). Preserves today's 8-hop cap exactly. All range checks against `rt[].hops` remain on the 1..8 scale; only `pack_beacon`/`parse_beacon` shift.
+
+`is_gateway` propagation: rides on each rt[] candidate alongside score/hops. Per-candidate storage (since different advertisers can disagree). Tied to existing rt-aging TTLs — no separate lifecycle.
+
+`n_entries` stays 8-bit (today's wire size). No escape mechanism. Practical max ~83 entries for 255 B LoRa frame.
+
+#### 7.0.3 RTS — locked layout
+
+```
+byte 0: 'R'
+byte 1: src(8)                                           -- prev-hop (kept; first hop-level frame)
+byte 2: next(8)
+byte 3: addr_len(3 hi) | rsv(1) | leaf_id(4 lo)          -- same pattern as DATA byte 1
+bytes 4..(4 + addr_len): dst (addr_len + 1 bytes)
+next 1: ctr_lo(4 hi) | rsv(4 lo)
+next 1: sf_bitmap(8)
+last 1: payload_len(8)
+```
+
+In-leaf size: 8 B (same as today). Each hierarchy hop adds 1 B.
+
+Field changes:
+- `origin` (1 B): **REMOVED** (§9 T2 privacy — destination identifies origin via MAC trial-verify + decrypted inner payload)
+- `src`: kept — first hop-level frame, receiver has no pending_rx yet
+- `dst`: variable, `addr_len + 1` bytes
+- `network_id` (4 bits): renamed to `leaf_id`, moved to byte 3 low nibble
+- `msg_id` (4 bits): renamed to `ctr_lo`, now in its own byte's high nibble (low nibble reserved)
+
+#### 7.0.4 CTS / ACK — locked layout (rename only)
+
+CTS (2 B, unchanged size):
+```
+byte 0: 'C'
+byte 1: ctr_lo(4 hi) | (sf - 5)(3) | rsv(1)
+```
+
+ACK (2 B, unchanged size):
+```
+byte 0: 'K'
+byte 1: ctr_lo(4 hi) | snr_bucket(4 lo)
+```
+
+Bit positions and matching semantics identical to today; only the 4-bit `msg_id` slot is renamed `ctr_lo`.
+
+#### 7.0.5 NACK — locked layout (3 B, shrunk from 4 B)
+
+```
+byte 0: 'N'
+byte 1: reason(4 hi) | ctr_lo(4 lo)
+byte 2: payload(8)                       -- reason-specific
+```
+
+Payload encoding by reason:
+
+| Reason | Code | Payload meaning | Range / units |
+|---|---|---|---|
+| `BUSY_RX` | 0 | `busy_for_ms / 16` | 0..4080 ms (16 ms quantum) |
+| `BUDGET` | 1 | `tier(4 hi) | headroom_buckets(4 lo)` | tier 0..15, headroom 0..15 (mapped to 0..100%) |
+| reserved | 2..15 | future | — |
+
+16 ms quantization on `busy_for_ms` is well below natural retry-jitter floor (~50 ms `retry_jitter_ms`), invisible in practice. 4080 ms ceiling has 4× headroom over realistic SF12 worst-case (~1 s).
+
+#### 7.0.6 Implementation phases
+
+Recommended sequencing to minimize blast radius:
+
+1. **Renames** — `network_id` → `leaf_id`, `msg_id` → `ctr_lo`. Pure internal; no wire-format change. Smallest blast radius, validates the codepath.
+2. **NACK 4→3 B** — encoder/decoder change + sender-side wait-time conversion (apply `× 16` on RX, `÷ 16` on TX). Independent.
+3. **BCN re-pack** — new byte 1 flags, hops-1 encoding, is_gateway bit, schedule-record path (always omitted at first since no node sets `has_schedule=1`). Touches `pack_beacon`/`parse_beacon` and route entry storage.
+4. **RTS re-pack** — new byte 3 packing, dst stays 1 B (addr_len=0 only), ctr_lo gets own byte. Touches `pack_rts`/`parse_rts`. In-leaf size unchanged (8 B).
+5. **DATA re-pack** — new flags byte, `ctr` field (replaces today's `origin_seq` payload header), ciphertext = plaintext placeholder, MAC = 4 zero bytes placeholder, E2E flags promoted from payload header to wire byte 1. Touches `pack_data`/`parse_data` and the entire E2E ACK code path. **Biggest single phase.**
+6. **Hierarchy support** (deferred until needed) — `addr_len > 0`, dst byte-array, gateway peeling, schedule-record emission. Not blocking other work.
+
+Tests in `test/run_tests.sh` (38 scenarios) and `webapp/tests/` (36 pytests) must stay green after each phase.
+
+---
+
 ### 7.1 Concrete encrypted hierarchical DATA frame (synthesis of §7 + §8.1 + §9 T2)
 
 **Problem statement.** Combine multi-network routing (§7), end-to-end encryption (§8.1), and originator anonymity (§9 T2) into a single concrete DATA frame that supports:
