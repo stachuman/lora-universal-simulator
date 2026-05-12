@@ -1160,7 +1160,7 @@ local RTS_LEN = 8       -- 'R' + origin + src + dst + next + (leaf_id<<4|ctr_lo)
 local CTS_LEN = 2       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | reserved_1)
 local DATA_HDR_LEN = 6  -- 'D' + origin + src + dst + next + (reserved_4|ctr_lo_4) (payload follows)
 local ACK_LEN = 2       -- 'K' + (ctr_lo<<4 | snr_bucket)
-local NACK_LEN = 4      -- 'N' + (reserved_4|ctr_lo_4) + busy_for_ms_lo + busy_for_ms_hi
+local NACK_LEN = 3      -- 'N' + (reason_4|ctr_lo_4) + payload (reason-specific encoding)
 local Q_LEN    = 4      -- 'Q' + src + dest + (leaf_id_4|reserved_4)
 
 -- LoRa on-air time in milliseconds (Semtech AN1200.13). This is intentionally
