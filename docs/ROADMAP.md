@@ -1676,6 +1676,24 @@ rt_learn_from_carried(carrier_id, dst, carrier_rt_hops, our_snr_to_carrier):
 - **Loop creation**: a learned candidate could create a 2-hop or 3-hop cycle. Existing `3-cycle prune` (§5.3) already handles this for BCN-derived entries; identical mechanism applies.
 - **Malicious claim**: a node could lie about rt_hops. Same trust assumption as BCN. No new attack surface beyond what BCN already exposes.
 
+**Penalty-aware behavior (composes with §5.7 tier-aware routing).**
+
+The tier-aware penalty system (§5.7) — `TIER_SCORE_PENALTY_DB = {HEALTHY=0, STRAINED=2, CRITICAL=5, EXHAUSTED=20}` — must be honored at three points in this design:
+
+**1. What gets written to `prev_fwd_rt_hops`.** Forwarder writes `self.rt[dst].hops` where `rt[dst].primary` has already been selected via `route_strictly_better` with tier-penalty consideration. If the "shortest path" runs through a peer the forwarder knows is SATURATED, the alt has already been promoted to primary, and the alt's hops are what get written. **Carried value reflects the path the forwarder would actually use under current tier conditions** — not an idealised cost.
+
+**2. How a receiver learns the candidate.** When a receiver applies `rt_merge_one` for the learned candidate `{ next = meta.src, hops = N+1, score = meta.snr }`, the existing `route_strictly_better` computes `effective_score = candidate.score - TIER_PENALTY[meta.src's known tier]`. If the receiver has observed `meta.src` as STRAINED via a prior `budget_low` NACK reception, the learned candidate's effective score is automatically penalized. The receiver's existing `neighbor_budget_tier[]` table feeds into this comparison without any new wiring.
+
+**3. Forwarding decisions on the same flight.** The forwarder selecting which next-hop to send DATA to also uses `route_strictly_better` with tier penalty — already implemented, unchanged. If the primary candidate's next-hop is currently CRITICAL or EXHAUSTED, the forwarder picks the alt with better effective_score.
+
+**Corner case — stale tier info at overhearing nodes.** An overhearing neighbor may not have heard a `budget_low` NACK from the carrier recently, so it doesn't know the carrier's current tier. Receiver assumes HEALTHY (= no penalty applied to learned candidate). The learned candidate may be slightly too-optimistic relative to reality. Mitigations already in protocol:
+
+- `neighbor_budget_tier_ttl_ms` (5 min default) ages stale tier info — overhearing node will re-default to HEALTHY if no fresh NACK observed
+- The next time the overhearing node TRIES to use the learned candidate and the carrier is actually saturated, a fresh `budget_low` NACK propagates the tier info
+- Same robustness as the existing tier-aware routing under stale info
+
+**Net result:** the §7.6 rt-learning composes cleanly with §5.7 tier penalty without any new wire fields. Penalty is applied automatically wherever `route_strictly_better` runs, which is everywhere `rt_merge_one` or forwarding decisions happen.
+
 **NACK reason extension.** NACK reason field gains a new value: `hop_budget`. Three-byte NACK frame layout unchanged from §3.6:
 
 ```
@@ -1785,6 +1803,7 @@ This closes a third learning loop: the originator gets DEFINITIVE truth about th
 | **§1 anti-spam** | No interaction; one frame, one origination |
 | **§3 channels** | Channel-mode multicast inherits same hop_budget mechanism; rt-learning applies per channel destination |
 | **PROTOCOL.md §4 SNR EWMA** | Existing per-link SNR EWMA update on every decode (already covers this exact pattern for SNR); rt-learning is a parallel mechanism for hops field |
+| **PROTOCOL.md §5.7 tier-aware routing** | **Penalty system applies automatically** — `prev_fwd_rt_hops` value reflects the forwarder's penalty-influenced primary choice; learned candidates go through `route_strictly_better` with tier penalty. No new wire fields needed. See "Penalty-aware behavior" subsection. |
 
 **Open questions / future variants.**
 
