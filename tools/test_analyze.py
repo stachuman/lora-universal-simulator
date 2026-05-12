@@ -502,9 +502,9 @@ def test_routing_diversity_counts_cascades_per_flight():
         _emit(node=1, t_ms=1000, et="tx_enqueue",
               origin=1, origin_seq=1, payload="m1"),
         _emit(node=1, t_ms=1500, et="path_cascade",
-              origin=1, origin_seq=1, msg_id=1, trigger="rts_giveup"),
+              origin=1, origin_seq=1, ctr_lo=1, trigger="rts_giveup"),
         _emit(node=1, t_ms=2000, et="path_cascade",
-              origin=1, origin_seq=1, msg_id=1, trigger="rts_giveup"),
+              origin=1, origin_seq=1, ctr_lo=1, trigger="rts_giveup"),
 
         _emit(node=1, t_ms=3000, et="tx_enqueue",
               origin=1, origin_seq=2, payload="m2"),
@@ -513,7 +513,7 @@ def test_routing_diversity_counts_cascades_per_flight():
         _emit(node=1, t_ms=4000, et="tx_enqueue",
               origin=1, origin_seq=3, payload="m3"),
         *[_emit(node=1, t_ms=4500 + 100*i, et="path_cascade",
-                origin=1, origin_seq=3, msg_id=3, trigger="rts_giveup")
+                origin=1, origin_seq=3, ctr_lo=3, trigger="rts_giveup")
           for i in range(4)],
 
         _emit(node=1, t_ms=5000, et="node_state_snapshot",
@@ -542,7 +542,7 @@ def test_routing_diversity_ignores_forwarder_enqueues():
         _emit(node=3, t_ms=1100, et="tx_enqueue",
               origin=1, origin_seq=1, depth=1, payload="m1"),
         _emit(node=1, t_ms=1500, et="path_cascade",
-              origin=1, origin_seq=1, msg_id=1, trigger="rts_giveup"),
+              origin=1, origin_seq=1, ctr_lo=1, trigger="rts_giveup"),
     ]
     path = _write_ndjson(events)
     try:
@@ -584,22 +584,22 @@ def test_anti_spam_counts_drops_by_sender_and_trigger():
     cfg = {"nodes": [{"name": f"n{i}"} for i in range(10)]}
     events = [
         _emit(node=1, t_ms=1000, et="rts_drop_originator_throttle",
-              **{"from": 5, "msg_id": 0, "apparent_origination": 7,
+              **{"from": 5, "ctr_lo": 0, "apparent_origination": 7,
                  "airtime_ms": 2000, "threshold_count": 6,
                  "threshold_airtime_ms": 9000}),
         _emit(node=1, t_ms=2000, et="rts_drop_originator_throttle",
-              **{"from": 5, "msg_id": 1, "apparent_origination": 8,
+              **{"from": 5, "ctr_lo": 1, "apparent_origination": 8,
                  "airtime_ms": 2500, "threshold_count": 6,
                  "threshold_airtime_ms": 9000}),
         _emit(node=2, t_ms=3000, et="rts_drop_originator_throttle",
-              **{"from": 7, "msg_id": 5, "apparent_origination": 3,
+              **{"from": 7, "ctr_lo": 5, "apparent_origination": 3,
                  "airtime_ms": 12000, "threshold_count": 6,
                  "threshold_airtime_ms": 9000}),
         _emit(node=2, t_ms=4000, et="originator_self_over_budget",
-              origin=2, origin_seq=4, msg_id=4, trigger="rts_giveup",
+              origin=2, origin_seq=4, ctr_lo=4, trigger="rts_giveup",
               own_originate_count_in_window=4, duty_cycle_tier=1),
         _emit(node=3, t_ms=5000, et="originator_self_over_budget",
-              origin=3, origin_seq=2, msg_id=2, trigger="ack_giveup",
+              origin=3, origin_seq=2, ctr_lo=2, trigger="ack_giveup",
               own_originate_count_in_window=5, duty_cycle_tier=2),
     ]
     path = _write_ndjson(events)
@@ -631,7 +631,7 @@ def test_anti_spam_both_triggers_when_count_and_airtime_exceeded():
     cfg = {"nodes": [{"name": "n0"}, {"name": "n1"}]}
     events = [
         _emit(node=0, t_ms=1000, et="rts_drop_originator_throttle",
-              **{"from": 1, "msg_id": 0, "apparent_origination": 10,
+              **{"from": 1, "ctr_lo": 0, "apparent_origination": 10,
                  "airtime_ms": 15000, "threshold_count": 6,
                  "threshold_airtime_ms": 9000}),
     ]

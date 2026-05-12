@@ -93,7 +93,7 @@ def trace(config_path: str, events_path: str, origin_id: int, origin_seq: int, o
         for k in ("from", "src", "next", "dst", "to_next", "from_next"):
             if k in d:
                 bits.append(f"{k}={name_of(names, d[k])}")
-        for k in ("msg_id", "reason", "slot", "via"):
+        for k in ("ctr_lo", "reason", "slot", "via"):
             if k in d:
                 v = d[k]
                 if k == "via":
