@@ -740,20 +740,30 @@
 -- bumps the offset every fire so successive beacons cycle through the
 -- whole table. Receivers don't need to track pages — every entry they
 -- hear gets merged via rt_merge as before.
--- BCN — 4-byte header + n × 3-byte entries:
+-- BCN — 4-byte header + optional schedule block + n × 3-byte entries:
 --   byte 0 : tag 'B'
---   byte 1 : leaf_id (4 hi nibble) | reserved (4 lo nibble)
+--   byte 1 : leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
 --   byte 2 : src (8)
---   byte 3 : n (8)
---   entries (3 B each): dest(8) + next(8) + (score_bucket_4 << 4 | hops_4)(8)
--- leaf_id (4 bits): same field as RTS. Receivers reject foreign-
--- network beacons before rt_merge so foreign nodes don't pollute our
--- routing tables.
+--   byte 3 : n_entries (8)
+--   if has_schedule == 1:
+--     byte 4 : layer_count (8)
+--     layer_count × 4-byte schedule records (parser skips today — runtime
+--                                            path for inter-layer TDM deferred
+--                                            to §7.3)
+--   entries (3 B each):
+--     byte 0 : dest (8)
+--     byte 1 : next (8)
+--     byte 2 : score_bucket(4 hi) | (hops - 1)(3) | is_gateway(1 lo)
+-- leaf_id (4 bits): same field as RTS. Receivers reject foreign-leaf
+-- beacons before rt_merge so foreign nodes don't pollute our routing
+-- tables.
 -- Per-entry score is the 4-bit SNR bucket (16 levels, 2 dB resolution,
 -- range -20..+10 dB) — same encoding used by the ACK piggyback for
--- consistency. Hops use the low 4 bits (protocol caps at 8 so 0-15 has
--- ample headroom). Saves 1 byte/entry vs the byte-aligned 4-byte format
--- (~25% per beacon, biggest channel-time win for large mesh + narrow BW).
+-- consistency. Hops are encoded on-wire as `hops - 1` (3 bits, range 0..7)
+-- to free 1 bit for `is_gateway`; the in-memory hops value stays 1..8 so
+-- the protocol's 8-hop cap is preserved. `is_gateway` is per-(dest, advertiser)
+-- and rides on each rt[] candidate so different advertisers' claims stay
+-- separate.
 
 -- Quantize an SNR (dB) to a 4-bit bucket [0..15]. 16 buckets, 2 dB per
 -- bin, range -20..+10 dB:
