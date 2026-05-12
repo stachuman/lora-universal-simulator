@@ -169,23 +169,23 @@ def test_delivery_breakdown_classifies_by_outcome():
     events = [
         # msg (origin=1, seq=1): originator enqueue + delivered
         _emit(node=1, t_ms=1000, et="tx_enqueue",
-              origin=1, origin_seq=1, dst=2, payload="hi-1"),
+              origin=1, ctr=1, dst=2, payload="hi-1"),
         _emit(node=2, t_ms=1500, et="delivered",
-              origin=1, origin_seq=1, payload="hi-1"),
+              origin=1, ctr=1, payload="hi-1"),
         # Forwarder enqueue at node=3 — must NOT count as a separate user msg.
         _emit(node=3, t_ms=1100, et="tx_enqueue",
-              origin=1, origin_seq=1, depth=1, dst=2, payload="hi-1"),
+              origin=1, ctr=1, depth=1, dst=2, payload="hi-1"),
 
         # msg (origin=1, seq=2): originator enqueue + path_cascade_exhausted
         _emit(node=1, t_ms=2000, et="tx_enqueue",
-              origin=1, origin_seq=2, dst=4, payload="hi-2"),
+              origin=1, ctr=2, dst=4, payload="hi-2"),
         _emit(node=1, t_ms=2500, et="path_cascade_exhausted",
-              origin=1, origin_seq=2, dst=4, trigger="rts_giveup",
+              origin=1, ctr=2, dst=4, trigger="rts_giveup",
               tried=[3, 5]),
 
         # msg (origin=1, seq=3): originator enqueue, no terminal
         _emit(node=1, t_ms=3000, et="tx_enqueue",
-              origin=1, origin_seq=3, dst=6, payload="hi-3"),
+              origin=1, ctr=3, dst=6, payload="hi-3"),
     ]
     path = _write_ndjson(events)
     try:
@@ -207,12 +207,12 @@ def test_delivery_breakdown_classifies_by_outcome():
 def test_latency_uses_originator_enqueue_time():
     events = [
         _emit(node=1, t_ms=1000, et="tx_enqueue",
-              origin=1, origin_seq=1, payload="x"),
+              origin=1, ctr=1, dst=2, payload="x"),
         # Forwarder also enqueues — latency MUST measure from originator.
         _emit(node=3, t_ms=1100, et="tx_enqueue",
-              origin=1, origin_seq=1, depth=1, payload="x"),
+              origin=1, ctr=1, dst=2, depth=1, payload="x"),
         _emit(node=2, t_ms=1500, et="delivered",
-              origin=1, origin_seq=1, payload="x"),
+              origin=1, ctr=1, dst=2, payload="x"),
     ]
     path = _write_ndjson(events)
     try:
@@ -270,17 +270,17 @@ def test_lifetime_waste_computes_ratio_and_distributions():
     """
     events = [
         _emit(node=1, t_ms=1000,    et="tx_enqueue",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
         _emit(node=2, t_ms=6000,    et="delivered",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
         _emit(node=1, t_ms=2000,    et="tx_enqueue",
-              origin=1, origin_seq=2, payload="m2"),
+              origin=1, ctr=2, dst=2, payload="m2"),
         _emit(node=2, t_ms=9000,    et="delivered",
-              origin=1, origin_seq=2, payload="m2"),
+              origin=1, ctr=2, dst=2, payload="m2"),
         _emit(node=1, t_ms=3000,    et="tx_enqueue",
-              origin=1, origin_seq=3, payload="m3"),
+              origin=1, ctr=3, dst=2, payload="m3"),
         _emit(node=1, t_ms=183_000, et="path_cascade_exhausted",
-              origin=1, origin_seq=3, dst=2, trigger="rts_giveup", tried=[3, 4, 5]),
+              origin=1, ctr=3, dst=2, trigger="rts_giveup", tried=[3, 4, 5]),
     ]
     path = _write_ndjson(events)
     try:
@@ -288,10 +288,10 @@ def test_lifetime_waste_computes_ratio_and_distributions():
         # Sanity-check the new fields exist
         assert "delivered_times" in deliv
         assert "exhausted_times" in deliv
-        assert deliv["delivered_times"][(1, 1)] == 6000
-        assert deliv["delivered_times"][(1, 2)] == 9000
-        assert deliv["exhausted_times"][(1, 3)]["time_ms"]  == 183_000
-        assert deliv["exhausted_times"][(1, 3)]["trigger"]   == "rts_giveup"
+        assert deliv["delivered_times"][(1, 2, 1)] == 6000
+        assert deliv["delivered_times"][(1, 2, 2)] == 9000
+        assert deliv["exhausted_times"][(1, 2, 3)]["time_ms"]  == 183_000
+        assert deliv["exhausted_times"][(1, 2, 3)]["trigger"]   == "rts_giveup"
 
         r = analyze.section_lifetime_waste(deliv)
         # Lifetimes: 5000 ms, 7000 ms for delivered; 180_000 ms for exhausted
@@ -310,9 +310,9 @@ def test_lifetime_waste_handles_no_deliveries():
     reports 'infinite ratio' instead of crashing."""
     events = [
         _emit(node=1, t_ms=1000,   et="tx_enqueue",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
         _emit(node=1, t_ms=60_000, et="path_cascade_exhausted",
-              origin=1, origin_seq=1, dst=2, trigger="rts_giveup", tried=[]),
+              origin=1, ctr=1, dst=2, trigger="rts_giveup", tried=[]),
     ]
     path = _write_ndjson(events)
     try:
@@ -334,12 +334,12 @@ def test_lifetime_waste_ignores_forwarder_enqueues():
     events = [
         # Originator enqueues at t=1000
         _emit(node=1, t_ms=1000,  et="tx_enqueue",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
         # Forwarder enqueues at t=2000 — different node, same key
         _emit(node=3, t_ms=2000,  et="tx_enqueue",
-              origin=1, origin_seq=1, depth=1, payload="m1"),
+              origin=1, ctr=1, dst=2, depth=1, payload="m1"),
         _emit(node=2, t_ms=11_000, et="delivered",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
     ]
     path = _write_ndjson(events)
     try:
@@ -500,20 +500,20 @@ def test_routing_diversity_counts_cascades_per_flight():
     Plus one snapshot per node with rt_dst=10, candidates=30 (3.0/dst)."""
     events = [
         _emit(node=1, t_ms=1000, et="tx_enqueue",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
         _emit(node=1, t_ms=1500, et="path_cascade",
-              origin=1, origin_seq=1, ctr_lo=1, trigger="rts_giveup"),
+              origin=1, ctr=1, dst=2, ctr_lo=1, trigger="rts_giveup"),
         _emit(node=1, t_ms=2000, et="path_cascade",
-              origin=1, origin_seq=1, ctr_lo=1, trigger="rts_giveup"),
+              origin=1, ctr=1, dst=2, ctr_lo=1, trigger="rts_giveup"),
 
         _emit(node=1, t_ms=3000, et="tx_enqueue",
-              origin=1, origin_seq=2, payload="m2"),
+              origin=1, ctr=2, dst=2, payload="m2"),
         # no cascades for (1,2) — primary worked
 
         _emit(node=1, t_ms=4000, et="tx_enqueue",
-              origin=1, origin_seq=3, payload="m3"),
+              origin=1, ctr=3, dst=2, payload="m3"),
         *[_emit(node=1, t_ms=4500 + 100*i, et="path_cascade",
-                origin=1, origin_seq=3, ctr_lo=3, trigger="rts_giveup")
+                origin=1, ctr=3, dst=2, ctr_lo=3, trigger="rts_giveup")
           for i in range(4)],
 
         _emit(node=1, t_ms=5000, et="node_state_snapshot",
@@ -537,12 +537,12 @@ def test_routing_diversity_ignores_forwarder_enqueues():
     Forwarder enqueues for the same key must not double-count."""
     events = [
         _emit(node=1, t_ms=1000, et="tx_enqueue",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, dst=2, payload="m1"),
         # forwarder enqueue at a different node — must NOT create a 2nd flight
         _emit(node=3, t_ms=1100, et="tx_enqueue",
-              origin=1, origin_seq=1, depth=1, payload="m1"),
+              origin=1, ctr=1, dst=2, depth=1, payload="m1"),
         _emit(node=1, t_ms=1500, et="path_cascade",
-              origin=1, origin_seq=1, ctr_lo=1, trigger="rts_giveup"),
+              origin=1, ctr=1, dst=2, ctr_lo=1, trigger="rts_giveup"),
     ]
     path = _write_ndjson(events)
     try:
@@ -557,7 +557,7 @@ def test_routing_diversity_handles_no_snapshots():
     must not crash and the print path must say so."""
     events = [
         _emit(node=1, t_ms=1000, et="tx_enqueue",
-              origin=1, origin_seq=1, payload="m1"),
+              origin=1, ctr=1, payload="m1"),
     ]
     path = _write_ndjson(events)
     try:
@@ -596,10 +596,10 @@ def test_anti_spam_counts_drops_by_sender_and_trigger():
                  "airtime_ms": 12000, "threshold_count": 6,
                  "threshold_airtime_ms": 9000}),
         _emit(node=2, t_ms=4000, et="originator_self_over_budget",
-              origin=2, origin_seq=4, ctr_lo=4, trigger="rts_giveup",
+              origin=2, ctr=4, ctr_lo=4, trigger="rts_giveup",
               own_originate_count_in_window=4, duty_cycle_tier=1),
         _emit(node=3, t_ms=5000, et="originator_self_over_budget",
-              origin=3, origin_seq=2, ctr_lo=2, trigger="ack_giveup",
+              origin=3, ctr=2, ctr_lo=2, trigger="ack_giveup",
               own_originate_count_in_window=5, duty_cycle_tier=2),
     ]
     path = _write_ndjson(events)
@@ -649,7 +649,7 @@ def test_anti_spam_clean_run_emits_nothing():
     """No anti-spam events → section reports clean run, no crash."""
     cfg = {"nodes": [{"name": "n0"}]}
     events = [_emit(node=0, t_ms=1000, et="tx_enqueue",
-                    origin=0, origin_seq=1, payload="x")]
+                    origin=0, ctr=1, payload="x")]
     path = _write_ndjson(events)
     try:
         r = analyze.section_anti_spam(path, cfg)

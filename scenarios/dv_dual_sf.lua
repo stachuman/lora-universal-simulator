@@ -4820,6 +4820,7 @@ function on_recv(self, frame, meta)
       else
         self:emit("delivered", {
           origin = d_origin, payload = d_user_text, ctr = d_ctr,
+          dst = self.id,
         })
         self:log(string.format("DELIVERED from %s: %q (ctr=%d%s)",
           name_of(self, d_origin), d_user_text, d_ctr,

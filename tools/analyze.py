@@ -244,7 +244,7 @@ def section_path_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> d
     edges = build_link_graph(events_path, names_by_id, since_ms)
 
     # For each delivered message, recover the actual hop chain by walking
-    # data_tx events for that (origin, origin_seq), then deduping by
+    # data_tx events for that (origin, ctr), then deduping by
     # (src_node, next_hop) to collapse repeats onto a single hop.
     #
     # Why data_tx (not rts_tx): data_tx fires only after the RTS-CTS
@@ -260,7 +260,7 @@ def section_path_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> d
     # Deduping by the (src, next) pair collapses every repeat — RTS
     # retry, DATA retransmit — onto a single hop count.
     delivered = []
-    data_tx_chain = defaultdict(list)  # (origin, seq) -> list of (t, src_id, next_id)
+    data_tx_chain = defaultdict(list)  # (origin, dst, ctr) -> list of (t, src_id, next_id)
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
             continue
@@ -270,21 +270,23 @@ def section_path_optimality(cfg: dict, events_path: str, since_ms: int = 0) -> d
             delivered.append(e)
         elif et == "data_tx":
             origin = d.get("origin")
-            seq = d.get("origin_seq")
-            if origin is not None and seq is not None:
+            dst = d.get("dst")
+            seq = d.get("ctr")
+            if origin is not None and dst is not None and seq is not None:
                 # data_tx uses "to" for next-hop in dv_dual_sf.lua;
                 # accept "next" as a fallback for any future scripts
                 # that follow the rts_tx field naming.
                 nxt = d.get("to", d.get("next"))
-                data_tx_chain[(origin, seq)].append((e["time_ms"], e["node"], nxt))
+                data_tx_chain[(origin, dst, seq)].append((e["time_ms"], e["node"], nxt))
 
     deltas = []
     detail = []
     for ev in delivered:
         d = ev["data"]
         origin = d.get("origin")
-        seq = d.get("origin_seq")
-        chain = data_tx_chain.get((origin, seq), [])
+        dst = d.get("dst", ev.get("node"))  # destination = node that fired delivered
+        seq = d.get("ctr")
+        chain = data_tx_chain.get((origin, dst, seq), [])
         if not chain:
             continue
         chain.sort()
@@ -593,7 +595,7 @@ def section_delivery_breakdown(events_path: str, since_ms: int = 0) -> dict:
     """For each user-originated message (originator-side tx_enqueue), record
     its terminal outcome: delivered / path_cascade_exhausted / unresolved.
 
-    A message is identified by (origin, origin_seq). path_cascade_exhausted
+    A message is identified by (origin, ctr). path_cascade_exhausted
     fires at the originator when every fallback next-hop has been tried and
     none worked; the `trigger` field in its data names the proximate cause.
     "unresolved" = a tx_enqueue at the originator with no terminal event,
@@ -603,19 +605,26 @@ def section_delivery_breakdown(events_path: str, since_ms: int = 0) -> dict:
     downstream sections (cold-start curve, lifetime-waste) can derive
     per-message timing without re-scanning the events file.
     """
-    enqueued: dict = {}    # (origin, seq) -> first enqueue time at originator
-    delivered: dict = {}   # (origin, seq) -> first delivered time
-    exhausted: dict = {}   # (origin, seq) -> {time_ms, trigger}
+    enqueued: dict = {}    # (origin, dst, ctr) -> first enqueue time at originator
+    delivered: dict = {}   # (origin, dst, ctr) -> first delivered time
+    exhausted: dict = {}   # (origin, dst, ctr) -> {time_ms, trigger}
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
             continue
         et = e.get("emit_type", "")
         d = e.get("data") or {}
         origin = d.get("origin")
-        seq = d.get("origin_seq")
+        seq = d.get("ctr")
         if origin is None or seq is None:
             continue
-        key = (origin, seq)
+        # ctr is per-(origin,dst); flight key needs dst to disambiguate.
+        if et == "delivered":
+            dst = d.get("dst", e.get("node"))
+        else:
+            dst = d.get("dst")
+        if dst is None:
+            continue
+        key = (origin, dst, seq)
         if et == "tx_enqueue" and e.get("node") == origin and key not in enqueued:
             # Filter to the originator's own enqueue. Forwarder enqueues
             # also fire (depth>=1) and would inflate the "sent" count.
@@ -668,8 +677,8 @@ def print_section_8(r: dict) -> None:
 
 def section_latency(events_path: str, since_ms: int = 0) -> list[int]:
     """Latency = (delivered.time_ms − originator's tx_enqueue.time_ms) per
-    delivered (origin, seq). Useful for spotting protocols that "deliver"
-    well only when given many seconds of slack.
+    delivered flight (origin, dst, ctr). Useful for spotting protocols that
+    "deliver" well only when given many seconds of slack.
     """
     enqueued: dict = {}
     latencies: list[int] = []
@@ -679,10 +688,16 @@ def section_latency(events_path: str, since_ms: int = 0) -> list[int]:
         et = e.get("emit_type", "")
         d = e.get("data") or {}
         origin = d.get("origin")
-        seq = d.get("origin_seq")
+        seq = d.get("ctr")
         if origin is None or seq is None:
             continue
-        key = (origin, seq)
+        if et == "delivered":
+            dst = d.get("dst", e.get("node"))
+        else:
+            dst = d.get("dst")
+        if dst is None:
+            continue
+        key = (origin, dst, seq)
         if et == "tx_enqueue" and e.get("node") == origin and key not in enqueued:
             enqueued[key] = e.get("time_ms", 0)
         elif et == "delivered":
@@ -1080,12 +1095,12 @@ def section_routing_diversity(events_path: str, since_ms: int = 0) -> dict:
                 last_snapshot_per_node[e.get("node")] = (dst, cand)
 
         elif et == "tx_enqueue" and e.get("node") == d.get("origin"):
-            key = (d.get("origin"), d.get("origin_seq"))
-            if key[0] is not None and key not in flight_cascades:
+            key = (d.get("origin"), d.get("dst"), d.get("ctr"))
+            if key[0] is not None and key[1] is not None and key not in flight_cascades:
                 flight_cascades[key] = 0
 
         elif et == "path_cascade":
-            key = (d.get("origin"), d.get("origin_seq"))
+            key = (d.get("origin"), d.get("dst"), d.get("ctr"))
             if key in flight_cascades:
                 flight_cascades[key] += 1
 
@@ -1456,9 +1471,10 @@ def section_hop_limit(cfg: dict, events_path: str,
     for c in cfg.get("commands", []):
         cmd = c.get("command", "")
         at_ms = int(c.get("at_ms", 0))
-        if not cmd.startswith("send ") or at_ms < since_ms:
-            continue
         parts = cmd.split(maxsplit=2)
+        verb = parts[0] if parts else ""
+        if verb not in ("send", "send_e2e") or at_ms < since_ms:
+            continue
         if len(parts) >= 3:
             origin = c.get("node")
             dst = parts[1]
@@ -1471,19 +1487,26 @@ def section_hop_limit(cfg: dict, events_path: str,
         et = e.get("emit_type", "")
         d = e.get("data") or {}
         origin = d.get("origin")
-        seq = d.get("origin_seq")
-        if et == "delivered" and origin is not None and seq is not None:
-            delivered[(origin, seq)] = (e["node"], e["time_ms"])
-        elif et == "data_tx" and origin is not None and seq is not None:
-            data_tx_chain[(origin, seq)].append({
+        seq = d.get("ctr")
+        if et == "delivered":
+            dst = d.get("dst", e.get("node"))
+        else:
+            dst = d.get("dst")
+        if origin is None or dst is None or seq is None:
+            continue
+        key = (origin, dst, seq)
+        if et == "delivered":
+            delivered[key] = (e["node"], e["time_ms"])
+        elif et == "data_tx":
+            data_tx_chain[key].append({
                 "t":    e["time_ms"],
                 "node": e["node"],
                 "to":   d.get("to", d.get("next")),
             })
-        elif et == "dup_drop" and origin is not None and seq is not None:
-            dup_drop_count[(origin, seq)] += 1
-        elif et == "path_cascade" and origin is not None and seq is not None:
-            path_cascade_count[(origin, seq)] += 1
+        elif et == "dup_drop":
+            dup_drop_count[key] += 1
+        elif et == "path_cascade":
+            path_cascade_count[key] += 1
 
     # Per-flight analysis
     path_hop_hist: Counter = Counter()
@@ -1499,10 +1522,11 @@ def section_hop_limit(cfg: dict, events_path: str,
     total_unique_edges_all = 0
     total_path_hops_all = 0
 
-    for (origin, seq), chain in data_tx_chain.items():
-        if (origin, seq) not in delivered:
+    for key, chain in data_tx_chain.items():
+        if key not in delivered:
             continue
-        deliv_node, deliv_t = delivered[(origin, seq)]
+        origin, dst, seq = key
+        deliv_node, deliv_t = delivered[key]
         path = _trace_delivery_path(chain, deliv_node, deliv_t, origin)
         if path is None:
             continue
@@ -1554,7 +1578,7 @@ def section_hop_limit(cfg: dict, events_path: str,
         amplification_hist[amp_bucket] += 1
 
         # Duplicate buckets
-        dups = dup_drop_count.get((origin, seq), 0)
+        dups = dup_drop_count.get(key, 0)
         if dups == 0:
             dup_bucket = "0 (clean)"
         elif dups == 1:
@@ -1584,7 +1608,7 @@ def section_hop_limit(cfg: dict, events_path: str,
             "amplification":     amp,
             "dup_copies":        dups,
             "variants":          variants,
-            "cascades":          path_cascade_count.get((origin, seq), 0),
+            "cascades":          path_cascade_count.get(key, 0),
         })
 
     # Top amplified flights
@@ -2217,7 +2241,10 @@ def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -
     for c in cfg.get("commands", []):
         cmd = c.get("command", "")
         at_ms = int(c.get("at_ms", 0))
-        if cmd.startswith("send ") and at_ms >= since_ms:
+        # Match both `send <dst> <text>` and `send_e2e <dst> <text>` — each
+        # enqueues exactly one originator-side message.
+        verb = cmd.split(maxsplit=1)[0] if cmd else ""
+        if verb in ("send", "send_e2e") and at_ms >= since_ms:
             sent += 1
     for e in iter_events(events_path, since_ms):
         if e.get("type") == "script_emit" and e.get("emit_type") == "delivered":

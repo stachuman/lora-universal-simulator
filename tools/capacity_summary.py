@@ -50,8 +50,8 @@ def summarize(config_path: str, events_path: str) -> dict:
     total_airtime = 0
     deferred_by_reason = Counter()
     drop_by_kind = Counter()
-    delivered = []  # list of {origin, origin_seq, dst, t_delivered}
-    sent = []       # list of {origin, origin_seq, dst, t_sent}
+    delivered = []  # list of {origin, ctr, dst, t_delivered}
+    sent = []       # list of {origin, ctr, dst, t_sent}
     rts_giveup = 0
     data_ack_giveup = 0
     dup_drop = 0
@@ -83,14 +83,15 @@ def summarize(config_path: str, events_path: str) -> dict:
                     delivered.append({
                         "node": e["node"],
                         "origin": d.get("origin"),
-                        "origin_seq": d.get("origin_seq"),
+                        "dst": d.get("dst", e.get("node")),
+                        "ctr": d.get("ctr"),
                         "t": e["time_ms"],
                     })
                 elif em == "tx_enqueue":
                     sent.append({
                         "node": e["node"],
                         "origin": d.get("origin"),
-                        "origin_seq": d.get("origin_seq"),
+                        "ctr": d.get("ctr"),
                         "dst": d.get("dst"),
                         "t": e["time_ms"],
                     })
@@ -106,14 +107,14 @@ def summarize(config_path: str, events_path: str) -> dict:
                     duty_cycle_blocked += 1
 
     # Match deliveries to sends to compute hops + latency.
-    sent_idx = {(s["origin"], s["origin_seq"]): s for s in sent}
+    sent_idx = {(s["origin"], s["dst"], s["ctr"]): s for s in sent}
     latencies = []
     for d in delivered:
-        s = sent_idx.get((d["origin"], d["origin_seq"]))
+        s = sent_idx.get((d["origin"], d["dst"], d["ctr"]))
         if s is not None:
             latencies.append(d["t"] - s["t"])
 
-    # Hops per delivered: count data_rx events with the same (origin, origin_seq).
+    # Hops per delivered: count data_rx events with the same (origin, dst, ctr).
     hops_by_msg = Counter()
     with open(events_path) as f:
         for line in f:
@@ -126,10 +127,10 @@ def summarize(config_path: str, events_path: str) -> dict:
             if e.get("emit_type") != "data_rx":
                 continue
             d = e.get("data", {}) or {}
-            key = (d.get("origin"), d.get("origin_seq"))
+            key = (d.get("origin"), d.get("dst"), d.get("ctr"))
             hops_by_msg[key] += 1
 
-    delivered_keys = {(d["origin"], d["origin_seq"]) for d in delivered}
+    delivered_keys = {(d["origin"], d["dst"], d["ctr"]) for d in delivered}
     delivered_hops = [hops_by_msg[k] for k in delivered_keys if hops_by_msg[k] > 0]
 
     n_send_cmds = sum(1 for c in commands
