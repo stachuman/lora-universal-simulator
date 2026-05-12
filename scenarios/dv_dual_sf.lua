@@ -3611,6 +3611,17 @@ function on_init(self, config)
         rt_n = rt_n + 1
         if entry.candidates then rt_cands = rt_cands + #entry.candidates end
       end
+      -- Current duty-cycle position: included so analyze.py §21 can
+      -- compute tier residence time via sample-and-hold across snapshots.
+      -- pct_used is the same fraction compute_budget_tier checks against
+      -- budget_strained_pct / budget_critical_pct / budget_exhausted_pct;
+      -- carrying both is cheap and avoids having to reconstruct one from
+      -- the other in the analyzer when thresholds change.
+      local pct_used = 0
+      if self.duty_cycle_budget_ms and self.duty_cycle_budget_ms > 0 then
+        local used = self:airtime_used_ms(self.duty_cycle_window_ms)
+        pct_used = 100.0 * used / self.duty_cycle_budget_ms
+      end
       self:emit("node_state_snapshot", {
         blind_count         = blind_n,
         queue_depth         = #self.tx_queue,
@@ -3619,6 +3630,8 @@ function on_init(self, config)
         has_pending_rx      = self.pending_rx ~= nil,
         rt_dst_count        = rt_n,
         rt_total_candidates = rt_cands,
+        budget_tier         = compute_budget_tier(self),
+        pct_used            = pct_used,
       })
       self:after(self.state_snapshot_period_ms, snapshot_loop)
     end

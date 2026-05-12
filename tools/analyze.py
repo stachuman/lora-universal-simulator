@@ -1639,38 +1639,47 @@ def print_section_20(r: dict) -> None:
             print(f"    {name:<24} {c}")
 
 
-# ---- Section 21: budget tier observations ---------------------------------
+# ---- Section 21: budget tier residence + observations ---------------------
 
 def section_budget_tier(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
-    """Per-node observations of duty-cycle budget tier (event-driven).
+    """Duty-cycle budget tier analysis (residence time + event-driven obs).
 
-    The lua's node_state_snapshot does NOT yet include the budget_tier
-    field, so we can't compute true residence time. Instead, we count
-    tier-revealing events:
+    Two data sources:
 
-      • beacon_skipped_budget  — tier was >= CRITICAL when BCN fired
-      • nack_tx (budget_low)   — tier was >= CRITICAL on RTS-rx
-      • originator_self_over_budget — tier was >= STRAINED on giveup
+    A. node_state_snapshot (periodic, sample-and-hold) — preferred.
+       Each snapshot carries `budget_tier` (0=HEALTHY, 1=STRAINED,
+       2=CRITICAL, 3=EXHAUSTED) and `pct_used`. The tier observed at
+       time T is assumed to hold until the next snapshot — gives a true
+       time-weighted residence per tier per node. Approximate for fast
+       transitions but accurate for slow-changing state.
 
-    These all signal "tier got high enough to trigger action" — useful
-    for spotting saturated nodes and counting saturation incidents, but
-    NOT a residence-time metric (HEALTHY/STRAINED moments produce no
-    events, so they're invisible here).
+    B. Tier-revealing event counts — fallback when snapshot doesn't
+       carry tier (legacy traces) and for event frequency tracking:
+         • beacon_skipped_budget  — tier was >= CRITICAL on BCN fire
+         • nack_tx (budget_low)   — tier was >= CRITICAL on RTS-rx
+         • originator_self_over_budget — tier was >= STRAINED on giveup
+       These can't measure HEALTHY time (no events fire there) but
+       count "saturation incidents" useful for spotting hot nodes.
 
-    To get true residence time, lua's node_state_snapshot.data needs to
-    add `budget_tier` and `pct_used` fields. This is flagged in the
-    print path so the gap is obvious.
+    Reports BOTH: residence-time histogram (if snapshots have tier),
+    plus event-frequency breakdown.
     """
     name_by_idx = {i: n.get("name", f"#{i}")
                    for i, n in enumerate(cfg.get("nodes", []))}
 
-    beacon_skipped_budget: Counter = Counter()  # node -> count
-    nack_budget_emit: Counter = Counter()       # node -> count (from nack_tx reason=budget_low)
-    self_over_budget: Counter = Counter()       # node -> count
-    tier_observations: Counter = Counter()      # tier_int -> total count across events
-
+    # Source A: snapshots with tier (residence time)
+    samples: dict = defaultdict(list)  # node -> [(time_ms, tier_int), ...]
+    transitions: Counter = Counter()   # (from, to) -> count per node
+    last_tier: dict = {}               # node -> last tier seen
+    pct_used_samples: list[float] = [] # network-wide pct_used distribution
     snapshot_count = 0
     snapshot_with_tier = 0
+
+    # Source B: event-driven counts
+    beacon_skipped_budget: Counter = Counter()
+    nack_budget_emit: Counter = Counter()
+    self_over_budget: Counter = Counter()
+    tier_observations: Counter = Counter()  # tier -> total count
 
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
@@ -1679,8 +1688,19 @@ def section_budget_tier(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
         d = e.get("data") or {}
         if et == "node_state_snapshot":
             snapshot_count += 1
-            if "budget_tier" in d:
+            tier = d.get("budget_tier")
+            if tier is not None:
                 snapshot_with_tier += 1
+                node = e.get("node")
+                t = e["time_ms"]
+                samples[node].append((t, int(tier)))
+                prev = last_tier.get(node)
+                if prev is not None and prev != tier:
+                    transitions[(prev, int(tier))] += 1
+                last_tier[node] = int(tier)
+            pct = d.get("pct_used")
+            if isinstance(pct, (int, float)):
+                pct_used_samples.append(float(pct))
         elif et == "beacon_skipped_budget":
             beacon_skipped_budget[e.get("node")] += 1
             tier = d.get("tier")
@@ -1697,12 +1717,55 @@ def section_budget_tier(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
             if tier is not None:
                 tier_observations[int(tier)] += 1
 
+    # Time-weighted residence per tier per node (sample-and-hold).
+    # tier_ms[node][tier] = total ms in that tier.
+    tier_ms: dict = defaultdict(lambda: defaultdict(int))
+    for node, seq in samples.items():
+        seq_sorted = sorted(seq)
+        for i in range(len(seq_sorted) - 1):
+            t0, tier = seq_sorted[i]
+            t1 = seq_sorted[i + 1][0]
+            tier_ms[node][tier] += max(0, t1 - t0)
+
+    # Aggregate network-wide residence
+    net_tier_ms: dict = defaultdict(int)
+    for per in tier_ms.values():
+        for tier, ms in per.items():
+            net_tier_ms[tier] += ms
+
+    pct_used_samples.sort()
+
     def resolve(nid):
         if isinstance(nid, int):
             return name_by_idx.get(nid, f"#{nid}")
         return str(nid) if nid is not None else "?"
 
+    # Per-node "worst tier reached" + time in each tier (top offenders)
+    per_node_summary = []
+    for node, per in tier_ms.items():
+        total = sum(per.values())
+        if total == 0:
+            continue
+        worst = max(per.keys()) if per else 0
+        time_in_strained_plus = sum(ms for t, ms in per.items() if t >= 1)
+        per_node_summary.append({
+            "name":  resolve(node),
+            "total_ms": total,
+            "worst":    worst,
+            "strained_plus_ms": time_in_strained_plus,
+            "strained_plus_pct": 100.0 * time_in_strained_plus / total if total else 0.0,
+            "tier_ms":  dict(per),
+        })
+    per_node_summary.sort(key=lambda r: -r["strained_plus_ms"])
+
     return {
+        "snapshot_count":        snapshot_count,
+        "snapshot_with_tier":    snapshot_with_tier,
+        "n_nodes_sampled":       len(samples),
+        "net_tier_ms":           dict(net_tier_ms),
+        "transitions":           dict(transitions),
+        "per_node_summary":      per_node_summary,
+        "pct_used_samples":      pct_used_samples,
         "beacon_skipped_budget": dict((resolve(n), c)
                                        for n, c in beacon_skipped_budget.items()),
         "nack_budget_emit":      dict((resolve(n), c)
@@ -1710,58 +1773,74 @@ def section_budget_tier(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
         "self_over_budget":      dict((resolve(n), c)
                                        for n, c in self_over_budget.items()),
         "tier_observations":     dict(tier_observations),
-        "snapshot_count":        snapshot_count,
-        "snapshot_with_tier":    snapshot_with_tier,
     }
 
 
 def print_section_21(r: dict) -> None:
-    print("\n=== (21) budget tier observations ===")
+    print("\n=== (21) budget tier residence + observations ===")
+    tier_name = {0: "HEALTHY", 1: "STRAINED", 2: "CRITICAL", 3: "EXHAUSTED"}
+
+    # --- A. Residence time (preferred — needs node_state_snapshot.budget_tier)
+    net = r["net_tier_ms"]
+    total = sum(net.values())
+    if total > 0:
+        print(f"  network-wide tier residence "
+              f"(sample-and-hold, n={r['n_nodes_sampled']} nodes):")
+        for tier in sorted(net.keys()):
+            pct = 100.0 * net[tier] / total
+            tname = tier_name.get(tier, f"tier_{tier}")
+            print(f"    {tname:<10}: {net[tier]/1000:>8.1f} s ({pct:>4.1f}%)")
+        trans = r["transitions"]
+        if trans:
+            print(f"  tier transitions (top 8):")
+            for (frm, to), c in sorted(trans.items(), key=lambda kv: -kv[1])[:8]:
+                print(f"    {tier_name.get(frm, '?'):<10} → "
+                      f"{tier_name.get(to, '?'):<10}: {c}")
+        if r["per_node_summary"]:
+            top = [n for n in r["per_node_summary"]
+                   if n["strained_plus_ms"] > 0][:5]
+            if top:
+                print(f"  top nodes by time spent in STRAINED+ tiers:")
+                for n in top:
+                    worst_name = tier_name.get(n["worst"], f"#{n['worst']}")
+                    print(f"    {n['name']:<24}  {n['strained_plus_ms']/1000:>6.1f} s "
+                          f"({n['strained_plus_pct']:>4.1f}%)  worst={worst_name}")
+        ps = r["pct_used_samples"]
+        if ps:
+            n = len(ps)
+            def q(p): return ps[min(n - 1, max(0, int(p * n)))]
+            print(f"  pct_used distribution (across all snapshots): "
+                  f"p50={q(0.5):.1f}%  p95={q(0.95):.1f}%  max={ps[-1]:.1f}%")
+    elif r["snapshot_count"] > 0 and r["snapshot_with_tier"] == 0:
+        print(f"  NOTE: {r['snapshot_count']} node_state_snapshot events seen but none")
+        print(f"        carry budget_tier (legacy trace). Re-run with updated lua")
+        print(f"        to enable residence-time analysis.")
+
+    # --- B. Event-driven obs (always shown; complement to residence)
     skipped = r["beacon_skipped_budget"]
     nacks   = r["nack_budget_emit"]
     selfwarn = r["self_over_budget"]
-    if not skipped and not nacks and not selfwarn:
-        print("  (no tier-revealing events — network stayed below CRITICAL/STRAINED)")
-        if r["snapshot_count"] > 0 and r["snapshot_with_tier"] == 0:
-            print("  NOTE: node_state_snapshot fired but doesn't carry budget_tier yet.")
-            print("        Add budget_tier + pct_used to lua's node_state_snapshot.data")
-            print("        to enable true residence-time analysis.")
-        return
-
-    tier_name = {0: "HEALTHY", 1: "STRAINED", 2: "CRITICAL", 3: "EXHAUSTED"}
-
-    if skipped:
-        total = sum(skipped.values())
-        print(f"  beacon_skipped_budget (tier ≥ CRITICAL when BCN fired): {total} events")
-        top = sorted(skipped.items(), key=lambda kv: -kv[1])[:5]
-        for name, c in top:
-            print(f"    {name:<24} {c} skips")
-
-    if nacks:
-        total = sum(nacks.values())
-        print(f"  budget_low NACKs emitted (tier ≥ CRITICAL on RTS-rx): {total}")
-        top = sorted(nacks.items(), key=lambda kv: -kv[1])[:5]
-        for name, c in top:
-            print(f"    {name:<24} {c} NACKs")
-
-    if selfwarn:
-        total = sum(selfwarn.values())
-        print(f"  originator_self_over_budget warns: {total}")
-        top = sorted(selfwarn.items(), key=lambda kv: -kv[1])[:5]
-        for name, c in top:
-            print(f"    {name:<24} {c} warns")
-
-    obs = r["tier_observations"]
-    if obs:
-        print(f"  tier observations across all reporting events:")
-        for tier in sorted(obs.keys()):
-            tname = tier_name.get(tier, f"tier_{tier}")
-            print(f"    {tname:<10}: {obs[tier]} observations")
-
-    if r["snapshot_count"] > 0 and r["snapshot_with_tier"] == 0:
-        print(f"  NOTE: {r['snapshot_count']} node_state_snapshot events seen but none")
-        print(f"        carry budget_tier yet. Add `budget_tier` + `pct_used` to lua's")
-        print(f"        node_state_snapshot.data emit for true residence-time tracking.")
+    if skipped or nacks or selfwarn:
+        if total > 0:
+            print()  # spacer between sections
+        print(f"  tier-driven event counts:")
+        if skipped:
+            tot = sum(skipped.values())
+            print(f"    beacon_skipped_budget:       {tot} events")
+            for name, c in sorted(skipped.items(), key=lambda kv: -kv[1])[:5]:
+                print(f"      {name:<22} {c} skips")
+        if nacks:
+            tot = sum(nacks.values())
+            print(f"    budget_low NACKs emitted:    {tot}")
+            for name, c in sorted(nacks.items(), key=lambda kv: -kv[1])[:5]:
+                print(f"      {name:<22} {c} NACKs")
+        if selfwarn:
+            tot = sum(selfwarn.values())
+            print(f"    originator_self_over_budget: {tot} warns")
+            for name, c in sorted(selfwarn.items(), key=lambda kv: -kv[1])[:5]:
+                print(f"      {name:<22} {c} warns")
+    elif total == 0:
+        print("  (no tier-related events — network stayed in HEALTHY tier)")
 
 
 # ---- Section 22: tier-aware routing impact --------------------------------
