@@ -8,7 +8,7 @@
 -- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), n_entries(1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}  →  4 + [1+4L]? + 3n B |
 -- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [leaf_id(4)|ctr_lo(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
--- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|ctr_lo(4)](1), payload(n)  →  6+n B |
+-- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
 -- | `'K'` | ACK    | `K`, [ctr_lo(4)|snr_bucket(4)](1)  →  2 B                                       |
 -- | `'N'` | NACK   | `N`, [reason(4)|ctr_lo(4)](1), payload(1)  →  3 B  |
 -- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [leaf_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
@@ -49,18 +49,17 @@
 -- bitmap trimming, link-asymmetry detection. SF picks today still read
 -- `_in` only.
 --
--- DATA's payload(n) bytes carry an APPLICATION-LAYER header followed by the
--- user text:
---   payload = [origin_seq_lo(1)] [origin_seq_hi(1)] [user_text(N)]
--- The originator stamps a 16-bit per-origin sequence number; mesh layer
--- treats the entire `payload` as opaque bytes (forwarders relay verbatim).
--- Every receiving node parses the first 2 bytes to derive the globally-
--- unique end-to-end message id (origin_id from the mesh frame, origin_seq
--- from the payload header) and uses it for duplicate detection — see
--- "Origin-level dedup" in the protocol-flow notes below. This is exactly
--- how a real firmware port would do it: the application generates seq +
--- text, hands the bytes to the mesh layer, the mesh layer treats opaque,
--- and the receiver's app strips the header on delivery.
+-- DATA (10+n bytes in-leaf): wire-level E2E flags on byte 1, 16-bit ctr on
+-- bytes 4-5, ciphertext slot (= plaintext today) carries the inner payload:
+--   inner = src_addr_len(1) | src_addr(1) | body
+-- followed by a 4-byte zero MAC placeholder (§8 crypto stub). The pair
+-- (origin from inner.src_addr, ctr from wire bytes 4-5) is the globally-
+-- unique end-to-end message id used for duplicate detection at every
+-- receiving node. Forwarders relay the inner bytes verbatim (ciphertext
+-- is opaque; only the destination / originator parse it). Wire-level flags
+-- (E2E_ACK_REQ, E2E_IS_ACK) are plaintext so intermediate nodes could
+-- apply QoS without breaking future encryption — an intentional design
+-- choice matching WireGuard / MLS envelope patterns.
 --
 -- Protocol flow (per node):
 --
@@ -180,7 +179,7 @@
 --
 -- Data plane (RTS on routing_sf, CTS+DATA on data_sf, ACK on routing_sf)
 --   tx_queue is a SCHEDULED queue of items shaped
---   {origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop,
+--   {origin, dst_id, dst_name, payload, user_text, ctr, flags, previous_hop,
 --    next_attempt_ms, requeue_count, enqueue_time_ms}; both originators
 --   (on_command) and forwarders (on_recv 'D' relay branch) enqueue,
 --   never call issue_send directly. become_free pops the earliest-ready
@@ -230,18 +229,18 @@
 --                                   ACK or ack_timeout fires.
 --
 --   NEXT-HOP (on_recv 'D' matching pending_rx.ctr_lo, next == self.id):
---     1. parse application-layer origin-seq header from d.payload to get
---        (origin_seq, user_text)
+--     1. parse_data gives d.origin, d.ctr, d.flags, d.body, d.inner directly
+--        (no inner-payload header to strip; origin + ctr are on the wire)
 --     2. cancel pending_rx_expiry; set_rx_sf(routing_sf); pending_rx = nil
---     3. cache last_acked_from[d.src] = d.ctr_lo; tx 'K' on routing_sf
---     4. ORIGIN-LEVEL DEDUP: if (d.origin, origin_seq) seen recently,
+--     3. cache last_acked_from[pending_rx.from] = d.ctr_lo; tx 'K' on routing_sf
+--     4. ORIGIN-LEVEL DEDUP: if (d.origin, d.ctr) seen recently,
 --        emit dup_drop and return — ACK was already sent; we just don't
 --        deliver-twice or forward-twice. Catches DV routing loops and
 --        legitimate same-payload retries via different paths.
---     5. record the (origin, origin_seq) in seen_origins with a TTL
---     6. if dst == self.id → emit "delivered" (payload = user_text)
---        else (forward) → after ack_air_ms+1: enqueue forward (preserving
---        the full payload bytes incl. the seq header), become_free
+--     5. record the (origin, ctr) in seen_origins with a TTL
+--     6. if dst == self.id → emit "delivered" (payload = d.body)
+--        else (forward) → after ack_air_ms+1: enqueue forward (d.inner
+--        verbatim, d.ctr, d.flags), become_free
 --
 --   ORIGINATOR/FORWARDER (on_recv 'K' matching pending_tx.ctr_lo):
 --     • cancel ack_timeout; pending_tx = nil; become_free
@@ -1055,36 +1054,12 @@ end
 --   • Both bits are PLAINTEXT in the payload header today. Under §9 T2
 --     they'd move INSIDE the encrypted payload — wire format stays
 --     the same, the parse just happens after decryption.
-local ORIGIN_HDR_LEN = 3
-local E2E_FLAG_ACK_REQUESTED = 0x01
-local E2E_FLAG_IS_ACK        = 0x02
-
-local function pack_origin_hdr(seq, flags)
-  flags = flags or 0
-  return string.char(flags & 0xff)
-              .. string.char(seq % 256)
-              .. string.char(math.floor(seq / 256) % 256)
-end
-
-local function parse_origin_hdr(payload)
-  if #payload < ORIGIN_HDR_LEN then return nil end
-  return {
-    flags     = payload:byte(1),
-    seq       = payload:byte(2) + payload:byte(3) * 256,
-    body      = payload:sub(ORIGIN_HDR_LEN + 1),
-  }
-end
-
--- Backward-compat aliases the rest of the script still references.
--- parse_origin_seq returns {seq, user_text} in the SAME shape as before;
--- callers that want flags use parse_origin_hdr directly.
-local function pack_origin_seq(seq) return pack_origin_hdr(seq, 0) end
-local function parse_origin_seq(payload)
-  local hdr = parse_origin_hdr(payload)
-  if hdr == nil then return nil end
-  return { seq = hdr.seq, user_text = hdr.body }
-end
-local ORIGIN_SEQ_HDR_LEN = ORIGIN_HDR_LEN   -- legacy name; sized 3 now
+-- DATA wire-level E2E flag bits (byte 1 of the DATA frame, bits 2-3).
+-- These replaced the old inner-payload origin header flags in §7.0.1.
+local DATA_FLAG_E2E_ACK_REQ = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)
+local DATA_FLAG_E2E_IS_ACK  = 0x04   -- bit 2 of byte 1 (E2E_IS_ACK)
+local DATA_FLAG_IS_MCAST    = 0x02   -- bit 1 of byte 1 (IS_MULTICAST, always 0 this phase)
+local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
 
 -- NACK — 3 bytes:
 --   byte 0 : tag 'N'
@@ -1166,30 +1141,69 @@ local function parse_q(frame)
   }
 end
 
--- DATA — 6-byte header + payload:
---   byte 0 : tag 'D'
---   byte 1 : origin (8)
---   byte 2 : src    (8)
---   byte 3 : dst    (8)
---   byte 4 : next   (8)
---   byte 5 : reserved (4 hi nibble) | ctr_lo (4 lo nibble)
---   byte 6+: payload
-local function pack_data(origin, src, dst, next_hop, ctr_lo, payload)
-  return "D" .. string.char(origin) .. string.char(src) .. string.char(dst)
+-- DATA — 10 + n bytes (in-leaf, addr_len=0):
+--   byte 0   : tag 'D'
+--   byte 1   : addr_len(3 hi) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
+--   byte 2   : next (immediate next-hop receiver)
+--   byte 3   : dst  (final destination — single byte when addr_len==0)
+--   bytes 4-5: ctr (16-bit LE, per-(origin,dst) counter)
+--   bytes 6..(5+n): ciphertext (= plaintext placeholder for now;
+--                    carries src_addr_len(1) | src_addr(1) | body)
+--   last 4   : MAC (4-byte zero placeholder until §8 crypto lands)
+--
+-- Inner payload (ciphertext slot, plaintext today):
+--   byte 6   : src_addr_len (= 0 for in-leaf / flat addresses)
+--   byte 7   : src_addr (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
+--   bytes 8+  : body (user_text for normal DATA; [acked_ctr_lo, acked_ctr_hi] for E2E ACK)
+local function pack_data(origin, next_hop, dst, ctr, flags, inner)
+  -- inner = pre-assembled bytes: src_addr_len(1) | src_addr(1) | body
+  local addr_len = 0                                      -- in-leaf only this phase
+  local byte1 = ((addr_len & 0x7) << 5) | (flags & 0x0e) -- flags: bits 1-3 only
+  local ctr_lo_byte = ctr & 0xff
+  local ctr_hi_byte = (ctr >> 8) & 0xff
+  local mac = string.rep("\0", MAC_LEN)
+  return "D" .. string.char(byte1)
               .. string.char(next_hop)
-              .. string.char(ctr_lo & 0xf)
-              .. payload
+              .. string.char(dst)
+              .. string.char(ctr_lo_byte)
+              .. string.char(ctr_hi_byte)
+              .. inner
+              .. mac
 end
 
 local function parse_data(frame)
-  if #frame < 6 or frame:sub(1,1) ~= "D" then return nil end
+  if #frame < 10 or frame:sub(1,1) ~= "D" then return nil end
+  local b1 = frame:byte(2)
+  local addr_len = (b1 >> 5) & 0x07
+  if addr_len ~= 0 then return nil end        -- hierarchy deferred
+  local flags    = b1 & 0x0e                  -- bits 1-3
+  local next_hop = frame:byte(3)
+  local dst      = frame:byte(4)
+  local ctr_lo_byte = frame:byte(5)
+  local ctr_hi_byte = frame:byte(6)
+  local ctr      = ctr_lo_byte | (ctr_hi_byte << 8)
+  -- inner spans byte 7 .. (#frame - MAC_LEN)
+  local inner_end = #frame - MAC_LEN
+  if inner_end < 7 then return nil end
+  local inner    = frame:sub(7, inner_end)
+  if #inner < 2 then return nil end           -- need src_addr_len + src_addr
+  local src_addr_len = inner:byte(1)
+  if src_addr_len ~= 0 then return nil end    -- flat addresses only this phase
+  local origin   = inner:byte(2)
+  local body     = inner:sub(3)
   return {
-    origin  = frame:byte(2),
-    src     = frame:byte(3),
-    dst     = frame:byte(4),
-    next    = frame:byte(5),
-    ctr_lo  = frame:byte(6) & 0xf,
-    payload = frame:sub(7),
+    flags         = flags,
+    e2e_ack_req   = (flags & DATA_FLAG_E2E_ACK_REQ) ~= 0,
+    e2e_is_ack    = (flags & DATA_FLAG_E2E_IS_ACK) ~= 0,
+    is_multicast  = (flags & DATA_FLAG_IS_MCAST) ~= 0,
+    next          = next_hop,
+    dst           = dst,
+    ctr           = ctr,
+    ctr_lo        = ctr & 0xf,               -- low nibble for hop-level match
+    origin        = origin,
+    body          = body,
+    -- 'inner' kept for verbatim relay by forwarders
+    inner         = inner,
   }
 end
 
@@ -1200,7 +1214,10 @@ end
 -- protocol — bump these if the frame layout changes.
 local RTS_LEN = 8       -- 'R' + origin + src + dst + next + (leaf_id<<4|ctr_lo) + sf_bitmap + payload_len
 local CTS_LEN = 2       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | reserved_1)
-local DATA_HDR_LEN = 6  -- 'D' + origin + src + dst + next + (reserved_4|ctr_lo_4) (payload follows)
+local DATA_HDR_LEN = 6  -- 'D' + byte1 + next + dst + ctr_lo + ctr_hi (inner+MAC follow)
+-- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
+-- RTS payload_len = #body + DATA_INNER_OVERHEAD for in-leaf frames.
+local DATA_INNER_OVERHEAD = 2 + MAC_LEN  -- src_addr_len(1) + src_addr(1) + MAC(4) = 6
 local ACK_LEN = 2       -- 'K' + (ctr_lo<<4 | snr_bucket)
 local NACK_LEN = 3      -- 'N' + (reason_4|ctr_lo_4) + payload (reason-specific encoding)
 local Q_LEN    = 4      -- 'Q' + src + dest + (leaf_id_4|reserved_4)
@@ -2039,7 +2056,7 @@ local function tx_rts_retry(self, reason)
                                           px.previous_hop)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
-      origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+      origin = px.origin, payload = px.user_text, ctr = px.ctr,
       ctr_lo = px.ctr_lo, next_hop = px.next, delay_ms = val_b,
       source = "tx_rts_retry", reason = reason,
     })
@@ -2049,7 +2066,7 @@ local function tx_rts_retry(self, reason)
     return
   elseif action_b == "alt" then
     self:emit("tx_blind_alt", {
-      origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+      origin = px.origin, payload = px.user_text, ctr = px.ctr,
       ctr_lo = px.ctr_lo, from_next = px.next, to_next = val_b,
     })
     self:log(string.format("tx_blind_alt (tx_rts_retry) msg=%d %s -> %s",
@@ -2062,9 +2079,9 @@ local function tx_rts_retry(self, reason)
   -- payload_len lets the receiver size its pending_rx_expiry to the
   -- actual DATA airtime instead of max_payload_bytes worst-case.
   local rts = pack_rts(self.leaf_id, px.origin, self.id, px.dst, px.next, px.ctr_lo,
-                       self.allowed_sf_bitmap, #px.payload)
+                       self.allowed_sf_bitmap, #px.payload + MAC_LEN)
   self:emit("rts_retry", {
-    origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+    origin = px.origin, payload = px.user_text, ctr = px.ctr,
     dst = px.dst, next = px.next,
     ctr_lo = px.ctr_lo, retries_left = px.retries_left, reason = reason,
   })
@@ -2114,7 +2131,7 @@ local function maybe_emit_self_over_budget(self, px, trigger)
   if own_count >= warn_count or tier >= BUDGET_TIER_STRAINED then
     self:emit("originator_self_over_budget", {
       origin        = self.id,
-      origin_seq    = px.origin_seq,
+      ctr           = px.ctr,
       dst           = px.dst,
       ctr_lo        = px.ctr_lo,
       trigger       = trigger,                  -- "rts_giveup" / "ack_giveup" / etc.
@@ -2171,7 +2188,7 @@ local function try_cascade_requeue(self, trigger)
     self:emit("cascade_load_skip", {
       origin         = px.origin,
       payload        = px.user_text,
-      origin_seq     = px.origin_seq,
+      ctr            = px.ctr,
       dst            = px.dst,
       ctr_lo         = px.ctr_lo,
       requeue_count  = next_count,
@@ -2201,7 +2218,8 @@ local function try_cascade_requeue(self, trigger)
     dst_name   = name_of(self, px.dst),
     payload    = px.payload,
     user_text  = px.user_text,
-    origin_seq = px.origin_seq,
+    ctr        = px.ctr,
+    flags      = px.flags or 0,
     previous_hop    = px.previous_hop,
     enqueue_time_ms = enq,                         -- preserve original
     requeue_count   = next_count,                  -- bump
@@ -2210,7 +2228,7 @@ local function try_cascade_requeue(self, trigger)
   self:emit("cascade_requeue", {
     origin        = px.origin,
     payload       = px.user_text,
-    origin_seq    = px.origin_seq,
+    ctr           = px.ctr,
     dst           = px.dst,
     ctr_lo        = px.ctr_lo,
     requeue_count = next_count,
@@ -2251,7 +2269,7 @@ local function rts_timeout_fire(self, captured_ctr_lo)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       ctr_lo = captured_ctr_lo, next_hop = self.pending_tx.next,
       delay_ms = val_b, source = "rts_timeout",
     })
@@ -2264,7 +2282,7 @@ local function rts_timeout_fire(self, captured_ctr_lo)
   elseif action_b == "alt" then
     self:emit("tx_blind_alt", {
       origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       ctr_lo = captured_ctr_lo,
       from_next = self.pending_tx.next, to_next = val_b,
     })
@@ -2289,7 +2307,7 @@ local function rts_timeout_fire(self, captured_ctr_lo)
       self:emit("path_cascade", {
         origin     = self.pending_tx.origin,
         payload    = self.pending_tx.user_text,
-        origin_seq = self.pending_tx.origin_seq,
+        ctr = self.pending_tx.ctr,
         dst        = self.pending_tx.dst, ctr_lo = captured_ctr_lo,
         from_next  = prev_next, to_next = next_hop,
         attempt    = set_size(self.pending_tx.alts_tried),
@@ -2319,14 +2337,14 @@ local function rts_timeout_fire(self, captured_ctr_lo)
     self:emit("path_cascade_exhausted", {
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       dst        = self.pending_tx.dst, ctr_lo = captured_ctr_lo,
       tried      = tried_list, trigger = "rts_giveup",
     })
     self:emit("rts_giveup", {
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       dst        = self.pending_tx.dst,
       next       = self.pending_tx.next,
       ctr_lo     = captured_ctr_lo,
@@ -2391,7 +2409,7 @@ local function ack_timeout_fire(self, captured_ctr_lo)
       self:emit("path_cascade", {
         origin     = self.pending_tx.origin,
         payload    = self.pending_tx.user_text,
-        origin_seq = self.pending_tx.origin_seq,
+        ctr = self.pending_tx.ctr,
         dst        = self.pending_tx.dst, ctr_lo = captured_ctr_lo,
         from_next  = prev_next, to_next = next_hop,
         attempt    = set_size(self.pending_tx.alts_tried),
@@ -2418,14 +2436,14 @@ local function ack_timeout_fire(self, captured_ctr_lo)
     self:emit("path_cascade_exhausted", {
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       dst        = self.pending_tx.dst, ctr_lo = captured_ctr_lo,
       tried      = tried_list, trigger = "ack_giveup",
     })
     self:emit("data_ack_giveup", {
       origin     = self.pending_tx.origin,
       payload    = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       dst        = self.pending_tx.dst,
       next       = self.pending_tx.next,
       ctr_lo     = captured_ctr_lo,
@@ -2496,7 +2514,7 @@ start_ack_timeout = function(self)
   end
   local data_air = airtime_ms(self.pending_tx.chosen_data_sf, self.bw_hz, self.cr,
                               self.preamble_sym,
-                              DATA_HDR_LEN + #self.pending_tx.payload)
+                              DATA_HDR_LEN + #self.pending_tx.payload + MAC_LEN)
   local delay = data_air + self.ack_air_ms
   local captured_ctr_lo = self.pending_tx.ctr_lo
   self.ack_timeout_handle = self:after(delay, function()
@@ -2552,7 +2570,9 @@ start_pending_rx_expiry = function(self)
   local pl = self.pending_rx.payload_len or self.max_payload_bytes
   local data_air = airtime_ms(chosen, self.bw_hz, self.cr,
                               self.preamble_sym, DATA_HDR_LEN + pl)
-  local expiry_ms = cts_air + self.cts_to_data_gap_ms + data_air
+  -- +2 ms guard so the DATA on_recv wins the sim tie-break if DATA arrives
+  -- at exactly the expiry boundary (can happen with exact-integer airtimes).
+  local expiry_ms = cts_air + self.cts_to_data_gap_ms + data_air + 2
   self.pending_rx.expiry_ms = expiry_ms   -- stash for NACK busy_for_ms calc
   local captured_ctr_lo = self.pending_rx.ctr_lo
   self.pending_rx_expiry_handle = self:after(expiry_ms, function()
@@ -2584,7 +2604,7 @@ try_drain_deferred = function(self)
     elseif (now - d.queued_at_ms) >= self.send_defer_ttl_ms then
       self:emit("send_giveup", {
         origin     = d.origin, dst = d.dst_id, dst_name = d.dst_name,
-        payload    = d.user_text, origin_seq = d.origin_seq,
+        payload    = d.user_text, ctr = d.ctr,
         waited_ms  = now - d.queued_at_ms,
         reason     = "defer_ttl",
       })
@@ -2606,7 +2626,7 @@ try_drain_deferred = function(self)
       local d = drained[i]
       self:emit("send_drained", {
         origin     = d.origin, dst = d.dst_id, dst_name = d.dst_name,
-        payload    = d.user_text, origin_seq = d.origin_seq,
+        payload    = d.user_text, ctr = d.ctr,
         waited_ms  = now - d.queued_at_ms,
       })
       self:log(string.format(
@@ -2621,15 +2641,14 @@ try_drain_deferred = function(self)
   end
 end
 
--- payload here is the FULL bytes (origin-seq header + user_text) — what
--- goes on the wire. user_text is what the user / visualizer sees in
--- emit data. origin_seq is the 16-bit per-origin counter (set at
--- on_command for new sends, preserved across forwards). queue_meta is
--- an optional table {enqueue_time_ms, requeue_count} threaded from the
--- tx_queue item through to pending_tx for cascade-requeue accounting;
--- when nil (forwarder direct path) we treat this as a fresh hop and
--- start enqueue_time_ms = now, requeue_count = 0.
-issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin_seq, previous_hop, queue_meta)
+-- payload here is the inner bytes (src_addr_len | src_addr | body) that go into the
+-- DATA frame's ciphertext slot. user_text is what the user / visualizer sees in
+-- emit data. ctr is the full 16-bit per-(origin,dst) outbound counter (set at
+-- on_command for new sends, preserved across forwards). flags carries wire-level
+-- DATA_FLAG_* bits. queue_meta is an optional table {enqueue_time_ms, requeue_count}
+-- threaded from the tx_queue item through to pending_tx for cascade-requeue
+-- accounting; when nil (forwarder direct path) we treat this as a fresh hop.
+issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, flags, previous_hop, queue_meta)
   -- Anti-spam self-monitoring: count our own originations (origin ==
   -- self.id; previous_hop == nil means we're not forwarding for someone
   -- else). Used to emit originator_self_over_budget on terminal failure
@@ -2645,7 +2664,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     -- end-to-end retry is the recovery path here.
     if previous_hop ~= nil then
       self:emit("send_no_route", {
-        origin = origin, payload = user_text, origin_seq = origin_seq, dst = dst_id,
+        origin = origin, payload = user_text, ctr = ctr, dst = dst_id,
       })
       self:log(string.format("send_no_route dst=%s (forwarder, route gone mid-flight)",
         dst_name))
@@ -2656,12 +2675,12 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     -- loop (periodic + on_recv 'B' hook) will retry on rt_update.
     table.insert(self.deferred_sends, {
       origin       = origin, dst_id = dst_id, dst_name = dst_name,
-      payload      = payload, user_text = user_text, origin_seq = origin_seq,
+      payload      = payload, user_text = user_text, ctr = ctr, flags = flags,
       queued_at_ms = self:now(),
     })
     self:emit("send_deferred", {
       origin     = origin, dst = dst_id, dst_name = dst_name,
-      payload    = user_text, origin_seq = origin_seq,
+      payload    = user_text, ctr = ctr,
       ttl_ms     = self.send_defer_ttl_ms,
       depth      = #self.deferred_sends,
     })
@@ -2700,7 +2719,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
   local blind_skipped_primary = nil
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
-      origin = origin, payload = user_text, origin_seq = origin_seq,
+      origin = origin, payload = user_text, ctr = ctr,
       dst = dst_id, next_hop = primary_next, delay_ms = val_b,
       source = "issue_send",
     })
@@ -2708,7 +2727,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
       name_of(self, primary_next), val_b))
     table.insert(self.tx_queue, 1, {
       origin = origin, dst_id = dst_id, dst_name = dst_name,
-      payload = payload, user_text = user_text, origin_seq = origin_seq,
+      payload = payload, user_text = user_text, ctr = ctr, flags = flags,
       previous_hop = previous_hop,
       enqueue_time_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
       requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
@@ -2718,7 +2737,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     return
   elseif action_b == "alt" then
     self:emit("tx_blind_alt", {
-      origin = origin, payload = user_text, origin_seq = origin_seq,
+      origin = origin, payload = user_text, ctr = ctr,
       dst = dst_id, from_next = primary_next, to_next = val_b,
     })
     self:log(string.format("tx_blind_alt (issue_send) dst=%s %s -> %s",
@@ -2726,7 +2745,9 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     blind_skipped_primary = primary_next
     primary_next = val_b
   end
-  local mid = gen_ctr_lo(self)
+  -- hop-level ctr_lo = low nibble of origin-level ctr, so DATA's ctr & 0xf
+  -- matches pending_rx.ctr_lo at the receiver without a separate wire field.
+  local mid = ctr & 0xf
   -- alts_tried: set keyed by next_hop id, cleared on successful ACK
   -- (pending_tx → nil via on_recv "K"). Pre-populate with the original
   -- primary if F1 blind-alt fired so the cascade doesn't try it again
@@ -2740,9 +2761,10 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     dst          = dst_id,
     next         = primary_next,
     ctr_lo       = mid,
-    payload      = payload,        -- full bytes (origin-seq hdr + user_text)
+    payload      = payload,        -- inner bytes (src_addr_len|src_addr|body) for DATA frame
     user_text    = user_text,      -- for emit + log clarity
-    origin_seq   = origin_seq,     -- end-to-end message id (with origin)
+    ctr          = ctr,            -- full 16-bit per-(origin,dst) counter
+    flags        = flags,          -- wire-level DATA_FLAG_* bits
     retries_left = effective_rts_max_retries(self,
       (queue_meta and queue_meta.requeue_count) or 0),
     alts_tried   = initial_alts_tried,
@@ -2756,24 +2778,27 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, origin
     enqueue_time_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
     requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
   }
-  -- payload_len includes the 2-byte origin-seq header — see pack_rts.
+  -- payload_len = inner overhead (src_addr_len + src_addr + MAC) + body size.
+  -- Body size = #payload - 2 (stripping the 2-byte inner header from inner bytes).
+  -- Equivalently: #payload + MAC_LEN (since payload already has 2-byte inner hdr).
+  local payload_len = #payload + MAC_LEN
   local rts = pack_rts(self.leaf_id, origin, self.id, dst_id, primary_next, mid,
-                       self.allowed_sf_bitmap, #payload)
+                       self.allowed_sf_bitmap, payload_len)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   self:emit("rts_tx", {
-    origin = origin, payload = user_text, origin_seq = origin_seq,
+    origin = origin, payload = user_text, ctr = ctr,
     dst = dst_id, next = primary_next, ctr_lo = mid,
     sf_bitmap = self.allowed_sf_bitmap,
   })
-  self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s seq=%d (sf_bitmap=0x%02x)",
-    name_of(self, primary_next), mid, name_of(self, origin), origin_seq,
+  self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s ctr=%d (sf_bitmap=0x%02x)",
+    name_of(self, primary_next), mid, name_of(self, origin), ctr,
     self.allowed_sf_bitmap))
   tx_initiating(self, rts, {
     sf    = self.routing_sf,
     label = label,
-    info  = string.format("origin=%s dst=%s next=%s msg=%d seq=%d sf_bitmap=0x%02x payload=%q",
+    info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x payload=%q",
       name_of(self, origin), dst_name, name_of(self, primary_next),
-      mid, origin_seq, self.allowed_sf_bitmap, user_text),
+      mid, ctr, self.allowed_sf_bitmap, user_text),
   }, function() start_rts_timeout(self) end)
   -- RX stays on routing_sf — CTS and NACK both ride on routing_sf now.
 end
@@ -2853,11 +2878,11 @@ become_free = function(self)
   end
   local item = table.remove(self.tx_queue, best_idx)
   self:emit("tx_dequeue", {
-    origin = item.origin, payload = item.user_text, origin_seq = item.origin_seq,
+    origin = item.origin, payload = item.user_text, ctr = item.ctr,
     dst = item.dst_id, depth = #self.tx_queue,
   })
   issue_send(self, item.origin, item.dst_id, item.dst_name,
-             item.payload, item.user_text, item.origin_seq, item.previous_hop,
+             item.payload, item.user_text, item.ctr, item.flags or 0, item.previous_hop,
              { enqueue_time_ms = item.enqueue_time_ms,
                requeue_count   = item.requeue_count })
 end
@@ -3458,7 +3483,7 @@ function on_init(self, config)
   -- now reachable get pushed back to tx_queue + emit send_drained;
   -- entries past TTL emit send_giveup. Forwarders never defer (they're
   -- mid-flight; lost-route mid-flight is a real failure).
-  self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, origin_seq, queued_at_ms}
+  self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, ctr, flags, queued_at_ms}
   self.send_defer_ttl_ms  = config.send_defer_ttl_ms or 30000
   -- Hop-level RTS-retry dedup. {sender_id → {ctr_lo, t_ms}}; lookups
   -- treat entries older than self.last_acked_ttl_ms as missing so the
@@ -3545,21 +3570,31 @@ function on_init(self, config)
   self.state_snapshot_period_ms = config.state_snapshot_period_ms or 60000
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
-  -- (origin_id, origin_seq) tuple and rejects subsequent arrivals of the
-  -- same id (after still ACKing the previous hop, so it clears its
-  -- pending_tx). This catches routing loops + legitimate same-payload
-  -- retransmissions in real firmware. TTL is generous (30s default)
-  -- because a flight at SF10 can take a few seconds with retries.
+  -- (origin_id, ctr) pair and rejects subsequent arrivals of the same id
+  -- (after still ACKing the previous hop, so it clears its pending_tx).
+  -- This catches routing loops + legitimate same-payload retransmissions
+  -- in real firmware. TTL is generous (30s default) because a flight at
+  -- SF10 can take a few seconds with retries.
   self.seen_origins       = {}
   self.seen_origin_ttl_ms = config.seen_origin_ttl_ms or 30000
-  self.next_origin_seq    = 1   -- 16-bit per-origin counter for new sends
+  -- Per-(self → peer) outbound 16-bit counter. Replaces the old flat next_origin_seq.
+  -- RAM-only this phase; NV persistence deferred to §8 crypto. Keyed by peer_id.
+  self.peer_send_counter  = {}   -- [peer_id] → last sent ctr value (0 = never sent)
   -- End-to-end ACK state. Originator-side per-message pending map keyed
-  -- by our own origin_seq. Set on send_e2e; cleared when matching E2E ACK
-  -- arrives (emit delivered_confirmed); pruned on TTL expiry (emit
-  -- e2e_ack_timeout). Cost per message: ~24 bytes of Lua table state
-  -- until ACK or TTL. See E2E ACK design in the header.
+  -- by ctr (the outbound counter for this (self,dst) pair). Set on send_e2e;
+  -- cleared when matching E2E ACK arrives (emit delivered_confirmed); pruned
+  -- on TTL expiry (emit e2e_ack_timeout).
   self.pending_e2e        = {}
   self.e2e_ack_ttl_ms     = config.e2e_ack_ttl_ms or 60000   -- 1 min default
+
+  -- next_ctr: per-(self, peer) outbound counter, wraps at 65535→1.
+  -- NV persistence deferred; RAM-only until §8 crypto lands.
+  function self:next_ctr(peer_id)
+    local c = (self.peer_send_counter[peer_id] or 0) + 1
+    if c > 65535 then c = 1 end
+    self.peer_send_counter[peer_id] = c
+    return c
+  end
 
   self.name_to_id = {}
   self.id_to_name = {}
@@ -3611,20 +3646,20 @@ function on_init(self, config)
   local function drain_loop()
     try_drain_deferred(self)
     local now = self:now()
-    for seq, info in pairs(self.pending_e2e) do
+    for ctr, info in pairs(self.pending_e2e) do
       if now - info.sent_at_ms >= self.e2e_ack_ttl_ms then
         self:emit("e2e_ack_timeout", {
           origin     = self.id,
-          origin_seq = seq,
+          ctr        = ctr,
           dst        = info.dst_id,
           payload    = info.user_text,
           ttl_ms     = self.e2e_ack_ttl_ms,
           elapsed_ms = now - info.sent_at_ms,
         })
         self:log(string.format(
-          "e2e_ack_timeout seq=%d dst=%s elapsed=%dms (no E2E ACK in %dms)",
-          seq, info.dst_name, now - info.sent_at_ms, self.e2e_ack_ttl_ms))
-        self.pending_e2e[seq] = nil
+          "e2e_ack_timeout ctr=%d dst=%s elapsed=%dms (no E2E ACK in %dms)",
+          ctr, info.dst_name, now - info.sent_at_ms, self.e2e_ack_ttl_ms))
+        self.pending_e2e[ctr] = nil
       end
     end
     self:after(1000, drain_loop)
@@ -4091,7 +4126,7 @@ function on_recv(self, frame, meta)
       local blind_window = self.cts_to_data_gap_ms +
         airtime_ms(c.chosen_data_sf, self.bw_hz, self.cr,
                    self.preamble_sym,
-                   DATA_HDR_LEN + self.max_payload_bytes)
+                   DATA_HDR_LEN + self.max_payload_bytes + DATA_INNER_OVERHEAD)
       local end_ms = now + blind_window
       local prev = self.blind_until[meta.src]
       if prev == nil or end_ms > prev then
@@ -4121,7 +4156,7 @@ function on_recv(self, frame, meta)
     -- bitmap (defends against a malformed CTS).
     if not sf_in_bitmap(self.allowed_sf_bitmap, c.chosen_data_sf) then
       self:emit("cts_invalid_sf", {
-        origin = self.pending_tx.origin, payload = self.pending_tx.payload,
+        origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
         from = c.src or self.pending_tx.next, ctr_lo = c.ctr_lo,
         chosen_data_sf = c.chosen_data_sf,
       })
@@ -4132,7 +4167,7 @@ function on_recv(self, frame, meta)
     self:emit("cts_rx", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       from = self.pending_tx.next, ctr_lo = c.ctr_lo,
       chosen_data_sf = c.chosen_data_sf,
     })
@@ -4150,20 +4185,21 @@ function on_recv(self, frame, meta)
       if self.pending_tx == nil or self.pending_tx.ctr_lo ~= px.ctr_lo then
         return
       end
-      local d = pack_data(px.origin, self.id, px.dst, px.next, px.ctr_lo, px.payload)
+      -- pack_data(origin, next_hop, dst, ctr, flags, inner)
+      local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0, px.payload)
       self:emit("data_tx", {
-        origin = px.origin, payload = px.user_text, origin_seq = px.origin_seq,
+        origin = px.origin, payload = px.user_text, ctr = px.ctr,
         dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
         sf = px.chosen_data_sf,
       })
-      self:log(string.format("data_tx -> %s ctr_lo=%d payload=%q on SF%d (ACK on SF%d)",
-        name_of(self, px.next), px.ctr_lo, px.payload, px.chosen_data_sf, self.routing_sf))
+      self:log(string.format("data_tx -> %s ctr_lo=%d ctr=%d payload=%q on SF%d (ACK on SF%d)",
+        name_of(self, px.next), px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf, self.routing_sf))
       tx_with_retry(self, d, {
         sf    = px.chosen_data_sf,
         label = "DATA",
-        info  = string.format("origin=%s dst=%s next=%s msg=%d sf=%d payload=%q",
+        info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf=%d payload=%q",
           name_of(self, px.origin), name_of(self, px.dst),
-          name_of(self, px.next), px.ctr_lo, px.chosen_data_sf, px.payload),
+          name_of(self, px.next), px.ctr_lo, px.ctr, px.chosen_data_sf, px.user_text),
       })
       -- Sender's RX has been on routing_sf throughout — no retune needed.
       -- DATA TX uses the per-tx sf override; the modem's RX state is
@@ -4208,7 +4244,7 @@ function on_recv(self, frame, meta)
     self:emit("ack_rx", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       from = self.pending_tx.next, ctr_lo = k.ctr_lo,
       data_snr_db = k.snr_db,
     })
@@ -4269,7 +4305,7 @@ function on_recv(self, frame, meta)
       self:emit("nack_rx", {
         origin = self.pending_tx.origin,
         payload = self.pending_tx.user_text,
-        origin_seq = self.pending_tx.origin_seq,
+        ctr = self.pending_tx.ctr,
         from = self.pending_tx.next, ctr_lo = n.ctr_lo,
         reason = "budget_low", tier = tier, blind_ms = blind_ms,
       })
@@ -4291,14 +4327,14 @@ function on_recv(self, frame, meta)
       self:emit("path_cascade_exhausted", {
         origin     = self.pending_tx.origin,
         payload    = self.pending_tx.user_text,
-        origin_seq = self.pending_tx.origin_seq,
+        ctr = self.pending_tx.ctr,
         dst        = self.pending_tx.dst, ctr_lo = self.pending_tx.ctr_lo,
         tried      = {}, trigger = "budget_low",
       })
       self:emit("rts_giveup", {
         origin = self.pending_tx.origin,
         payload = self.pending_tx.user_text,
-        origin_seq = self.pending_tx.origin_seq,
+        ctr = self.pending_tx.ctr,
         dst    = self.pending_tx.dst,
         next   = self.pending_tx.next, ctr_lo = self.pending_tx.ctr_lo,
       })
@@ -4315,7 +4351,7 @@ function on_recv(self, frame, meta)
     self:emit("nack_rx", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       from = self.pending_tx.next, ctr_lo = n.ctr_lo, busy_for_ms = n.busy_for_ms,
     })
     self:log(string.format("nack_rx <- %s ctr_lo=%d busy_for=%dms",
@@ -4383,9 +4419,10 @@ function on_recv(self, frame, meta)
       origin     = self.pending_tx.origin,
       dst_id     = self.pending_tx.dst,
       dst_name   = name_of(self, self.pending_tx.dst),
-      payload    = self.pending_tx.payload,        -- full bytes
+      payload    = self.pending_tx.payload,        -- inner bytes
       user_text  = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr        = self.pending_tx.ctr,
+      flags      = self.pending_tx.flags or 0,
       previous_hop = self.pending_tx.previous_hop,
       -- Preserve original tx_queue accounting: this is a busy-NACK requeue,
       -- NOT a cascade-requeue, so requeue_count stays at the pending_tx's
@@ -4398,7 +4435,7 @@ function on_recv(self, frame, meta)
     self:emit("tx_requeued", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
-      origin_seq = self.pending_tx.origin_seq,
+      ctr = self.pending_tx.ctr,
       dst = self.pending_tx.dst, ctr_lo = self.pending_tx.ctr_lo,
       busy_for_ms = n.busy_for_ms, depth = #self.tx_queue,
     })
@@ -4415,38 +4452,32 @@ function on_recv(self, frame, meta)
     if d.next ~= self.id then return end
     if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
 
-    -- Parse the application-layer origin-header from the payload bytes.
-    -- Forwarders peek to get (origin, origin_seq) for dedup; the rest is
-    -- the body (user text for normal DATA, or the acked-seq for E2E ACK).
-    -- A real-firmware port works the same way: app prepends header, mesh
-    -- treats opaque, app strips on receive. If parsing fails (truncated
-    -- payload), treat the whole payload as user_text and skip dedup.
-    local oh = parse_origin_hdr(d.payload)
-    local origin_seq    = oh and oh.seq   or nil
-    local flags         = oh and oh.flags or 0
-    local is_e2e_ack    = (flags & E2E_FLAG_IS_ACK)        ~= 0
-    local e2e_ack_req   = (flags & E2E_FLAG_ACK_REQUESTED) ~= 0
-    local user_text     = oh and oh.body or d.payload
+    -- parse_data already extracted origin, body, ctr, flags from the new
+    -- wire format. E2E flag bits are on wire byte 1 (not inner payload).
+    local is_e2e_ack  = d.e2e_is_ack
+    local e2e_ack_req = d.e2e_ack_req
+    local user_text   = d.body         -- body = text for normal DATA, or acked-ctr bytes for E2E ACK
 
     self:emit("data_rx", {
       origin     = d.origin,
       payload    = user_text,
-      origin_seq = origin_seq,
-      from       = d.src,
+      ctr        = d.ctr,
+      from       = self.pending_rx.from,  -- inbound sender (from pending_rx; d has no src field)
       dst        = d.dst,
       ctr_lo     = d.ctr_lo,
-      len        = #d.payload,
+      len        = #d.inner,
     })
     self:log(string.format(
-      "data_rx <- %s (origin=%s seq=%s dst=%s ctr_lo=%d, %d bytes) -> back to SF%d",
-      name_of(self, d.src), name_of(self, d.origin),
-      tostring(origin_seq), name_of(self, d.dst),
-      d.ctr_lo, #d.payload, self.routing_sf))
+      "data_rx <- %s (origin=%s ctr=%d dst=%s ctr_lo=%d, %d inner bytes) -> back to SF%d",
+      name_of(self, self.pending_rx.from), name_of(self, d.origin),
+      d.ctr, name_of(self, d.dst),
+      d.ctr_lo, #d.inner, self.routing_sf))
 
     -- DATA decoded. Cancel the pending_rx_expiry, retune RX, clear
     -- pending_rx. Then immediately TX the per-hop ACK on routing_sf and
     -- cache (sender, ctr_lo) so future retried RTS-from-this-sender
     -- short-circuits to a re-ACK without re-processing the DATA.
+    local rx_from = self.pending_rx.from
     if self.pending_rx_expiry_handle then
       self:cancel(self.pending_rx_expiry_handle)
       self.pending_rx_expiry_handle = nil
@@ -4454,7 +4485,7 @@ function on_recv(self, frame, meta)
     self:set_rx_sf(self.routing_sf)
     self.pending_rx = nil
 
-    self.last_acked_from[d.src] = { ctr_lo = d.ctr_lo, t_ms = self:now() }
+    self.last_acked_from[rx_from] = { ctr_lo = d.ctr_lo, t_ms = self:now() }
     -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
     -- bucket. Sender uses it to maintain its outbound link-quality EWMA
     -- to us (which we can't see because we're at the receiving end);
@@ -4462,35 +4493,33 @@ function on_recv(self, frame, meta)
     -- (future) per-neighbor RTS bitmap trimming.
     local ack = pack_ack(d.ctr_lo, meta.snr)
     self:emit("ack_tx", {
-      origin = d.origin, payload = user_text, origin_seq = origin_seq,
-      to = d.src, ctr_lo = d.ctr_lo, data_snr = meta.snr,
+      origin = d.origin, payload = user_text, ctr = d.ctr,
+      to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
     })
     self:log(string.format("ack_tx -> %s ctr_lo=%d (on routing SF%d)",
-      name_of(self, d.src), d.ctr_lo, self.routing_sf))
+      name_of(self, rx_from), d.ctr_lo, self.routing_sf))
     tx_with_retry(self, ack, {
       sf    = self.routing_sf,
       label = "ACK",
-      info  = string.format("to=%s msg=%d", name_of(self, d.src), d.ctr_lo),
+      info  = string.format("to=%s msg=%d", name_of(self, rx_from), d.ctr_lo),
     })
 
     -- Origin-level dedup. Now that the ACK is on its way (the
     -- previous hop will clear pending_tx whether or not we forward),
-    -- check whether we've already seen this (origin, origin_seq).
-    -- If so: don't deliver-twice and don't forward-twice. Catches DV
-    -- routing loops and legitimate same-payload retries from the
-    -- originator that found a different path.
-    if origin_seq ~= nil then
-      local seen_key = string.format("%d|%d", d.origin, origin_seq)
+    -- check whether we've already seen this (origin, ctr).
+    -- Re-keyed from (origin, origin_seq) → (origin, ctr) per §7.0.1.
+    do
+      local seen_key = string.format("%d|%d", d.origin, d.ctr)
       local now_ms = self:now()
       local exp = self.seen_origins[seen_key]
       if exp and exp > now_ms then
         self:emit("dup_drop", {
-          origin = d.origin, payload = user_text, origin_seq = origin_seq,
-          from = d.src, ctr_lo = d.ctr_lo,
+          origin = d.origin, payload = user_text, ctr = d.ctr,
+          from = rx_from, ctr_lo = d.ctr_lo,
         })
         self:log(string.format(
-          "dup_drop <- %s (origin=%s seq=%d, already seen — ACK only)",
-          name_of(self, d.src), name_of(self, d.origin), origin_seq))
+          "dup_drop <- %s (origin=%s ctr=%d, already seen — ACK only)",
+          name_of(self, rx_from), name_of(self, d.origin), d.ctr))
         return
       end
       -- Opportunistic prune of expired entries (cheap; bounded set).
@@ -4505,87 +4534,84 @@ function on_recv(self, frame, meta)
     -- the same script-tick don't race the runtime's self_tx_in_flight
     -- check (which would defer the forward-RTS via on_radio_busy retry —
     -- correct but wasteful; this is real-hardware behaviour anyway).
-    local d_origin     = d.origin
-    local d_src        = d.src              -- predecessor (for forward loop guard)
-    local d_dst        = d.dst
-    local d_payload    = d.payload          -- full bytes for re-forwarding
-    local d_user_text  = user_text
-    local d_origin_seq = origin_seq
+    local d_origin    = d.origin
+    local d_src       = rx_from            -- predecessor (for forward loop guard)
+    local d_dst       = d.dst
+    local d_inner     = d.inner            -- inner bytes verbatim for forwarding
+    local d_ctr       = d.ctr
+    local d_flags     = d.flags
+    local d_user_text = user_text
     local is_delivered = (d.dst == self.id)
 
     if is_delivered then
       if is_e2e_ack then
         -- This DATA is an end-to-end ACK delivered to us as the original
-        -- originator. Body carries the acked_seq (16-bit LE) — match
-        -- against pending_e2e and emit delivered_confirmed. Do NOT emit
-        -- "delivered" (this isn't user data; the analyzer's delivery
-        -- breakdown should only count true user payloads). Do NOT trigger
-        -- another E2E ACK (would loop).
+        -- originator. Body carries [acked_ctr_lo, acked_ctr_hi] (2 bytes) —
+        -- match against pending_e2e and emit delivered_confirmed. Do NOT
+        -- emit "delivered" (not user data). Do NOT trigger another E2E ACK.
         if #d_user_text >= 2 then
-          local acked_seq = d_user_text:byte(1) + d_user_text:byte(2) * 256
-          local info = self.pending_e2e[acked_seq]
+          local acked_ctr = d_user_text:byte(1) | (d_user_text:byte(2) << 8)
+          local info = self.pending_e2e[acked_ctr]
           if info ~= nil then
             self:emit("delivered_confirmed", {
               origin     = self.id,         -- the original originator (us)
-              origin_seq = acked_seq,
+              ctr        = acked_ctr,
               dst        = info.dst_id,
               payload    = info.user_text,
               elapsed_ms = self:now() - info.sent_at_ms,
               via_ack_from = d_origin,      -- the destination that ACK'd
             })
             self:log(string.format(
-              "delivered_confirmed acked_seq=%d dst=%s elapsed=%dms (E2E ACK from %s)",
-              acked_seq, info.dst_name, self:now() - info.sent_at_ms,
+              "delivered_confirmed acked_ctr=%d dst=%s elapsed=%dms (E2E ACK from %s)",
+              acked_ctr, info.dst_name, self:now() - info.sent_at_ms,
               name_of(self, d_origin)))
-            self.pending_e2e[acked_seq] = nil
+            self.pending_e2e[acked_ctr] = nil
           else
             -- No matching pending_e2e — either we already received this
             -- ACK (duplicate), already timed out, or never sent the
             -- corresponding e2e. Cheap diagnostic emit for the analyzer.
             self:emit("e2e_ack_unmatched", {
-              origin_seq = acked_seq, from = d_origin,
+              ctr = acked_ctr, from = d_origin,
             })
           end
         end
       else
         self:emit("delivered", {
-          origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
+          origin = d_origin, payload = d_user_text, ctr = d_ctr,
         })
-        self:log(string.format("DELIVERED from %s: %q (seq=%s%s)",
-          name_of(self, d_origin), d_user_text, tostring(d_origin_seq),
+        self:log(string.format("DELIVERED from %s: %q (ctr=%d%s)",
+          name_of(self, d_origin), d_user_text, d_ctr,
           e2e_ack_req and " [E2E-ack requested]" or ""))
         if e2e_ack_req then
-          -- Schedule an E2E ACK send back to d_origin. The new flight
-          -- gets our own next_origin_seq; its payload header carries
-          -- IS_ACK flag and our own seq; its BODY is the 2-byte
-          -- acked-seq (the original sender's seq we're confirming).
-          -- The new flight goes through the normal RTS-CTS-DATA-ACK
-          -- mechanics — forwarders route it back to d_origin without
-          -- knowing it's an E2E ACK.
-          local ack_seq = self.next_origin_seq
-          self.next_origin_seq = (ack_seq + 1) % 65536
-          local body = string.char(d_origin_seq % 256)
-                     .. string.char(math.floor(d_origin_seq / 256) % 256)
-          local e2e_payload = pack_origin_hdr(ack_seq, E2E_FLAG_IS_ACK) .. body
+          -- Schedule an E2E ACK send back to d_origin. The return flight
+          -- carries DATA_FLAG_E2E_IS_ACK on wire byte 1. Its body is the
+          -- 2-byte acked ctr [ctr_lo, ctr_hi] (the originator's ctr we're
+          -- confirming). Goes through normal RTS-CTS-DATA-ACK mechanics.
+          local return_ctr = self:next_ctr(d_origin)
+          local return_body = string.char(d_ctr & 0xff) .. string.char((d_ctr >> 8) & 0xff)
+          local return_inner = string.char(0)               -- src_addr_len = 0
+                             .. string.char(self.id)        -- src_addr
+                             .. return_body
           table.insert(self.tx_queue, {
             origin     = self.id,
             dst_id     = d_origin,
             dst_name   = name_of(self, d_origin),
-            payload    = e2e_payload,
-            user_text  = string.format("[E2E-ACK seq=%d]", d_origin_seq),
-            origin_seq = ack_seq,
+            payload    = return_inner,
+            user_text  = string.format("[E2E-ACK ctr=%d]", d_ctr),
+            ctr        = return_ctr,
+            flags      = DATA_FLAG_E2E_IS_ACK,
             enqueue_time_ms = self:now(),
             requeue_count   = 0,
             next_attempt_ms = 0,
           })
           self:emit("e2e_ack_tx_enqueued", {
-            origin = self.id, origin_seq = ack_seq,
-            dst = d_origin, acked_origin_seq = d_origin_seq,
+            origin = self.id, ctr = return_ctr,
+            dst = d_origin, acked_ctr = d_ctr,
             depth = #self.tx_queue,
           })
           self:log(string.format(
-            "e2e_ack_tx_enqueued seq=%d acked=%d dst=%s",
-            ack_seq, d_origin_seq, name_of(self, d_origin)))
+            "e2e_ack_tx_enqueued ctr=%d acked=%d dst=%s",
+            return_ctr, d_ctr, name_of(self, d_origin)))
         end
       end
     end
@@ -4602,7 +4628,7 @@ function on_recv(self, frame, meta)
       local route = self.rt[d_dst]
       if route == nil then
         self:emit("forward_fail", {
-          origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
+          origin = d_origin, payload = d_user_text, ctr = d_ctr,
           dst = d_dst, reason = "no_route",
         })
         self:log(string.format("forward_fail: no route to %s", dst_name))
@@ -4614,22 +4640,23 @@ function on_recv(self, frame, meta)
           origin     = d_origin,
           dst_id     = d_dst,
           dst_name   = dst_name,
-          payload    = d_payload,             -- full bytes (preserves the seq header)
+          payload    = d_inner,             -- inner bytes (verbatim relay)
           user_text  = d_user_text,
-          origin_seq = d_origin_seq,
+          ctr        = d_ctr,
+          flags      = d_flags,
           previous_hop = d_src,               -- forward loop guard
           enqueue_time_ms = self:now(),       -- fresh hop attempt
           requeue_count   = 0,
           next_attempt_ms = 0,
         })
         self:emit("forward_queued", {
-          origin = d_origin, payload = d_user_text, origin_seq = d_origin_seq,
+          origin = d_origin, payload = d_user_text, ctr = d_ctr,
           dst = d_dst, depth = #self.tx_queue,
         })
         return
       end
       issue_send(self, d_origin, d_dst, dst_name,
-                 d_payload, d_user_text, d_origin_seq, d_src)
+                 d_inner, d_user_text, d_ctr, d_flags, d_src)
     end)
     return
   end
@@ -4711,52 +4738,52 @@ function on_command(self, cmd_str)
   end
   local dst_id = self.name_to_id[dst_name]
   if dst_id == nil then return "ERROR: unknown dst: " .. dst_name end
-  -- Stamp this user-message with our 16-bit per-origin sequence number.
-  -- Combined with our origin_id (carried by the mesh DATA frame), the
-  -- pair (origin_id, origin_seq) is the globally-unique end-to-end
-  -- message id used by every receiving node for dedup.
-  local seq = self.next_origin_seq
-  self.next_origin_seq = (seq + 1) % 65536
-  local flags = want_e2e and E2E_FLAG_ACK_REQUESTED or 0
-  local full_payload = pack_origin_hdr(seq, flags) .. text
+  -- Stamp this user-message with a per-(self,dst) 16-bit outbound counter.
+  -- The pair (origin_id, ctr) is the globally-unique e2e message id used
+  -- by every receiving node for dedup. Replaces the old flat next_origin_seq.
+  local ctr = self:next_ctr(dst_id)
+  local wire_flags = want_e2e and DATA_FLAG_E2E_ACK_REQ or 0
+  -- inner = src_addr_len(1) | src_addr(1) | body
+  local inner = string.char(0) .. string.char(self.id) .. text
   if want_e2e then
     -- Register pending_e2e BEFORE enqueueing the send so a fast E2E ACK
     -- (e.g. test scenario with 1-hop path) doesn't arrive before the
     -- bookkeeping is in place.
-    self.pending_e2e[seq] = {
+    self.pending_e2e[ctr] = {
       sent_at_ms = self:now(),
       dst_id     = dst_id,
       dst_name   = dst_name,
       user_text  = text,
     }
     self:emit("e2e_ack_pending", {
-      origin = self.id, origin_seq = seq, dst = dst_id,
+      origin = self.id, ctr = ctr, dst = dst_id,
       ttl_ms = self.e2e_ack_ttl_ms,
     })
     self:log(string.format("send_e2e: pending_e2e[%d] dst=%s ttl=%dms",
-      seq, dst_name, self.e2e_ack_ttl_ms))
+      ctr, dst_name, self.e2e_ack_ttl_ms))
   end
   table.insert(self.tx_queue, {
     origin     = self.id,
     dst_id     = dst_id,
     dst_name   = dst_name,
-    payload    = full_payload,    -- full bytes that go on the wire
+    payload    = inner,           -- inner bytes (src_addr_len|src_addr|body)
     user_text  = text,            -- emit / log clarity
-    origin_seq = seq,
+    ctr        = ctr,
+    flags      = wire_flags,
     enqueue_time_ms = self:now(), -- first enqueue; cap reference for cascade-requeue
     requeue_count   = 0,
     next_attempt_ms = 0,
   })
   self:emit("tx_enqueue", {
-    origin = self.id, payload = text, origin_seq = seq,
+    origin = self.id, payload = text, ctr = ctr,
     dst = dst_id, depth = #self.tx_queue,
     e2e_ack_requested = want_e2e,
   })
-  self:log(string.format("send: queued dst=%s payload=%q seq=%d e2e=%s (queue depth=%d)",
-    dst_name, text, seq, tostring(want_e2e), #self.tx_queue))
+  self:log(string.format("send: queued dst=%s payload=%q ctr=%d e2e=%s (queue depth=%d)",
+    dst_name, text, ctr, tostring(want_e2e), #self.tx_queue))
   become_free(self)
-  return string.format("queued (depth=%d, seq=%d, e2e=%s)",
-    #self.tx_queue, seq, tostring(want_e2e))
+  return string.format("queued (depth=%d, ctr=%d, e2e=%s)",
+    #self.tx_queue, ctr, tostring(want_e2e))
 end
 
 -- on_radio_busy fires when the runtime defers a TX (LBT channel_busy or

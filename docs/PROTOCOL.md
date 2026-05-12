@@ -199,9 +199,9 @@ byte:  0   1     2     3    4     5                    6           7
   retry dedup at any realistic send rate.
 - `sf_bitmap` (8 bits): bit `i` set means SF `i+5` is acceptable for
   the data leg. e.g., `0b00001110` = {SF6, SF7, SF8}.
-- `payload_len` (8 bits): exact byte count of the upcoming DATA
-  payload (origin_seq header + user_text). Lets the receiver size
-  `pending_rx_expiry` to actual airtime.
+- `payload_len` (8 bits): byte count of the upcoming DATA inner bytes
+  plus MAC (= `#inner + MAC_LEN`). Lets the receiver size
+  `pending_rx_expiry` to actual airtime instead of worst-case.
 
 ### 3.3 CTS (`'C'`) — 2 bytes
 
@@ -224,45 +224,58 @@ No `leaf_id` — CTS is matched at the originator by
 `pending_tx.ctr_lo`, which was set after the originator's already-
 validated RTS.
 
-### 3.4 DATA (`'D'`) — 6 bytes header + n bytes payload
+### 3.4 DATA (`'D'`) — 10 + n bytes (in-leaf, addr_len=0)
+
+Per ROADMAP §7.0.1. E2E flags moved from inner payload header to wire byte 1.
+16-bit `ctr` replaces the 3-byte inner origin-header. 4-byte zero MAC placeholder
+added (crypto stub, will carry Poly1305-truncated under §8).
 
 ```
-byte:  0   1     2     3    4     5                    6..
-       ┌───┬─────┬─────┬───┬─────┬───────────────────┬─────────────┐
-       │'D'│ orig│ src │dst│ next│ reserved (4 hi)   │ payload     │
-       │   │     │     │   │     │ ctr_lo (4 lo)     │             │
-       └───┴─────┴─────┴───┴─────┴───────────────────┴─────────────┘
+byte:  0    1                        2     3    4    5     6...(5+n)  last 4
+       ┌────┬────────────────────────┬─────┬────┬────┬──── ┬──────────┬───────┐
+       │'D' │ addr_len (3 hi)        │ next│ dst│ctr │ ctr │ciphertext│  MAC  │
+       │    │ rsv (1)                │     │    │ lo │ hi  │ (n+2 B)  │ (4 B) │
+       │    │ E2E_ACK_REQ (1)        │     │    │    │     │          │ zeros │
+       │    │ E2E_IS_ACK (1)         │     │    │    │     │          │       │
+       │    │ IS_MULTICAST (1)       │     │    │    │     │          │       │
+       │    │ rsv (1)                │     │    │    │     │          │       │
+       └────┴────────────────────────┴─────┴────┴────┴─────┴──────────┴───────┘
 
-payload = [flags(1)] [origin_seq_lo(1)] [origin_seq_hi(1)] [body(N)]
+Total: 10 + n bytes for in-leaf (addr_len=0). n = body bytes.
 
-flags byte:
-  bit 0 = E2E_FLAG_ACK_REQUESTED   (origin wants end-to-end confirmation)
-  bit 1 = E2E_FLAG_IS_ACK           (this DATA payload IS an E2E ACK;
-                                      body = [acked_seq_lo, acked_seq_hi])
-  bits 2-7 = reserved
+ciphertext slot (= plaintext today):
+  byte 6  : src_addr_len (= 0 for in-leaf / flat addresses this phase)
+  byte 7  : src_addr     (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
+  bytes 8+: body         (user text for normal DATA; [acked_ctr_lo, acked_ctr_hi] for E2E ACK)
+
+byte 1 flag bits (low to high):
+  bit 0 (0x01): reserved
+  bit 1 (0x02): IS_MULTICAST  (always 0 this phase — multicast deferred)
+  bit 2 (0x04): E2E_IS_ACK    (this DATA IS an E2E ACK; body = [acked_ctr_lo, acked_ctr_hi])
+  bit 3 (0x08): E2E_ACK_REQ   (origin requests end-to-end confirmation)
+  bit 4 (0x10): reserved      (gained from shrinking addr_len from 4 to 3 bits)
+  bits 5-7:     addr_len       (always 0 this phase — hierarchy deferred)
+
+hop-level ctr_lo: low nibble of ctr (ctr & 0xf), used for pending_rx matching.
 ```
 
-- Mesh header fields (origin, src, dst, next, ctr_lo) are sized as in
-  RTS.
-- `payload` is opaque to the mesh layer at forwarders — they relay it
-  byte-for-byte. Origin and destination parse the 3-byte originator
-  header (1 B flags + 2 B `origin_seq`), then dispatch on the flags
-  byte for normal-DATA vs E2E-ACK handling. See §7.4 for full E2E ACK
-  semantics.
-- `origin_seq` is the 16-bit per-originator sequence for dedup (see §10).
-- `body` interpretation depends on flags:
-  - `IS_ACK=0` (normal DATA): body is opaque user text.
-  - `IS_ACK=1` (E2E ACK return frame): body is exactly 2 bytes —
-    `[acked_seq_lo, acked_seq_hi]` — the `origin_seq` being acked.
-
-**Wire-compat note.** The payload header grew from 2 B (just
-`origin_seq`) to 3 B (flags + `origin_seq`). All existing flows set
-`flags=0`, so a hypothetical legacy parser that re-read the first byte
-as `origin_seq_lo` would see 0 there — semantically wrong but doesn't
-crash; the actual `origin_seq` would be misread as `(seq>>8, body[0])`.
-This is a hard format break; all nodes upgrade in lockstep. For the
-simulator (single codebase) this is a non-issue. The flag bits become
-encrypted under §9 T2 — wire framing unchanged.
+- `ctr` (16-bit LE): per-(origin, dst) outbound counter, promoted to plaintext
+  wire bytes 4-5. Replaces the 3-byte inner origin-header (flags + origin_seq).
+- **E2E flag bits are on wire byte 1** (plaintext), not inside the ciphertext slot.
+  This lets intermediate nodes apply QoS (e.g., priority forwarding of ACK_REQ
+  frames) without needing to decrypt — an intentional design aligned with
+  WireGuard/MLS envelope patterns. Under §8 crypto the flags stay on byte 1.
+- `ciphertext` (inner payload) is carried as plaintext today. Forwarders relay it
+  verbatim — the ciphertext slot is opaque to the mesh layer at intermediate hops.
+  Origin and destination parse it: `src_addr_len | src_addr | body`.
+- `body` interpretation:
+  - `E2E_IS_ACK=0` (normal DATA): body is opaque user text.
+  - `E2E_IS_ACK=1` (E2E ACK return frame): body is exactly 2 bytes —
+    `[acked_ctr_lo, acked_ctr_hi]` — the 16-bit ctr being acked.
+- `MAC` (4 bytes, all-zero placeholder): will carry Poly1305-truncated tag
+  once §8 crypto lands. Receiver ignores MAC bytes today.
+- In-leaf size: 10 + n bytes (vs 8 + n before §7.0.1). The +2 B overhead
+  is the crypto/privacy stub cost; wire layout is identical once §8 lands.
 
 ### 3.5 ACK (`'K'`) — 2 bytes
 
@@ -372,7 +385,7 @@ hears it regardless of which SF it is listening on at that moment.
 | Q   | 4      | RREQ-route (one-hop) |
 | RTS | 8 | fixed |
 | CTS | 2 | fixed |
-| DATA | 6 + n | n = payload bytes (≤ `max_payload_bytes`) |
+| DATA | 10 + n | in-leaf (addr_len=0): 6 B hdr + 2 B inner-hdr + n B body + 4 B MAC |
 | ACK | 2 | fixed |
 | NACK | 3 | fixed |
 
@@ -948,46 +961,48 @@ overrun, route change — the originator's K-ack still succeeded and
 the loss is silent. For important user messages (payments, status
 confirmations) the originator needs end-to-end confirmation.
 
-**Design.** Opt-in per message. The originator sets
-`E2E_FLAG_ACK_REQUESTED` in the DATA payload header (§3.4). The
-destination, on accepting delivery, sends a small return DATA frame
-back to the originator with `E2E_FLAG_IS_ACK=1` and body =
-`[acked_seq_lo, acked_seq_hi]`. The return frame travels via normal
-data-plane mechanics (RTS/CTS/DATA/ACK + routing) — no new frame
-type, no new forwarding logic. Only origin and destination know it's
-an ACK; intermediate forwarders see ordinary DATA.
+**Design.** Opt-in per message. The originator sets the
+`E2E_ACK_REQ` bit (bit 3) on **wire byte 1** of the DATA frame (§3.4).
+The destination, on accepting delivery, sends a small return DATA frame
+back to the originator with `E2E_IS_ACK` (bit 2) set on wire byte 1
+and body = `[acked_ctr_lo, acked_ctr_hi]`. The return frame travels
+via normal data-plane mechanics (RTS/CTS/DATA/ACK + routing) — no new
+frame type, no new forwarding logic. Only origin and destination know
+it is an ACK; intermediate forwarders see ordinary DATA (the flag bits
+are visible on wire byte 1 but forwarders relay them verbatim without
+acting on them).
 
 **Originator flow.**
 ```
 Originator calls send_e2e <dst> <text>:
-  - allocate origin_seq
-  - record pending_e2e[seq] = { sent_at, dst, text }
+  - allocate ctr = self:next_ctr(dst_id)   (per-(self,dst) 16-bit counter)
+  - record pending_e2e[ctr] = { sent_at, dst, text }
   - emit e2e_ack_pending
-  - enqueue with E2E_FLAG_ACK_REQUESTED set in payload header
+  - enqueue with E2E_ACK_REQ set on wire byte 1 (flags = DATA_FLAG_E2E_ACK_REQ)
 ```
 
-**Destination flow (on `delivered` of a DATA with ACK_REQUESTED).**
+**Destination flow (on `delivered` of a DATA with E2E_ACK_REQ set).**
 ```
-Parse payload header → flags + origin_seq + body
-Emit `delivered` (body=user_text) — unchanged
-If E2E_FLAG_ACK_REQUESTED:
-  - build return payload: flags=E2E_FLAG_IS_ACK, seq=new own seq,
-    body=[acked_seq_lo, acked_seq_hi] (the original sender's seq)
-  - enqueue as a new send back to the original origin
+parse_data gives: d.e2e_ack_req = true, d.ctr = originator's ctr, d.body = user text
+Emit `delivered` (payload=d.body) — unchanged from user perspective
+If e2e_ack_req:
+  - return_ctr = self:next_ctr(d.origin)   (destination's own ctr for this pair)
+  - return_body = [d.ctr & 0xff, (d.ctr >> 8) & 0xff]   (acked ctr, LE)
+  - inner = src_addr_len(0) | src_addr(self.id) | return_body
+  - enqueue with flags = DATA_FLAG_E2E_IS_ACK, ctr = return_ctr, payload = inner
   - emit e2e_ack_tx_enqueued (analyzer / diagnostic)
-Note: the return frame never sets ACK_REQUESTED — no recursion.
+Note: the return frame never sets E2E_ACK_REQ — no recursion.
 ```
 
 **Originator flow on receiving the E2E ACK.**
 ```
-on_recv "D" → delivered branch:
-  - parse flags → E2E_FLAG_IS_ACK set
-  - extract acked_seq from body
-  - look up pending_e2e[acked_seq]:
-      - present: emit delivered_confirmed, clear pending entry
+on_recv "D" → delivered branch (d.e2e_is_ack = true):
+  - acked_ctr = d.body:byte(1) | (d.body:byte(2) << 8)
+  - look up pending_e2e[acked_ctr]:
+      - present: emit delivered_confirmed (payload = info.user_text), clear entry
       - absent : emit e2e_ack_unmatched (duplicate or already timed out)
   - DO NOT emit a normal `delivered` (this is an ACK, not user content)
-  - DO NOT trigger another E2E ACK (IS_ACK bit prevents recursion)
+  - DO NOT trigger another E2E ACK (E2E_IS_ACK bit prevents recursion)
 ```
 
 **Timeout.** The 1-s drain loop (existing) prunes `pending_e2e`
@@ -995,10 +1010,10 @@ entries older than `e2e_ack_ttl_ms` (default 60 s) and emits
 `e2e_ack_timeout`. The app layer decides whether to retry, surface
 "no answer received", or fall back to assumed delivery.
 
-**Cost.** E2E ACK return payload = 3 B header + 2 B acked-seq = 5 B
-content. On wire: ~10 B per hop (DATA framing). At SF8 BW250 a 3-hop
-round-trip is roughly 600 ms total airtime. This is **why it's
-opt-in** — at scale, ACKing every flight doubles the airtime budget
+**Cost.** E2E ACK return inner = 2 B src-addr-hdr + 2 B acked-ctr = 4 B
+inner content. On wire: 10 + 2 = 12 B per hop (DATA framing at in-leaf).
+At SF8 BW250 a 3-hop round-trip is roughly 600 ms total airtime. This is
+**why it's opt-in** — at scale, ACKing every flight doubles the airtime budget
 consumed per message.
 
 **Composition.**
