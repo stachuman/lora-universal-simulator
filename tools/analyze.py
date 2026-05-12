@@ -1281,6 +1281,667 @@ def print_section_17(r: dict) -> None:
                 print(f"    {tier_name.get(tier, f'tier_{tier}'):<14} {c}")
 
 
+# ---- Section 18: E2E delivery ACK metrics ---------------------------------
+
+def section_e2e_ack(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """End-to-end DATA delivery ACK (§7.4 in PROTOCOL.md, commit 28ce259).
+
+    Tracks the opt-in E2E ACK roundtrip introduced for important messages:
+      • e2e_ack_pending      — originator registered send_e2e
+      • e2e_ack_tx_enqueued  — destination queued the return ACK
+      • delivered_confirmed  — originator matched returning E2E ACK
+      • e2e_ack_unmatched    — ACK arrived but no pending entry
+      • e2e_ack_timeout      — pending entry expired (no ACK in TTL)
+
+    Confirmation rate = delivered_confirmed / e2e_ack_pending.
+    """
+    name_by_idx = {i: n.get("name", f"#{i}")
+                   for i, n in enumerate(cfg.get("nodes", []))}
+
+    pending = 0
+    enqueued = 0
+    confirmed = 0
+    unmatched = 0
+    timed_out = 0
+    rtt_ms_list: list[int] = []
+    pending_by_origin: Counter = Counter()
+    confirmed_by_origin: Counter = Counter()
+    timeout_by_origin: Counter = Counter()
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "e2e_ack_pending":
+            pending += 1
+            origin = e.get("node")
+            pending_by_origin[origin] += 1
+        elif et == "e2e_ack_tx_enqueued":
+            enqueued += 1
+        elif et == "delivered_confirmed":
+            confirmed += 1
+            confirmed_by_origin[e.get("node")] += 1
+            rtt = d.get("rtt_ms")
+            if isinstance(rtt, (int, float)) and rtt >= 0:
+                rtt_ms_list.append(int(rtt))
+        elif et == "e2e_ack_unmatched":
+            unmatched += 1
+        elif et == "e2e_ack_timeout":
+            timed_out += 1
+            timeout_by_origin[e.get("node")] += 1
+
+    def resolve(nid):
+        if isinstance(nid, int):
+            return name_by_idx.get(nid, f"#{nid}")
+        return str(nid) if nid is not None else "?"
+
+    return {
+        "pending":           pending,
+        "enqueued":          enqueued,
+        "confirmed":         confirmed,
+        "unmatched":         unmatched,
+        "timed_out":         timed_out,
+        "rtt_ms":            sorted(rtt_ms_list),
+        "pending_by_origin": [(resolve(o), c)
+                              for o, c in pending_by_origin.most_common(5)],
+        "confirmed_by_origin": dict((resolve(o), c)
+                                     for o, c in confirmed_by_origin.items()),
+        "timeout_by_origin":   dict((resolve(o), c)
+                                     for o, c in timeout_by_origin.items()),
+    }
+
+
+def print_section_18(r: dict) -> None:
+    print("\n=== (18) end-to-end delivery ACK ===")
+    if r["pending"] == 0 and r["confirmed"] == 0 and r["timed_out"] == 0:
+        print("  (no E2E ACK events — feature not exercised by this scenario)")
+        return
+    print(f"  send_e2e usage (e2e_ack_pending):  {r['pending']}")
+    print(f"  return ACK queued at destination:  {r['enqueued']}")
+    print(f"  delivered_confirmed (matched):     {r['confirmed']}")
+    print(f"  e2e_ack_unmatched (late/duplicate):{r['unmatched']}")
+    print(f"  e2e_ack_timeout (TTL exceeded):    {r['timed_out']}")
+    if r["pending"] > 0:
+        rate = 100.0 * r["confirmed"] / r["pending"]
+        print(f"  confirmation rate:                 {rate:.1f}%")
+    rtts = r["rtt_ms"]
+    if rtts:
+        n = len(rtts)
+        def q(p): return rtts[min(n - 1, max(0, int(p * n)))]
+        print(f"  E2E round-trip latency (ms): "
+              f"min={rtts[0]}  p50={q(0.5)}  p95={q(0.95)}  max={rtts[-1]}")
+    if r["pending_by_origin"]:
+        print(f"  top send_e2e originators:")
+        for name, c in r["pending_by_origin"]:
+            conf = r["confirmed_by_origin"].get(name, 0)
+            timeo = r["timeout_by_origin"].get(name, 0)
+            print(f"    {name:<24} sent={c:>4}  confirmed={conf:>4}  "
+                  f"timeout={timeo:>4}")
+
+
+# ---- Section 19: hop-limit analysis (8-hop ceiling) -----------------------
+
+def section_hop_limit(cfg: dict, events_path: str,
+                       since_ms: int = 0,
+                       hop_limit: int = 8) -> dict:
+    """Hop-count distribution + fail-attribution against the protocol's
+    hard hop limit (default 8 — see PROTOCOL.md §5.2 'hops > 8 rejected').
+
+    Histogram is built from successful delivered flights using the same
+    (data_tx → dedupe by (src, next)) machinery as §1 path optimality.
+
+    Fail-attribution: for each user-issued `send` command, check whether
+    the shortest path on the observed link graph exceeds the hop limit.
+    If so AND the send didn't deliver, it's classified as hop-limit-
+    binding. This is a CONSERVATIVE estimate — sends could fail for many
+    other reasons even when a short path exists. We only flag the cases
+    where physics rules out delivery at the current limit.
+    """
+    names_by_id = {i: n["name"] for i, n in enumerate(cfg["nodes"])}
+    name_to_id = {v: k for k, v in names_by_id.items()}
+    edges = build_link_graph(events_path, names_by_id, since_ms)
+
+    # Successful flights: hop count from data_tx chain dedupe (same logic
+    # as §1 — see section_path_optimality for rationale).
+    delivered_seqs: set[tuple] = set()
+    data_tx_chain: dict[tuple, list] = defaultdict(list)
+    sends: list[tuple[str, str]] = []  # (origin_name, dst_name) pairs
+
+    for c in cfg.get("commands", []):
+        cmd = c.get("command", "")
+        at_ms = int(c.get("at_ms", 0))
+        if not cmd.startswith("send ") or at_ms < since_ms:
+            continue
+        parts = cmd.split(maxsplit=2)
+        if len(parts) >= 3:
+            # "send <dst> <text>" — c["node"] is originator
+            origin = c.get("node")
+            dst = parts[1]
+            if origin and dst:
+                sends.append((origin, dst))
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "delivered":
+            origin = d.get("origin")
+            seq = d.get("origin_seq")
+            if origin is not None and seq is not None:
+                delivered_seqs.add((origin, seq))
+        elif et == "data_tx":
+            origin = d.get("origin")
+            seq = d.get("origin_seq")
+            if origin is not None and seq is not None:
+                nxt = d.get("to", d.get("next"))
+                data_tx_chain[(origin, seq)].append((e["time_ms"], e["node"], nxt))
+
+    hop_histogram: Counter = Counter()
+    flights_at_limit = 0
+    headroom_samples: list[int] = []
+    for (origin, seq), chain in data_tx_chain.items():
+        if (origin, seq) not in delivered_seqs:
+            continue
+        chain.sort()
+        seen = set()
+        actual_hops = 0
+        for t, src, nxt in chain:
+            key = (src, nxt)
+            if key not in seen:
+                seen.add(key)
+                actual_hops += 1
+        if actual_hops > 0:
+            hop_histogram[actual_hops] += 1
+            if actual_hops == hop_limit:
+                flights_at_limit += 1
+            headroom_samples.append(hop_limit - actual_hops)
+
+    # Fail-attribution: sends that didn't deliver, with shortest link-path
+    # > hop_limit. CONSERVATIVE: only flags physics-impossible cases.
+    impossible_sends = 0
+    impossible_examples: list[dict] = []
+    hop_distances: list[int] = []
+    for origin_name, dst_name in sends:
+        a = name_to_id.get(origin_name)
+        b = name_to_id.get(dst_name)
+        if a is None or b is None:
+            continue
+        opt = shortest_hops(edges, a, b)
+        if opt is None:
+            continue
+        hop_distances.append(opt)
+        if opt > hop_limit:
+            # Was this send delivered? Match by origin name; can't match
+            # by seq because user commands don't know the runtime-assigned
+            # seq. Use heuristic: any delivered flight from this origin
+            # to this dst counts as "this user's send succeeded
+            # eventually" — but we'll only flag drops, not retries, so
+            # this is bounded.
+            # Simpler approximation: count send commands where opt > limit.
+            # We can't perfectly attribute success/fail to specific sends.
+            impossible_sends += 1
+            if len(impossible_examples) < 5:
+                impossible_examples.append({
+                    "src": origin_name, "dst": dst_name, "min_hops": opt,
+                })
+
+    # What-if sensitivity: what % of currently-delivered flights would
+    # have failed if hop_limit were tightened?
+    total_delivered_flights = sum(hop_histogram.values())
+    what_if = {}
+    for trial_limit in (7, 6, 5, 4):
+        if trial_limit >= hop_limit:
+            continue
+        too_long = sum(c for h, c in hop_histogram.items() if h > trial_limit)
+        what_if[trial_limit] = too_long
+
+    return {
+        "hop_histogram":           dict(hop_histogram),
+        "hop_limit":               hop_limit,
+        "flights_at_limit":        flights_at_limit,
+        "headroom_samples":        sorted(headroom_samples),
+        "total_delivered_flights": total_delivered_flights,
+        "impossible_sends":        impossible_sends,
+        "impossible_examples":     impossible_examples,
+        "total_sends":             len(sends),
+        "what_if":                 what_if,
+    }
+
+
+def print_section_19(r: dict) -> None:
+    print(f"\n=== (19) hop-limit analysis (limit = {r['hop_limit']}) ===")
+    hist = r["hop_histogram"]
+    total = r["total_delivered_flights"]
+    if total == 0:
+        print("  (no delivered flights to analyze)")
+        return
+    print(f"  hop count distribution (n={total} delivered):")
+    for h in sorted(hist.keys()):
+        bar = "#" * min(40, int(40 * hist[h] / total))
+        marker = "  ← AT LIMIT" if h == r["hop_limit"] else ""
+        print(f"    {h} hop{'s' if h != 1 else ' '}: "
+              f"{hist[h]:>5} ({100*hist[h]/total:>4.1f}%)  {bar}{marker}")
+
+    headrooms = r["headroom_samples"]
+    if headrooms:
+        n = len(headrooms)
+        median = headrooms[n // 2]
+        p95 = headrooms[min(n - 1, int(0.05 * n))]  # 5th percentile = worst case
+        worst = headrooms[0]
+        print(f"  headroom to limit: median={median}, p95-tight={p95}, worst={worst}")
+
+    if r["flights_at_limit"]:
+        print(f"  flights AT limit ({r['hop_limit']} hops): "
+              f"{r['flights_at_limit']} — limit is binding for these")
+
+    if r["impossible_sends"]:
+        ts = r["total_sends"]
+        pct = 100.0 * r["impossible_sends"] / ts if ts else 0.0
+        print(f"  sends with shortest-path > limit (physics-impossible): "
+              f"{r['impossible_sends']}/{ts} ({pct:.1f}%)")
+        if r["impossible_examples"]:
+            print(f"  examples:")
+            for ex in r["impossible_examples"]:
+                print(f"    {ex['src']} → {ex['dst']}: min_hops={ex['min_hops']}")
+
+    if r["what_if"]:
+        print(f"  what-if sensitivity (currently-delivered flights that would have failed):")
+        for trial, lost in sorted(r["what_if"].items(), reverse=True):
+            pct = 100.0 * lost / total if total else 0.0
+            print(f"    if limit were {trial}: {lost} flights lost ({pct:.1f}%)")
+
+
+# ---- Section 20: NACK reason breakdown ------------------------------------
+
+def section_nack_reasons(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """NACK reason breakdown (commit 0160d79 added the reason byte).
+
+    Two reasons defined:
+      • busy_rx (legacy): receiver's pending_rx is locked to another flight
+      • budget_low: receiver's duty-cycle tier >= CRITICAL — refuse forward
+
+    Tracking the breakdown reveals what kind of pressure the network is
+    under: many BUSY_RX → channel contention; many BUDGET_LOW → duty-cycle
+    saturation. Also reveals which nodes are most saturated (top emitters
+    of BUDGET_LOW NACKs).
+    """
+    name_by_idx = {i: n.get("name", f"#{i}")
+                   for i, n in enumerate(cfg.get("nodes", []))}
+
+    nack_tx_by_reason: Counter = Counter()
+    nack_rx_by_reason: Counter = Counter()
+    busy_tx_by_node: Counter = Counter()
+    budget_tx_by_node: Counter = Counter()
+    budget_rx_by_node: Counter = Counter()
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "nack_tx":
+            reason = d.get("reason", "busy_rx")
+            nack_tx_by_reason[reason] += 1
+            node = e.get("node")
+            if reason == "budget_low":
+                budget_tx_by_node[node] += 1
+            else:
+                busy_tx_by_node[node] += 1
+        elif et == "nack_rx":
+            reason = d.get("reason", "busy_rx")
+            nack_rx_by_reason[reason] += 1
+            if reason == "budget_low":
+                budget_rx_by_node[e.get("node")] += 1
+
+    def resolve(nid):
+        if isinstance(nid, int):
+            return name_by_idx.get(nid, f"#{nid}")
+        return str(nid) if nid is not None else "?"
+
+    return {
+        "tx_by_reason":         dict(nack_tx_by_reason),
+        "rx_by_reason":         dict(nack_rx_by_reason),
+        "top_budget_emitters":  [(resolve(n), c)
+                                  for n, c in budget_tx_by_node.most_common(5)],
+        "top_busy_emitters":    [(resolve(n), c)
+                                  for n, c in busy_tx_by_node.most_common(5)],
+        "top_budget_receivers": [(resolve(n), c)
+                                  for n, c in budget_rx_by_node.most_common(5)],
+    }
+
+
+def print_section_20(r: dict) -> None:
+    print("\n=== (20) NACK reason breakdown ===")
+    tx = r["tx_by_reason"]
+    rx = r["rx_by_reason"]
+    if not tx and not rx:
+        print("  (no NACK events — instrumentation may not be wired)")
+        return
+    total_tx = sum(tx.values())
+    total_rx = sum(rx.values())
+    print(f"  nack_tx (emitted by receivers refusing): {total_tx}")
+    for reason, c in sorted(tx.items(), key=lambda kv: -kv[1]):
+        pct = 100.0 * c / total_tx if total_tx else 0.0
+        print(f"    {reason:<14}: {c:>5} ({pct:.0f}%)")
+    print(f"  nack_rx (received by senders): {total_rx}")
+    for reason, c in sorted(rx.items(), key=lambda kv: -kv[1]):
+        pct = 100.0 * c / total_rx if total_rx else 0.0
+        print(f"    {reason:<14}: {c:>5} ({pct:.0f}%)")
+    if r["top_budget_emitters"]:
+        print(f"  top BUDGET_LOW NACK emitters (saturated nodes):")
+        for name, c in r["top_budget_emitters"]:
+            print(f"    {name:<24} {c}")
+    if r["top_budget_receivers"]:
+        print(f"  top BUDGET_LOW NACK receivers (senders being told to back off):")
+        for name, c in r["top_budget_receivers"]:
+            print(f"    {name:<24} {c}")
+
+
+# ---- Section 21: budget tier observations ---------------------------------
+
+def section_budget_tier(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """Per-node observations of duty-cycle budget tier (event-driven).
+
+    The lua's node_state_snapshot does NOT yet include the budget_tier
+    field, so we can't compute true residence time. Instead, we count
+    tier-revealing events:
+
+      • beacon_skipped_budget  — tier was >= CRITICAL when BCN fired
+      • nack_tx (budget_low)   — tier was >= CRITICAL on RTS-rx
+      • originator_self_over_budget — tier was >= STRAINED on giveup
+
+    These all signal "tier got high enough to trigger action" — useful
+    for spotting saturated nodes and counting saturation incidents, but
+    NOT a residence-time metric (HEALTHY/STRAINED moments produce no
+    events, so they're invisible here).
+
+    To get true residence time, lua's node_state_snapshot.data needs to
+    add `budget_tier` and `pct_used` fields. This is flagged in the
+    print path so the gap is obvious.
+    """
+    name_by_idx = {i: n.get("name", f"#{i}")
+                   for i, n in enumerate(cfg.get("nodes", []))}
+
+    beacon_skipped_budget: Counter = Counter()  # node -> count
+    nack_budget_emit: Counter = Counter()       # node -> count (from nack_tx reason=budget_low)
+    self_over_budget: Counter = Counter()       # node -> count
+    tier_observations: Counter = Counter()      # tier_int -> total count across events
+
+    snapshot_count = 0
+    snapshot_with_tier = 0
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "node_state_snapshot":
+            snapshot_count += 1
+            if "budget_tier" in d:
+                snapshot_with_tier += 1
+        elif et == "beacon_skipped_budget":
+            beacon_skipped_budget[e.get("node")] += 1
+            tier = d.get("tier")
+            if tier is not None:
+                tier_observations[int(tier)] += 1
+        elif et == "nack_tx" and d.get("reason") == "budget_low":
+            nack_budget_emit[e.get("node")] += 1
+            tier = d.get("tier")
+            if tier is not None:
+                tier_observations[int(tier)] += 1
+        elif et == "originator_self_over_budget":
+            self_over_budget[e.get("node")] += 1
+            tier = d.get("duty_cycle_tier")
+            if tier is not None:
+                tier_observations[int(tier)] += 1
+
+    def resolve(nid):
+        if isinstance(nid, int):
+            return name_by_idx.get(nid, f"#{nid}")
+        return str(nid) if nid is not None else "?"
+
+    return {
+        "beacon_skipped_budget": dict((resolve(n), c)
+                                       for n, c in beacon_skipped_budget.items()),
+        "nack_budget_emit":      dict((resolve(n), c)
+                                       for n, c in nack_budget_emit.items()),
+        "self_over_budget":      dict((resolve(n), c)
+                                       for n, c in self_over_budget.items()),
+        "tier_observations":     dict(tier_observations),
+        "snapshot_count":        snapshot_count,
+        "snapshot_with_tier":    snapshot_with_tier,
+    }
+
+
+def print_section_21(r: dict) -> None:
+    print("\n=== (21) budget tier observations ===")
+    skipped = r["beacon_skipped_budget"]
+    nacks   = r["nack_budget_emit"]
+    selfwarn = r["self_over_budget"]
+    if not skipped and not nacks and not selfwarn:
+        print("  (no tier-revealing events — network stayed below CRITICAL/STRAINED)")
+        if r["snapshot_count"] > 0 and r["snapshot_with_tier"] == 0:
+            print("  NOTE: node_state_snapshot fired but doesn't carry budget_tier yet.")
+            print("        Add budget_tier + pct_used to lua's node_state_snapshot.data")
+            print("        to enable true residence-time analysis.")
+        return
+
+    tier_name = {0: "HEALTHY", 1: "STRAINED", 2: "CRITICAL", 3: "EXHAUSTED"}
+
+    if skipped:
+        total = sum(skipped.values())
+        print(f"  beacon_skipped_budget (tier ≥ CRITICAL when BCN fired): {total} events")
+        top = sorted(skipped.items(), key=lambda kv: -kv[1])[:5]
+        for name, c in top:
+            print(f"    {name:<24} {c} skips")
+
+    if nacks:
+        total = sum(nacks.values())
+        print(f"  budget_low NACKs emitted (tier ≥ CRITICAL on RTS-rx): {total}")
+        top = sorted(nacks.items(), key=lambda kv: -kv[1])[:5]
+        for name, c in top:
+            print(f"    {name:<24} {c} NACKs")
+
+    if selfwarn:
+        total = sum(selfwarn.values())
+        print(f"  originator_self_over_budget warns: {total}")
+        top = sorted(selfwarn.items(), key=lambda kv: -kv[1])[:5]
+        for name, c in top:
+            print(f"    {name:<24} {c} warns")
+
+    obs = r["tier_observations"]
+    if obs:
+        print(f"  tier observations across all reporting events:")
+        for tier in sorted(obs.keys()):
+            tname = tier_name.get(tier, f"tier_{tier}")
+            print(f"    {tname:<10}: {obs[tier]} observations")
+
+    if r["snapshot_count"] > 0 and r["snapshot_with_tier"] == 0:
+        print(f"  NOTE: {r['snapshot_count']} node_state_snapshot events seen but none")
+        print(f"        carry budget_tier yet. Add `budget_tier` + `pct_used` to lua's")
+        print(f"        node_state_snapshot.data emit for true residence-time tracking.")
+
+
+# ---- Section 22: tier-aware routing impact --------------------------------
+
+def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """Tier-aware routing (commit 939842d) demotes saturated next-hops via
+    a dB-score penalty in route_strictly_better. The mechanism's impact:
+
+      • blind_observed with reason='nack_budget' — sender marked a peer
+        blind due to receiving a budget NACK
+      • rt_update events — implicitly elevated when tier changes shuffle
+        the routing table (no separate "tier-driven" flag, so we can only
+        count total rt_update churn for now)
+
+    Reports the count of budget-driven blind marks and active blind window
+    extent. Combined with §20 NACK reasons, this gives the full picture
+    of the tier-aware routing feedback loop.
+    """
+    name_by_idx = {i: n.get("name", f"#{i}")
+                   for i, n in enumerate(cfg.get("nodes", []))}
+
+    blind_observed_total = 0
+    blind_observed_budget = 0
+    blind_observed_other = 0
+    blind_by_observer: Counter = Counter()  # the OBSERVING node
+    blind_for_peer: Counter = Counter()     # the BLIND-MARKED peer
+    tx_blind_defer = 0
+    tx_blind_alt = 0
+    blind_durations_ms: list[int] = []  # all blind_until - now from blind_observed
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "blind_observed":
+            blind_observed_total += 1
+            reason = d.get("reason", "")
+            if reason == "nack_budget":
+                blind_observed_budget += 1
+                blind_by_observer[e.get("node")] += 1
+                blind_for_peer[d.get("node")] += 1
+            else:
+                blind_observed_other += 1
+            # extract duration if present
+            until = d.get("until_ms")
+            now = e.get("time_ms")
+            if isinstance(until, (int, float)) and isinstance(now, (int, float)):
+                dur = int(until - now)
+                if dur > 0:
+                    blind_durations_ms.append(dur)
+        elif et == "tx_blind_defer":
+            tx_blind_defer += 1
+        elif et == "tx_blind_alt":
+            tx_blind_alt += 1
+
+    def resolve(nid):
+        if isinstance(nid, int):
+            return name_by_idx.get(nid, f"#{nid}")
+        return str(nid) if nid is not None else "?"
+
+    return {
+        "blind_observed_total":  blind_observed_total,
+        "blind_observed_budget": blind_observed_budget,
+        "blind_observed_other":  blind_observed_other,
+        "top_observers":         [(resolve(n), c)
+                                   for n, c in blind_by_observer.most_common(5)],
+        "top_blind_peers":       [(resolve(n), c)
+                                   for n, c in blind_for_peer.most_common(5)],
+        "tx_blind_defer":        tx_blind_defer,
+        "tx_blind_alt":          tx_blind_alt,
+        "blind_durations_ms":    sorted(blind_durations_ms),
+    }
+
+
+def print_section_22(r: dict) -> None:
+    print("\n=== (22) tier-aware routing impact ===")
+    if r["blind_observed_total"] == 0 and r["tx_blind_defer"] == 0:
+        print("  (no blind/tier events — feature inactive in this run)")
+        return
+    print(f"  blind_observed (total):       {r['blind_observed_total']}")
+    print(f"    of which budget-driven:     {r['blind_observed_budget']}")
+    print(f"    of which other (CTS overhear etc.): {r['blind_observed_other']}")
+    print(f"  tx_blind_defer (held back due to blind peer):  {r['tx_blind_defer']}")
+    print(f"  tx_blind_alt (switched to alt due to blind):   {r['tx_blind_alt']}")
+    if r["top_observers"]:
+        print(f"  top observers (sending budget-driven blind marks):")
+        for name, c in r["top_observers"]:
+            print(f"    {name:<24} {c}")
+    if r["top_blind_peers"]:
+        print(f"  top peers being marked blind (saturated):")
+        for name, c in r["top_blind_peers"]:
+            print(f"    {name:<24} {c}")
+    durs = r["blind_durations_ms"]
+    if durs:
+        n = len(durs)
+        def q(p): return durs[min(n - 1, max(0, int(p * n)))]
+        print(f"  blind window duration: "
+              f"min={durs[0]/1000:.0f}s  p50={q(0.5)/1000:.0f}s  "
+              f"p95={q(0.95)/1000:.0f}s  max={durs[-1]/1000:.0f}s")
+
+
+# ---- Section 23: inter-layer gateway efficiency (§7.3 — stub for now) -----
+
+def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """Inter-layer gateway TDM scheduling (roadmap §7.3, NOT YET IMPLEMENTED
+    as of writing).
+
+    When the feature lands, the lua will emit:
+      • layer_sweep_start / layer_sweep_end — gateway tunes to/from upper layer
+      • cross_layer_handoff — frame transitioned between layers
+      • cross_layer_giveup — frame dropped (no overlap window)
+      • gateway_schedule_announced / gateway_schedule_received
+
+    This stub looks for those events and prints "(not implemented)" if
+    absent. When the feature lands, replace the stub body with real
+    aggregation; the print path will reveal real data automatically.
+    """
+    sweep_start = 0
+    sweep_end = 0
+    cross_layer_handoffs = 0
+    cross_layer_giveups = 0
+    gateway_schedule_announced = 0
+    gateway_schedule_received = 0
+    is_gateway_count: Counter = Counter()  # node -> count of BCNs with self_gateway_flag
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        if et == "layer_sweep_start":
+            sweep_start += 1
+        elif et == "layer_sweep_end":
+            sweep_end += 1
+        elif et == "cross_layer_handoff":
+            cross_layer_handoffs += 1
+        elif et == "cross_layer_giveup":
+            cross_layer_giveups += 1
+        elif et == "gateway_schedule_announced":
+            gateway_schedule_announced += 1
+        elif et == "gateway_schedule_received":
+            gateway_schedule_received += 1
+        elif et == "beacon_tx" and d.get("self_gateway_flag"):
+            is_gateway_count[e.get("node")] += 1
+
+    return {
+        "sweep_start":                 sweep_start,
+        "sweep_end":                   sweep_end,
+        "cross_layer_handoffs":        cross_layer_handoffs,
+        "cross_layer_giveups":         cross_layer_giveups,
+        "gateway_schedule_announced":  gateway_schedule_announced,
+        "gateway_schedule_received":   gateway_schedule_received,
+        "is_gateway_count":            dict(is_gateway_count),
+    }
+
+
+def print_section_23(r: dict) -> None:
+    print("\n=== (23) inter-layer gateway efficiency (§7.3) ===")
+    total = (r["sweep_start"] + r["cross_layer_handoffs"] +
+             r["gateway_schedule_announced"] + len(r["is_gateway_count"]))
+    if total == 0:
+        print("  (no inter-layer events — §7.3 not yet implemented; section will "
+              "populate automatically when the feature lands)")
+        return
+    if r["is_gateway_count"]:
+        print(f"  gateway-flagged nodes: {len(r['is_gateway_count'])}")
+    if r["sweep_start"]:
+        print(f"  layer_sweep_start events:      {r['sweep_start']}")
+        print(f"  layer_sweep_end events:        {r['sweep_end']}")
+    if r["cross_layer_handoffs"]:
+        print(f"  cross_layer_handoff events:    {r['cross_layer_handoffs']}")
+    if r["cross_layer_giveups"]:
+        print(f"  cross_layer_giveup events:     {r['cross_layer_giveups']}")
+    if r["gateway_schedule_announced"]:
+        print(f"  gateway_schedule_announced:    {r['gateway_schedule_announced']}")
+    if r["gateway_schedule_received"]:
+        print(f"  gateway_schedule_received:     {r['gateway_schedule_received']}")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -1387,6 +2048,18 @@ def main() -> None:
     print_section_16(section_routing_diversity(args.events, warmup_end_ms))
 
     print_section_17(section_anti_spam(args.events, cfg, warmup_end_ms))
+
+    print_section_18(section_e2e_ack(args.events, cfg, warmup_end_ms))
+
+    print_section_19(section_hop_limit(cfg, args.events, warmup_end_ms))
+
+    print_section_20(section_nack_reasons(args.events, cfg, warmup_end_ms))
+
+    print_section_21(section_budget_tier(args.events, cfg, warmup_end_ms))
+
+    print_section_22(section_tier_routing(args.events, cfg, warmup_end_ms))
+
+    print_section_23(section_inter_layer(args.events, cfg, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 
