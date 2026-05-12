@@ -1226,8 +1226,8 @@ so the previous hop always clears its pending_tx.
 Every node N tracks, per direct-radio sender X, two distinct-ctr_lo
 sliding-window counts over `originator_window_ms` (default 5 min):
 
-- `R[X]` = distinct RTS msg_ids from X.
-- `C[X]` = distinct CTS msg_ids from X.
+- `R[X]` = distinct RTS ctr_los from X.
+- `C[X]` = distinct CTS ctr_los from X.
 
 Same-ctr_lo retries within `originator_retry_dedup_ms` (default 10 s)
 count once each — a legitimate originator's `rts_max_retries × K`
@@ -1561,7 +1561,7 @@ Per-node state populated:
 | `snr_ewma_in` / `snr_ewma_out` | table | nbr → SNR estimate |
 | `last_rx_routing_sf_ms` | int | Beacon throttle witness |
 | `leaf_id` | int | 4-bit mesh identifier |
-| `next_msg_id` | int | 4-bit per-flight counter |
+| `next_ctr_lo` | int | 4-bit per-flight counter |
 
 ### 12.2 on_recv
 
