@@ -219,8 +219,9 @@
 --     • pending_rx busy + same (from,ctr_lo) → re-tx CTS-dup, restart
 --                                              pending_rx_expiry, return
 --     • pending_rx busy + different sender   → emit rts_rejected_busy
---     • else: set_rx_sf(data_sf); pending_rx = {from,origin,dst,ctr_lo};
+--     • else: set_rx_sf(data_sf); pending_rx = {from,dst,ctr_lo,...};
 --             start_pending_rx_expiry; tx 'C' on data_sf
+--             (origin learned later from DATA inner payload — not on RTS wire)
 --
 --   ORIGINATOR/FORWARDER (on_recv 'C' matching pending_tx.ctr_lo):
 --     1. cancel rts_timeout (avoid spurious retry on the same tick)
