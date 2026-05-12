@@ -832,6 +832,14 @@ Tests in `test/run_tests.sh` (38 scenarios) and `webapp/tests/` (36 pytests) mus
 
 ### 7.1 Concrete encrypted hierarchical DATA frame (synthesis of §7 + §8.1 + §9 T2)
 
+**Status — Wire format IMPLEMENTED** (Phases 4-5 of the 5-phase wire-format
+refactor, landed 2026-05-12). The locked layout is captured in §7.0.1 above;
+the in-leaf path (addr_len=0) is live with ciphertext+MAC bytes acting as
+plaintext placeholders until §8 crypto lands. `addr_len > 0` hierarchy
+support is deferred. The original design discussion follows for context.
+
+---
+
 **Problem statement.** Combine multi-network routing (§7), end-to-end encryption (§8.1), and originator anonymity (§9 T2) into a single concrete DATA frame that supports:
 1. Hierarchical routing across nested networks (leaf → city → region → country → global)
 2. End-to-end confidentiality + authenticity with no on-wire key/session identifier
@@ -979,6 +987,15 @@ Step 7 — Bob receives:
 - Tests: per-message round-trip, multi-hop traversal, dup-MAC dedup, replay rejection, peer-key rotation, gateway boundary. ~200 lines test scenarios.
 
 ### 7.2 BCN re-engineering for hierarchical routing
+
+**Status — Wire format IMPLEMENTED** (Phase 3 of the wire-format refactor,
+landed 2026-05-12). The locked layout is captured in §7.0.2 above. New
+flag bits (`has_schedule`, `self_gateway`, `is_mobile`) and the route-entry
+`is_gateway` bit are emitted; the schedule-record path is reserved on the
+wire and skipped at parse time pending §7.3 inter-layer TDM. The original
+design discussion follows for context.
+
+---
 
 **Problem statement.** Today's BCN advertises `(src, [dest, next, score, hops])` entries — all 1-byte node IDs within a single network. Under §7.1's hierarchical model, BCN needs to:
 1. Indicate which leaf network the emitter belongs to (replacement for today's `network_id` filter role, which was repurposed in DATA as `addr_len`)
@@ -1194,6 +1211,14 @@ Acceptable for non-realtime use cases (chat, status, alerts). Not for sub-second
 - Tests: schedule drift, overlap windows, missed sweep recovery, cross-layer delivery, schedule advertisement: ~150 lines
 
 ### 7.4 Control-plane frame updates (RTS / CTS / ACK / NACK)
+
+**Status — IMPLEMENTED** (Phases 1, 2, 5 of the wire-format refactor,
+landed 2026-05-12). RTS dropped `origin` and repacked byte 3 (§7.0.3);
+NACK shrunk 4→3 bytes with quantized busy_for_ms (§7.0.5); CTS/ACK kept
+2-byte sizes via the `msg_id`→`ctr_lo` rename. The original design
+discussion follows for context.
+
+---
 
 **Problem statement.** With §7.1 (encrypted hierarchical DATA), §7.2 (BCN re-engineering), and §7.3 (inter-layer TDM) in place, the supporting control-plane frames need adjustment: RTS must carry the variable hierarchical `dst`, and the matching-ID slot in CTS/ACK/NACK needs to align with the new `ctr` field that replaces `msg_id`.
 

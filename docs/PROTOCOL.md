@@ -392,7 +392,7 @@ hears it regardless of which SF it is listening on at that moment.
 
 | Frame | Bytes | Notes |
 |---|---|---|
-| BCN | 4 + 3n | n entries (3 B each, bit-packed); default cap 49 → max ~151 B |
+| BCN | 4 + 3n (plain leaf); 4 + [1 + 4L] + 3n (gateway w/ L upper-layer schedule records) | n entries (3 B each, bit-packed); default cap 49 → max ~151 B for plain leaf |
 | Q   | 4      | RREQ-route (one-hop) |
 | RTS | 8 | fixed |
 | CTS | 2 | fixed |
