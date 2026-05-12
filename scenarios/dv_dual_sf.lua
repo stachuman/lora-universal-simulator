@@ -423,55 +423,51 @@
 -- DESIGN PRINCIPLES.
 --   • Opt-in per message — bulk chat doesn't pay the round-trip; only
 --     send_e2e marks a message as "I want confirmation."
---   • Tiny ACK frame — total payload 5 bytes (3-byte header + 2-byte
---     acked-seq), ~10 bytes on the wire. Routed via normal DATA mechanics
---     so no new frame type, no new forwarding logic.
+--   • Tiny ACK frame — body 2 bytes ([acked_ctr_lo, acked_ctr_hi]) carried
+--     inside a normal 10-byte DATA wire frame. Routed via normal DATA
+--     mechanics so no new frame type, no new forwarding logic.
 --   • Reuses existing routing — destination acts as originator of a new
 --     short DATA flight back to the original origin. Forwarders see the
 --     E2E ACK as a normal DATA frame; only origin/destination know it's
---     an ACK (via the IS_ACK flag in the payload header).
+--     an ACK (via the IS_ACK flag on DATA wire byte 1).
 --
 -- WIRE FORMAT.
---   Payload header (originator + destination parse; forwarders treat
---   opaque except for the seq field for dedup):
---     byte 0 : flags
---                bit 0 (E2E_FLAG_ACK_REQUESTED) — origin wants
---                        end-to-end confirmation of this message
---                bit 1 (E2E_FLAG_IS_ACK)         — this DATA payload IS
---                        an E2E ACK (body has [acked_seq_lo, acked_seq_hi])
---     bytes 1-2: origin_seq (this flight's per-originator 16-bit seq)
---     bytes 3+: body (user_text for normal DATA; [acked_seq_lo,
---                acked_seq_hi] for E2E ACK)
+--   E2E flags live on DATA wire byte 1 (ROADMAP §7.0.1):
+--     bit 3 (DATA_FLAG_E2E_ACK_REQ) — origin wants end-to-end confirmation
+--                                     of this message.
+--     bit 2 (DATA_FLAG_E2E_IS_ACK)  — this DATA frame IS an E2E ACK
+--                                     (body = [acked_ctr_lo, acked_ctr_hi]).
 --
---   Both flag bits live in plaintext header bytes today. Under §9 T2
---   privacy they'd move INSIDE the encrypted payload — wire format
---   unchanged, just the parse happens after decryption.
+--   `ctr` (DATA wire bytes 4-5) is the 16-bit per-(origin, dst) counter
+--   that triple-duties as crypto-nonce entropy, replay protection, and
+--   E2E flight identifier (replaces the pre-Phase-4 origin_seq).
 --
 -- FLOW.
 --   1. Originator calls "send_e2e <dst> <text>". on_command:
---        - assigns origin_seq
---        - records pending_e2e[seq] = {sent_at, dst, text}
+--        - allocates ctr via self:next_ctr(dst)
+--        - records pending_e2e[ctr] = {sent_at, dst, text}
 --        - emits e2e_ack_pending
---        - enqueues the send with E2E_FLAG_ACK_REQUESTED set in payload
+--        - enqueues the send with DATA_FLAG_E2E_ACK_REQ set on the wire flags
 --   2. The send travels via normal RTS-CTS-DATA-ACK chain to destination.
 --   3. Destination's on_recv "D" delivered branch:
---        - parses flags + origin_seq + body
+--        - reads d.flags, d.ctr, d.body directly from parse_data
 --        - emits "delivered" with body as user_text (unchanged)
---        - if E2E_FLAG_ACK_REQUESTED set: builds a return DATA payload
---          with E2E_FLAG_IS_ACK and body=[acked_seq_lo, acked_seq_hi],
---          enqueues it as a new send to the original origin
+--        - if d.e2e_ack_req: allocates its own return_ctr, builds a return
+--          DATA with DATA_FLAG_E2E_IS_ACK set and body =
+--          [d.ctr & 0xff, (d.ctr >> 8) & 0xff], enqueues it as a new
+--          send to d.origin
 --        - emits e2e_ack_tx_enqueued for analyzer/diagnostic
 --   4. The return DATA travels normally back to origin.
 --   5. Origin's on_recv "D" delivered branch:
---        - parses flags, sees E2E_FLAG_IS_ACK
---        - extracts acked_seq from body
---        - looks up pending_e2e[acked_seq]
+--        - sees d.e2e_is_ack
+--        - extracts acked_ctr = body:byte(1) | (body:byte(2) << 8)
+--        - looks up pending_e2e[acked_ctr]
 --          - if present: emit delivered_confirmed, clear pending entry
 --          - if not: emit e2e_ack_unmatched (duplicate or already timed out)
 --        - does NOT emit "delivered" (this is an ACK, not user content)
 --        - does NOT trigger another E2E ACK (no recursion — IS_ACK and
---          ACK_REQUESTED are independent bits; an E2E ACK never sets
---          ACK_REQUESTED on its return frame)
+--          ACK_REQ are independent bits; an E2E ACK never sets ACK_REQ
+--          on its return frame)
 --   6. If origin's pending_e2e entry ages past e2e_ack_ttl_ms (default
 --      60 s) without seeing the ACK, the 1-s drain_loop emits
 --      e2e_ack_timeout for the app's "no answer received" UX.
@@ -1019,41 +1015,37 @@ end
 -- NACK ('N'): receiver tells the sender "I can't accept this RTS right now,
 -- I'll be free in busy_for_ms milliseconds". 16-bit relative duration is
 -- clock-sync-free; 65 s is plenty for any flight estimate.
--- Application-layer header inside the DATA frame's payload bytes:
---   [seq_lo(1)] [seq_hi(1)] [user_text(N)]
--- 16-bit origin-local sequence number prepended by the ORIGINATOR. Mesh
--- layer (RTS/CTS/DATA frames) treats payload as opaque; only the script
--- (acting as the application layer) reads / writes this header. The
--- tuple (mesh's origin field, seq from this header) is the globally-
--- unique end-to-end message id used for dedup at every receiving node.
--- This is how a real firmware port works: app generates seq + text,
--- hands bytes to mesh, mesh treats opaque, app strips on receive.
--- Originator payload header — 3 bytes, treated opaquely by the mesh
--- layer but parsed at originator / destination:
---   byte 0 : flags
---             bit 0 = e2e_ack_requested  (origin wants confirmation of
---                                          end-to-end delivery)
---             bit 1 = is_e2e_ack          (this payload IS an E2E ACK
---                                          — body is [acked_seq_lo,
---                                          acked_seq_hi] not user text)
---             bits 2-7 = reserved
---   byte 1 : seq_lo  (this flight's per-originator 16-bit seq, low)
---   byte 2 : seq_hi  (high byte)
---   bytes 3+: body
---             - if is_e2e_ack=0: user text
---             - if is_e2e_ack=1: [acked_seq_lo][acked_seq_hi] (2 B)
+-- DATA wire layout (post-Phase-4, per ROADMAP §7.0.1):
+--   byte 0   : tag 'D'
+--   byte 1   : addr_len(3 hi) | rsv(1) | E2E_ACK_REQ | E2E_IS_ACK | IS_MULTICAST | rsv
+--   byte 2   : next (immediate next-hop receiver)
+--   byte 3   : dst  (final destination — single byte when addr_len==0)
+--   bytes 4-5: ctr (16-bit LE, per-(origin, dst) counter)
+--   bytes 6..(5+n): ciphertext slot (plaintext placeholder until §8 crypto).
+--                    Inner layout: src_addr_len(1) | src_addr(src_addr_len+1) | body
+--                    For addr_len=0: src_addr_len=0, src_addr=[origin_id].
+--                    body = user_text (normal) OR [acked_ctr_lo,acked_ctr_hi]
+--                           (when E2E_IS_ACK is set on byte 1)
+--   last 4   : MAC — 4-byte zero placeholder until §8 lands (Poly1305-truncated then)
+--
+-- `ctr` is allocated by self:next_ctr(peer_id) per outbound (self → peer).
+-- It triple-duties as crypto-nonce entropy (when §8 lands), replay
+-- protection (strict-monotonic check at dst), and the (origin, ctr) key
+-- used by seen_origins dedup and pending_e2e lookup. CTS/ACK/NACK echo
+-- only the LOW NIBBLE (ctr_lo = ctr & 0xf) for hop-level matching.
 --
 -- Frame design rationale (see §5 in docs/ROADMAP.md):
---   • Per-message opt-in via the e2e_ack_requested bit — bulk chat
---     doesn't pay the round-trip; explicitly-marked important sends do.
---   • E2E ACK is just a tiny DATA flight back to origin, routed via
---     the normal data-plane mechanics. No new frame type needed; only
---     payload-level discrimination via the is_e2e_ack bit.
---   • E2E ACK payload total = 3 (header) + 2 (acked seq) = 5 bytes
---     content + ~5 B DATA wire framing ≈ 10 B on the wire per hop.
---   • Both bits are PLAINTEXT in the payload header today. Under §9 T2
---     they'd move INSIDE the encrypted payload — wire format stays
---     the same, the parse just happens after decryption.
+--   • Per-message opt-in via DATA_FLAG_E2E_ACK_REQ — bulk chat doesn't
+--     pay the round-trip; explicitly-marked important sends do.
+--   • E2E ACK is just a tiny DATA flight back to origin, routed via the
+--     normal data-plane mechanics. No new frame type needed; only
+--     wire-flag discrimination via DATA_FLAG_E2E_IS_ACK.
+--   • E2E ACK on-wire size ≈ 10 (header+MAC) + 2 (body=acked_ctr) = 12 B
+--     per hop.
+--   • Under §9 T2 privacy + §8 crypto, the "ciphertext slot" actually
+--     gets encrypted; src_addr + body move INSIDE the ciphertext, and
+--     forwarders can no longer read origin from the wire. The wire
+--     LAYOUT stays unchanged — only encryption gets enabled.
 -- DATA wire-level E2E flag bits (byte 1 of the DATA frame, bits 2-3).
 -- These replaced the old inner-payload origin header flags in §7.0.1.
 local DATA_FLAG_E2E_ACK_REQ = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)

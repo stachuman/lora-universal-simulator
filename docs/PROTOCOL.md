@@ -46,7 +46,7 @@ coexist on the same channel via a 4-bit `leaf_id` filter.
   SNR EWMA.
 - **Hop-level reliable, end-to-end best-effort.** Each hop is
   acknowledged. End-to-end delivery rides on per-hop reliability; the
-  application layer can layer dedup via `(origin, origin_seq)`.
+  application layer can layer dedup via `(origin, ctr)`.
 - **Routing is decentralized DV.** No central controller. Each node
   announces its known routes via beacon; receivers merge into a local
   K=3 candidate list per destination, pick the best for forwarding.
@@ -533,7 +533,7 @@ try_cascade_requeue(self, trigger):
 ```
 
 `tx_queue` is now a **scheduled queue** of items shaped
-`{origin, dst_id, dst_name, payload, user_text, origin_seq,
+`{origin, dst_id, dst_name, body, ctr, flags,
 previous_hop, next_attempt_ms, requeue_count, enqueue_time_ms}`.
 `become_free` pops the earliest-ready item (smallest
 `next_attempt_ms <= now`, FIFO tie-break) whenever the node becomes
@@ -1230,30 +1230,32 @@ RTS — the check is implicit.
 
 ## 10. Origin-level dedup
 
-End-to-end uniqueness is provided by `(origin_node_id, origin_seq)`:
+End-to-end uniqueness is provided by `(origin_node_id, ctr)`:
 
-- `origin_node_id`: 8-bit field in DATA's mesh header.
-- `origin_seq`: 16-bit application-layer sequence number, second and
-  third bytes of the 3-byte originator payload header (§3.4 —
-  `[flags, seq_lo, seq_hi]`). Originator increments per send; never
-  wraps in any realistic deployment lifetime (65k sends per node).
+- `origin_node_id`: 8-bit field carried inside DATA's inner payload
+  (the "ciphertext" slot). Reconstructed at the destination by
+  `parse_data` from `inner.src_addr`.
+- `ctr`: 16-bit per-(origin, dst) counter on DATA wire bytes 4-5 (§3.4).
+  Sender increments per outbound flight to that peer via
+  `self:next_ctr(peer)`; wraps at 65,536 → forced re-key under §8
+  (~18 years at 10 msg/day, not a practical concern).
 
 Receiving a DATA frame:
 
 ```
 on_recv 'D' (matches pending_rx):
-  parse origin payload header → flags + origin_seq + body
+  d = parse_data(frame)    -- yields flags, ctr, origin, body, e2e_ack_req, e2e_is_ack
   ack the frame regardless (sender clears pending_tx)
-  if (d.origin, origin_seq) in seen_origins:
+  if (d.origin, d.ctr) in seen_origins:
     emit dup_drop
     return  (don't deliver-twice or forward-twice)
-  record (d.origin, origin_seq) in seen_origins with TTL
+  record (d.origin, d.ctr) in seen_origins with TTL
   if dst == self.id:
-    if flags.E2E_FLAG_IS_ACK:
+    if d.e2e_is_ack:
       handle E2E ACK arrival (see §7.4)
     else:
       emit delivered (payload = body = user_text)
-      if flags.E2E_FLAG_ACK_REQUESTED: enqueue return E2E ACK (§7.4)
+      if d.e2e_ack_req: enqueue return E2E ACK (§7.4)
   else (forwarder):
     after ack_air_ms+1: enqueue forward; become_free
 ```
@@ -1716,18 +1718,18 @@ expectations) subscribe by event_type.
 | `ack_snr_feedback` | snr_ewma_out updated from ACK piggyback | `from`, `data_snr_db`, `snr_bucket`, `ewma_out` |
 | `nack_tx` | NACK emitted | `to`, `ctr_lo`, `reason` (`busy_rx` or `budget_low`), plus per-reason: `busy_for_ms` OR `tier` |
 | `nack_rx` | NACK decoded, matches pending_tx | `from`, `ctr_lo`, `reason`, plus per-reason: `busy_for_ms` OR `tier`, `blind_ms` |
-| `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `origin_seq` |
-| `dup_drop` | Duplicate (origin, origin_seq) | `origin`, `origin_seq` |
+| `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `ctr` |
+| `dup_drop` | Duplicate (origin, ctr) | `origin`, `ctr` |
 | `forward_queued` | Forwarder enqueued the relay | `origin`, `dst` |
 | `q_tx` | Q (RREQ-route) emitted by sender (§3.7) | `dst`, `dst_name` |
 | `q_rx` | Q decoded; receiver matches leaf_id | `from`, `dest` |
 | `forward_fail` | Forwarder dropped (no route, no budget, etc.) | `origin`, `dst`, `reason` |
 | `retune_for_data` | RX retuned for DATA reception | `from`, `ctr_lo`, `chosen_data_sf` |
-| `e2e_ack_pending` | Originator registered a `send_e2e` and is waiting for E2E ACK (§7.4) | `dst`, `origin_seq`, `ttl_ms` |
-| `e2e_ack_tx_enqueued` | Destination enqueued the return E2E ACK frame (§7.4) | `to`, `acked_seq` |
-| `delivered_confirmed` | Originator received the E2E ACK matching a pending send (§7.4) | `dst`, `acked_seq`, `rtt_ms` |
-| `e2e_ack_unmatched` | E2E ACK arrived but no matching `pending_e2e` entry (§7.4) | `from`, `acked_seq`, `reason` (`duplicate` / `already_timed_out`) |
-| `e2e_ack_timeout` | Pending E2E ACK exceeded `e2e_ack_ttl_ms` (§7.4) | `dst`, `origin_seq`, `waited_ms` |
+| `e2e_ack_pending` | Originator registered a `send_e2e` and is waiting for E2E ACK (§7.4) | `dst`, `ctr`, `ttl_ms` |
+| `e2e_ack_tx_enqueued` | Destination enqueued the return E2E ACK frame (§7.4) | `to`, `acked_ctr` |
+| `delivered_confirmed` | Originator received the E2E ACK matching a pending send (§7.4) | `dst`, `acked_ctr`, `rtt_ms` |
+| `e2e_ack_unmatched` | E2E ACK arrived but no matching `pending_e2e` entry (§7.4) | `from`, `acked_ctr`, `reason` (`duplicate` / `already_timed_out`) |
+| `e2e_ack_timeout` | Pending E2E ACK exceeded `e2e_ack_ttl_ms` (§7.4) | `dst`, `ctr`, `waited_ms` |
 
 ### 13.3 Failure / cascade
 
