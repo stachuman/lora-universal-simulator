@@ -1724,11 +1724,12 @@ With rt-learning via carried claim:
 
 | Frame | Today | Proposed | Δ |
 |---|---|---|---|
-| DATA | 6 B header + n payload | 8 B header + n payload | **+2 B** |
+| DATA (regular) | 6 B header + n payload | 8 B header + n payload | **+2 B** |
+| DATA with E2E_IS_ACK=1 (return ACK) | 6 B header + 4 B ACK body | 8 B header + 5 B ACK body | **+3 B (ACK only)** |
 | NACK | 4 B (with reason byte) | 4 B (new reason value, no size change) | 0 |
 | RTS / CTS / ACK / BCN / Q | unchanged | unchanged | 0 |
 
-For a 50-byte payload: +4% per DATA frame. For shorter payloads: more proportional but still small.
+For a 50-byte payload: +4% per DATA frame. E2E ACK frames are small (~10 B on wire); +1 byte for `actual_hops_used` is ~10% on the ACK only — but ACKs are rare (only opt-in flights), so network-wide cost is negligible.
 
 **What this design deliberately does.**
 
@@ -1744,11 +1745,40 @@ For a 50-byte payload: +4% per DATA frame. For shorter payloads: more proportion
 - **Does NOT propagate info about cold destinations** (dsts that aren't currently being communicated to). BCN remains the only mechanism for those.
 - **Does NOT carry SNR-along-the-path summary** (Variant C from design discussion). Could be added later if needed.
 
+**E2E ACK return-path learning (§5 extension).**
+
+Because the §5 E2E ACK is itself a DATA-class frame (with `E2E_IS_ACK=1`), the same §7.6 mechanism applies automatically on the return trip:
+
+- ACK's `prev_fwd_rt_hops` carries forwarder claims for `dst-of-ACK` = the originator
+- All forwarders + overhearing neighbors on the return path learn rt[originator].hops
+- ACK's `hop_budget` enforces a per-flight cap on the return route too
+
+**This means the FORWARD flight teaches the network about routes to the destination, AND the RETURN ACK teaches the network about routes to the originator. Both directions propagate routing info through DATA flow.**
+
+**Plus an explicit additional field on E2E ACK only.** The E2E ACK body extends by 1 byte to carry `actual_hops_used` — the count of hops the ORIGINAL forward-direction DATA traveled to reach the destination. The destination derives this directly from the received DATA's `hop_budget.committed_hops` field (= the field §7.6 already increments at each forwarder).
+
+```
+E2E ACK frame body (was: acked_seq(2B); now: acked_seq(2B) + actual_hops_used(1B))
+
+byte 0-1: acked_seq      (the original (origin, seq) being ACK'd, unchanged)
+byte 2:   actual_hops_used (4 hi: hops the forward DATA traveled to dst,
+                            4 lo: reserved)
+```
+
+Originator, on receiving the E2E ACK with `actual_hops_used`:
+1. Compare with self.rt[dst].hops:
+   - If `actual_hops_used < self.rt[dst].hops`: rt was over-estimating; update down
+   - If `actual_hops_used > self.rt[dst].hops`: rt was under-estimating; update up (may push to alt)
+   - If equal: no change
+2. Update rt[dst].hops with empirical evidence
+
+This closes a third learning loop: the originator gets DEFINITIVE truth about the forward path's actual length, on top of the en-route rt-learning that §7.6 already provides.
+
 **Composition with other roadmap items.**
 
 | Subsystem | Composition |
 |---|---|
-| **§5 E2E ACK** | E2E ACK could optionally carry `actual_hops_used` for additional originator-side rt-cost learning. Independent of the rt-learning mechanism added here. |
+| **§5 E2E ACK** | E2E ACK gains `actual_hops_used` field (+1B on ACK body only). Plus inherits §7.6 hop_budget + prev_fwd_rt_hops on the return trip — every node along the return path learns rt[originator]. |
 | **§7.1 hierarchical DATA** | Adds 2 bytes to DATA header. Combined with privacy + crypto, total overhead ≈ +5 B (T2/crypto) +2 B (hop budget + rt-learning) = +7 B vs today. |
 | **§7.5 multicast** | Multicast carries one hop_budget per frame; rt-learning piggyback applies to each multicast destination. |
 | **§5.6 cascade-requeue** | `hop_budget_exceeded` failure feeds into cascade-requeue same as other rts_giveup events |
@@ -1770,6 +1800,7 @@ For a 50-byte payload: +4% per DATA frame. For shorter payloads: more proportion
 | `hop_budget_slack` | 3 | Extra hops above rt[dst].hops the originator grants |
 | `hop_budget_max_initial` | 15 | Hard cap on initial budget (= 4-bit field max) |
 | `rt_learn_from_data` | true | Whether to apply rt_merge from carried `prev_fwd_rt_hops` (overhear + addressed) |
+| `e2e_ack_carries_actual_hops` | true | Whether E2E ACK body includes `actual_hops_used` (+1B on ACK only) |
 
 **Implementation cost estimate.**
 
@@ -1779,10 +1810,12 @@ For a 50-byte payload: +4% per DATA frame. For shorter payloads: more proportion
 - Wire-up at addressed-forwarder path AND overhearing-neighbor path in on_recv: ~20 lines
 - NACK reason extension (new reason `hop_budget`): ~20 lines
 - Originator's NACK-rx handler for hop_budget: ~30 lines
-- Analyzer §19 extension: tally hop_budget_exceeded drops + measure rt-learning effects (rt-update events triggered by DATA vs BCN): ~50 lines
-- Tests: hop_budget exhaustion drop + NACK return + rt-learning convergence (multi-flight scenario): ~150 lines
+- E2E ACK pack/parse extension for `actual_hops_used` (+1B on ACK body): ~15 lines
+- Originator's E2E-ACK-rx handler for rt-cost learning from `actual_hops_used`: ~25 lines
+- Analyzer §19 extension: tally hop_budget_exceeded drops + measure rt-learning effects (rt-update events triggered by DATA vs BCN vs E2E-ACK feedback): ~60 lines
+- Tests: hop_budget exhaustion drop + NACK return + rt-learning convergence (multi-flight scenario) + E2E ACK actual_hops feedback: ~180 lines
 
-**Cross-references.** §3.6 PROTOCOL.md (NACK reason byte extends with new value), §4 PROTOCOL.md (existing per-link SNR EWMA pattern is the inspiration), §5.2 PROTOCOL.md (`rt_merge` is reused for the carried-claim learning), §7.1 (DATA gains 2 bytes), §7.5 (multicast inherits same hop_budget), §11.5 (budget tiers — orthogonal, hop_budget is per-flight not per-node), §13 events (new `hop_budget_exceeded` event; existing `rt_update` events will fire more frequently from DATA-driven learning).
+**Cross-references.** §3.6 PROTOCOL.md (NACK reason byte extends with new value), §4 PROTOCOL.md (existing per-link SNR EWMA pattern is the inspiration), §5.2 PROTOCOL.md (`rt_merge` is reused for the carried-claim learning), §5 (E2E ACK body gains `actual_hops_used` field), §7.1 (DATA gains 2 bytes), §7.5 (multicast inherits same hop_budget), §11.5 (budget tiers — orthogonal, hop_budget is per-flight not per-node), §13 events (new `hop_budget_exceeded` event; existing `rt_update` events will fire more frequently from DATA-driven learning + E2E-ACK feedback).
 
 ---
 
