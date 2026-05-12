@@ -5,7 +5,7 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [leaf_id(4)|reserved(4)](1), src(1), n(1), entries × n × {dest(1), next(1), [score_bucket_4|hops_4](1)}  →  4+3n B |
+-- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), n_entries(1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}  →  4 + [1+4L]? + 3n B |
 -- | `'R'` | RTS    | `R`, origin(1), src(1), dst(1), next(1), [leaf_id(4)|ctr_lo(4)](1), sf_bitmap(1), payload_len(1)  →  8 B |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
 -- | `'D'` | DATA   | `D`, origin(1), src(1), dst(1), next(1), [reserved(4)|ctr_lo(4)](1), payload(n)  →  6+n B |
@@ -793,16 +793,25 @@ end
 --
 -- Steady state with no churn → all flags clean → only Phase 2 runs →
 -- byte-for-byte identical to the pre-differential pack_beacon.
+local function pack_beacon_byte1(node)
+  local b = (node.leaf_id & 0xf) << 4
+  if node.has_schedule  then b = b | 0x08 end
+  if node.self_gateway  then b = b | 0x04 end
+  if node.is_mobile     then b = b | 0x02 end
+  -- bit 0 reserved (zero)
+  return b
+end
+
 local function pack_beacon(node, max_entries, offset)
   local all_dests = {}
   for dest_id, _ in pairs(node.rt) do
     table.insert(all_dests, dest_id)
   end
   table.sort(all_dests)
-  local nid_byte = (node.leaf_id & 0xf) << 4
+  local byte1 = pack_beacon_byte1(node)
   local total = #all_dests
   if total == 0 then
-    return "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(0),
+    return "B" .. string.char(byte1) .. string.char(node.id) .. string.char(0),
            0,
            { dirty_n = 0, stable_n = 0, total_dirty = 0 }
   end
@@ -840,14 +849,16 @@ local function pack_beacon(node, max_entries, offset)
 
   -- Build frame: dirty entries first, then stable.
   local n_total = dirty_n + stable_n
-  local out = "B" .. string.char(nid_byte) .. string.char(node.id) .. string.char(n_total)
+  local out = "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_total)
   local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
     local b = bucket_of_snr_4b(p.score)               -- 4-bit bucket
-    local hops = p.hops & 0xf                          -- protocol caps at 8; 4 bits ample
+    local hops_wire = (p.hops - 1) & 0x7              -- wire stores hops-1 (range 0..7)
+    local is_gw     = (p.is_gateway == true) and 1 or 0
+    local entry_byte2 = ((b & 0xf) << 4) | (hops_wire << 1) | is_gw
     out = out .. string.char(dest_id)
               .. string.char(p.next_hop)
-              .. string.char((b << 4) | hops)
+              .. string.char(entry_byte2)
   end
   for i = 1, dirty_n do pack_one(dirty_in_order[i]) end
   for _, d  in ipairs(stable_page) do pack_one(d) end
@@ -867,22 +878,43 @@ end
 
 local function parse_beacon(frame)
   if #frame < 4 or frame:sub(1,1) ~= "B" then return nil end
-  local nid = (frame:byte(2) >> 4) & 0xf
-  local src = frame:byte(3)
-  local n   = frame:byte(4)
-  if #frame < 4 + 3*n then return nil end          -- 3 bytes per entry now
-  local entries = {}
-  local pos = 5
+  local b1  = frame:byte(2)
+  local out = {
+    leaf_id      = (b1 >> 4) & 0xf,
+    has_schedule = (b1 & 0x08) ~= 0,
+    self_gateway = (b1 & 0x04) ~= 0,
+    is_mobile    = (b1 & 0x02) ~= 0,
+    src          = frame:byte(3),
+    entries      = {},
+  }
+  local n   = frame:byte(4)   -- n_entries (unchanged 8-bit width)
+  local pos = 5               -- next byte after n_entries
+  if out.has_schedule then
+    local layer_count = frame:byte(pos)
+    pos = pos + 1
+    -- skip layer_count × 4 bytes (schedule records — runtime path not implemented yet)
+    pos = pos + layer_count * 4
+  end
+  if #frame < pos - 1 + 3*n then return nil end   -- length check (accounts for schedule skip)
   for _ = 1, n do
-    local dest = frame:byte(pos)
-    local nxt  = frame:byte(pos + 1)
-    local sh   = frame:byte(pos + 2)
-    local score = snr_of_bucket_4b((sh >> 4) & 0xf)  -- decode bucket center
-    local hops  = sh & 0xf
-    table.insert(entries, { dest = dest, next = nxt, score = score, hops = hops })
+    local dest        = frame:byte(pos)
+    local nxt         = frame:byte(pos + 1)
+    local sh          = frame:byte(pos + 2)
+    local score_bucket = (sh >> 4) & 0xf
+    local hops_wire    = (sh >> 1) & 0x7
+    local hops         = hops_wire + 1             -- decode hops-1 → hops
+    local is_gateway   = (sh & 0x01) ~= 0
+    table.insert(out.entries, {
+      dest       = dest,
+      next       = nxt,
+      score      = snr_of_bucket_4b(score_bucket),
+      score_bucket = score_bucket,
+      hops       = hops,
+      is_gateway = is_gateway,
+    })
     pos = pos + 3
   end
-  return { leaf_id = nid, src = src, entries = entries }
+  return out
 end
 
 -- Update a per-neighbor SNR EWMA in-place. First sample seeds the EWMA
@@ -3084,6 +3116,15 @@ schedule_triggered_beacon = function(self)
 end
 
 function on_init(self, config)
+  -- Node-level identity flags (BCN byte 1 bits 3:1).
+  -- Defaults false; no current scenario sets these config keys.
+  -- has_schedule: reserved until §7.3 inter-layer TDM lands.
+  -- self_gateway: true if this node bridges to internet/backbone.
+  -- is_mobile:    true if this node is mobile (relaxes route aging etc.).
+  self.has_schedule = false
+  self.self_gateway = (config.is_gateway == true)
+  self.is_mobile    = (config.is_mobile  == true)
+
   self.routing_sf       = config.routing_sf      or 7
   -- Per-flight DATA SF is now negotiated via the RTS bitmap → CTS choice.
   -- self.allowed_data_sfs is the list this node will offer when ORIGINATING
@@ -3730,10 +3771,11 @@ function on_recv(self, frame, meta)
         local combined_hops  = e.hops + 1
         if combined_hops <= 8 then
           local cand = {
-            next_hop = b.src,
-            n2_hop   = e.next,   -- N's claimed next-hop for e.dest; used by rt_prune_cycle
-            score    = combined_score,
-            hops     = combined_hops,
+            next_hop   = b.src,
+            n2_hop     = e.next,   -- N's claimed next-hop for e.dest; used by rt_prune_cycle
+            score      = combined_score,
+            hops       = combined_hops,
+            is_gateway = (e.is_gateway == true),
             last_seen_ms = now,
           }
           local action = rt_merge(self, self.rt, e.dest, cand, self.routing_snr_floor_db)

@@ -112,45 +112,69 @@ All frames begin with a 1-byte ASCII tag for cheap dispatch. Bit fields
 within bytes are MSB-first within each byte. Multi-byte numeric fields
 are little-endian (lo byte first) where applicable.
 
-### 3.1 Beacon (`'B'`) — 4 + 3n bytes
+### 3.1 Beacon (`'B'`) — 4 + [1+4L]? + 3n bytes
+
+Wire format (see ROADMAP §7.0.2 for the full bit-assignment rationale):
 
 ```
-byte:  0      1                  2     3   4..(4+3n)
-       ┌───┬─────────────────┬─────┬───┬───────────────────────────┐
-       │'B'│ leaf_id(4hi) │ src │ n │ entries × n × 3 bytes     │
-       │   │ reserved (4lo)  │     │   │                           │
-       └───┴─────────────────┴─────┴───┴───────────────────────────┘
+byte:  0      1                                        2     3
+       ┌───┬─────────────────────────────────────────┬─────┬──────────┐
+       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │ n_entries│
+       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │          │
+       └───┴─────────────────────────────────────────┴─────┴──────────┘
 
-each entry (3 bytes, bit-packed):
-       ┌──────┬──────┬─────────────────────────┐
-       │ dest │ next │ score_bucket_4 │ hops_4 │
-       └──────┴──────┴────────────────┴────────┘
+if has_schedule == 1 (optional schedule block):
+  byte 4:       layer_count(8)
+  bytes 5..(4 + 4×layer_count):
+                schedule records (4 B each — parser SKIPS; no node sets
+                has_schedule=1 yet; reserved for future §7.3 TDM)
+
+  schedule record (4 bytes):
+       ┌─────────────────────────────┬──────────────────┬──────────────────┬──────────┐
+       │ layer(4) │ (sf-5)(3) │ rsv(1)│ duration_100ms(8)│ offset_from_bcn(8)│ rsv(8) │
+       └─────────────────────────────┴──────────────────┴──────────────────┴──────────┘
+
+route entries × n_entries (3 bytes each, start after optional schedule block):
+       ┌──────┬──────┬────────────────────────────────────────┐
+       │ dest │ next │ score_bucket(4) │ (hops-1)(3) │ is_gw(1) │
+       └──────┴──────┴────────────────────────────────────────┘
 ```
 
-- `leaf_id` (4 bits): admin-managed mesh identifier. Receivers
+**Byte-1 flag bits:**
+- `leaf_id` (4 bits, 7:4): admin-managed mesh identifier. Receivers
   reject foreign-network beacons before any rt_merge work.
-- `src` (8 bits): beacon sender's node id.
-- `n` (8 bits): entry count in this page (capped by
-  `beacon_max_entries`, default 49 for a 151-byte cap).
-- `entries[i].dest` (8 bits): destination this entry routes to.
-- `entries[i].next` (8 bits): the sender's next-hop for `dest`. Used
-  by receivers for **3-cycle prune** (see §5.2).
-- `entries[i].score_bucket_4` (4 bits, hi nibble of byte 2): chain-min
-  SNR quantized to a 4-bit bucket via `bucket_of_snr_4b` (16 buckets,
-  2 dB resolution, range −20..+10 dB). Same encoding used for ACK
-  piggyback SNR feedback for consistency. Decoded via
-  `snr_of_bucket_4b` to bucket center.
-- `entries[i].hops` (4 bits, lo nibble of byte 2): hop count along the
-  advertised path. Routes with `hops > 8` rejected at the receiver.
+- `has_schedule` (1 bit, 3): when 1, a schedule block follows immediately
+  after `n_entries`. Currently always 0; reserved for §7.3 inter-layer TDM.
+- `self_gateway` (1 bit, 2): sender is an internet/backbone gateway.
+- `is_mobile` (1 bit, 1): sender is a mobile node.
+- `rsv` (1 bit, 0): reserved, must be zero.
 
-**Pre-bit-pack:** entries were 4 bytes (`dest + next + score_i8(8) +
-hops(8)`); default beacon was 200 bytes (49 × 4-byte entries). Bit-
-packing entries to 3 bytes shrinks the default beacon to 151 bytes
-(−24.5% airtime) while preserving the 49-entry-per-page count.
-Scenarios that want denser pages can bump `beacon_max_bytes` to 200
-(→ 65 entries/page) or 255 (→ ~83 entries/page, LoRa PHY max).
-Score precision drops from 1 dB to 2 dB — fine for routing decisions
-since per-packet LoRa SNR variance is typically 1-3 dB anyway.
+**Fixed header fields:**
+- `src` (8 bits): beacon sender's node id.
+- `n_entries` (8 bits): route-entry count in this page (capped by
+  `beacon_max_entries`, default 49 for a 151-byte frame).
+
+**Route entry byte 2 bit fields:**
+- `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
+  via `bucket_of_snr_4b` (16 buckets, 2 dB resolution, range −20..+10 dB).
+  Same encoding as ACK piggyback SNR. Decoded via `snr_of_bucket_4b`.
+- `(hops-1)` (3 bits, 3:1): wire carries `hops − 1` (range 0..7). In-memory
+  `rt[]` candidates store decoded `hops` (range 1..8). The 8-hop cap is
+  preserved: `combined_hops > 8` routes are rejected at the receiver.
+- `is_gateway` (1 bit, 0): the advertised path's terminal node is a gateway.
+  Per-candidate storage in `rt[]`; the data plane reads it from the primary
+  candidate. Different advertisers may disagree; route-selection picks
+  among candidates by score, and the chosen candidate's `is_gateway` is
+  authoritative.
+
+**Frame size:** default 151 bytes = 4-byte header + 49 × 3-byte entries
+(no schedule block). A gateway BCN with L upper layers adds 1 + 4L bytes.
+
+**Pre-bit-pack history:** before Phase 1-2 entries were 4 bytes
+(`dest + next + score_i8(8) + hops(8)`) and the default was 200 bytes.
+Phase 2 packed entries to 3 bytes (−24.5% airtime). Phase 3 (this spec)
+repacked byte 1 to add flag bits and repacked entry byte 2 to add the
+`is_gateway` bit and use the `hops-1` encoding.
 
 ### 3.2 RTS (`'R'`) — 8 bytes
 
