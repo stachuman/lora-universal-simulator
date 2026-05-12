@@ -1579,20 +1579,25 @@ This means multicast naturally pairs with **§3 channel mechanics** (group PSK f
 
 **Cross-references.** §7.1 (unicast DATA shares the encryption + MAC structure), §3 (channels are the primary use case for multicast; both modes used), §10 in PROTOCOL.md (origin-level dedup via `seen_origins` is for unicast — multicast has its own per-destination forwarding dedup), §1 (each multicast frame = one origination at 1st-hop counters), §9 (originator identity in encrypted body; dst_list visible to forwarders for routing).
 
-### 7.6 DATA hop budget (per-flight TTL to bound path wandering)
+### 7.6 DATA hop budget + opportunistic rt-learning (per-flight TTL + route-info propagation)
 
-**Problem statement.** The 8-hop rt-merge filter ("Routes with hops > 8 rejected") bounds the rt[]-entry hops field but does NOT enforce an end-to-end ceiling on actual DATA-flight path length. Each forwarder makes a locally-optimal next-hop decision from its OWN partial rt[] view; those choices don't compose into the globally-shortest path. Result: flights can wander well beyond the documented 8-hop limit.
+**Problem statement.** The 8-hop rt-merge filter ("Routes with hops > 8 rejected") bounds the rt[]-entry hops field but does NOT enforce an end-to-end ceiling on actual DATA-flight path length. AND: rt[] views drift out of sync between forwarders because BCN propagation is throttled to save airtime — so each forwarder uses a slightly different (often stale) view, and the locally-optimal choices don't compose into the globally-shortest path.
 
 **Measured on s04_seattle_realistic** (138 nodes, 60 min, 181 delivered flights):
 
 - 5.5% of deliveries had actual path > 8 hops (max 12 hops, vs 5-hop shortest)
 - 24% of flights' actual path was LONGER than originator's rt[dst].hops said
 - Median rt entry age at send: 14.7 minutes (rt entries are stale by ~15 min on average)
-- For the worst-wandering flights: each forwarder's rt[dst].hops advertised values were INCONSISTENT (5/6/7 for the same dst) — different forwarders have genuinely different views
+- For the worst-wandering flights: each forwarder's rt[dst].hops advertised values were INCONSISTENT (5/6/7 for the same dst)
 
-This is fundamentally a DV-routing limitation. Without global topology knowledge, forwarders' local choices accumulate non-trivially. The 8-hop limit was supposed to bound this; it doesn't.
+This is fundamentally a DV-routing limitation. Without global topology knowledge AND without enough BCN bandwidth to keep rt[] fresh, forwarders' local choices accumulate non-trivially.
 
-**Proposal.** Add a 2-byte `hop_budget` field to the DATA frame that travels with each flight. Originator initializes it to `rt[dst].hops + slack` (default `slack = 3`). Each forwarder decrements; at 0, drop the flight and NACK back with reason `hop_budget`. This caps per-flight wandering without changing routing decisions.
+**Proposal.** Add 2 bytes to the DATA frame that serve a dual purpose:
+
+1. **Hop budget** (byte X) — enforces a per-flight cap on path length; bounds the wandering.
+2. **Previous-forwarder rt[dst] claim** (byte Y) — turns every DATA frame into a tiny BCN entry for its destination. **Every receiver — addressed forwarder OR overhearing neighbor — can do an opportunistic `rt_merge` for `dst` based on the carried claim + measured SNR.** This propagates routing info via DATA flow, much faster than BCN-only.
+
+The two pieces work together: hop_budget catches the worst-wandering flights; rt-learning prevents future flights from making the same wandering choices.
 
 **Wire format addition.**
 ```
@@ -1602,35 +1607,76 @@ byte X: hop_budget byte
   bits 7-4 (hi nibble): hops_remaining  (decremented per forwarder; drop at 0)
   bits 3-0 (lo nibble): committed_hops  (incremented per forwarder; informational)
 
-byte Y: expected_first_hop_id (1B)
-  Originator's rt[dst].next at send-time. Stays unchanged through all hops.
-  Used at the originator on E2E ACK return for rt-cost learning.
+byte Y: prev_fwd_rt_hops (1B)
+  The previous forwarder's rt[dst].hops at the moment they transmitted.
+  Initially set by originator to rt[dst].hops at send time.
+  OVERWRITTEN at each addressed forwarder before re-transmission.
+  Read by addressed forwarder AND by overhearing neighbors for rt-learning.
 ```
 
-Both nibbles capped at 15 (4-bit max). For protocols with 8-hop primary limit + slack of 3, max budget = 11, well within 15.
+Both nibbles in byte X capped at 15 (4-bit max). For protocols with 8-hop primary limit + slack of 3, max budget = 11.
 
 **Originator initialization.**
 ```
 issue_send(dst):
-  budget_remaining = min(15, rt[dst].hops + slack)         -- slack default 3
-  budget_committed = 0
-  expected_first_hop = rt[dst].next
+  budget_remaining   = min(15, rt[dst].hops + slack)   -- slack default 3
+  budget_committed   = 0
+  prev_fwd_rt_hops   = rt[dst].hops
   emit_data_with_hop_budget(...)
 ```
 
-**Forwarder logic (3 lines added to on_recv DATA).**
+**Forwarder logic (the addressed `next`-hop).**
 ```
-on_recv DATA:
+on_recv DATA (self.id == frame.next):
+  -- (A) hop budget enforcement
   hop_budget.committed += 1
   hop_budget.remaining -= 1
   if hop_budget.remaining < 0 AND self.id != dst:
     emit "hop_budget_exceeded"
     send NACK(reason=hop_budget) back to upstream prev_hop
     drop (do not forward, do not deliver)
+
+  -- (B) opportunistic rt-learning from carried claim
+  rt_learn_from_carried(meta.src, dst, frame.prev_fwd_rt_hops, meta.snr)
+
+  -- (C) before re-transmitting downstream:
+  outbound_frame.prev_fwd_rt_hops = self.rt[dst].hops
   ... existing forwarding logic ...
 ```
 
-**NACK reason extension.** NACK reason field gains a new value: `hop_budget`. Three-byte NACK frame layout unchanged from §3.6; reason value extends the enum:
+**Overhearing neighbor logic (= radio-range neighbor receiving DATA addressed to someone else).**
+```
+on_recv DATA (self.id != frame.next):
+  -- Standard: ignore for routing/forwarding (frame is not for us)
+  -- NEW: opportunistic rt-learning for the carried destination
+  rt_learn_from_carried(meta.src, dst, frame.prev_fwd_rt_hops, meta.snr)
+  return  (no forwarding; just the learning side-effect)
+```
+
+**The rt-learning helper.**
+```
+rt_learn_from_carried(carrier_id, dst, carrier_rt_hops, our_snr_to_carrier):
+  -- Carrier (= meta.src = the node that just transmitted) claims to
+  -- reach dst in carrier_rt_hops hops. From our perspective, dst is
+  -- reachable via carrier in (carrier_rt_hops + 1) hops, with quality
+  -- gated by our SNR to carrier.
+  derived_hops  = carrier_rt_hops + 1
+  derived_score = our_snr_to_carrier
+  if derived_hops > MAX_HOP_LIMIT (= 8): return  -- same rt_merge guard as BCN
+  candidate = { next = carrier_id, hops = derived_hops, score = derived_score }
+  rt_merge_one(self.rt, dst, candidate)   -- existing rt_merge logic
+  -- rt_merge applies route_strictly_better, 3-cycle prune, K=3 alts cap, etc.
+```
+
+**Why this matters.** Existing protocol updates `snr_ewma_in[meta.src]` on every successful decode (any frame type). It does NOT propagate routing info beyond the immediate hop. With this addition, every successful DATA decode also propagates rt[dst]-cost info to the receiver. The same way snr_ewma works automatically per-link, **rt[dst] now updates automatically per-flight-overheard.** No extra airtime; just 1 byte per DATA frame.
+
+**Trust and loop concerns (and how the existing protocol handles them).**
+
+- **Stale claim**: a forwarder might claim "dst 4 hops" but be wrong. Same problem as BCN. `route_strictly_better` only updates rt if the new candidate is genuinely better. SNR weighting penalizes weak-SNR claims.
+- **Loop creation**: a learned candidate could create a 2-hop or 3-hop cycle. Existing `3-cycle prune` (§5.3) already handles this for BCN-derived entries; identical mechanism applies.
+- **Malicious claim**: a node could lie about rt_hops. Same trust assumption as BCN. No new attack surface beyond what BCN already exposes.
+
+**NACK reason extension.** NACK reason field gains a new value: `hop_budget`. Three-byte NACK frame layout unchanged from §3.6:
 
 ```
 reason 0: busy_rx (pending_rx active)
@@ -1657,17 +1703,22 @@ NACK payload for reason=hop_budget: 2 bytes carrying `original_budget` + `actual
 | 5 | ~2% | low |
 | ∞ (no enforcement) | 0% | none |
 
-`slack = 3` catches the worst-wandering flights while preserving most moderate detours. Loss of ~4% delivery rate is acceptable because those flights were the airtime-expensive cases anyway — and originator-side rt-cost learning (next bullet) will adapt over time.
+`slack = 3` catches the worst-wandering flights while preserving most moderate detours. The drops are mitigated over time by the rt-learning piece — repeated flights to the same dst should converge to shorter paths.
 
-**Originator-side rt cost learning.**
+**Convergence dynamic (the "vote" effect through DATA flow).**
 
-`expected_first_hop_id` is set by originator and travels unchanged through all hops. When the E2E ACK returns (§5), the destination can include `actual_hops_used` in the ACK payload. Originator compares with `rt[dst].hops`:
+Without rt-learning (BCN-only):
+- Flight 1 to dst: forwarders use stale rt; path wanders
+- Flight 2 to dst (5 minutes later): forwarders' rt is still stale; same wandering
+- BCN refresh takes minutes; convergence is slow
 
-- If `actual < rt[dst].hops`: rt was over-estimating → update `rt[dst].hops = actual` (downward)
-- If `actual > rt[dst].hops`: rt was under-estimating → update `rt[dst].hops = actual` (upward; may push next-hop to alt if score drops)
-- If equal: no change
+With rt-learning via carried claim:
+- Flight 1 to dst: forwarders along the path AND overhearing neighbors update rt[dst] from carried claims
+- Flight 2 to dst (5 minutes later): forwarders' rt[dst] reflects evidence from flight 1 — likely shorter path chosen
+- Each successful flight teaches all participating + nearby nodes
+- Convergence in a few flight-rounds rather than tens of minutes
 
-This closes the feedback loop: rt converges to empirical reality based on actual delivered paths, not just BCN-propagated claims. **No additional BCN airtime needed for this learning.**
+**Scope of learning.** Only destinations being actively communicated to get rt-updates from this mechanism. Cold destinations still rely on BCN. **Hot destinations (= the ones that matter for routing decisions) converge fast.**
 
 **Wire-cost summary.**
 
@@ -1679,28 +1730,38 @@ This closes the feedback loop: rt converges to empirical reality based on actual
 
 For a 50-byte payload: +4% per DATA frame. For shorter payloads: more proportional but still small.
 
-**What this design does NOT do.**
+**What this design deliberately does.**
 
-- **Does not carry the full source-route.** Only `expected_first_hop` from the originator's view — the rest of the path is opaque on the wire.
-- **Does not propagate route knowledge between forwarders.** Each forwarder still uses ONLY its own rt[] for routing decisions. Carried info is for budget enforcement + originator-side learning only.
-- **Does not implement a "vote" or consensus mechanism between forwarders.** Considered as Variant B / Variant C in design discussion; rejected for now because (a) +8 bytes too expensive, (b) trust-chain issues, (c) the +2-byte cheap variant captures most of the benefit.
+- **Bounds wandering** via hop_budget enforcement (per-flight TTL)
+- **Propagates rt[dst] info via DATA flow** to addressed forwarders + overhearing neighbors
+- **Reuses existing rt_merge logic** (route_strictly_better, 3-cycle prune, K=3 alts cap) — no new merge semantics
+- **Costs 1 extra byte per DATA frame** for the carried claim (vs the original §7.6 design that used the same byte for `expected_first_hop`)
+
+**What this design deliberately does NOT do.**
+
+- **Does NOT carry the full source-route.** Only the previous forwarder's rt-claim — no path enumeration.
+- **Does NOT implement inter-forwarder consensus or voting.** Each forwarder still makes independent local decisions; the carried claim just adds another input to rt_merge.
+- **Does NOT propagate info about cold destinations** (dsts that aren't currently being communicated to). BCN remains the only mechanism for those.
+- **Does NOT carry SNR-along-the-path summary** (Variant C from design discussion). Could be added later if needed.
 
 **Composition with other roadmap items.**
 
 | Subsystem | Composition |
 |---|---|
-| **§5 E2E ACK** | E2E ACK payload extended to carry `actual_hops_used` → originator learns real path cost; updates rt[dst].hops |
-| **§7.1 hierarchical DATA** | Adds 2 bytes to DATA header. Combined with privacy + crypto, total overhead ≈ +5 B (T2/crypto) +2 B (hop budget) = +7 B vs today. |
-| **§7.5 multicast** | Multicast carries one hop_budget per frame; each branch's path is bounded independently |
+| **§5 E2E ACK** | E2E ACK could optionally carry `actual_hops_used` for additional originator-side rt-cost learning. Independent of the rt-learning mechanism added here. |
+| **§7.1 hierarchical DATA** | Adds 2 bytes to DATA header. Combined with privacy + crypto, total overhead ≈ +5 B (T2/crypto) +2 B (hop budget + rt-learning) = +7 B vs today. |
+| **§7.5 multicast** | Multicast carries one hop_budget per frame; rt-learning piggyback applies to each multicast destination. |
 | **§5.6 cascade-requeue** | `hop_budget_exceeded` failure feeds into cascade-requeue same as other rts_giveup events |
 | **§1 anti-spam** | No interaction; one frame, one origination |
-| **§3 channels** | Channel-mode multicast inherits same hop_budget mechanism; budget bounds spread-out delivery |
+| **§3 channels** | Channel-mode multicast inherits same hop_budget mechanism; rt-learning applies per channel destination |
+| **PROTOCOL.md §4 SNR EWMA** | Existing per-link SNR EWMA update on every decode (already covers this exact pattern for SNR); rt-learning is a parallel mechanism for hops field |
 
 **Open questions / future variants.**
 
-- **Slack-per-traffic-class**: maybe E2E-ACK-requested flights get higher slack (more important to deliver). Could be app-config; defer.
-- **Adaptive slack**: forwarder near budget exhaustion could send a "tight on budget" hint upstream. Adds complexity; defer.
-- **Variant B (4B partial source-route)**: if `slack = 3` doesn't catch enough wandering, expand to carry first 3-4 next-hop choices. More byte cost, more constraint on path.
+- **Slack-per-traffic-class**: maybe E2E-ACK-requested flights get higher slack. Defer.
+- **Variant C (cumulative path quality)**: carry weakest_link_snr + hops_walked instead of prev_fwd_rt_hops. More info per byte, more complex semantics. Deferred.
+- **Variant B (last-2-forwarder IDs)**: carry the last 2 forwarder IDs to learn about FORWARDERS rather than DESTINATIONS. Different learning target; can be added as a separate proposal if needed.
+- **rt-learning for destinations beyond limit**: current design rejects derived_hops > 8 (same as BCN rt_merge). Could allow up to higher limit if hop_budget is also raised. Tied together.
 
 **Tunables.**
 
@@ -1708,20 +1769,20 @@ For a 50-byte payload: +4% per DATA frame. For shorter payloads: more proportion
 |---|---|---|
 | `hop_budget_slack` | 3 | Extra hops above rt[dst].hops the originator grants |
 | `hop_budget_max_initial` | 15 | Hard cap on initial budget (= 4-bit field max) |
-| `e2e_ack_carries_actual_hops` | true | Whether E2E ACK includes actual_hops_used for rt cost learning |
+| `rt_learn_from_data` | true | Whether to apply rt_merge from carried `prev_fwd_rt_hops` (overhear + addressed) |
 
 **Implementation cost estimate.**
 
-- DATA pack/parse extension for hop_budget byte + first_hop byte: ~30 lines
+- DATA pack/parse extension for hop_budget + prev_fwd_rt_hops bytes: ~30 lines
 - Forwarder decrement + drop + NACK emit on exhaustion: ~30 lines
+- `rt_learn_from_carried` helper (calls existing rt_merge_one): ~25 lines
+- Wire-up at addressed-forwarder path AND overhearing-neighbor path in on_recv: ~20 lines
 - NACK reason extension (new reason `hop_budget`): ~20 lines
 - Originator's NACK-rx handler for hop_budget: ~30 lines
-- E2E ACK extension to carry actual_hops_used (if §5 is reworked): ~20 lines
-- Originator's rt-cost learning logic on E2E ACK return: ~30 lines
-- Analyzer §19 extension: tally hop_budget_exceeded drops + rt-learning effects: ~40 lines
-- Tests: hop_budget exhaustion drop + NACK return + rt update on E2E ACK feedback: ~120 lines
+- Analyzer §19 extension: tally hop_budget_exceeded drops + measure rt-learning effects (rt-update events triggered by DATA vs BCN): ~50 lines
+- Tests: hop_budget exhaustion drop + NACK return + rt-learning convergence (multi-flight scenario): ~150 lines
 
-**Cross-references.** §3.6 PROTOCOL.md (NACK reason byte extends with new value), §5 (E2E ACK carries actual_hops_used for rt-cost learning), §7.1 (DATA gains 2 bytes), §7.5 (multicast inherits same hop_budget), §11.5 (budget tiers — orthogonal, hop_budget is per-flight not per-node), §13 events (new `hop_budget_exceeded` event).
+**Cross-references.** §3.6 PROTOCOL.md (NACK reason byte extends with new value), §4 PROTOCOL.md (existing per-link SNR EWMA pattern is the inspiration), §5.2 PROTOCOL.md (`rt_merge` is reused for the carried-claim learning), §7.1 (DATA gains 2 bytes), §7.5 (multicast inherits same hop_budget), §11.5 (budget tiers — orthogonal, hop_budget is per-flight not per-node), §13 events (new `hop_budget_exceeded` event; existing `rt_update` events will fire more frequently from DATA-driven learning).
 
 ---
 
