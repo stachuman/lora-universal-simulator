@@ -108,6 +108,33 @@ A node sets `self.req_sync_pending = true` when:
 
 The flag rides on the next outgoing BCN (periodic or triggered, whichever comes first). After that emission, the flag is cleared. So a single REQ_SYNC bit is broadcast at most once per "need" trigger.
 
+### 6.1 Mobility hooks (forward-compatibility contract)
+
+The v1 implementation only wires the `on_init` hook. Three other call sites
+are reserved for the §2 mobility design and MUST set `req_sync_pending = true`
+when that code lands:
+
+| Hook point | Trigger | Source design |
+|---|---|---|
+| `on_init` | every boot | v1 (this spec) |
+| Tier-1 intra-leaf neighbour shift | `>= mobile_neighbor_change_threshold` of recent direct neighbours aged out within `mobile_change_window_ms` | §2 Tier 1 |
+| Tier-2 cross-leaf join | mobile has just adopted a new `leaf_id` after the random-pick + collision-detection sequence | §2 Tier 2 |
+| Tier-2 leaf-departure (optional) | `>= mobile_leaf_change_threshold` of recent direct neighbours aged out AND new neighbours carry a foreign `leaf_id` | §2 Tier 2 (heuristic only) |
+
+For the Tier-2 join path the REQ_SYNC bit MUST ride on the mobile's FIRST BCN
+in the new leaf. Without that, the mobile sits in the new leaf with a stale
+rt[] from the old leaf until receiver-detection eventually catches it via
+first-contact in some other unrelated traffic. The Tier-2 path knows it's
+about to broadcast a discontinuous identity — that's exactly when REQ_SYNC
+is most needed.
+
+The Tier-1 intra-leaf hook covers the "I walked far enough that my whole
+rt[] is now suspect" case: every dst routed through a now-aged-out next-hop
+is stale, but if some of those routes happen to overlap with what the new
+neighbours advertise, receiver-side first-contact won't fire (the new
+neighbours already had entries for the mobile from indirect advertisement).
+REQ_SYNC bypasses that gap.
+
 ## 7. Sync-response BCN (responder side)
 
 ```
@@ -185,6 +212,29 @@ Two invariants to preserve:
 
 If the simulator measures a regression in `rt_aged` events post-implementation, that's the signal that liveness isn't propagating correctly and the fix is in `rt_merge`.
 
+### 9.1 Mobile aging margin (known tight)
+
+§2 specifies `mobile_rt_aging_neighbor_ms = 5 min` for entries whose
+advertiser has `is_mobile=1` — five-sixths shorter than the static TTL.
+With default `beacon_period_ms = 5 min`, that's **only 1 refresh per
+aging window** (vs static's 6 refreshes per window), with no slack for
+±20 % periodic jitter OR adaptive-throttle skip.
+
+The dirty-only design HELPS this margin in two ways: smaller BCNs
+reduce channel pressure → fewer adaptive-throttle skips, and the
+4-byte liveness heartbeat is small enough that even hostile channel
+conditions usually let it through. But the math is still tight.
+
+**Recommendation (not yet wired):** when the §2 mobility code lands,
+bump the default `mobile_rt_aging_neighbor_ms` from 5 min to 10 min
+so mobiles have a 2× safety ratio (period vs TTL), matching the
+6× ratio static nodes enjoy by configuration. Alternative tuning:
+keep TTL at 5 min but force `beacon_period_ms = 2.5 min` for
+`is_mobile=1` nodes — same margin, smaller absolute window.
+
+This spec doesn't enforce either tuning today (no mobile code exists
+yet to test against). Flagged for the §2 implementation pass.
+
 ## 10. Composition with other features
 
 | Feature | Interaction |
@@ -195,7 +245,7 @@ If the simulator measures a regression in `rt_aged` events post-implementation, 
 | **§7.2 schedule records (gateways)** | Sync-response BCN includes schedule records when `has_schedule=1`. Periodic/triggered also include them on every emission (small fixed cost for gateways). |
 | **§1 anti-spam** | Anti-spam already keys on `meta.src` (radio physical). Sync-response BCNs don't change observation counts in a meaningful way (count-based metric absorbs single events). |
 | **Budget tiers** | Sync-response respects EXHAUSTED tier — defers to healthier neighbours. STRAINED / CRITICAL still respond (they're the ones with routes worth syncing). |
-| **§2 mobility (is_mobile)** | Mobile nodes are exactly the use-case for REQ_SYNC. They set the flag when their leaf changes (future hook). Receiver-detection also catches this. |
+| **§2 mobility (is_mobile)** | Mobile nodes are the highest-value use-case for REQ_SYNC. v1 wires only `on_init`; §2's future code adds three additional hooks (see §6.1): Tier-1 intra-leaf neighbour-shift, Tier-2 cross-leaf join, Tier-2 leaf-departure. Receiver-side first-contact detection covers the cases where mobile gains new neighbours but doesn't set REQ_SYNC itself. Mobile-specific aging TTL margin discussed in §9.1. |
 | **Cold-start UX** | Joiner emits a BCN at on_init (already does); sets REQ_SYNC. Neighbours respond within ~`sync_response_jitter_ms` (default 2 s). Routes appear FAST — much faster than today's "wait for next rotation slot". |
 
 ## 11. Tunables
