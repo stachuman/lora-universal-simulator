@@ -1607,7 +1607,10 @@ Per-node state populated:
 | `tx_stash` | table | label → frame for on_radio_busy retry |
 | `blind_until` | table | nbr → absolute_ms (F1 mitigation) |
 | `last_acked_from` | table | sender → {ctr_lo, t_ms} (RTS dedup) |
-| `seen_origins` | table | (origin, seq) → t_ms (end-to-end dedup) |
+| `seen_origins` | table | (origin, ctr) → t_ms (end-to-end dedup) |
+| `peer_send_counter` | table | peer_id → outbound 16-bit ctr (per-(self,peer)) |
+| `peer_last_seen_ctr` | table | peer_id → highest inbound ctr seen (replay window) |
+| `pending_e2e` | table | ctr → {sent_at, dst, text} (E2E ACK pending state) |
 | `snr_ewma_in` / `snr_ewma_out` | table | nbr → SNR estimate |
 | `last_rx_routing_sf_ms` | int | Beacon throttle witness |
 | `leaf_id` | int | 4-bit mesh identifier |

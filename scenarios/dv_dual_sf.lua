@@ -27,10 +27,11 @@
 --   bit i = SF (5+i) is acceptable for the DATA leg; the receiver picks one.
 --   bit 0 = SF5 (fastest), bit 7 = SF12 (most robust). e.g. 0b01000010 = SF6+SF12.
 -- RTS's payload_len byte (offset 8) is the byte count of the upcoming DATA
--- payload (origin-seq header + user_text). Lets the receiver size
--- pending_rx_expiry to actual airtime instead of max_payload_bytes
--- worst-case — important when payloads vary 10–200 bytes, since the
--- worst-case budget would freeze pending_rx ~2× longer than needed.
+-- frame after its 6-byte header: inner overhead (src_addr_len + src_addr,
+-- 2 B today) + body + MAC (4 B). Lets the receiver size pending_rx_expiry
+-- to actual airtime instead of max_payload_bytes worst-case — important
+-- when bodies vary 10–200 bytes, since the worst-case budget would freeze
+-- pending_rx ~2× longer than needed.
 -- CTS's last byte is the receiver's chosen data SF (single value, 5..12),
 -- selected from the RTS bitmap. The SNR fed into select_data_sf is the
 -- per-neighbour inbound EWMA (`snr_ewma_in[r.src]`), updated at the top
@@ -936,11 +937,12 @@ local function update_snr_ewma(table_, nbr_id, snr_db, alpha)
 end
 
 -- payload_len is the exact byte count the upcoming DATA frame will carry
--- in its variable-length suffix (origin-seq header + user_text). The
--- receiver uses it to size pending_rx_expiry to actual airtime instead
--- of the worst-case (max_payload_bytes), which mattered when payloads
--- range 10–200 bytes — real protocols can't afford to budget every
--- flight at the absolute upper bound.
+-- after its 6-byte header — inner overhead (src_addr_len + src_addr =
+-- 2 B at addr_len=0) + body + MAC (4 B). The receiver uses it to size
+-- pending_rx_expiry to actual airtime instead of the worst-case
+-- (max_payload_bytes), which mattered when bodies range 10–200 bytes —
+-- real protocols can't afford to budget every flight at the absolute
+-- upper bound.
 -- RTS — 8 bytes, bit-packed:
 --   byte 0 : tag 'R'
 --   byte 1 : origin (8)
@@ -1030,9 +1032,10 @@ end
 --
 -- `ctr` is allocated by self:next_ctr(peer_id) per outbound (self → peer).
 -- It triple-duties as crypto-nonce entropy (when §8 lands), replay
--- protection (strict-monotonic check at dst), and the (origin, ctr) key
--- used by seen_origins dedup and pending_e2e lookup. CTS/ACK/NACK echo
--- only the LOW NIBBLE (ctr_lo = ctr & 0xf) for hop-level matching.
+-- protection (today: TTL-based seen_origins dedup; strict-monotonic NV
+-- counters land with §8), and the (origin, ctr) key used by seen_origins
+-- dedup and pending_e2e lookup. CTS/ACK/NACK echo only the LOW NIBBLE
+-- (ctr_lo = ctr & 0xf) for hop-level matching.
 --
 -- Frame design rationale (see §5 in docs/ROADMAP.md):
 --   • Per-message opt-in via DATA_FLAG_E2E_ACK_REQ — bulk chat doesn't
@@ -1861,17 +1864,6 @@ local function maybe_emit_rt_full(self)
   end
 end
 
-local function gen_ctr_lo(self)
-  -- 4-bit per-(originator) flight counter, wraps at 16. The 4-bit RTS
-  -- field can no longer carry the historic node_id<<8 prefix; per-msg
-  -- uniqueness is recoverable from (node, ctr_lo, time) tuples in event
-  -- logs. Hop-level dedup uses last_acked_from with a TTL to handle
-  -- wraparound at any realistic send rate.
-  local mid = self.next_ctr_lo & 0xf
-  self.next_ctr_lo = (self.next_ctr_lo + 1) & 0xf
-  return mid
-end
-
 -- Human-readable id resolver for log lines. Falls back to "#N" if a frame
 -- somehow carries an id we don't have a name for (shouldn't happen in
 -- well-formed scenarios but keeps logs from blowing up).
@@ -2523,7 +2515,7 @@ local function pending_rx_expiry_fire(self, captured_ctr_lo)
   if self.pending_rx.ctr_lo ~= captured_ctr_lo then return end
   self:emit("data_rx_timeout", {
     origin = self.pending_rx.origin,
-    -- payload + origin_seq unknown — DATA never arrived
+    -- body + ctr unknown — DATA never arrived
     from = self.pending_rx.from, ctr_lo = captured_ctr_lo,
   })
   self:log(string.format("data_rx_timeout from=%s ctr_lo=%d -> clearing pending_rx",
@@ -3453,7 +3445,7 @@ function on_init(self, config)
                               self.preamble_sym, CTS_LEN)
   self.pending_rx_expiry_max_ms = cts_air + self.cts_to_data_gap_ms +
     airtime_ms(slowest_sf, self.bw_hz, self.cr, self.preamble_sym,
-               DATA_HDR_LEN + self.max_payload_bytes)
+               DATA_HDR_LEN + self.max_payload_bytes + DATA_INNER_OVERHEAD)
 
   self.rt              = {}
   self.next_ctr_lo     = 1
