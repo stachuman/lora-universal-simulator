@@ -1077,12 +1077,19 @@ local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 cr
 --     receiver. Don't keep retrying me — route around.
 --     payload = tier(4 hi) | headroom_buckets(4 lo)
 --     tier 0..15; headroom_buckets 0..15 → 0..100% (value/15 × 100%).
+--   NACK_REASON_HOP_BUDGET (2): the DATA flight's hop_budget was
+--     exhausted at the forwarder before reaching destination (§7.6).
+--     The flight is dead; originator needs to learn rt[dst] was too
+--     short and possibly trigger Q-frame re-discovery.
+--     payload = committed_hops(4 hi) | reserved(4 lo)
+--     committed_hops 0..15 — how many hops the flight already walked.
 --
 -- Shrunk from 4→3 bytes per ROADMAP §7.0.5. busy_for_ms quantum = 16 ms
 -- (well below the 50 ms natural retry-jitter floor). Max range 4080 ms
 -- covers SF12 worst-case with 4× headroom.
-local NACK_REASON_BUSY_RX = 0
-local NACK_REASON_BUDGET  = 1
+local NACK_REASON_BUSY_RX    = 0
+local NACK_REASON_BUDGET     = 1
+local NACK_REASON_HOP_BUDGET = 2   -- §7.6: flight exceeded hop budget
 
 local NACK_BUSY_QUANTUM_MS = 16   -- granularity of BUSY_RX payload
 
@@ -1090,8 +1097,9 @@ local NACK_BUSY_QUANTUM_MS = 16   -- granularity of BUSY_RX payload
 --   byte 0 : tag 'N'
 --   byte 1 : reason (4 hi) | ctr_lo (4 lo)
 --   byte 2 : payload (reason-specific)
---             BUSY_RX:  busy_for_ms / 16  (0..4080 ms, 16 ms granularity)
---             BUDGET:   tier (4 hi) | headroom_buckets (4 lo)
+--             BUSY_RX:    busy_for_ms / 16  (0..4080 ms, 16 ms granularity)
+--             BUDGET:     tier (4 hi) | headroom_buckets (4 lo)
+--             HOP_BUDGET: committed_hops (4 hi) | reserved (4 lo)
 local function pack_nack(ctr_lo, reason, payload)
   reason  = reason or NACK_REASON_BUSY_RX
   payload = payload or 0
@@ -1115,6 +1123,8 @@ local function parse_nack(frame)
   elseif reason == NACK_REASON_BUDGET then
     out.budget_tier             = (payload >> 4) & 0xf
     out.budget_headroom_buckets = payload & 0xf
+  elseif reason == NACK_REASON_HOP_BUDGET then
+    out.committed_hops = (payload >> 4) & 0xf
   end
   return out
 end
@@ -1144,30 +1154,43 @@ local function parse_q(frame)
   }
 end
 
--- DATA — 10 + n bytes (in-leaf, addr_len=0):
+-- DATA — 12 + n bytes (in-leaf, addr_len=0); §7.6 hop-budget + rt-learning:
 --   byte 0   : tag 'D'
 --   byte 1   : addr_len(3 hi) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
 --   byte 2   : next (immediate next-hop receiver)
 --   byte 3   : dst  (final destination — single byte when addr_len==0)
---   bytes 4-5: ctr (16-bit LE, per-(origin,dst) counter)
---   bytes 6..(5+n): ciphertext (= plaintext placeholder for now;
+--   byte 4   : hop_budget byte: hops_remaining(4 hi) | committed_hops(4 lo)  (§7.6)
+--   byte 5   : prev_fwd_rt_hops — previous transmitter's rt[dst].hops claim    (§7.6)
+--   bytes 6-7: ctr (16-bit LE, per-(origin,dst) counter)
+--   bytes 8..(7+n): ciphertext (= plaintext placeholder for now;
 --                    carries src_addr_len(1) | src_addr(1) | body)
 --   last 4   : MAC (4-byte zero placeholder until §8 crypto lands)
 --
 -- Inner payload (ciphertext slot, plaintext today):
---   byte 6   : src_addr_len (= 0 for in-leaf / flat addresses)
---   byte 7   : src_addr (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
---   bytes 8+  : body (user_text for normal DATA; [acked_ctr_lo, acked_ctr_hi] for E2E ACK)
-local function pack_data(origin, next_hop, dst, ctr, flags, inner)
+--   byte 8   : src_addr_len (= 0 for in-leaf / flat addresses)
+--   byte 9   : src_addr (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
+--   bytes 10+ : body (user_text for normal DATA; [acked_ctr_lo, acked_ctr_hi, ?] for E2E ACK)
+local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
   -- inner = pre-assembled bytes: src_addr_len(1) | src_addr(1) | body
+  -- hop_budget = optional table { remaining, committed, prev_fwd_rt_hops }
+  --   remaining: hops_remaining (4 bits, 0-15); default 15 = no enforcement
+  --   committed: committed_hops (4 bits, 0-15); default 0
+  --   prev_fwd_rt_hops: previous fwd's claim of dst's hops (8 bits); default 0
   local addr_len = 0                                      -- in-leaf only this phase
   local byte1 = ((addr_len & 0x7) << 5) | (flags & 0x0e) -- flags: bits 1-3 only
+  local hb = hop_budget or {}
+  local hb_remaining = math.min(15, math.max(0, hb.remaining or 15))
+  local hb_committed = math.min(15, math.max(0, hb.committed or 0))
+  local hop_budget_byte = ((hb_remaining & 0xf) << 4) | (hb_committed & 0xf)
+  local prev_fwd_rt_hops = math.min(255, math.max(0, hb.prev_fwd_rt_hops or 0))
   local ctr_lo_byte = ctr & 0xff
   local ctr_hi_byte = (ctr >> 8) & 0xff
   local mac = string.rep("\0", MAC_LEN)
   return "D" .. string.char(byte1)
               .. string.char(next_hop)
               .. string.char(dst)
+              .. string.char(hop_budget_byte)
+              .. string.char(prev_fwd_rt_hops)
               .. string.char(ctr_lo_byte)
               .. string.char(ctr_hi_byte)
               .. inner
@@ -1175,20 +1198,24 @@ local function pack_data(origin, next_hop, dst, ctr, flags, inner)
 end
 
 local function parse_data(frame)
-  if #frame < 10 or frame:sub(1,1) ~= "D" then return nil end
+  if #frame < 12 or frame:sub(1,1) ~= "D" then return nil end
   local b1 = frame:byte(2)
   local addr_len = (b1 >> 5) & 0x07
   if addr_len ~= 0 then return nil end        -- hierarchy deferred
   local flags    = b1 & 0x0e                  -- bits 1-3
   local next_hop = frame:byte(3)
   local dst      = frame:byte(4)
-  local ctr_lo_byte = frame:byte(5)
-  local ctr_hi_byte = frame:byte(6)
+  local hop_budget_byte   = frame:byte(5)
+  local prev_fwd_rt_hops  = frame:byte(6)
+  local hb_remaining = (hop_budget_byte >> 4) & 0xf
+  local hb_committed = hop_budget_byte & 0xf
+  local ctr_lo_byte = frame:byte(7)
+  local ctr_hi_byte = frame:byte(8)
   local ctr      = ctr_lo_byte | (ctr_hi_byte << 8)
-  -- inner spans byte 7 .. (#frame - MAC_LEN)
+  -- inner spans byte 9 .. (#frame - MAC_LEN)
   local inner_end = #frame - MAC_LEN
-  if inner_end < 7 then return nil end
-  local inner    = frame:sub(7, inner_end)
+  if inner_end < 9 then return nil end
+  local inner    = frame:sub(9, inner_end)
   if #inner < 2 then return nil end           -- need src_addr_len + src_addr
   local src_addr_len = inner:byte(1)
   if src_addr_len ~= 0 then return nil end    -- flat addresses only this phase
@@ -1201,6 +1228,9 @@ local function parse_data(frame)
     is_multicast  = (flags & DATA_FLAG_IS_MCAST) ~= 0,
     next          = next_hop,
     dst           = dst,
+    hop_remaining = hb_remaining,
+    hop_committed = hb_committed,
+    prev_fwd_rt_hops = prev_fwd_rt_hops,
     ctr           = ctr,
     ctr_lo        = ctr & 0xf,               -- low nibble for hop-level match
     origin        = origin,
@@ -1217,7 +1247,7 @@ end
 -- protocol — bump these if the frame layout changes.
 local RTS_LEN = 8       -- 'R' + src + next + [addr_len|rsv|leaf_id] + dst + [ctr_lo<<4|rsv] + sf_bitmap + payload_len
 local CTS_LEN = 2       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | reserved_1)
-local DATA_HDR_LEN = 6  -- 'D' + byte1 + next + dst + ctr_lo + ctr_hi (inner+MAC follow)
+local DATA_HDR_LEN = 8  -- 'D' + byte1 + next + dst + hop_budget + prev_fwd_rt_hops + ctr_lo + ctr_hi (inner+MAC follow)
 -- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
 -- RTS payload_len = #body + DATA_INNER_OVERHEAD for in-leaf frames.
 local DATA_INNER_OVERHEAD = 2 + MAC_LEN  -- src_addr_len(1) + src_addr(1) + MAC(4) = 6
@@ -2639,7 +2669,7 @@ end
 -- DATA_FLAG_* bits. queue_meta is an optional table {enqueue_time_ms, requeue_count}
 -- threaded from the tx_queue item through to pending_tx for cascade-requeue
 -- accounting; when nil (forwarder direct path) we treat this as a fresh hop.
-issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, flags, previous_hop, queue_meta)
+issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, flags, previous_hop, queue_meta, forward_hop_budget)
   -- Anti-spam self-monitoring: count our own originations (origin ==
   -- self.id; previous_hop == nil means we're not forwarding for someone
   -- else). Used to emit originator_self_over_budget on terminal failure
@@ -2768,6 +2798,30 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     -- forwarders calling issue_send directly pass nil → fresh hop.
     enqueue_time_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
     requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
+    -- §7.6 hop budget. Two paths:
+    --   • Originator (forward_hop_budget == nil): initialize to
+    --     rt[dst].hops + slack, capped at hop_budget_max_initial (15).
+    --   • Forwarder (forward_hop_budget ~= nil): inherit the decremented
+    --     budget computed at on_recv DATA time.
+    -- prev_fwd_rt_hops is overwritten with self's rt view so the wire
+    -- carries the current-transmitter's claim, not stale upstream info.
+    hop_budget = (function()
+      if forward_hop_budget ~= nil then
+        return {
+          remaining = forward_hop_budget.remaining,
+          committed = forward_hop_budget.committed,
+          prev_fwd_rt_hops = (entry.candidates[1] and entry.candidates[1].hops) or 0,
+        }
+      else
+        local rt_hops = (entry.candidates[1] and entry.candidates[1].hops) or 1
+        return {
+          remaining = math.min(self.hop_budget_max_initial,
+                                rt_hops + self.hop_budget_slack),
+          committed = 0,
+          prev_fwd_rt_hops = rt_hops,
+        }
+      end
+    end)(),
   }
   -- payload_len = inner overhead (src_addr_len + src_addr + MAC) + body size.
   -- Body size = #payload - 2 (stripping the 2-byte inner header from inner bytes).
@@ -2875,7 +2929,8 @@ become_free = function(self)
   issue_send(self, item.origin, item.dst_id, item.dst_name,
              item.payload, item.user_text, item.ctr, item.flags or 0, item.previous_hop,
              { enqueue_time_ms = item.enqueue_time_ms,
-               requeue_count   = item.requeue_count })
+               requeue_count   = item.requeue_count },
+             item.forward_hop_budget)
 end
 
 -- ---------- script lifecycle ------------------------------------------------
@@ -3578,6 +3633,17 @@ function on_init(self, config)
   self.pending_e2e        = {}
   self.e2e_ack_ttl_ms     = config.e2e_ack_ttl_ms or 60000   -- 1 min default
 
+  -- §7.6 hop budget — per-flight TTL bounds path wandering.
+  -- Originator initializes hop_budget = rt[dst].hops + slack at send time.
+  -- Each forwarder decrements remaining; at 0, drop with hop_budget_exceeded
+  -- (and in Phase B, NACK reason=hop_budget back to upstream).
+  -- slack=3 (default) catches worst-wandering flights while preserving moderate
+  -- detours; calibrated against s04_seattle_realistic data showing ~4% delivery
+  -- impact at slack=3.
+  self.hop_budget_slack       = config.hop_budget_slack       or 3
+  self.hop_budget_max_initial = config.hop_budget_max_initial or 15  -- 4-bit field max
+  self.rt_learn_from_data     = config.rt_learn_from_data     or true
+
   -- next_ctr: per-(self, peer) outbound counter, wraps at 65535→1.
   -- NV persistence deferred; RAM-only until §8 crypto lands.
   function self:next_ctr(peer_id)
@@ -4171,8 +4237,8 @@ function on_recv(self, frame, meta)
       if self.pending_tx == nil or self.pending_tx.ctr_lo ~= px.ctr_lo then
         return
       end
-      -- pack_data(origin, next_hop, dst, ctr, flags, inner)
-      local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0, px.payload)
+      -- pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
+      local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0, px.payload, px.hop_budget)
       self:emit("data_tx", {
         origin = px.origin, payload = px.user_text, ctr = px.ctr,
         dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
@@ -4333,6 +4399,68 @@ function on_recv(self, frame, meta)
       return
     end
 
+    -- Hop-budget NACK (§7.6 Phase B). A downstream forwarder ran out
+    -- of hop_budget before reaching dst. The flight is dead — there's
+    -- no path within the budget. Update rt[dst].hops upward (the route
+    -- was longer than we thought) and drop the pending_tx.
+    --
+    -- Why we don't just retry: a retry with the same originator-side
+    -- rt would produce the same budget calculation and same exhaustion.
+    -- We need rt[dst] to update first. Tier-aware routing / Q-frame
+    -- re-discovery handle that asynchronously; this flight is over.
+    if n.reason == NACK_REASON_HOP_BUDGET then
+      local dst_id = self.pending_tx.dst
+      local committed = n.committed_hops or 0
+      -- Update rt[dst].hops upward: the actual path needed at least
+      -- (committed + 1) hops, but we had budgeted less. Push the rt
+      -- estimate to the empirical minimum we just learned. Capped at
+      -- 15 (4-bit limit) so we don't overflow the wire field.
+      local entry = self.rt[dst_id]
+      if entry and entry.candidates[1] then
+        local old_hops = entry.candidates[1].hops
+        local new_hops = math.min(15, math.max(old_hops, committed + 1))
+        if new_hops ~= old_hops then
+          entry.candidates[1].hops = new_hops
+          self:emit("rt_update", {
+            dest = dst_id, next = entry.candidates[1].next_hop,
+            score = entry.candidates[1].score, hops = new_hops,
+            slot = "primary", trigger = "hop_budget_nack",
+          })
+          self:log(string.format(
+            "rt[%s].hops %d→%d (hop_budget NACK from %s, committed=%d)",
+            name_of(self, dst_id), old_hops, new_hops,
+            name_of(self, self.pending_tx.next), committed))
+        end
+      end
+      self:emit("nack_rx", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        from = self.pending_tx.next, ctr_lo = n.ctr_lo,
+        reason = "hop_budget", committed_hops = committed,
+      })
+      self:log(string.format(
+        "nack_rx <- %s ctr_lo=%d reason=hop_budget committed=%d (flight terminal)",
+        name_of(self, self.pending_tx.next), n.ctr_lo, committed))
+      self:emit("path_cascade_exhausted", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        dst = self.pending_tx.dst, ctr_lo = self.pending_tx.ctr_lo,
+        tried = {}, trigger = "hop_budget",
+      })
+      self:emit("rts_giveup", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        dst = self.pending_tx.dst,
+        next = self.pending_tx.next, ctr_lo = self.pending_tx.ctr_lo,
+      })
+      self.pending_tx = nil
+      become_free(self)
+      return
+    end
+
     -- Legacy busy_rx NACK path (reason 0).
     self:emit("nack_rx", {
       origin = self.pending_tx.origin,
@@ -4435,6 +4563,45 @@ function on_recv(self, frame, meta)
   if tag == "D" then
     local d = parse_data(frame)
     if not d then return end
+
+    -- §7.6 Phase C: opportunistic rt-learning from the carried
+    -- `prev_fwd_rt_hops` claim. Applies to EVERY successful DATA decode
+    -- — addressed forwarders AND overhearing neighbors — same pattern
+    -- the per-link snr_ewma_in update already uses.
+    --
+    -- Candidate { next = meta.src, hops = prev_fwd_rt_hops + 1, score
+    -- = meta.snr } goes through standard rt_merge, which applies
+    -- route_strictly_better with tier penalty (§5.7). No new merge
+    -- logic. Bounded by MAX_HOP_LIMIT (8); claims that would yield
+    -- hops > 8 are dropped (same guard BCN-merged entries face).
+    if self.rt_learn_from_data and meta.src ~= nil and meta.src ~= self.id then
+      local carrier = meta.src
+      local carrier_claim = d.prev_fwd_rt_hops or 0
+      local candidate_hops = carrier_claim + 1
+      if carrier_claim > 0 and candidate_hops <= 8 and d.dst ~= self.id then
+        local cand = {
+          next_hop     = carrier,
+          hops         = candidate_hops,
+          score        = meta.snr,
+          last_seen_ms = self:now(),
+        }
+        local action = rt_merge(self, self.rt, d.dst, cand, self.routing_snr_floor_db)
+        if action == "new" or action == "promote" then
+          self:emit("rt_update", {
+            dest = d.dst, next = carrier, score = meta.snr,
+            hops = candidate_hops, slot = "primary",
+            trigger = "data_rt_learn",
+          })
+        elseif action == "alt_install" then
+          self:emit("rt_update", {
+            dest = d.dst, next = carrier, score = meta.snr,
+            hops = candidate_hops, slot = "alt",
+            trigger = "data_rt_learn",
+          })
+        end
+      end
+    end
+
     if d.next ~= self.id then return end
     if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
 
@@ -4472,6 +4639,55 @@ function on_recv(self, frame, meta)
     self.pending_rx = nil
 
     self.last_acked_from[rx_from] = { ctr_lo = d.ctr_lo, t_ms = self:now() }
+
+    -- §7.6 Phase B: hop_budget enforcement happens BEFORE the ACK is sent.
+    -- If the flight's budget is exhausted at this hop AND we're not the
+    -- destination, the upstream needs the NACK feedback (not the ACK).
+    -- We must NOT send ACK in this case — otherwise upstream's pending_tx
+    -- clears on ACK reception before our NACK arrives, and the rt-learning
+    -- side-effect (rt[dst].hops upward) is lost.
+    local hb_new_remaining = d.hop_remaining - 1
+    local hb_new_committed = math.min(15, d.hop_committed + 1)
+    local is_delivered_for_budget_check = (d.dst == self.id)
+    if not is_delivered_for_budget_check and hb_new_remaining < 0 then
+      self:emit("hop_budget_exceeded", {
+        origin = d.origin, payload = user_text, ctr = d.ctr,
+        dst = d.dst, from = rx_from,
+        committed = hb_new_committed,
+      })
+      self:log(string.format(
+        "hop_budget_exceeded origin=%s dst=%s ctr=%d committed=%d (NACK, no forward)",
+        name_of(self, d.origin), name_of(self, d.dst), d.ctr, hb_new_committed))
+      -- Record (origin, ctr) in seen_origins so any later duplicate
+      -- arriving at us short-circuits via dup_drop. We DID receive the
+      -- frame; we just can't carry it further.
+      self.seen_origins[string.format("%d|%d", d.origin, d.ctr)] =
+        self:now() + self.seen_origin_ttl_ms
+      -- NACK back to the upstream so it learns rt[dst] was under-estimating.
+      -- Use tx_with_retry (RESPONSE class, same priority as ACK would have
+      -- been) so the NACK reaches upstream within its ACK-await window.
+      local nack_payload = ((hb_new_committed & 0xf) << 4) | 0
+      local nack = pack_nack(d.ctr_lo, NACK_REASON_HOP_BUDGET, nack_payload)
+      self:emit("nack_tx", {
+        origin = d.origin, payload = user_text, ctr = d.ctr,
+        to = rx_from, ctr_lo = d.ctr_lo,
+        reason = "hop_budget", committed_hops = hb_new_committed,
+      })
+      self:log(string.format(
+        "nack_tx -> %s reason=hop_budget committed=%d (in lieu of ACK)",
+        name_of(self, rx_from), hb_new_committed))
+      tx_with_retry(self, nack, {
+        sf    = self.routing_sf,
+        label = "NACK",
+        info  = string.format("to=%s reason=hop_budget committed=%d",
+          name_of(self, rx_from), hb_new_committed),
+      })
+      self:after(self.ack_air_ms + 1, function()
+        become_free(self)
+      end)
+      return
+    end
+
     -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
     -- bucket. Sender uses it to maintain its outbound link-quality EWMA
     -- to us (which we can't see because we're at the receiving end);
@@ -4527,16 +4743,32 @@ function on_recv(self, frame, meta)
     local d_ctr       = d.ctr
     local d_flags     = d.flags
     local d_user_text = user_text
+    local d_committed_at_dst = hb_new_committed   -- §7.6: for E2E ACK actual_hops_used
     local is_delivered = (d.dst == self.id)
+
+    -- §7.6: forward_hop_budget = the decremented values that will travel
+    -- with the forwarded frame (next-hop and beyond). Already enforced
+    -- above (before ACK send); if we got here, hop_budget is fine.
+    local forward_hop_budget = {
+      remaining = hb_new_remaining,
+      committed = hb_new_committed,
+      -- prev_fwd_rt_hops gets re-stamped from self.rt[d_dst] inside issue_send
+      -- (the forwarder overwrite per §7.6). Pre-populate with 0; issue_send
+      -- replaces it.
+      prev_fwd_rt_hops = 0,
+    }
 
     if is_delivered then
       if is_e2e_ack then
         -- This DATA is an end-to-end ACK delivered to us as the original
-        -- originator. Body carries [acked_ctr_lo, acked_ctr_hi] (2 bytes) —
-        -- match against pending_e2e and emit delivered_confirmed. Do NOT
-        -- emit "delivered" (not user data). Do NOT trigger another E2E ACK.
+        -- originator. Body carries [acked_ctr_lo, acked_ctr_hi, actual_hops_used]
+        -- (3 bytes per §7.6) — match against pending_e2e, emit
+        -- delivered_confirmed, and use actual_hops_used to update
+        -- rt[dst].hops with empirical truth. Do NOT emit "delivered"
+        -- (not user data). Do NOT trigger another E2E ACK.
         if #d_user_text >= 2 then
           local acked_ctr = d_user_text:byte(1) | (d_user_text:byte(2) << 8)
+          local actual_hops = (#d_user_text >= 3) and d_user_text:byte(3) or nil
           local info = self.pending_e2e[acked_ctr]
           if info ~= nil then
             self:emit("delivered_confirmed", {
@@ -4546,12 +4778,36 @@ function on_recv(self, frame, meta)
               payload    = info.user_text,
               elapsed_ms = self:now() - info.sent_at_ms,
               via_ack_from = d_origin,      -- the destination that ACK'd
+              actual_hops_used = actual_hops,
             })
             self:log(string.format(
-              "delivered_confirmed acked_ctr=%d dst=%s elapsed=%dms (E2E ACK from %s)",
+              "delivered_confirmed acked_ctr=%d dst=%s elapsed=%dms actual_hops=%s (E2E ACK from %s)",
               acked_ctr, info.dst_name, self:now() - info.sent_at_ms,
-              name_of(self, d_origin)))
+              tostring(actual_hops), name_of(self, d_origin)))
             self.pending_e2e[acked_ctr] = nil
+            -- §7.6 Phase D: rt-cost learning from the E2E ACK's actual_hops.
+            -- Update self.rt[info.dst_id].hops with empirical truth. If
+            -- shorter than current rt: shave the estimate (better route).
+            -- If longer: push estimate up (the path was harder than rt thought).
+            -- Capped at 8 (rt_merge limit).
+            if actual_hops ~= nil and actual_hops > 0 and actual_hops <= 8 then
+              local entry = self.rt[info.dst_id]
+              if entry and entry.candidates[1] then
+                local prim = entry.candidates[1]
+                local old_hops = prim.hops
+                if old_hops ~= actual_hops then
+                  prim.hops = actual_hops
+                  self:emit("rt_update", {
+                    dest = info.dst_id, next = prim.next_hop,
+                    score = prim.score, hops = actual_hops,
+                    slot = "primary", trigger = "e2e_ack_actual_hops",
+                  })
+                  self:log(string.format(
+                    "rt[%s].hops %d→%d (e2e_ack actual_hops feedback)",
+                    info.dst_name, old_hops, actual_hops))
+                end
+              end
+            end
           else
             -- No matching pending_e2e — either we already received this
             -- ACK (duplicate), already timed out, or never sent the
@@ -4570,11 +4826,16 @@ function on_recv(self, frame, meta)
           e2e_ack_req and " [E2E-ack requested]" or ""))
         if e2e_ack_req then
           -- Schedule an E2E ACK send back to d_origin. The return flight
-          -- carries DATA_FLAG_E2E_IS_ACK on wire byte 1. Its body is the
-          -- 2-byte acked ctr [ctr_lo, ctr_hi] (the originator's ctr we're
-          -- confirming). Goes through normal RTS-CTS-DATA-ACK mechanics.
+          -- carries DATA_FLAG_E2E_IS_ACK on wire byte 1. Body extended
+          -- per §7.6:
+          --   [acked_ctr_lo(1) acked_ctr_hi(1) actual_hops_used(1)] = 3 bytes
+          -- actual_hops_used = hop_budget.committed of the received DATA
+          -- (= how many hops the forward DATA actually walked). Originator
+          -- uses this to update rt[dst].hops with empirical truth.
           local return_ctr = self:next_ctr(d_origin)
-          local return_body = string.char(d_ctr & 0xff) .. string.char((d_ctr >> 8) & 0xff)
+          local return_body = string.char(d_ctr & 0xff)
+                            .. string.char((d_ctr >> 8) & 0xff)
+                            .. string.char(d_committed_at_dst & 0xff)
           local return_inner = string.char(0)               -- src_addr_len = 0
                              .. string.char(self.id)        -- src_addr
                              .. return_body
@@ -4583,7 +4844,8 @@ function on_recv(self, frame, meta)
             dst_id     = d_origin,
             dst_name   = name_of(self, d_origin),
             payload    = return_inner,
-            user_text  = string.format("[E2E-ACK ctr=%d]", d_ctr),
+            user_text  = string.format("[E2E-ACK ctr=%d hops=%d]",
+              d_ctr, d_committed_at_dst),
             ctr        = return_ctr,
             flags      = DATA_FLAG_E2E_IS_ACK,
             enqueue_time_ms = self:now(),
@@ -4593,11 +4855,12 @@ function on_recv(self, frame, meta)
           self:emit("e2e_ack_tx_enqueued", {
             origin = self.id, ctr = return_ctr,
             dst = d_origin, acked_ctr = d_ctr,
+            actual_hops_used = d_committed_at_dst,
             depth = #self.tx_queue,
           })
           self:log(string.format(
-            "e2e_ack_tx_enqueued ctr=%d acked=%d dst=%s",
-            return_ctr, d_ctr, name_of(self, d_origin)))
+            "e2e_ack_tx_enqueued ctr=%d acked=%d actual_hops=%d dst=%s",
+            return_ctr, d_ctr, d_committed_at_dst, name_of(self, d_origin)))
         end
       end
     end
@@ -4634,6 +4897,10 @@ function on_recv(self, frame, meta)
           enqueue_time_ms = self:now(),       -- fresh hop attempt
           requeue_count   = 0,
           next_attempt_ms = 0,
+          -- §7.6: carry the post-decrement hop budget so the eventual
+          -- issue_send (via become_free) has the right state to put on
+          -- the outgoing wire.
+          forward_hop_budget = forward_hop_budget,
         })
         self:emit("forward_queued", {
           origin = d_origin, payload = d_user_text, ctr = d_ctr,
@@ -4642,7 +4909,7 @@ function on_recv(self, frame, meta)
         return
       end
       issue_send(self, d_origin, d_dst, dst_name,
-                 d_inner, d_user_text, d_ctr, d_flags, d_src)
+                 d_inner, d_user_text, d_ctr, d_flags, d_src, nil, forward_hop_budget)
     end)
     return
   end

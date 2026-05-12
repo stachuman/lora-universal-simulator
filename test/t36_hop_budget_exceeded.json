@@ -1,0 +1,48 @@
+{
+  "_name": "t36_hop_budget_exceeded",
+  "_desc": "§7.6 Phase A: hop_budget enforcement. 5-node line a-b-c-d-e. a sends to e. With hop_budget_max_initial=2 (artificially low for testing), the budget exhausts at hop 3 (= node d). Verifies: (1) d emits hop_budget_exceeded; (2) e does NOT emit delivered. Without the cap, the 4-hop flight would deliver normally.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 10000,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "a", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9],
+                  "beacon_period_ms": 2000, "quiet_threshold_ms": 0,
+                  "hop_budget_slack": 0, "hop_budget_max_initial": 2 } },
+    { "name": "b", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9],
+                  "beacon_period_ms": 2000, "quiet_threshold_ms": 0,
+                  "hop_budget_slack": 0, "hop_budget_max_initial": 2 } },
+    { "name": "c", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9],
+                  "beacon_period_ms": 2000, "quiet_threshold_ms": 0,
+                  "hop_budget_slack": 0, "hop_budget_max_initial": 2 } },
+    { "name": "d", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9],
+                  "beacon_period_ms": 2000, "quiet_threshold_ms": 0,
+                  "hop_budget_slack": 0, "hop_budget_max_initial": 2 } },
+    { "name": "e", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9],
+                  "beacon_period_ms": 2000, "quiet_threshold_ms": 0,
+                  "hop_budget_slack": 0, "hop_budget_max_initial": 2 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "a", "to": "b", "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "b", "to": "c", "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "c", "to": "d", "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "d", "to": "e", "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 30000, "node": "a", "command": "send e hop-budget-test" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "d", "emit_type": "hop_budget_exceeded", "value": "" }
+  ]
+}
