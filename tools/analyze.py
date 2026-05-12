@@ -1380,33 +1380,78 @@ def print_section_18(r: dict) -> None:
                   f"timeout={timeo:>4}")
 
 
-# ---- Section 19: hop-limit analysis (8-hop ceiling) -----------------------
+# ---- Section 19: hop & amplification analysis -----------------------------
+
+def _trace_delivery_path(chain: list, deliver_node, deliver_t, origin) -> list:
+    """Walk backward from delivery to reconstruct the ACTUAL chain of
+    forwarders that produced the delivered copy. Each iteration finds
+    the data_tx event with to==current that fired most recently before
+    current's time. Returns the ordered list of hops (each is a dict
+    with t/node/to), or None if reconstruction failed (e.g., chain
+    missing the originator-side hop).
+
+    NOTE on correctness: data_tx events from PARALLEL branches share
+    the same (origin, seq) but represent independent flight copies.
+    The "latest data_tx targeting `current` before deliver_t" finds the
+    most-recent upstream hop, which by construction is on the branch
+    that produced the delivered copy (= it had to arrive before
+    delivery to cause delivery).
+    """
+    chain_sorted = sorted(chain, key=lambda x: x["t"])
+    path = []
+    current = deliver_node
+    current_t = deliver_t
+    while current != origin:
+        candidates = [c for c in chain_sorted
+                      if c["to"] == current and c["t"] <= current_t]
+        if not candidates:
+            return None
+        best = candidates[-1]
+        path.append(best)
+        current = best["node"]
+        current_t = best["t"]
+        if len(path) > 50:  # sanity bound
+            return None
+    path.reverse()
+    return path
+
 
 def section_hop_limit(cfg: dict, events_path: str,
                        since_ms: int = 0,
                        hop_limit: int = 8) -> dict:
-    """Hop-count distribution + fail-attribution against the protocol's
-    hard hop limit (default 8 — see PROTOCOL.md §5.2 'hops > 8 rejected').
+    """Hop-count analysis split cleanly into three orthogonal metrics:
 
-    Histogram is built from successful delivered flights using the same
-    (data_tx → dedupe by (src, next)) machinery as §1 path optimality.
+    1. **Actual delivery-path hops** — the real chain of forwarders that
+       produced the delivered copy. Reconstructed by walking BACKWARD
+       from each delivered event: at each step, find the data_tx that
+       targeted the current node and fired before the current time.
+       This filters out parallel cascade branches.
 
-    Fail-attribution: for each user-issued `send` command, check whether
-    the shortest path on the observed link graph exceeds the hop limit.
-    If so AND the send didn't deliver, it's classified as hop-limit-
-    binding. This is a CONSERVATIVE estimate — sends could fail for many
-    other reasons even when a short path exists. We only flag the cases
-    where physics rules out delivery at the current limit.
+    2. **Total unique edges traversed** — count of distinct (src, next)
+       pairs across the whole (origin, seq) flight, including parallel
+       branches that didn't end up delivering the message. This is what
+       the original metric was measuring.
+
+    3. **Amplification = total_unique_edges / delivery_path_hops** —
+       how much extra airtime the flight consumed beyond its delivery
+       path. 1.0× = clean single path; >1.0× = parallel branches still
+       in flight (usually from ACK-loss → originator cascade-retry).
+
+    Plus: duplicate-copy count per flight (from dup_drop events at
+    intermediate nodes that already saw this (origin, seq)).
+
+    Plus: fail-attribution against the hop limit — sends with shortest
+    link-path > limit are physics-impossible at this limit (rare).
     """
     names_by_id = {i: n["name"] for i, n in enumerate(cfg["nodes"])}
     name_to_id = {v: k for k, v in names_by_id.items()}
     edges = build_link_graph(events_path, names_by_id, since_ms)
 
-    # Successful flights: hop count from data_tx chain dedupe (same logic
-    # as §1 — see section_path_optimality for rationale).
-    delivered_seqs: set[tuple] = set()
-    data_tx_chain: dict[tuple, list] = defaultdict(list)
-    sends: list[tuple[str, str]] = []  # (origin_name, dst_name) pairs
+    delivered: dict = {}                                 # (o,s) -> (node, time_ms)
+    data_tx_chain: dict[tuple, list] = defaultdict(list) # (o,s) -> list of {t,node,to}
+    dup_drop_count: Counter = Counter()                  # (o,s) -> count
+    path_cascade_count: Counter = Counter()              # (o,s) -> count
+    sends: list[tuple[str, str]] = []
 
     for c in cfg.get("commands", []):
         cmd = c.get("command", "")
@@ -1415,7 +1460,6 @@ def section_hop_limit(cfg: dict, events_path: str,
             continue
         parts = cmd.split(maxsplit=2)
         if len(parts) >= 3:
-            # "send <dst> <text>" — c["node"] is originator
             origin = c.get("node")
             dst = parts[1]
             if origin and dst:
@@ -1426,128 +1470,268 @@ def section_hop_limit(cfg: dict, events_path: str,
             continue
         et = e.get("emit_type", "")
         d = e.get("data") or {}
-        if et == "delivered":
-            origin = d.get("origin")
-            seq = d.get("origin_seq")
-            if origin is not None and seq is not None:
-                delivered_seqs.add((origin, seq))
-        elif et == "data_tx":
-            origin = d.get("origin")
-            seq = d.get("origin_seq")
-            if origin is not None and seq is not None:
-                nxt = d.get("to", d.get("next"))
-                data_tx_chain[(origin, seq)].append((e["time_ms"], e["node"], nxt))
+        origin = d.get("origin")
+        seq = d.get("origin_seq")
+        if et == "delivered" and origin is not None and seq is not None:
+            delivered[(origin, seq)] = (e["node"], e["time_ms"])
+        elif et == "data_tx" and origin is not None and seq is not None:
+            data_tx_chain[(origin, seq)].append({
+                "t":    e["time_ms"],
+                "node": e["node"],
+                "to":   d.get("to", d.get("next")),
+            })
+        elif et == "dup_drop" and origin is not None and seq is not None:
+            dup_drop_count[(origin, seq)] += 1
+        elif et == "path_cascade" and origin is not None and seq is not None:
+            path_cascade_count[(origin, seq)] += 1
 
-    hop_histogram: Counter = Counter()
+    # Per-flight analysis
+    path_hop_hist: Counter = Counter()
+    amplification_hist: Counter = Counter()
+    dup_count_hist: Counter = Counter()
+    variant_count_hist: Counter = Counter()
     flights_at_limit = 0
+    flights_over_limit = 0
+    over_limit_examples: list[dict] = []
+    top_amplified: list[dict] = []
     headroom_samples: list[int] = []
-    for (origin, seq), chain in data_tx_chain.items():
-        if (origin, seq) not in delivered_seqs:
-            continue
-        chain.sort()
-        seen = set()
-        actual_hops = 0
-        for t, src, nxt in chain:
-            key = (src, nxt)
-            if key not in seen:
-                seen.add(key)
-                actual_hops += 1
-        if actual_hops > 0:
-            hop_histogram[actual_hops] += 1
-            if actual_hops == hop_limit:
-                flights_at_limit += 1
-            headroom_samples.append(hop_limit - actual_hops)
+    per_flight: list[dict] = []
+    total_unique_edges_all = 0
+    total_path_hops_all = 0
 
-    # Fail-attribution: sends that didn't deliver, with shortest link-path
-    # > hop_limit. CONSERVATIVE: only flags physics-impossible cases.
+    for (origin, seq), chain in data_tx_chain.items():
+        if (origin, seq) not in delivered:
+            continue
+        deliv_node, deliv_t = delivered[(origin, seq)]
+        path = _trace_delivery_path(chain, deliv_node, deliv_t, origin)
+        if path is None:
+            continue
+        # Count total unique edges across whole flight (incl. parallel branches)
+        unique_edges = {(c["node"], c["to"]) for c in chain}
+        total_unique = len(unique_edges)
+        path_hops = len(path)
+        if path_hops == 0:
+            continue
+        amp = total_unique / path_hops
+
+        # "Variants" = independent branches the originator initiated for
+        # this flight. Each data_tx event from the originator represents
+        # a NEW branch (RTS-CTS-DATA happens once per successful CTS, so
+        # multiple originator-side data_tx events imply cascade-after-
+        # CTS-loss retries each spawning a fresh branch).
+        # Note: downstream forwarders can ALSO cascade, multiplying
+        # branches further — we don't count those here because
+        # data_tx_chain doesn't carry forwarder cascade state.
+        originator_tx_count = sum(1 for c in chain if c["node"] == origin)
+        variants = max(1, originator_tx_count)
+
+        path_hop_hist[path_hops] += 1
+        total_unique_edges_all += total_unique
+        total_path_hops_all += path_hops
+        if path_hops == hop_limit:
+            flights_at_limit += 1
+        if path_hops > hop_limit:
+            flights_over_limit += 1
+            if len(over_limit_examples) < 5:
+                over_limit_examples.append({
+                    "origin": names_by_id.get(origin, f"#{origin}"),
+                    "dst":    names_by_id.get(deliv_node, f"#{deliv_node}"),
+                    "hops":   path_hops,
+                })
+        headroom_samples.append(hop_limit - path_hops)
+
+        # Amplification buckets
+        if amp <= 1.0:
+            amp_bucket = "1.0× (single path)"
+        elif amp <= 1.5:
+            amp_bucket = "1.0-1.5×"
+        elif amp <= 2.0:
+            amp_bucket = "1.5-2.0×"
+        elif amp <= 3.0:
+            amp_bucket = "2.0-3.0×"
+        else:
+            amp_bucket = ">3.0×"
+        amplification_hist[amp_bucket] += 1
+
+        # Duplicate buckets
+        dups = dup_drop_count.get((origin, seq), 0)
+        if dups == 0:
+            dup_bucket = "0 (clean)"
+        elif dups == 1:
+            dup_bucket = "1 dup"
+        elif dups <= 3:
+            dup_bucket = "2-3 dups"
+        else:
+            dup_bucket = "4+ dups"
+        dup_count_hist[dup_bucket] += 1
+
+        # Variant buckets
+        if variants == 1:
+            variant_bucket = "1 (single branch)"
+        elif variants == 2:
+            variant_bucket = "2 branches"
+        elif variants == 3:
+            variant_bucket = "3 branches"
+        else:
+            variant_bucket = "4+ branches"
+        variant_count_hist[variant_bucket] += 1
+
+        per_flight.append({
+            "origin":            names_by_id.get(origin, f"#{origin}"),
+            "dst":               names_by_id.get(deliv_node, f"#{deliv_node}"),
+            "path_hops":         path_hops,
+            "total_unique_edges": total_unique,
+            "amplification":     amp,
+            "dup_copies":        dups,
+            "variants":          variants,
+            "cascades":          path_cascade_count.get((origin, seq), 0),
+        })
+
+    # Top amplified flights
+    top_amplified = sorted(per_flight,
+                            key=lambda r: -r["amplification"])[:8]
+
+    # Fail-attribution: sends with shortest-link-path > limit
     impossible_sends = 0
     impossible_examples: list[dict] = []
-    hop_distances: list[int] = []
     for origin_name, dst_name in sends:
         a = name_to_id.get(origin_name)
         b = name_to_id.get(dst_name)
         if a is None or b is None:
             continue
         opt = shortest_hops(edges, a, b)
-        if opt is None:
-            continue
-        hop_distances.append(opt)
-        if opt > hop_limit:
-            # Was this send delivered? Match by origin name; can't match
-            # by seq because user commands don't know the runtime-assigned
-            # seq. Use heuristic: any delivered flight from this origin
-            # to this dst counts as "this user's send succeeded
-            # eventually" — but we'll only flag drops, not retries, so
-            # this is bounded.
-            # Simpler approximation: count send commands where opt > limit.
-            # We can't perfectly attribute success/fail to specific sends.
+        if opt is not None and opt > hop_limit:
             impossible_sends += 1
             if len(impossible_examples) < 5:
                 impossible_examples.append({
                     "src": origin_name, "dst": dst_name, "min_hops": opt,
                 })
 
-    # What-if sensitivity: what % of currently-delivered flights would
-    # have failed if hop_limit were tightened?
-    total_delivered_flights = sum(hop_histogram.values())
+    # What-if sensitivity using ACTUAL delivery path (not unique edges)
+    total_flights = sum(path_hop_hist.values())
     what_if = {}
     for trial_limit in (7, 6, 5, 4):
         if trial_limit >= hop_limit:
             continue
-        too_long = sum(c for h, c in hop_histogram.items() if h > trial_limit)
+        too_long = sum(c for h, c in path_hop_hist.items() if h > trial_limit)
         what_if[trial_limit] = too_long
 
     return {
-        "hop_histogram":           dict(hop_histogram),
-        "hop_limit":               hop_limit,
-        "flights_at_limit":        flights_at_limit,
-        "headroom_samples":        sorted(headroom_samples),
-        "total_delivered_flights": total_delivered_flights,
-        "impossible_sends":        impossible_sends,
-        "impossible_examples":     impossible_examples,
-        "total_sends":             len(sends),
-        "what_if":                 what_if,
+        "hop_limit":             hop_limit,
+        "path_hop_hist":         dict(path_hop_hist),
+        "amplification_hist":    dict(amplification_hist),
+        "dup_count_hist":        dict(dup_count_hist),
+        "variant_count_hist":    dict(variant_count_hist),
+        "headroom_samples":      sorted(headroom_samples),
+        "flights_at_limit":      flights_at_limit,
+        "flights_over_limit":    flights_over_limit,
+        "over_limit_examples":   over_limit_examples,
+        "top_amplified":         top_amplified,
+        "total_flights":         total_flights,
+        "total_unique_edges_all": total_unique_edges_all,
+        "total_path_hops_all":   total_path_hops_all,
+        "impossible_sends":      impossible_sends,
+        "impossible_examples":   impossible_examples,
+        "total_sends":           len(sends),
+        "what_if":               what_if,
     }
 
 
 def print_section_19(r: dict) -> None:
-    print(f"\n=== (19) hop-limit analysis (limit = {r['hop_limit']}) ===")
-    hist = r["hop_histogram"]
-    total = r["total_delivered_flights"]
+    print(f"\n=== (19) hop & amplification analysis (limit = {r['hop_limit']}) ===")
+    total = r["total_flights"]
     if total == 0:
         print("  (no delivered flights to analyze)")
         return
-    print(f"  hop count distribution (n={total} delivered):")
+
+    # --- 1. Delivery-path hops (the TRUE hop count) ---
+    print(f"  actual delivery-path hops (n={total} delivered):")
+    hist = r["path_hop_hist"]
     for h in sorted(hist.keys()):
         bar = "#" * min(40, int(40 * hist[h] / total))
-        marker = "  ← AT LIMIT" if h == r["hop_limit"] else ""
-        print(f"    {h} hop{'s' if h != 1 else ' '}: "
+        marker = ""
+        if h == r["hop_limit"]:
+            marker = "  ← AT LIMIT"
+        elif h > r["hop_limit"]:
+            marker = "  ← OVER"
+        print(f"    {h:>2} hop{'s' if h != 1 else ' '}: "
               f"{hist[h]:>5} ({100*hist[h]/total:>4.1f}%)  {bar}{marker}")
 
     headrooms = r["headroom_samples"]
     if headrooms:
         n = len(headrooms)
         median = headrooms[n // 2]
-        p95 = headrooms[min(n - 1, int(0.05 * n))]  # 5th percentile = worst case
+        p95_tight = headrooms[min(n - 1, int(0.05 * n))]
         worst = headrooms[0]
-        print(f"  headroom to limit: median={median}, p95-tight={p95}, worst={worst}")
+        print(f"  headroom to limit: median={median}, p95-tight={p95_tight}, worst={worst}")
 
     if r["flights_at_limit"]:
-        print(f"  flights AT limit ({r['hop_limit']} hops): "
-              f"{r['flights_at_limit']} — limit is binding for these")
+        print(f"  flights AT limit ({r['hop_limit']} hops): {r['flights_at_limit']}")
+    if r["flights_over_limit"]:
+        print(f"  flights OVER limit (delivery path > {r['hop_limit']}): "
+              f"{r['flights_over_limit']}")
+        if r["over_limit_examples"]:
+            print(f"  examples of over-limit deliveries:")
+            for ex in r["over_limit_examples"]:
+                print(f"    {ex['origin']} → {ex['dst']}: {ex['hops']} hops")
 
+    # --- 2. Message amplification (parallel branches) ---
+    print(f"\n  message amplification (total edges burned / delivery-path hops):")
+    for bucket in ["1.0× (single path)", "1.0-1.5×", "1.5-2.0×", "2.0-3.0×", ">3.0×"]:
+        c = r["amplification_hist"].get(bucket, 0)
+        if c > 0:
+            bar = "#" * min(40, int(40 * c / total))
+            print(f"    {bucket:<22}: {c:>4} ({100*c/total:>4.1f}%)  {bar}")
+    if r["total_path_hops_all"] > 0:
+        net_amp = r["total_unique_edges_all"] / r["total_path_hops_all"]
+        wasted = r["total_unique_edges_all"] - r["total_path_hops_all"]
+        wasted_pct = 100.0 * wasted / r["total_unique_edges_all"] if r["total_unique_edges_all"] else 0.0
+        print(f"  network-wide: total edges={r['total_unique_edges_all']}, "
+              f"delivery-path hops={r['total_path_hops_all']}")
+        print(f"  fleet amplification: {net_amp:.2f}× "
+              f"(= {wasted} wasted-edges, {wasted_pct:.1f}% of edges spent on dead branches)")
+
+    # --- 3. Variants per flight (originator-initiated branches) ---
+    print(f"\n  variants per flight (= distinct originator-initiated branches):")
+    for bucket in ["1 (single branch)", "2 branches", "3 branches", "4+ branches"]:
+        c = r["variant_count_hist"].get(bucket, 0)
+        if c > 0:
+            bar = "#" * min(40, int(40 * c / total))
+            print(f"    {bucket:<22}: {c:>4} ({100*c/total:>4.1f}%)  {bar}")
+
+    # --- 4. Duplicate copies (dup_drop count per flight) ---
+    print(f"\n  duplicate copies per flight (dup_drop arrivals at "
+          f"recipients/forwarders):")
+    for bucket in ["0 (clean)", "1 dup", "2-3 dups", "4+ dups"]:
+        c = r["dup_count_hist"].get(bucket, 0)
+        if c > 0:
+            bar = "#" * min(40, int(40 * c / total))
+            print(f"    {bucket:<14}: {c:>4} ({100*c/total:>4.1f}%)  {bar}")
+
+    # --- 5. Top amplified flights ---
+    if r["top_amplified"]:
+        print(f"\n  top {len(r['top_amplified'])} amplified flights "
+              f"(real path × amplification = wasted airtime):")
+        print(f"    {'origin':<24} {'dst':<24} {'path':>4} {'edges':>5} "
+              f"{'amp':>5} {'var':>3} {'dups':>4} {'casc':>4}")
+        for fl in r["top_amplified"]:
+            print(f"    {fl['origin']:<24} {fl['dst']:<24} {fl['path_hops']:>4} "
+                  f"{fl['total_unique_edges']:>5} {fl['amplification']:>4.1f}× "
+                  f"{fl['variants']:>3} {fl['dup_copies']:>4} {fl['cascades']:>4}")
+
+    # --- 5. Hop-limit fail attribution ---
     if r["impossible_sends"]:
         ts = r["total_sends"]
         pct = 100.0 * r["impossible_sends"] / ts if ts else 0.0
-        print(f"  sends with shortest-path > limit (physics-impossible): "
+        print(f"\n  sends with shortest-path > limit (physics-impossible): "
               f"{r['impossible_sends']}/{ts} ({pct:.1f}%)")
         if r["impossible_examples"]:
-            print(f"  examples:")
             for ex in r["impossible_examples"]:
                 print(f"    {ex['src']} → {ex['dst']}: min_hops={ex['min_hops']}")
 
     if r["what_if"]:
-        print(f"  what-if sensitivity (currently-delivered flights that would have failed):")
+        print(f"\n  what-if sensitivity on delivery-path (currently-delivered flights "
+              f"that would have failed):")
         for trial, lost in sorted(r["what_if"].items(), reverse=True):
             pct = 100.0 * lost / total if total else 0.0
             print(f"    if limit were {trial}: {lost} flights lost ({pct:.1f}%)")
