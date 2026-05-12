@@ -1193,19 +1193,20 @@ At slower SFs (SF11/SF12) the practical max can drop to ~50-100 B per frame, sev
 ```
 At forwarder F, on receiving multicast DATA:
 
-1. Deliver locally if recipient:
+1. Local delivery (if recipient):
      if dst_count == 0:
-       deliver locally (we're a recipient — "all" includes us)
-     elif self.id is in dst_list:
-       deliver locally
-     (else: we're just a forwarder, no local delivery)
-
-2. Determine the working set:
-     if dst_count == 0:
-       working_set = { entry.dest for entry in rt[] }     -- ALL reachable nodes
-       working_set -= {self.id}
+       am_recipient = true (we're in "all")
      else:
-       working_set = dst_list - {self.id}
+       am_recipient = (self.id is in dst_list)
+     if am_recipient AND (origin, ctr) NOT in delivered_multicast:
+       deliver locally; record in delivered_multicast
+
+2. Forward-side per-destination dedup:
+     forwarded_set = forwarded_by_multicast[(origin, ctr)] or empty set
+     if dst_count == 0:
+       working_set = { entry.dest for entry in rt[] } - {self.id} - forwarded_set
+     else:
+       working_set = dst_list - {self.id} - forwarded_set
    if working_set is empty: done.
 
 3. Group by next-hop direction:
@@ -1221,11 +1222,54 @@ At forwarder F, on receiving multicast DATA:
          send multicast-to-all frame (dst_count=0, no dst_list) to next_hop
        else:
          send multicast frame with dst_list=subset to next_hop
+
+5. Update forwarded-set state:
+     forwarded_by_multicast[(origin, ctr)] += working_set
+     touch_ttl(forwarded_by_multicast[(origin, ctr)], multicast_dedup_ttl_ms)
 ```
 
 The "all" mode doesn't even carry the list — each forwarder reconstructs it from local `rt[]` on the fly. Saves wire bytes; relies on `rt[]` being current.
 
-**Deduplication.** Standard `seen_origins` (§10) dedup applies — `(originator, ctr)` catches duplicates if topology causes the same multicast frame to arrive via two paths. Same mechanism for both modes.
+**Per-destination forwarding dedup — why mesh requires it.** Standard `seen_origins` (§10) dedup is **insufficient for multicast in mesh topologies**. The same multicast operation legitimately splits into multiple frames carrying DIFFERENT destination subsets, all sharing `(origin, ctr)`. A naive `seen_origins` check would drop all but the first split arriving at each forwarder, losing destinations carried by the others.
+
+**Diamond example (showing why):**
+
+```
+       A (originator, wants to reach D and E)
+      / \
+     B   C
+      \ /
+       D (also forwards to E)
+       |
+       E
+
+A's rt[D] = via B; A's rt[E] = via C (C → D → E)
+
+Naive seen_origins (BROKEN):
+  A → B with dst_list=[D]      → B → D delivers, marks (A,ctr)
+  A → C with dst_list=[E]      → C → D
+  D sees (A,ctr) seen → drops  → E LOST
+
+With per-destination forwarding dedup (CORRECT):
+  A → B with dst_list=[D]      → D delivers, forwarded={D}
+  A → C with dst_list=[E]      → C → D
+  D: working_set = [E] - {D forwarded} = [E]
+  D forwards to E, forwarded={D, E}
+  E receives ✓
+```
+
+**Two distinct dedup tables at each forwarder:**
+
+| Table | Keyed on | Purpose | TTL |
+|---|---|---|---|
+| `delivered_multicast[(origin, ctr)]` | (origin, ctr) | Prevent double-delivery to local app when frame arrives via multiple paths | `seen_origin_ttl_ms` (existing default 30 s) |
+| `forwarded_by_multicast[(origin, ctr)]` | (origin, ctr) → set of destinations | Prevent re-forwarding same destinations on re-arriving multicast splits | `multicast_dedup_ttl_ms` (default 300 s = 5 min — covers mesh propagation timescales) |
+
+**State cost.** Per active multicast: ~24 bytes overhead + ~1 byte per destination already forwarded. For a forwarder seeing 10 active multicasts each with average 10 destinations: ~340 bytes total. Negligible.
+
+The two tables are functionally separate but small and bounded.
+
+**Why `multicast_dedup_ttl_ms` is longer than `seen_origin_ttl_ms`:** local delivery dedup just needs to cover human-perception timescales (don't deliver the same chat message twice in quick succession). Forwarding dedup needs to cover the time for a multicast to fully propagate through the mesh (multi-hop, possibly with retries) — a few minutes is appropriate.
 
 **Worked example — explicit list (30 recipients, body ≈ 50 B).**
 
@@ -1338,16 +1382,20 @@ This means multicast naturally pairs with **§3 channel mechanics** (group PSK f
 |---|---|---|
 | `multicast_max_dst_count` | computed from SF + body | Per-SF cap on destinations per multicast frame (frame-budget guardrail); originator splits if needed |
 | `multicast_drop_unroutable` | true | If `rt[d]` is missing at a forwarder, silently drop `d` from the subset (vs. flooding all neighbors) |
+| `multicast_dedup_ttl_ms` | 300000 (5 min) | TTL for `forwarded_by_multicast[(origin, ctr)]` entries. Sized to cover mesh propagation including retries. After expiry, a re-arriving frame with same (origin, ctr) is treated as a fresh multicast (rare in practice). |
+| `multicast_forwarded_table_max` | 64 | Soft cap on simultaneously-tracked multicasts per forwarder; LRU eviction beyond this. Protects memory under burst load. |
 
 **Implementation cost estimate.**
 
 - `pack_data` / `parse_data` multicast variant (both modes): ~60 lines
 - Forwarding algorithm (group-by-next-hop, fan-out, dst_count=0 specialization): ~70 lines
 - Local-delivery branch (when self is recipient in either mode): ~25 lines
+- `delivered_multicast` + `forwarded_by_multicast` tables with TTL aging + LRU cap: ~80 lines
+- Diamond / multi-path dedup tests (the cases naive seen_origins would break): ~50 lines
 - Group-PSK crypto integration (for channel use case): ~50 lines
-- Tests: explicit-list multicast round-trip, multicast-to-all coverage, fan-out at splitter, dedup at diamond, drop-unroutable, gateway boundary fallback: ~200 lines
+- Tests: explicit-list multicast round-trip, multicast-to-all coverage, fan-out at splitter, **mesh diamond delivery (the case proving per-dest dedup works)**, drop-unroutable, gateway boundary fallback, TTL expiry of forwarded-set, LRU eviction under burst: ~250 lines
 
-**Cross-references.** §7.1 (unicast DATA shares the encryption + MAC structure), §3 (channels are the primary use case for multicast; both modes used), §10 in PROTOCOL.md (origin-level dedup via `seen_origins` catches duplicates), §1 (each multicast frame = one origination at 1st-hop counters), §9 (originator identity in encrypted body; dst_list visible to forwarders for routing).
+**Cross-references.** §7.1 (unicast DATA shares the encryption + MAC structure), §3 (channels are the primary use case for multicast; both modes used), §10 in PROTOCOL.md (origin-level dedup via `seen_origins` is for unicast — multicast has its own per-destination forwarding dedup), §1 (each multicast frame = one origination at 1st-hop counters), §9 (originator identity in encrypted body; dst_list visible to forwarders for routing).
 
 ---
 
