@@ -5,7 +5,7 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), n_entries(1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}  →  4 + [1+4L]? + 3n B |
+-- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|n_entries(7)](1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}, seen_bitmap(32B)?  →  4 + [1+4L]? + 3n + [32]? B |
 -- | `'R'` | RTS    | `R`, src(1), next(1), [addr_len(3)|rsv(1)|leaf_id(4)](1), dst(1 when addr_len=0), [ctr_lo(4)|rsv(4)](1), sf_bitmap(1), payload_len(1)  →  8 B (in-leaf) |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|reserved(1)](1)  →  2 B                              |
 -- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
@@ -737,11 +737,12 @@
 -- bumps the offset every fire so successive beacons cycle through the
 -- whole table. Receivers don't need to track pages — every entry they
 -- hear gets merged via rt_merge as before.
--- BCN — 4-byte header + optional schedule block + n × 3-byte entries:
+-- BCN — 4-byte header + optional schedule block + n × 3-byte entries
+--       + optional 32-byte destination-seen bitmap:
 --   byte 0 : tag 'B'
 --   byte 1 : leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
 --   byte 2 : src (8)
---   byte 3 : n_entries (8)
+--   byte 3 : has_seen_bitmap(1 hi) | n_entries(7 lo)
 --   if has_schedule == 1:
 --     byte 4 : layer_count (8)
 --     layer_count × 4-byte schedule records (parser skips today — runtime
@@ -790,16 +791,126 @@ end
 --   the primary was pruned). Sorted by dest_id for determinism. Capped at
 --   max_entries — overflow waits for the next beacon (no information loss).
 --
--- Phase 2 (background): the existing sliding-offset rotation fills any
---   remaining slots, skipping destinations already in the dirty page so
---   we never duplicate within a single beacon.
+-- Phase 2 (warmup/background): the existing sliding-offset rotation fills
+--   any remaining slots, skipping destinations already in the dirty page so
+--   we never duplicate within a single beacon. After warmup, periodic and
+--   triggered BCNs skip this phase and rely on the seen bitmap for freshness.
 --
 -- After emission: dirty flags for sent routes are cleared. The stable
 -- offset advances ONLY by the number of stable slots used — so when
 -- dirty fills the beacon, stable progress isn't lost.
 --
--- Steady state with no churn → all flags clean → only Phase 2 runs →
--- byte-for-byte identical to the pre-differential pack_beacon.
+-- Steady state after warmup with no churn → all flags clean → Phase 2 is
+-- skipped → BCN carries only the header plus the optional seen bitmap.
+local BCN_N_HAS_SEEN_BITMAP = 0x80
+local BCN_N_ENTRIES_MASK    = 0x7f
+local BCN_SEEN_BITMAP_BYTES = 32
+
+local function bitmap_set_bit(bytes, id)
+  if id < 0 or id > 254 then return end
+  local byte_i = math.floor(id / 8) + 1
+  local bit_i = id % 8
+  bytes[byte_i] = bytes[byte_i] | (1 << bit_i)
+end
+
+local function bitmap_get_bit(bitmap, id)
+  if id < 0 or id > 254 or #bitmap < BCN_SEEN_BITMAP_BYTES then return false end
+  local byte_i = math.floor(id / 8) + 1
+  local bit_i = id % 8
+  return (bitmap:byte(byte_i) & (1 << bit_i)) ~= 0
+end
+
+local function bitmap_count_bits(bitmap)
+  local n = 0
+  for i = 1, #bitmap do
+    local b = bitmap:byte(i)
+    while b ~= 0 do
+      n = n + (b & 1)
+      b = b >> 1
+    end
+  end
+  return n
+end
+
+local function build_seen_bitmap(node)
+  local bytes = {}
+  for i = 1, BCN_SEEN_BITMAP_BYTES do bytes[i] = 0 end
+  local now = node:now()
+  local ttl = node.seen_bitmap_ttl_ms or 0
+  if ttl > 0 then
+    for dest_id, seen_ms in pairs(node.dest_seen_ms or {}) do
+      if dest_id >= 0 and dest_id <= 254 and (now - seen_ms) <= ttl then
+        bitmap_set_bit(bytes, dest_id)
+      end
+    end
+    for dest_id, entry in pairs(node.rt or {}) do
+      local primary = entry.candidates and entry.candidates[1]
+      if dest_id >= 0 and dest_id <= 254 and primary and primary.last_seen_ms
+         and (now - primary.last_seen_ms) <= ttl then
+        bitmap_set_bit(bytes, dest_id)
+      end
+    end
+  end
+  bitmap_set_bit(bytes, node.id)
+  local out = {}
+  for i = 1, BCN_SEEN_BITMAP_BYTES do out[i] = string.char(bytes[i]) end
+  local bitmap = table.concat(out)
+  return bitmap, bitmap_count_bits(bitmap)
+end
+
+local function mark_dest_seen(self, dest_id, source)
+  if dest_id == nil or dest_id < 0 or dest_id > 254 then return false end
+  local now = self:now()
+  local prev = self.dest_seen_ms[dest_id]
+  self.dest_seen_ms[dest_id] = now
+  local emit_interval = math.max(1, math.floor((self.seen_bitmap_ttl_ms or 1) / 4))
+  if prev == nil or (now - prev) >= emit_interval then
+    self:emit("dest_seen_update", {
+      dest = dest_id,
+      source = source,
+      age_ms = prev and (now - prev) or nil,
+    })
+  end
+  return prev == nil
+end
+
+local function refresh_bitmap_candidates(self, dest_id, next_hop)
+  local entry = self.rt[dest_id]
+  if not entry or not entry.candidates then return 0 end
+  local refreshed = 0
+  local now = self:now()
+  for i, c in ipairs(entry.candidates) do
+    if c.next_hop == next_hop then
+      local age = c.last_seen_ms and (now - c.last_seen_ms) or nil
+      c.last_seen_ms = now
+      refreshed = refreshed + 1
+      self:emit("rt_bitmap_refresh", {
+        dest = dest_id,
+        next = next_hop,
+        slot = (i == 1) and "primary" or "alt",
+        age_ms = age,
+      })
+    end
+  end
+  return refreshed
+end
+
+local function apply_seen_bitmap(self, bitmap, source, bitmap_src)
+  if not bitmap or #bitmap < BCN_SEEN_BITMAP_BYTES then return 0, 0 end
+  local n = 0
+  local refreshed = 0
+  for dest_id = 0, 254 do
+    if dest_id ~= self.id and bitmap_get_bit(bitmap, dest_id) then
+      n = n + 1
+      mark_dest_seen(self, dest_id, source)
+      if bitmap_src ~= nil then
+        refreshed = refreshed + refresh_bitmap_candidates(self, dest_id, bitmap_src)
+      end
+    end
+  end
+  return n, refreshed
+end
+
 local function pack_beacon_byte1(node)
   local b = (node.leaf_id & 0xf) << 4
   if node.has_schedule  then b = b | 0x08 end
@@ -809,18 +920,29 @@ local function pack_beacon_byte1(node)
   return b
 end
 
-local function pack_beacon(node, max_entries, offset)
+local function pack_beacon(node, max_entries, offset, dirty_only)
+  max_entries = math.min(max_entries, BCN_N_ENTRIES_MASK)
   local all_dests = {}
   for dest_id, _ in pairs(node.rt) do
     table.insert(all_dests, dest_id)
   end
   table.sort(all_dests)
   local byte1 = pack_beacon_byte1(node)
+  local seen_bitmap = nil
+  local seen_bits = 0
+  if node.seen_bitmap_enabled then
+    seen_bitmap, seen_bits = build_seen_bitmap(node)
+  end
   local total = #all_dests
   if total == 0 then
-    return "B" .. string.char(byte1) .. string.char(node.id) .. string.char(0),
+    local n_byte = seen_bitmap and BCN_N_HAS_SEEN_BITMAP or 0
+    return "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_byte)
+           .. (seen_bitmap or ""),
            0,
-           { dirty_n = 0, stable_n = 0, total_dirty = 0 }
+           {
+             dirty_n = 0, stable_n = 0, total_dirty = 0,
+             n_entries = 0, seen_bits = seen_bits,
+           }
   end
 
   -- Phase 1: dirty routes (sorted, deterministic).
@@ -836,10 +958,13 @@ local function pack_beacon(node, max_entries, offset)
   local dirty_n = math.min(total_dirty, max_entries)
 
   -- Phase 2: stable rotation — walk from offset, skip dirty, fill remaining.
+  -- Post-warmup dirty-only BCNs deliberately skip this phase: route changes
+  -- travel as dirty entries, while the destination-seen bitmap refreshes
+  -- existing same-next-hop candidates without paying full route-page airtime.
   local stable_page = {}
   local remaining = max_entries - dirty_n
   local new_offset = offset
-  if remaining > 0 then
+  if remaining > 0 and not dirty_only then
     local idx = offset
     local steps = 0
     while #stable_page < remaining and steps < total do
@@ -856,7 +981,9 @@ local function pack_beacon(node, max_entries, offset)
 
   -- Build frame: dirty entries first, then stable.
   local n_total = dirty_n + stable_n
-  local out = "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_total)
+  local n_byte = n_total & BCN_N_ENTRIES_MASK
+  if seen_bitmap then n_byte = n_byte | BCN_N_HAS_SEEN_BITMAP end
+  local out = "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_byte)
   local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
     local b = bucket_of_snr_4b(p.score)               -- 4-bit bucket
@@ -869,6 +996,7 @@ local function pack_beacon(node, max_entries, offset)
   end
   for i = 1, dirty_n do pack_one(dirty_in_order[i]) end
   for _, d  in ipairs(stable_page) do pack_one(d) end
+  if seen_bitmap then out = out .. seen_bitmap end
 
   -- Clear dirty for routes that landed in this beacon (those that overflowed
   -- stay dirty for the next one).
@@ -880,6 +1008,9 @@ local function pack_beacon(node, max_entries, offset)
     dirty_n     = dirty_n,
     stable_n    = stable_n,
     total_dirty = total_dirty,
+    n_entries   = n_total,
+    seen_bits   = seen_bits,
+    dirty_only   = dirty_only == true,
   }
 end
 
@@ -894,7 +1025,10 @@ local function parse_beacon(frame)
     src          = frame:byte(3),
     entries      = {},
   }
-  local n   = frame:byte(4)   -- n_entries (unchanged 8-bit width)
+  local n_byte = frame:byte(4)
+  local has_seen_bitmap = (n_byte & BCN_N_HAS_SEEN_BITMAP) ~= 0
+  local n   = n_byte & BCN_N_ENTRIES_MASK
+  out.has_seen_bitmap = has_seen_bitmap
   local pos = 5               -- next byte after n_entries
   if out.has_schedule then
     if #frame < pos then return nil end           -- need at least the layer_count byte
@@ -921,6 +1055,15 @@ local function parse_beacon(frame)
       is_gateway = is_gateway,
     })
     pos = pos + 3
+  end
+  if has_seen_bitmap then
+    if #frame < pos - 1 + BCN_SEEN_BITMAP_BYTES then return nil end
+    out.seen_bitmap = frame:sub(pos, pos + BCN_SEEN_BITMAP_BYTES - 1)
+    out.seen_bits = bitmap_count_bits(out.seen_bitmap)
+    pos = pos + BCN_SEEN_BITMAP_BYTES
+  end
+  if pos <= #frame then
+    return nil
   end
   return out
 end
@@ -2960,15 +3103,19 @@ local function send_beacon_page(self, kind)
       compute_budget_tier(self), kind))
     return false
   end
+  local dirty_only = (self.warmup_ms > 0 and self:now() >= self.warmup_ms)
   local frame, new_offset, diff = pack_beacon(self,
                                               self.beacon_max_entries,
-                                              self.beacon_offset)
+                                              self.beacon_offset,
+                                              dirty_only)
   local total  = rt_count(self.rt)
-  local page_n = frame:byte(4)              -- byte 4 = n (post-leaf_id-header)
+  local page_n = diff.n_entries or ((frame:byte(4) or 0) & BCN_N_ENTRIES_MASK)
   self:emit("beacon_tx", {
     n_entries = page_n, rt_total = total,
     offset = self.beacon_offset, next_offset = new_offset,
     kind = kind,
+    seen_bits = diff.seen_bits or 0,
+    dirty_only = diff.dirty_only == true,
   })
   -- Differential breakdown: how many of the n_entries were dirty (priority)
   -- vs stable (background rotation), and how many dirty routes overflowed
@@ -2979,11 +3126,21 @@ local function send_beacon_page(self, kind)
     total_dirty = diff.total_dirty,
     rt_total    = total,
     kind        = kind,
+    n_entries   = page_n,
+    seen_bits   = diff.seen_bits or 0,
+    dirty_only   = diff.dirty_only == true,
   })
+  if self.seen_bitmap_enabled then
+    self:emit("seen_bitmap_tx", {
+      bits_set = diff.seen_bits or 0,
+      ttl_ms = self.seen_bitmap_ttl_ms,
+    })
+  end
   self:log(string.format(
-    "beacon_tx kind=%s page=%d/%d (dirty=%d stable=%d, overflow=%d) offset %d→%d",
+    "beacon_tx kind=%s page=%d/%d (dirty=%d stable=%d, overflow=%d dirty_only=%s) offset %d→%d",
     kind, page_n, total, diff.dirty_n, diff.stable_n,
     diff.total_dirty - diff.dirty_n,
+    tostring(diff.dirty_only == true),
     self.beacon_offset, new_offset))
   self.beacon_offset = new_offset
   -- Track when this node last committed a BCN to air. Consulted by the
@@ -3235,6 +3392,13 @@ function on_init(self, config)
   self.beacon_period_warmup_ms = config.beacon_period_warmup_ms or 5000
   self.beacon_period_ms        = config.beacon_period_ms        or 300000
   self.warmup_ms               = config._sim_warmup_ms          or 0
+  -- Optional destination freshness bitmap appended to BCN frames. It is
+  -- not a route advertisement: receivers update dest_seen_ms only, and
+  -- route candidates refresh only when the existing candidate's next_hop
+  -- is the bitmap sender.
+  self.seen_bitmap_enabled     = (config.seen_bitmap_enabled ~= false)
+  self.seen_bitmap_ttl_ms      = config.seen_bitmap_ttl_ms      or 1800000
+  self.dest_seen_ms            = {}
   -- Triggered beacons: fire a one-shot re-beacon ~hundreds of ms after any
   -- meaningful rt mutation (new entry, primary promote, 3-cycle prune) so
   -- routing changes propagate within the data plane's reaction window
@@ -3814,6 +3978,9 @@ function on_recv(self, frame, meta)
       end
     end
   end
+  if meta.src ~= nil then
+    mark_dest_seen(self, meta.src, "direct")
+  end
   local tag = frame:sub(1, 1)
 
   if tag == "B" then
@@ -3824,7 +3991,20 @@ function on_recv(self, frame, meta)
     -- 4-bit space. Silent drop (no event spam — expected during
     -- enhanced propagation events).
     if b.leaf_id ~= self.leaf_id then return end
-    self:emit("beacon_rx", { src = b.src, n_entries = #b.entries })
+    self:emit("beacon_rx", {
+      src = b.src,
+      n_entries = #b.entries,
+      seen_bits = b.seen_bits or 0,
+    })
+    if b.seen_bitmap then
+      local seen_n, refreshed_n = apply_seen_bitmap(self, b.seen_bitmap, "bitmap", b.src)
+      self:emit("seen_bitmap_rx", {
+        from = b.src,
+        bits_set = b.seen_bits or seen_n,
+        applied = seen_n,
+        refreshed = refreshed_n,
+      })
+    end
 
     local now = self:now()
     -- Track time of last BCN-RX (separate from last_rx_routing_sf_ms,
@@ -3845,6 +4025,7 @@ function on_recv(self, frame, meta)
     -- log only when something interesting changed (new or promotion to
     -- primary) to avoid spamming on every refresh round.
     do
+      mark_dest_seen(self, b.src, "beacon_src")
       local cand = { next_hop = b.src, score = meta.snr, hops = 1, last_seen_ms = now }
       local action = rt_merge(self, self.rt, b.src, cand, self.routing_snr_floor_db)
       if action == "new" or action == "promote" then
@@ -3861,6 +4042,7 @@ function on_recv(self, frame, meta)
     -- is a candidate route via the beacon-sender. K=2 rt_merge slots it as
     -- primary, alt, or drops it.
     for _, e in ipairs(b.entries) do
+      mark_dest_seen(self, e.dest, "route")
       if e.dest == self.id then
         -- nothing: split horizon, beacon-sender's view of how to reach me
         -- isn't a route I install for myself.
@@ -4610,6 +4792,8 @@ function on_recv(self, frame, meta)
     local is_e2e_ack  = d.e2e_is_ack
     local e2e_ack_req = d.e2e_ack_req
     local user_text   = d.body         -- body = text for normal DATA, or acked-ctr bytes for E2E ACK
+    mark_dest_seen(self, d.origin, "data_origin")
+    mark_dest_seen(self, d.dst, "data_dst")
 
     self:emit("data_rx", {
       origin     = d.origin,

@@ -1,0 +1,29 @@
+{
+  "_name": "t42_seen_bitmap_wire",
+  "_desc": "BCN seen-bitmap wire smoke test. Empty dirty-only BCNs append the 32-byte destination freshness bitmap; receivers parse it and update destination freshness without requiring route entries.",
+  "simulation": {
+    "duration_ms": 12000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 3000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false } },
+    { "name": "bob", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 3000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 10.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "seen_bitmap_tx", "value": "\"bits_set\":1" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "seen_bitmap_rx", "value": "\"bits_set\":1" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "dest_seen_update", "value": "\"source\":\"direct\"" }
+  ]
+}

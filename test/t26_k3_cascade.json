@@ -1,6 +1,6 @@
 {
   "_name": "t26_k3_cascade",
-  "_desc": "K=3 cascade test. alice has 3 separate 1-hop relays to dave (relay1=best, relay2, relay3). relay1 dies at t=25000, forcing alice's pending tx to cascade to relay2 once primary fails — proving rts_giveup cascade walks the candidates list rather than dropping the message.",
+  "_desc": "K=3 cascade test. alice has 3 separate 1-hop relays to dave. relay2 is alice's converged primary in this deterministic fixture and dies at t=25000, forcing alice's pending tx to cascade to another candidate once primary fails — proving rts_giveup cascade walks the candidates list rather than dropping the message.",
   "simulation": {
     "duration_ms": 60000,
     "step_ms": 1,
@@ -11,16 +11,16 @@
   },
   "nodes": [
     { "name": "alice",  "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false, "seen_bitmap_enabled": false } },
     { "name": "relay1", "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 },
-      "dies_at_ms": 25000 },
+      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false, "seen_bitmap_enabled": false } },
     { "name": "relay2", "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false, "seen_bitmap_enabled": false },
+      "dies_at_ms": 25000 },
     { "name": "relay3", "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false, "seen_bitmap_enabled": false } },
     { "name": "dave",   "script": "scenarios/dv_dual_sf.lua",
-      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } }
+      "config": { "routing_sf": 10, "allowed_data_sfs": [8,9,10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "req_sync_on_boot": false, "sync_response_enabled": false, "seen_bitmap_enabled": false } }
   ],
   "topology": {
     "links": [

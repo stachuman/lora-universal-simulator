@@ -42,7 +42,7 @@ import json
 import os
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from heapq import heappush, heappop
 
 
@@ -2078,6 +2078,12 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
     tx_blind_defer = 0
     tx_blind_alt = 0
     blind_durations_ms: list[int] = []  # all blind_until - now from blind_observed
+    degraded_tx = 0
+    degraded_rx = 0
+    degraded_bits_tx = 0
+    degraded_bits_rx = 0
+    degraded_marked = 0
+    neighbor_marks = Counter()
 
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
@@ -2104,6 +2110,15 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
             tx_blind_defer += 1
         elif et == "tx_blind_alt":
             tx_blind_alt += 1
+        elif et == "degraded_bitmap_tx":
+            degraded_tx += 1
+            degraded_bits_tx += int(d.get("bits_set", 0) or 0)
+        elif et == "degraded_bitmap_rx":
+            degraded_rx += 1
+            degraded_bits_rx += int(d.get("applied", 0) or 0)
+            degraded_marked += int(d.get("marked", 0) or 0)
+        elif et == "neighbor_budget_mark":
+            neighbor_marks[d.get("source", "?")] += 1
 
     def resolve(nid):
         if isinstance(nid, int):
@@ -2121,6 +2136,12 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
         "tx_blind_defer":        tx_blind_defer,
         "tx_blind_alt":          tx_blind_alt,
         "blind_durations_ms":    sorted(blind_durations_ms),
+        "degraded_tx":           degraded_tx,
+        "degraded_rx":           degraded_rx,
+        "degraded_bits_tx":      degraded_bits_tx,
+        "degraded_bits_rx":      degraded_bits_rx,
+        "degraded_marked":       degraded_marked,
+        "neighbor_marks":        neighbor_marks,
     }
 
 
@@ -2134,6 +2155,13 @@ def print_section_22(r: dict) -> None:
     print(f"    of which other (CTS overhear etc.): {r['blind_observed_other']}")
     print(f"  tx_blind_defer (held back due to blind peer):  {r['tx_blind_defer']}")
     print(f"  tx_blind_alt (switched to alt due to blind):   {r['tx_blind_alt']}")
+    print(f"  degraded bitmap TX/RX:      {r['degraded_tx']} / {r['degraded_rx']}")
+    print(f"    bits sent / applied:      {r['degraded_bits_tx']} / {r['degraded_bits_rx']}")
+    print(f"    new budget marks from bitmap: {r['degraded_marked']}")
+    if r["neighbor_marks"]:
+        print(f"  neighbor budget mark sources:")
+        for source, c in r["neighbor_marks"].most_common():
+            print(f"    {source:<16} {c}")
     if r["top_observers"]:
         print(f"  top observers (sending budget-driven blind marks):")
         for name, c in r["top_observers"]:
@@ -2151,7 +2179,772 @@ def print_section_22(r: dict) -> None:
               f"p95={q(0.95)/1000:.0f}s  max={durs[-1]/1000:.0f}s")
 
 
-# ---- Section 23: inter-layer gateway efficiency (§7.3 — stub for now) -----
+# ---- Section 23: routing decision quality ---------------------------------
+
+def section_route_decisions(cfg: dict, events_path: str, since_ms: int = 0) -> dict:
+    names_by_id = {i: n["name"] for i, n in enumerate(cfg.get("nodes", []))}
+
+    def node_name(v):
+        if isinstance(v, int):
+            return names_by_id.get(v, str(v))
+        if isinstance(v, str) and v.isdigit():
+            return names_by_id.get(int(v), v)
+        return str(v)
+
+    total = 0
+    reason = Counter()
+    by_node_bad = Counter()
+    by_dst_bad = Counter()
+    only_candidate = 0
+    chosen_shortest = 0
+    better_hop = 0
+    much_better_hop = 0
+    better_budget = 0
+    chosen_bad_tier = 0
+    chosen_blind = 0
+    no_eligible = 0
+    delta_sum = 0
+    deltas = []
+    details = []
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type")
+        d = e.get("data") or {}
+        if et == "route_decision":
+            total += 1
+            r = d.get("reason", "?")
+            reason[r] += 1
+            if int(d.get("candidate_count", 0)) <= 1:
+                only_candidate += 1
+            best_hops = int(d.get("best_hops", -1))
+            delta = int(d.get("chosen_minus_best_hops", 0))
+            if best_hops < 0:
+                no_eligible += 1
+            else:
+                deltas.append(delta)
+                delta_sum += delta
+                if delta <= 0:
+                    chosen_shortest += 1
+            if int(d.get("better_hop_available", 0)):
+                better_hop += 1
+                by_node_bad[node_name(e.get("node", "?"))] += 1
+                dst = d.get("dst")
+                by_dst_bad[names_by_id.get(dst, str(dst))] += 1
+            if delta >= 2:
+                much_better_hop += 1
+            if int(d.get("better_budget_available", 0)):
+                better_budget += 1
+            if int(d.get("chosen_tier", 0)) >= 2:
+                chosen_bad_tier += 1
+            if int(d.get("chosen_blind", 0)):
+                chosen_blind += 1
+        elif et == "route_decision_detail" and len(details) < 12:
+            details.append((node_name(e.get("node", "?")), d))
+
+    return {
+        "total": total,
+        "reason": reason,
+        "only_candidate": only_candidate,
+        "chosen_shortest": chosen_shortest,
+        "better_hop": better_hop,
+        "much_better_hop": much_better_hop,
+        "better_budget": better_budget,
+        "chosen_bad_tier": chosen_bad_tier,
+        "chosen_blind": chosen_blind,
+        "no_eligible": no_eligible,
+        "mean_delta": (delta_sum / len(deltas)) if deltas else 0.0,
+        "by_node_bad": by_node_bad,
+        "by_dst_bad": by_dst_bad,
+        "details": details,
+        "names_by_id": names_by_id,
+    }
+
+
+def print_section_23_route_decisions(r: dict) -> None:
+    print("\n=== (23) routing decision quality ===")
+    total = r["total"]
+    if total == 0:
+        print("  (no route_decision events observed; run with updated dv_dual_sf.lua)")
+        return
+
+    def pct(n: int) -> str:
+        return f"{100*n/total:.1f}%"
+
+    print(f"  decisions observed:              {total}")
+    print(f"  only one candidate available:     {r['only_candidate']:>6}  ({pct(r['only_candidate'])})")
+    print(f"  chose shortest eligible local:    {r['chosen_shortest']:>6}  ({pct(r['chosen_shortest'])})")
+    print(f"  ignored shorter eligible alt:     {r['better_hop']:>6}  ({pct(r['better_hop'])})")
+    print(f"  ignored alt shorter by >=2 hops:  {r['much_better_hop']:>6}  ({pct(r['much_better_hop'])})")
+    print(f"  healthier eligible alt existed:   {r['better_budget']:>6}  ({pct(r['better_budget'])})")
+    print(f"  chosen via CRITICAL/EXHAUSTED:    {r['chosen_bad_tier']:>6}  ({pct(r['chosen_bad_tier'])})")
+    print(f"  chosen next-hop currently blind:  {r['chosen_blind']:>6}  ({pct(r['chosen_blind'])})")
+    print(f"  no non-blind eligible candidate:  {r['no_eligible']:>6}  ({pct(r['no_eligible'])})")
+    print(f"  mean chosen-minus-best hops:      {r['mean_delta']:.2f}")
+
+    print("\n  decision reasons:")
+    for k, v in r["reason"].most_common(8):
+        print(f"    {k:<22} {v:>6}  ({pct(v)})")
+
+    if r["by_node_bad"]:
+        print("\n  top nodes ignoring shorter eligible alts:")
+        for node, n in r["by_node_bad"].most_common(6):
+            print(f"    {node:<24} {n:>5}")
+
+    if r["by_dst_bad"]:
+        print("\n  top destinations where shorter alts were ignored:")
+        for dst, n in r["by_dst_bad"].most_common(6):
+            print(f"    {dst:<24} {n:>5}")
+
+    if r["details"]:
+        print("\n  sample detailed suspicious decisions:")
+        names = r["names_by_id"]
+        for node, d in r["details"][:6]:
+            dst = names.get(d.get("dst"), str(d.get("dst")))
+            chosen = names.get(d.get("chosen_next"), str(d.get("chosen_next")))
+            print(f"    {node} -> {dst}: chose {chosen}, reason={d.get('reason')} "
+                  f"rank={d.get('chosen_rank')} hops={d.get('chosen_hops')} "
+                  f"best={d.get('best_hops')} Δ={d.get('chosen_minus_best_hops')} "
+                  f"tier={d.get('chosen_tier')}")
+
+
+# ---- Section 24: route-table quality --------------------------------------
+
+def section_route_table_quality(cfg: dict, events_path: str, since_ms: int = 0) -> dict:
+    names_by_id = {i: n["name"] for i, n in enumerate(cfg.get("nodes", []))}
+
+    def node_name(v):
+        if isinstance(v, int):
+            return names_by_id.get(v, str(v))
+        if isinstance(v, str) and v.isdigit():
+            return names_by_id.get(int(v), v)
+        return str(v)
+
+    total = 0
+    reason = Counter()
+    by_node = Counter()
+    by_dst = Counter()
+    by_next = Counter()
+    primary_long = 0
+    primary_worse = 0
+    primary_stale = 0
+    primary_bad_tier = 0
+    ages = []
+    deltas = []
+    samples = []
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit" or e.get("emit_type") != "rt_quality_snapshot":
+            continue
+        d = e.get("data") or {}
+        total += 1
+        r = d.get("reason", "?")
+        reason[r] += 1
+        node = node_name(e.get("node", "?"))
+        dst = names_by_id.get(d.get("dst"), str(d.get("dst")))
+        nxt = names_by_id.get(d.get("primary_next"), str(d.get("primary_next")))
+        by_node[node] += 1
+        by_dst[dst] += 1
+        by_next[nxt] += 1
+        primary_hops = int(d.get("primary_hops", 0))
+        delta = int(d.get("primary_minus_best_hops", 0))
+        age = int(d.get("primary_age_ms", 0))
+        tier = int(d.get("primary_tier", 0))
+        ages.append(age)
+        deltas.append(delta)
+        if primary_hops >= 8:
+            primary_long += 1
+        if delta >= 2:
+            primary_worse += 1
+        if r == "primary_stale":
+            primary_stale += 1
+        if tier >= 2:
+            primary_bad_tier += 1
+        if len(samples) < 10:
+            samples.append((node, dst, nxt, d))
+
+    ages.sort()
+    deltas.sort()
+
+    return {
+        "total": total,
+        "reason": reason,
+        "by_node": by_node,
+        "by_dst": by_dst,
+        "by_next": by_next,
+        "primary_long": primary_long,
+        "primary_worse": primary_worse,
+        "primary_stale": primary_stale,
+        "primary_bad_tier": primary_bad_tier,
+        "ages": ages,
+        "deltas": deltas,
+        "samples": samples,
+        "names_by_id": names_by_id,
+    }
+
+
+def print_section_24_route_table_quality(r: dict) -> None:
+    print("\n=== (24) route-table quality ===")
+    total = r["total"]
+    if total == 0:
+        print("  (no rt_quality_snapshot events observed; run with updated dv_dual_sf.lua)")
+        return
+
+    def pct(n: int) -> str:
+        return f"{100*n/total:.1f}%"
+
+    def q(vals, p):
+        if not vals:
+            return 0
+        return vals[min(len(vals) - 1, max(0, int(p * len(vals))))]
+
+    print(f"  suspicious primary snapshots:     {total}")
+    print(f"  primary >= 8 hops:                {r['primary_long']:>6}  ({pct(r['primary_long'])})")
+    print(f"  primary worse than local best >=2:{r['primary_worse']:>6}  ({pct(r['primary_worse'])})")
+    print(f"  primary near stale TTL:           {r['primary_stale']:>6}  ({pct(r['primary_stale'])})")
+    print(f"  primary via CRITICAL/EXHAUSTED:   {r['primary_bad_tier']:>6}  ({pct(r['primary_bad_tier'])})")
+    print(f"  primary age: p50={q(r['ages'], 0.5)/1000:.0f}s "
+          f"p95={q(r['ages'], 0.95)/1000:.0f}s max={q(r['ages'], 0.999)/1000:.0f}s")
+    print(f"  primary-minus-best hops: p50={q(r['deltas'], 0.5)} "
+          f"p95={q(r['deltas'], 0.95)} max={q(r['deltas'], 0.999)}")
+
+    print("\n  reasons:")
+    for k, v in r["reason"].most_common(8):
+        print(f"    {k:<24} {v:>6}  ({pct(v)})")
+
+    if r["by_node"]:
+        print("\n  top nodes with suspicious primaries:")
+        for node, n in r["by_node"].most_common(6):
+            print(f"    {node:<24} {n:>5}")
+
+    if r["by_dst"]:
+        print("\n  top destinations with suspicious primaries:")
+        for dst, n in r["by_dst"].most_common(6):
+            print(f"    {dst:<24} {n:>5}")
+
+    if r["by_next"]:
+        print("\n  top next-hops used by suspicious primaries:")
+        for nxt, n in r["by_next"].most_common(6):
+            print(f"    {nxt:<24} {n:>5}")
+
+    if r["samples"]:
+        print("\n  sample suspicious primaries:")
+        names = r["names_by_id"]
+        for node, dst, nxt, d in r["samples"][:6]:
+            best = names.get(d.get("best_next"), str(d.get("best_next")))
+            print(f"    {node} -> {dst}: primary={nxt} hops={d.get('primary_hops')} "
+                  f"best={best}/{d.get('best_candidate_hops')} "
+                  f"Δ={d.get('primary_minus_best_hops')} "
+                  f"age={int(d.get('primary_age_ms', 0))/1000:.0f}s "
+                  f"reason={d.get('reason')}")
+
+
+# ---- Section 25: DATA loss attribution ------------------------------------
+
+def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
+                                  since_ms: int = 0) -> dict:
+    """Attribute directed DATA-flight loss to protocol stages.
+
+    The protocol emits a directed lifecycle around every hop:
+      RTS -> CTS -> DATA -> ACK.
+
+    Those script emits are better for "where did this DATA flight fail?"
+    than raw radio drop counts, because a LoRa TX is observable by many
+    nodes. The RF-label table below is still useful, but it counts receiver
+    observations and therefore overcounts a single TX's impact.
+    """
+    ev_counts: Counter = Counter()
+    retry_reasons: Counter = Counter()
+    terminal_triggers: Counter = Counter()
+    cascade_triggers: Counter = Counter()
+    requeue_triggers: Counter = Counter()
+    top_ack_timeout_next: Counter = Counter()
+    top_cts_timeout_next: Counter = Counter()
+    top_data_timeout_from: Counter = Counter()
+    top_terminal_dst: Counter = Counter()
+    multi_next_rts = 0
+    multi_next_retry = 0
+
+    rf_by_label_type: dict[str, Counter] = defaultdict(Counter)
+
+    for e in iter_events(events_path, since_ms):
+        typ = e.get("type")
+        if typ == "script_emit":
+            et = e.get("emit_type", "")
+            d = e.get("data") or {}
+            if et in {
+                "tx_enqueue", "rts_tx", "rts_retry", "cts_tx", "cts_rx",
+                "data_tx", "data_rx", "ack_tx", "ack_rx", "nack_tx",
+                "nack_rx", "data_rx_timeout", "path_cascade",
+                "cascade_requeue", "path_cascade_exhausted", "rts_giveup",
+                "data_ack_giveup", "cascade_load_skip",
+                "rts_multi_next_slot_wait", "rts_multi_next_suppressed",
+                "rts_multi_next_selected", "rts_multi_next_late_ignored",
+            }:
+                ev_counts[et] += 1
+            if et == "rts_tx" and d.get("next2") is not None:
+                multi_next_rts += 1
+            elif et == "rts_retry" and d.get("next2") is not None:
+                multi_next_retry += 1
+            if et == "rts_retry":
+                reason = d.get("reason", "?")
+                retry_reasons[reason] += 1
+                if reason == "ack_timeout":
+                    top_ack_timeout_next[d.get("next")] += 1
+                elif reason == "cts_timeout":
+                    top_cts_timeout_next[d.get("next")] += 1
+            elif et == "data_rx_timeout":
+                top_data_timeout_from[d.get("from")] += 1
+            elif et == "path_cascade":
+                cascade_triggers[d.get("trigger", "?")] += 1
+            elif et == "cascade_requeue":
+                requeue_triggers[d.get("trigger", "?")] += 1
+            elif et == "path_cascade_exhausted":
+                terminal_triggers[d.get("trigger", "?")] += 1
+                top_terminal_dst[d.get("dst")] += 1
+        elif typ in DROP_TYPES or typ == "collision":
+            lbl = pkt_label.get(e.get("pkt"), "?")
+            rf_by_label_type[lbl][typ] += 1
+
+    rts_attempts = ev_counts["rts_tx"] + ev_counts["rts_retry"]
+    cts_rx = ev_counts["cts_rx"]
+    data_tx = ev_counts["data_tx"]
+    data_rx = ev_counts["data_rx"]
+    ack_tx = ev_counts["ack_tx"]
+    ack_rx = ev_counts["ack_rx"]
+    nack_rx = ev_counts["nack_rx"]
+
+    # Directed-stage symptoms. These are not disjoint packet counts; they are
+    # the clearest emitted symptoms for each failure surface.
+    cts_timeout_retries = retry_reasons.get("cts_timeout", 0)
+    ack_timeout_retries = retry_reasons.get("ack_timeout", 0)
+    data_missing_at_receiver = max(0, data_tx - data_rx)
+    data_no_ack_at_sender = max(0, data_tx - ack_rx)
+    ack_missing_after_decode = max(0, ack_tx - ack_rx)
+
+    return {
+        "ev_counts": ev_counts,
+        "retry_reasons": retry_reasons,
+        "terminal_triggers": terminal_triggers,
+        "cascade_triggers": cascade_triggers,
+        "requeue_triggers": requeue_triggers,
+        "rts_attempts": rts_attempts,
+        "setup_success": cts_rx,
+        "setup_no_cts_symptom": cts_timeout_retries,
+        "nack_rx": nack_rx,
+        "data_tx": data_tx,
+        "data_rx": data_rx,
+        "data_rx_timeout": ev_counts["data_rx_timeout"],
+        "data_missing_at_receiver": data_missing_at_receiver,
+        "data_no_ack_at_sender": data_no_ack_at_sender,
+        "ack_tx": ack_tx,
+        "ack_rx": ack_rx,
+        "ack_missing_after_decode": ack_missing_after_decode,
+        "multi_next_rts": multi_next_rts,
+        "multi_next_retry": multi_next_retry,
+        "top_ack_timeout_next": top_ack_timeout_next,
+        "top_cts_timeout_next": top_cts_timeout_next,
+        "top_data_timeout_from": top_data_timeout_from,
+        "top_terminal_dst": top_terminal_dst,
+        "rf_by_label_type": rf_by_label_type,
+    }
+
+
+def print_section_25_data_loss(r: dict, cfg: dict) -> None:
+    print("\n=== (25) DATA loss attribution ===")
+    ev = r["ev_counts"]
+    rts_attempts = r["rts_attempts"]
+    data_tx = r["data_tx"]
+    data_rx = r["data_rx"]
+    ack_tx = r["ack_tx"]
+    ack_rx = r["ack_rx"]
+
+    def pct(n: int, d: int) -> str:
+        return f"{100.0*n/d:.1f}%" if d else "n/a"
+
+    print("  directed hop lifecycle:")
+    print(f"    RTS attempts:             {rts_attempts:>5} "
+          f"(initial={ev['rts_tx']}, retry={ev['rts_retry']})")
+    print(f"    CTS received by sender:   {r['setup_success']:>5} "
+          f"({pct(r['setup_success'], rts_attempts)} of RTS attempts)")
+    print(f"    DATA transmitted:         {data_tx:>5}")
+    print(f"    DATA decoded at next hop: {data_rx:>5} "
+          f"({pct(data_rx, data_tx)} of DATA TX)")
+    print(f"    ACK transmitted:          {ack_tx:>5}")
+    print(f"    ACK received by sender:   {ack_rx:>5} "
+          f"({pct(ack_rx, ack_tx)} of ACK TX)")
+
+    print("\n  loss symptoms by stage:")
+    print(f"    no CTS / setup timeout retries:       {r['setup_no_cts_symptom']:>5}")
+    print(f"    NACKs received instead of CTS/ACK:    {r['nack_rx']:>5}")
+    print(f"    DATA TX not decoded at next hop:      {r['data_missing_at_receiver']:>5}")
+    print(f"    receiver DATA-wait timeouts:          {r['data_rx_timeout']:>5}")
+    print(f"    DATA TX without matching ACK rx:      {r['data_no_ack_at_sender']:>5}")
+    print(f"    ACK TX without matching ACK rx:       {r['ack_missing_after_decode']:>5}")
+
+    multi_total = r["multi_next_rts"] + r["multi_next_retry"]
+    print("\n  multi-next RTS activity:")
+    print(f"    RTS attempts carrying next2:          {multi_total:>5} "
+          f"(initial={r['multi_next_rts']}, retry={r['multi_next_retry']})")
+    print(f"    slot-2 wait events:                   {ev['rts_multi_next_slot_wait']:>5}")
+    print(f"    slot-2 suppressed by earlier reply:   {ev['rts_multi_next_suppressed']:>5}")
+    print(f"    sender selected next2 responder:      {ev['rts_multi_next_selected']:>5}")
+    print(f"    late slot-2 responses ignored:        {ev['rts_multi_next_late_ignored']:>5}")
+
+    if r["retry_reasons"]:
+        print("\n  RTS retry reasons:")
+        total = sum(r["retry_reasons"].values())
+        for reason, n in r["retry_reasons"].most_common():
+            print(f"    {reason:<18} {n:>5}  ({pct(n, total)})")
+
+    if r["terminal_triggers"]:
+        print("\n  terminal cascade exhaustion triggers:")
+        total = sum(r["terminal_triggers"].values())
+        for trig, n in r["terminal_triggers"].most_common():
+            print(f"    {trig:<18} {n:>5}  ({pct(n, total)})")
+
+    names = {i: n.get("name", str(i)) for i, n in enumerate(cfg.get("nodes", []))}
+    if r["top_cts_timeout_next"]:
+        print("\n  top next-hops on CTS-timeout retries:")
+        for node_id, n in r["top_cts_timeout_next"].most_common(5):
+            print(f"    {names.get(node_id, str(node_id)):<24} {n:>5}")
+    if r["top_ack_timeout_next"]:
+        print("\n  top next-hops on ACK-timeout retries:")
+        for node_id, n in r["top_ack_timeout_next"].most_common(5):
+            print(f"    {names.get(node_id, str(node_id)):<24} {n:>5}")
+    if r["top_data_timeout_from"]:
+        print("\n  top senders causing receiver DATA-wait timeouts:")
+        for node_id, n in r["top_data_timeout_from"].most_common(5):
+            print(f"    {names.get(node_id, str(node_id)):<24} {n:>5}")
+    if r["top_terminal_dst"]:
+        print("\n  top terminal-drop destinations:")
+        for node_id, n in r["top_terminal_dst"].most_common(5):
+            print(f"    {names.get(node_id, str(node_id)):<24} {n:>5}")
+
+    print("\n  RF drop/collision observations by packet label "
+          "(receiver-observations, not directed failures):")
+    labels = ["RTS", "RTS-fwd", "RTS-rty", "CTS", "DATA", "ACK", "NACK"]
+    drop_order = ["collision", "drop_weak", "drop_sf_mismatch",
+                  "drop_preamble_miss", "drop_rx_blind", "drop_halfduplex"]
+    for lbl in labels:
+        counts = r["rf_by_label_type"].get(lbl)
+        if not counts:
+            continue
+        total = sum(counts.values())
+        parts = []
+        for k in drop_order:
+            if counts.get(k):
+                parts.append(f"{k}={counts[k]}")
+        print(f"    {lbl:<8} total={total:>5}  " + ", ".join(parts))
+
+
+# ---- Section 26: RTS/CTS setup attribution --------------------------------
+
+def section_rts_setup_attribution(events_path: str, cfg: dict,
+                                  pkt_label: dict[str, str],
+                                  since_ms: int = 0) -> dict:
+    """Join RTS attempts with directed receiver/script/RF outcomes.
+
+    The raw RF drops overcount because every LoRa TX is observed by many
+    receivers. This pass follows the intended next-hop only:
+      RTS tx -> intended next-hop decode/script-drop/response -> sender rx.
+    """
+    nodes = cfg.get("nodes", [])
+    id_to_name = {i: n.get("name", str(i)) for i, n in enumerate(nodes)}
+    name_to_id = {v: k for k, v in id_to_name.items()}
+
+    pending_rts_emit: dict[str, deque] = defaultdict(deque)
+    pending_response_emit: dict[str, deque] = defaultdict(deque)
+    open_by_key: dict[tuple[int, int, int], deque] = defaultdict(deque)
+    attempts_by_pkt: dict[str, dict] = {}
+    responses_by_pkt: dict[str, dict] = {}
+    attempts: list[dict] = []
+
+    def node_id_from_event(e: dict) -> int | None:
+        n = e.get("node")
+        if isinstance(n, int):
+            return n
+        return name_to_id.get(n)
+
+    def node_name_from_event(e: dict) -> str | None:
+        n = e.get("node")
+        if isinstance(n, str):
+            return n
+        if isinstance(n, int):
+            return id_to_name.get(n)
+        return None
+
+    def first_open(key: tuple[int, int, int]) -> dict | None:
+        q = open_by_key.get(key)
+        if not q:
+            return None
+        for a in q:
+            if not a.get("closed"):
+                return a
+        return q[0] if q else None
+
+    def latest_open(key: tuple[int, int, int]) -> dict | None:
+        q = open_by_key.get(key)
+        if not q:
+            return None
+        for a in reversed(q):
+            if not a.get("closed"):
+                return a
+        return q[-1] if q else None
+
+    def mark_timeout(sender_id: int | None, next_id: int | None, ctr_lo: int | None) -> None:
+        if sender_id is None or next_id is None or ctr_lo is None:
+            return
+        a = latest_open((next_id, sender_id, ctr_lo))
+        if a and not a.get("closed"):
+            a["timeout"] = True
+            a["closed"] = True
+
+    for e in iter_events(events_path, since_ms):
+        typ = e.get("type")
+        if typ == "script_emit":
+            et = e.get("emit_type", "")
+            d = e.get("data") or {}
+            node_id = node_id_from_event(e)
+            node_name = node_name_from_event(e)
+
+            if et == "rts_tx":
+                if node_name is not None:
+                    pending_rts_emit[node_name].append({
+                        "kind": "initial",
+                        "origin": d.get("origin"),
+                        "dst": d.get("dst"),
+                        "ctr": d.get("ctr"),
+                        "ctr_lo": d.get("ctr_lo"),
+                        "next": d.get("next"),
+                    })
+            elif et == "rts_retry":
+                mark_timeout(node_id, d.get("next"), d.get("ctr_lo")) \
+                    if d.get("reason") == "cts_timeout" else None
+                if node_name is not None:
+                    pending_rts_emit[node_name].append({
+                        "kind": "retry",
+                        "reason": d.get("reason"),
+                        "origin": d.get("origin"),
+                        "dst": d.get("dst"),
+                        "ctr": d.get("ctr"),
+                        "ctr_lo": d.get("ctr_lo"),
+                        "next": d.get("next"),
+                    })
+            elif et in ("rts_rx", "rts_rx_dup"):
+                key = (node_id, d.get("from"), d.get("ctr_lo"))
+                a = first_open(key)
+                if a:
+                    a["rts_decoded"] = True
+                    a["rts_decode_kind"] = et
+            elif et in ("rts_drop_pending_tx", "rts_drop_originator_throttle", "rts_drop_no_sf"):
+                key = (node_id, d.get("from"), d.get("ctr_lo"))
+                a = first_open(key)
+                if a:
+                    a["script_drop"] = et
+                    a["closed"] = True
+            elif et in ("cts_tx", "nack_tx"):
+                if node_name is not None:
+                    pending_response_emit[node_name].append({
+                        "label": "CTS" if et == "cts_tx" else "NACK",
+                        "to": d.get("to"),
+                        "ctr_lo": d.get("ctr_lo"),
+                        "reason": d.get("reason"),
+                    })
+                key = (node_id, d.get("to"), d.get("ctr_lo"))
+                a = first_open(key)
+                if a:
+                    a["response_emitted"] = "CTS" if et == "cts_tx" else "NACK"
+                    a["response_reason"] = d.get("reason")
+            elif et in ("cts_rx", "nack_rx"):
+                sender_id = node_id
+                next_id = d.get("from")
+                key = (next_id, sender_id, d.get("ctr_lo"))
+                a = first_open(key)
+                if a:
+                    a["response_received"] = "CTS" if et == "cts_rx" else "NACK"
+                    a["response_rx_reason"] = d.get("reason")
+                    a["closed"] = True
+
+        elif typ == "tx":
+            label = e.get("label") or pkt_label.get(e.get("pkt"), "")
+            node_name = e.get("node")
+            if label in ("RTS", "RTS-fwd", "RTS-rty"):
+                meta = pending_rts_emit[node_name].popleft() if pending_rts_emit.get(node_name) else {}
+                src_id = name_to_id.get(node_name)
+                next_id = meta.get("next")
+                a = {
+                    "t": e.get("time_ms"),
+                    "pkt": e.get("pkt"),
+                    "label": label,
+                    "src": src_id,
+                    "src_name": node_name,
+                    "next": next_id,
+                    "next_name": id_to_name.get(next_id, str(next_id)),
+                    "ctr_lo": meta.get("ctr_lo"),
+                    "kind": meta.get("kind", "unknown"),
+                    "retry_reason": meta.get("reason"),
+                    "origin": meta.get("origin"),
+                    "dst": meta.get("dst"),
+                    "closed": False,
+                }
+                attempts.append(a)
+                attempts_by_pkt[e.get("pkt")] = a
+                if src_id is not None and next_id is not None and meta.get("ctr_lo") is not None:
+                    open_by_key[(next_id, src_id, meta.get("ctr_lo"))].append(a)
+            elif label in ("CTS", "CTS-dup", "NACK"):
+                q = pending_response_emit.get(node_name)
+                meta = q.popleft() if q else {}
+                src_id = name_to_id.get(node_name)
+                to_id = meta.get("to")
+                key = (src_id, to_id, meta.get("ctr_lo"))
+                a = first_open(key)
+                responses_by_pkt[e.get("pkt")] = {
+                    "attempt": a,
+                    "label": label,
+                    "src": src_id,
+                    "to": to_id,
+                    "to_name": id_to_name.get(to_id, str(to_id)),
+                    "ctr_lo": meta.get("ctr_lo"),
+                }
+                if a:
+                    a["response_pkt"] = e.get("pkt")
+
+        elif typ in DROP_TYPES or typ == "collision":
+            pkt = e.get("pkt")
+            a = attempts_by_pkt.get(pkt)
+            if a and e.get("to") == a.get("next_name"):
+                a["rts_rf_drop"] = typ
+            r = responses_by_pkt.get(pkt)
+            if r and r.get("attempt") and e.get("to") == r.get("to_name"):
+                r["attempt"]["response_rf_drop"] = typ
+
+    # Classify every directed RTS attempt.
+    categories: Counter = Counter()
+    rf_rts: Counter = Counter()
+    rf_resp: Counter = Counter()
+    script_drops: Counter = Counter()
+    top_next_by_cat: dict[str, Counter] = defaultdict(Counter)
+    unresolved = 0
+
+    for a in attempts:
+        if a.get("response_received") == "CTS":
+            cat = "success_cts_rx"
+        elif a.get("response_received") == "NACK":
+            cat = "nack_rx"
+        elif a.get("script_drop"):
+            cat = "rts_decoded_script_drop"
+            script_drops[a["script_drop"]] += 1
+        elif not a.get("rts_decoded"):
+            if a.get("rts_rf_drop"):
+                cat = "rts_not_decoded_rf"
+                rf_rts[a["rts_rf_drop"]] += 1
+            elif a.get("timeout"):
+                cat = "rts_not_decoded_no_observation"
+            else:
+                cat = "unresolved"
+                unresolved += 1
+        elif a.get("response_emitted") and not a.get("response_received"):
+            if a.get("response_rf_drop"):
+                cat = "response_lost_rf"
+                rf_resp[a["response_rf_drop"]] += 1
+            elif a.get("timeout"):
+                cat = "response_lost_no_observation"
+            else:
+                cat = "response_pending_or_unresolved"
+                unresolved += 1
+        elif a.get("rts_decoded") and not a.get("response_emitted"):
+            cat = "rts_decoded_no_response"
+        else:
+            cat = "unresolved"
+            unresolved += 1
+
+        categories[cat] += 1
+        top_next_by_cat[cat][a.get("next")] += 1
+
+    return {
+        "attempts": len(attempts),
+        "categories": categories,
+        "rf_rts": rf_rts,
+        "rf_resp": rf_resp,
+        "script_drops": script_drops,
+        "top_next_by_cat": top_next_by_cat,
+        "unresolved": unresolved,
+    }
+
+
+def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
+    print("\n=== (26) RTS/CTS setup attribution ===")
+    total = r["attempts"]
+    if total == 0:
+        print("  no RTS attempts observed")
+        return
+
+    def pct(n: int) -> str:
+        return f"{100.0*n/total:.1f}%"
+
+    order = [
+        "success_cts_rx",
+        "nack_rx",
+        "rts_not_decoded_rf",
+        "rts_not_decoded_no_observation",
+        "rts_decoded_script_drop",
+        "response_lost_rf",
+        "response_lost_no_observation",
+        "rts_decoded_no_response",
+        "response_pending_or_unresolved",
+        "unresolved",
+    ]
+    labels = {
+        "success_cts_rx": "CTS reached sender",
+        "nack_rx": "NACK reached sender",
+        "rts_not_decoded_rf": "RTS lost at intended next-hop (RF drop)",
+        "rts_not_decoded_no_observation": "RTS not decoded; no directed RF drop seen",
+        "rts_decoded_script_drop": "RTS decoded then script dropped",
+        "response_lost_rf": "CTS/NACK emitted but lost at sender (RF drop)",
+        "response_lost_no_observation": "CTS/NACK emitted but not observed at sender",
+        "rts_decoded_no_response": "RTS decoded but no response emitted",
+        "response_pending_or_unresolved": "response path unresolved",
+        "unresolved": "unresolved / still in flight",
+    }
+    print(f"  directed RF RTS transmissions classified: {total}")
+    for k in order:
+        n = r["categories"].get(k, 0)
+        if n:
+            print(f"    {labels[k]:<52} {n:>5}  ({pct(n)})")
+
+    if r["rf_rts"]:
+        print("\n  RTS RF loss at intended next-hop:")
+        for reason, n in r["rf_rts"].most_common():
+            print(f"    {reason:<22} {n:>5}")
+    if r["rf_resp"]:
+        print("\n  CTS/NACK RF loss at sender:")
+        for reason, n in r["rf_resp"].most_common():
+            print(f"    {reason:<22} {n:>5}")
+    if r["script_drops"]:
+        print("\n  RTS decoded then script-dropped:")
+        for reason, n in r["script_drops"].most_common():
+            print(f"    {reason:<28} {n:>5}")
+
+    names = {i: n.get("name", str(i)) for i, n in enumerate(cfg.get("nodes", []))}
+    interesting = [
+        "rts_not_decoded_rf",
+        "rts_not_decoded_no_observation",
+        "response_lost_rf",
+        "rts_decoded_script_drop",
+    ]
+    print("\n  top next-hops by selected failure class:")
+    for cat in interesting:
+        c = r["top_next_by_cat"].get(cat)
+        if not c:
+            continue
+        top = ", ".join(f"{names.get(node, str(node))}:{n}"
+                        for node, n in c.most_common(4))
+        print(f"    {labels[cat]:<52} {top}")
+
+
+# ---- Section 27: inter-layer gateway efficiency (§7.3 — stub for now) -----
 
 def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
     """Inter-layer gateway TDM scheduling (roadmap §7.3, NOT YET IMPLEMENTED
@@ -2206,8 +2999,8 @@ def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
     }
 
 
-def print_section_23(r: dict) -> None:
-    print("\n=== (23) inter-layer gateway efficiency (§7.3) ===")
+def print_section_27_inter_layer(r: dict) -> None:
+    print("\n=== (27) inter-layer gateway efficiency (§7.3) ===")
     total = (r["sweep_start"] + r["cross_layer_handoffs"] +
              r["gateway_schedule_announced"] + len(r["is_gateway_count"]))
     if total == 0:
@@ -2349,7 +3142,17 @@ def main() -> None:
 
     print_section_22(section_tier_routing(args.events, cfg, warmup_end_ms))
 
-    print_section_23(section_inter_layer(args.events, cfg, warmup_end_ms))
+    print_section_23_route_decisions(section_route_decisions(cfg, args.events, warmup_end_ms))
+
+    print_section_24_route_table_quality(section_route_table_quality(cfg, args.events, warmup_end_ms))
+
+    print_section_25_data_loss(
+        section_data_loss_attribution(args.events, pkt_label, warmup_end_ms), cfg)
+
+    print_section_26_rts_setup(
+        section_rts_setup_attribution(args.events, cfg, pkt_label, warmup_end_ms), cfg)
+
+    print_section_27_inter_layer(section_inter_layer(args.events, cfg, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 

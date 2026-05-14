@@ -1,0 +1,34 @@
+{
+  "_name": "t40_dirty_only_cold_start",
+  "_desc": "Late cold-start joiner alice requests sync from an already-converged bob-carol pair. bob's SYNC_FULL response gives alice the route to carol, and alice delivers within seconds.",
+  "simulation": {
+    "duration_ms": 40000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 31,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 },
+      "start_at_ms": 10000 },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 22000, "node": "alice", "command": "send carol hello-from-alice" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "sync_response_tx", "value": "" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "delivered",        "value": "hello-from-alice" }
+  ]
+}

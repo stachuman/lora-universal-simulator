@@ -1,0 +1,104 @@
+{
+  "_name": "t44_rts_multi_next_visual",
+  "_desc": "Small visual fixture for ordered multi-next RTS. relay_a and relay_b first send one priming DATA frame to dave; alice overhears those frames and learns both candidates. Then alice sends to dave with relay_a preferred and relay_b second. First alice send: relay_a answers slot 1 and relay_b should wait then suppress. relay_a dies before the second alice send. Second alice send: alice still advertises relay_a first and relay_b second; relay_a is silent, so relay_b answers in slot 2 and alice sends DATA to relay_b.",
+  "simulation": {
+    "duration_ms": 45000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "clock_drift_ppm_sigma": 0,
+    "radio": {
+      "sf": 8,
+      "bw": 250,
+      "cr": 5,
+      "hardware": {
+        "decode_margin_steepness_db": 0,
+        "sf_switch_delay_ms": 0,
+        "preamble_miss_base": 0
+      }
+    }
+  },
+  "nodes": [
+    {
+      "name": "alice",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [9],
+        "beacon_period_ms": 1000,
+        "quiet_threshold_ms": 0,
+        "seen_bitmap_enabled": false,
+        "rts_multi_next_enabled": true,
+        "rts_multi_next_slot_guard_ms": 20,
+        "lbt_enabled": false
+      }
+    },
+    {
+      "name": "relay_a",
+      "script": "scenarios/dv_dual_sf.lua",
+      "dies_at_ms": 25000,
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [9],
+        "beacon_period_ms": 1000,
+        "quiet_threshold_ms": 0,
+        "seen_bitmap_enabled": false,
+        "rts_multi_next_enabled": true,
+        "rts_multi_next_slot_guard_ms": 20,
+        "lbt_enabled": false
+      }
+    },
+    {
+      "name": "relay_b",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [9],
+        "beacon_period_ms": 1000,
+        "quiet_threshold_ms": 0,
+        "seen_bitmap_enabled": false,
+        "rts_multi_next_enabled": true,
+        "rts_multi_next_slot_guard_ms": 20,
+        "lbt_enabled": false
+      }
+    },
+    {
+      "name": "dave",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [9],
+        "beacon_period_ms": 1000,
+        "quiet_threshold_ms": 0,
+        "seen_bitmap_enabled": false,
+        "rts_multi_next_enabled": true,
+        "rts_multi_next_slot_guard_ms": 20,
+        "lbt_enabled": false
+      }
+    }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice",   "to": "relay_a", "snr": 14.0, "rssi": -70.0, "bidir": true },
+      { "from": "alice",   "to": "relay_b", "snr": 12.0, "rssi": -74.0, "bidir": true },
+      { "from": "relay_a", "to": "relay_b", "snr": 12.0, "rssi": -74.0, "bidir": true },
+      { "from": "relay_a", "to": "dave",    "snr": 14.0, "rssi": -70.0, "bidir": true },
+      { "from": "relay_b", "to": "dave",    "snr": 12.0, "rssi": -74.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 6000,  "node": "relay_a", "command": "send dave prime-relay-a" },
+    { "at_ms": 9000,  "node": "relay_b", "command": "send dave prime-relay-b" },
+    { "at_ms": 15000, "node": "alice", "command": "send dave before-primary-dies" },
+    { "at_ms": 30000, "node": "alice", "command": "send dave after-primary-dies" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice",   "emit_type": "rts_tx", "value": "before-primary-dies" },
+    { "type": "script_emit_contains", "node": "relay_b", "emit_type": "rts_multi_next_slot_wait", "value": "" },
+    { "type": "script_emit_contains", "node": "relay_b", "emit_type": "rts_multi_next_suppressed", "value": "" },
+    { "type": "event_count", "event_type": "node_died", "count": 1 },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_multi_next_selected", "value": "" },
+    { "type": "script_emit_contains", "node": "dave",  "emit_type": "delivered", "value": "after-primary-dies" }
+  ]
+}

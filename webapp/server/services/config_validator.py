@@ -1,8 +1,9 @@
 """Config validator for lus scenario JSON.
 
 Returns ``(parsed_config, [])`` on success, ``(None, [errors])`` on failure.
-Rejects MeshCore-only fields with explicit messages so users porting from
-MeshCore configs get clear guidance.
+Unknown lus fields are allowed through so the webapp stays forward-compatible
+with the orchestrator. MeshCore-only fields still get explicit messages so
+users porting from MeshCore configs get clear guidance.
 """
 
 from __future__ import annotations

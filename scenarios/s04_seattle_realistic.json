@@ -3186,10 +3186,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6811,
       "lon": -122.352
@@ -3199,10 +3196,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.555214,
       "lon": -122.253456
@@ -3212,10 +3206,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.620513,
       "lon": -122.216034
@@ -3225,10 +3216,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6231,
       "lon": -122.319
@@ -3238,10 +3226,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.606163,
       "lon": -122.286072
@@ -3251,10 +3236,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6599,
       "lon": -122.357
@@ -3264,10 +3246,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6384,
       "lon": -122.357
@@ -3277,10 +3256,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6067,
       "lon": -122.326
@@ -3290,10 +3266,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6794,
       "lon": -122.341
@@ -3303,10 +3276,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.705603,
       "lon": -122.380829
@@ -3316,10 +3286,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6745,
       "lon": -122.374
@@ -3329,10 +3296,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6709,
       "lon": -122.328
@@ -3342,10 +3306,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6366,
       "lon": -122.348
@@ -3355,10 +3316,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6745,
       "lon": -122.374
@@ -3368,10 +3326,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6759,
       "lon": -122.393
@@ -3381,10 +3336,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.61,
       "lon": -122.325
@@ -3394,10 +3346,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.57861,
       "lon": -122.376881
@@ -3407,10 +3356,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.577221,
       "lon": -122.28693
@@ -3420,10 +3366,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.622,
       "lon": -122.325
@@ -3433,10 +3376,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6831,
       "lon": -122.398
@@ -3446,10 +3386,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6359,
       "lon": -122.339
@@ -3459,10 +3396,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.725699,
       "lon": -122.318859
@@ -3472,10 +3406,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6233,
       "lon": -122.314
@@ -3485,10 +3416,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.66296,
       "lon": -122.428894
@@ -3498,10 +3426,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.5822,
       "lon": -122.39954
@@ -3511,10 +3436,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6905,
       "lon": -122.28
@@ -3524,10 +3446,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.56089,
       "lon": -122.369156
@@ -3537,10 +3456,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6603,
       "lon": -122.273026
@@ -3550,10 +3466,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6094,
       "lon": -122.326
@@ -3563,10 +3476,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6663,
       "lon": -122.301
@@ -3576,10 +3486,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6361,
       "lon": -122.327
@@ -3589,10 +3496,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6355,
       "lon": -122.324
@@ -3602,10 +3506,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6513,
       "lon": -122.388
@@ -3615,10 +3516,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.567261,
       "lon": -122.309074
@@ -3628,10 +3526,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6495,
       "lon": -122.37
@@ -3641,10 +3536,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6684,
       "lon": -122.382
@@ -3654,10 +3546,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6879,
       "lon": -122.284
@@ -3667,10 +3556,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6869,
       "lon": -122.366
@@ -3680,10 +3566,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.622595,
       "lon": -122.229252
@@ -3693,10 +3576,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6132,
       "lon": -122.318
@@ -3706,10 +3586,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6225,
       "lon": -122.352
@@ -3719,10 +3596,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6027,
       "lon": -122.331
@@ -3732,10 +3606,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.576294,
       "lon": -122.35199
@@ -3745,10 +3616,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.59181,
       "lon": -122.225647
@@ -3758,10 +3626,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6843,
       "lon": -122.341
@@ -3771,10 +3636,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6242,
       "lon": -122.354
@@ -3784,10 +3646,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6798,
       "lon": -122.358
@@ -3797,10 +3656,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6481,
       "lon": -122.313
@@ -3810,10 +3666,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6774,
       "lon": -122.313
@@ -3823,10 +3676,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6727,
       "lon": -122.329
@@ -3836,10 +3686,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6807,
       "lon": -122.315
@@ -3849,10 +3696,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6407,
       "lon": -122.351
@@ -3862,10 +3706,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6138,
       "lon": -122.335
@@ -3875,10 +3716,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6737,
       "lon": -122.308
@@ -3888,10 +3726,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.676,
       "lon": -122.32
@@ -3901,10 +3736,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6709,
       "lon": -122.39
@@ -3914,10 +3746,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.671,
       "lon": -122.393
@@ -3927,10 +3756,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6178,
       "lon": -122.323
@@ -3940,10 +3766,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6906,
       "lon": -122.347
@@ -3953,10 +3776,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.732627,
       "lon": -122.371387
@@ -3966,10 +3786,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.530184,
       "lon": -122.397995
@@ -3979,10 +3796,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6952,
       "lon": -122.374
@@ -3992,10 +3806,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.743479,
       "lon": -122.305298
@@ -4005,10 +3816,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.623,
       "lon": -122.369
@@ -4018,10 +3826,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.635437,
       "lon": -122.228394
@@ -4031,10 +3836,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.519056,
       "lon": -122.337227
@@ -4044,10 +3846,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6559,
       "lon": -122.321
@@ -4057,10 +3856,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.701444,
       "lon": -122.360058
@@ -4070,10 +3866,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6411,
       "lon": -122.393
@@ -4083,10 +3876,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6694,
       "lon": -122.326
@@ -4096,10 +3886,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.636015,
       "lon": -122.283669
@@ -4109,10 +3896,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6924,
       "lon": -122.313
@@ -4122,10 +3906,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6186,
       "lon": -122.338
@@ -4135,10 +3916,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6587,
       "lon": -122.338
@@ -4148,10 +3926,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6187,
       "lon": -122.338
@@ -4161,10 +3936,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6101,
       "lon": -122.325
@@ -4174,10 +3946,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6874,
       "lon": -122.35
@@ -4187,10 +3956,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.616926,
       "lon": -122.289162
@@ -4200,10 +3966,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6797,
       "lon": -122.291
@@ -4213,10 +3976,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.697516,
       "lon": -122.39954
@@ -4226,10 +3986,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.630694,
       "lon": -122.392502
@@ -4239,10 +3996,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6465,
       "lon": -122.319
@@ -4252,10 +4006,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6282,
       "lon": -122.296
@@ -4265,10 +4016,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6286,
       "lon": -122.302
@@ -4278,10 +4026,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6687,
       "lon": -122.388
@@ -4291,10 +4036,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6792,
       "lon": -122.318
@@ -4304,10 +4046,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6297,
       "lon": -122.32
@@ -4317,10 +4056,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6796,
       "lon": -122.341
@@ -4330,10 +4066,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6238,
       "lon": -122.321
@@ -4343,10 +4076,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6215,
       "lon": -122.316
@@ -4356,10 +4086,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6688,
       "lon": -122.396
@@ -4369,10 +4096,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6957,
       "lon": -122.293
@@ -4382,10 +4106,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6271,
       "lon": -122.326
@@ -4395,10 +4116,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6144,
       "lon": -122.319
@@ -4408,10 +4126,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6725,
       "lon": -122.342
@@ -4421,10 +4136,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6114,
       "lon": -122.316
@@ -4434,10 +4146,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.712303,
       "lon": -122.300148
@@ -4447,10 +4156,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6758,
       "lon": -122.346
@@ -4460,10 +4166,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.584631,
       "lon": -122.349758
@@ -4473,10 +4176,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.712649,
       "lon": -122.373104
@@ -4486,10 +4186,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6169,
       "lon": -122.331
@@ -4499,10 +4196,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6117,
       "lon": -122.347
@@ -4512,10 +4206,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6235,
       "lon": -122.365
@@ -4525,10 +4216,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6294,
       "lon": -122.317
@@ -4538,10 +4226,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.680876,
       "lon": -122.208996
@@ -4551,10 +4236,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6129,
       "lon": -122.352
@@ -4564,10 +4246,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6495,
       "lon": -122.37
@@ -4577,10 +4256,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.617,
       "lon": -122.32
@@ -4590,10 +4266,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6629,
       "lon": -122.315
@@ -4603,10 +4276,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.711148,
       "lon": -122.342377
@@ -4616,10 +4286,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6364,
       "lon": -122.316
@@ -4629,10 +4296,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6533,
       "lon": -122.35
@@ -4642,10 +4306,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6604,
       "lon": -122.333
@@ -4655,10 +4316,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6805,
       "lon": -122.357
@@ -4668,10 +4326,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.544091,
       "lon": -122.216721
@@ -4681,10 +4336,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6446,
       "lon": -122.396
@@ -4694,10 +4346,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6104,
       "lon": -122.315
@@ -4707,10 +4356,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6417,
       "lon": -122.326
@@ -4720,10 +4366,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6733,
       "lon": -122.314
@@ -4733,10 +4376,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6495,
       "lon": -122.37
@@ -4746,10 +4386,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6765,
       "lon": -122.304
@@ -4759,10 +4396,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.653825,
       "lon": -122.199211
@@ -4772,10 +4406,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6777,
       "lon": -122.354
@@ -4785,10 +4416,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6855,
       "lon": -122.366
@@ -4798,10 +4426,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6123,
       "lon": -122.321
@@ -4811,10 +4436,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6759,
       "lon": -122.325
@@ -4824,10 +4446,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6685,
       "lon": -122.366
@@ -4837,10 +4456,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6622,
       "lon": -122.357
@@ -4850,10 +4466,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.57282,
       "lon": -122.401257
@@ -4863,10 +4476,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6649,
       "lon": -122.334
@@ -4876,10 +4486,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.739323,
       "lon": -122.359543
@@ -4889,10 +4496,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.734821,
       "lon": -122.252941
@@ -4902,10 +4506,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6238,
       "lon": -122.316
@@ -4915,10 +4516,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.6872,
       "lon": -122.376
@@ -4928,10 +4526,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.71981,
       "lon": -122.374477
@@ -4941,10 +4536,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.715999,
       "lon": -122.244873
@@ -4954,10 +4546,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.587294,
       "lon": -122.384949
@@ -4967,10 +4556,7 @@
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "routing_sf": 8,
-        "allowed_data_sfs": [
-          9,
-          10
-        ]
+        "allowed_data_sfs": [7,9]
       },
       "lat": 47.578726,
       "lon": -122.23835

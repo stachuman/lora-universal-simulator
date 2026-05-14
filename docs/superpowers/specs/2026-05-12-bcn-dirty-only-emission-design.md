@@ -77,15 +77,17 @@ beacon_fire (periodic):
   re-arm timer for next period (±20% jitter, as today)
   if pending_tx or pending_rx: skip emission, return (as today)
   if adaptive_throttle_should_skip(): skip emission, return (as today)
+  mark multi-hop primaries dirty when rt_refresh_remote_ms elapsed
   payload = pack_beacon_dirty_only(self.rt)
     # Phase 1 only — dirty entries sorted by dest_id, deterministic order
     # NO Phase 2 rotation fill
   if self.req_sync_pending:
     set REQ_SYNC bit in byte 1
-    # bit stays set on at most one BCN emission; clear after first emit
-  tx 'B' with the assembled payload
+    # bit stays set until a BCN carrying it is accepted by the TX path
+  tx 'B' with the assembled payload via the normal flood/beacon TX path
   clear .dirty on every entry emitted (as today)
-  clear self.req_sync_pending
+  if TX accepted/scheduled and REQ_SYNC bit was present:
+    clear self.req_sync_pending
 ```
 
 Even when `payload` is just the 4-byte header (no dirty entries), the BCN is emitted. This is the **liveness heartbeat** that keeps `last_seen_ms` fresh at neighbours so `rt_aging_ttl_neighbor_ms = 30 min` doesn't evict me. With a 5-min period, neighbours see ~6 refreshes per aging window — comfortable margin.
@@ -106,7 +108,7 @@ A node sets `self.req_sync_pending = true` when:
 - It came out of mobility migration (future hook — out of scope today, but the state-machine slot is ready).
 - (Optional, future) Its rt[] becomes "thin" — fewer than `rt_thin_threshold` direct-neighbour entries. Not in v1 to keep semantics simple.
 
-The flag rides on the next outgoing BCN (periodic or triggered, whichever comes first). After that emission, the flag is cleared. So a single REQ_SYNC bit is broadcast at most once per "need" trigger.
+The flag rides on the next outgoing BCN (periodic or triggered, whichever comes first). After a BCN carrying the bit is accepted by the normal flood/beacon TX path, the flag is cleared. If a candidate BCN is skipped before TX acceptance (half-duplex, duty-cycle block, LBT skip), `req_sync_pending` remains set so the next eligible BCN can still carry the request. So a single REQ_SYNC bit is broadcast at most once per "need" trigger, but it is not lost to a local pre-TX skip.
 
 ### 6.1 Mobility hooks (forward-compatibility contract)
 
@@ -167,6 +169,10 @@ fire_sync_response(joiner_id):
   if sync_response_satisfied_for(joiner_id):
     emit("sync_response_suppressed", joiner_id, reason="already_synced")
     return  # somebody already responded
+  if observed_recent_sync_response():
+    emit("sync_response_suppressed", joiner_id, reason="observed_other_sync")
+    after(sync_response_jitter_ms, fire_sync_response, joiner_id)
+    return  # do not mark joiner satisfied; hidden/asymmetric links may mean it missed the other sync
   if self.budget_tier >= EXHAUSTED:
     emit("sync_response_suppressed", joiner_id, reason="budget_exhausted")
     return  # let a healthier neighbour handle it
@@ -175,20 +181,20 @@ fire_sync_response(joiner_id):
     return
   payload = pack_beacon_with_rotation_fill(self.rt)
     # Today's pack_beacon: dirty first, then rotation page up to max_entries
-  tx 'B' with the assembled payload
+  tx 'B' with the assembled payload via the normal flood/beacon TX path
   mark_sync_satisfied(joiner_id, ttl=sync_satisfied_ttl_ms)
 
 sync_response_satisfied_for(joiner_id):
   return (now - self.sync_satisfied[joiner_id]) < sync_satisfied_ttl_ms
-        OR observed_recent_sync_response(joiner_id)
 
-observed_recent_sync_response(joiner_id):
+observed_recent_sync_response():
   # Any BCN we've received in the last sync_response_jitter_ms with
-  # n_entries >= ROTATION_SYNC_THRESHOLD counts as someone else's sync response
+  # n_entries >= ROTATION_SYNC_THRESHOLD counts as a possible response.
+  # It can suppress this immediate fire, but it must not satisfy the joiner.
   return self.last_observed_sync_response_ms > now - sync_response_jitter_ms
 ```
 
-Tracking `last_observed_sync_response_ms` is a single timestamp updated whenever a BCN with `n_entries >= ROTATION_SYNC_THRESHOLD` is received. Suppression is then a single comparison — no per-joiner tracking needed.
+Tracking `last_observed_sync_response_ms` is a single timestamp updated whenever a BCN with `n_entries >= ROTATION_SYNC_THRESHOLD` is received. Suppression is then a single comparison, but it is intentionally conservative: an observed large BCN only delays our response, because the responder cannot prove the joiner heard that same BCN. Only this node's own successful sync-response marks `sync_satisfied[joiner_id]`.
 
 `sync_satisfied[joiner_id]` is a small TTL'd dict (one entry per recently-handled joiner). Bounded by network neighbour count.
 
@@ -200,7 +206,15 @@ Unchanged from today. The bit means "advertise at next emission, then forget":
 - Set by `rt_prune_cycle` when a primary is pruned.
 - Cleared by `pack_beacon` for every entry it emits in the current frame.
 
-The only subtle change: sync-response BCN packs `(dirty ∪ rotation)` and clears dirty for every entry it included, identical to today's pack_beacon behaviour. Periodic/triggered packs `(dirty only)` and clears dirty for those.
+The subtle change: sync-response BCN packs `(dirty ∪ rotation)` but does **not** clear dirty flags. A sync-response is a solicited snapshot for one joiner and may not be heard by every neighbour that still needs the mutation. Periodic/triggered dirty-only BCNs are the propagation vehicle; they clear dirty for entries they include.
+
+One optional liveness lever exists once periodic stable rotation is removed:
+multi-hop primary routes can be re-marked dirty after `rt_refresh_remote_ms`
+(default `0`, disabled). This gives otherwise-stable remote routes a bounded
+refresh when a deployment needs it, but it is not enabled by default because
+aggressive refresh restores too much BCN airtime in the dense s04 stress
+scenario. Direct neighbours do not use it because the BCN header and any
+received frame already refresh their 1-hop liveness.
 
 ## 9. Liveness & aging
 
@@ -208,9 +222,14 @@ Two invariants to preserve:
 
 1. **Neighbours don't age me out.** `rt_aging_ttl_neighbor_ms = 30 min` means I need to emit something detectable within every 30-min window. Periodic BCN every 5 min × 6 = 6 refreshes per window. Even with adaptive-throttle skip rates (today ~10%), worst-case 5 emissions per window. Margin is fine.
 
-2. **`rt_merge` updates `last_seen_ms` even on empty BCN.** This is the action item — confirm today's code does this. If `rt_merge` early-returns on `n_entries == 0`, fix it. The 4-byte header alone is the heartbeat; reception updates last_seen regardless of content.
+2. **Multi-hop route aging is visible and tunable.** Remote routes depend on
+advertisement refresh, not direct RF liveness. With pure dirty-only they may
+age more aggressively in long static runs; `rt_refresh_remote_ms` is the
+explicit tuning lever if that cost is unacceptable.
 
-If the simulator measures a regression in `rt_aged` events post-implementation, that's the signal that liveness isn't propagating correctly and the fix is in `rt_merge`.
+3. **`rt_merge` updates `last_seen_ms` even on empty BCN.** This is the action item — confirm today's code does this. If `rt_merge` early-returns on `n_entries == 0`, fix it. The 4-byte header alone is the heartbeat; reception updates last_seen regardless of content.
+
+If the simulator measures a regression in `rt_aged` events post-implementation, first check `rt_refresh_remote_ms` and then the direct-neighbour empty-BCN refresh path in `rt_merge`.
 
 ### 9.1 Mobile aging margin (known tight)
 
@@ -244,7 +263,7 @@ yet to test against). Flagged for the §2 implementation pass.
 | **Triggered BCN coalescing** | Unchanged. Multiple mutations within trigger window still collapse to one BCN. |
 | **§7.2 schedule records (gateways)** | Sync-response BCN includes schedule records when `has_schedule=1`. Periodic/triggered also include them on every emission (small fixed cost for gateways). |
 | **§1 anti-spam** | Anti-spam already keys on `meta.src` (radio physical). Sync-response BCNs don't change observation counts in a meaningful way (count-based metric absorbs single events). |
-| **Budget tiers** | Sync-response respects EXHAUSTED tier — defers to healthier neighbours. STRAINED / CRITICAL still respond (they're the ones with routes worth syncing). |
+| **Budget tiers** | Sync-response suppresses only at EXHAUSTED tier. STRAINED / CRITICAL still respond (they're the ones with routes worth syncing), but the normal `tx_flood` duty-cycle precheck still blocks if the node has no legal airtime left. |
 | **§2 mobility (is_mobile)** | Mobile nodes are the highest-value use-case for REQ_SYNC. v1 wires only `on_init`; §2's future code adds three additional hooks (see §6.1): Tier-1 intra-leaf neighbour-shift, Tier-2 cross-leaf join, Tier-2 leaf-departure. Receiver-side first-contact detection covers the cases where mobile gains new neighbours but doesn't set REQ_SYNC itself. Mobile-specific aging TTL margin discussed in §9.1. |
 | **Cold-start UX** | Joiner emits a BCN at on_init (already does); sets REQ_SYNC. Neighbours respond within ~`sync_response_jitter_ms` (default 2 s). Routes appear FAST — much faster than today's "wait for next rotation slot". |
 

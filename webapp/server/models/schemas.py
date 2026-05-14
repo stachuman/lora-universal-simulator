@@ -1,7 +1,8 @@
 """Pydantic schemas for lus scenario JSON.
 
-These describe the *full* lus config schema — the validator may reject
-extra fields, but the model itself only knows lus-specific shape.
+These describe the lus config fields the webapp currently understands.
+Unknown fields are allowed so newer scenario JSON can pass through to lus,
+which is the source of truth for runtime validation.
 """
 
 from __future__ import annotations
@@ -11,8 +12,11 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 
+LUS_MODEL_CONFIG = ConfigDict(extra="allow")
+
+
 class PathLossModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     # "none" opts out of the log-distance baseline at orchestrator startup
     # so explicit topology.links[] entries are used verbatim. The other
@@ -39,7 +43,7 @@ class PathLossModel(BaseModel):
 
 class RadioHardware(BaseModel):
     """Per-radio hardware turnaround delays + decode-quality knobs."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     rx_to_tx_delay_ms: Optional[int] = Field(default=None, ge=0)
     tx_to_rx_delay_ms: Optional[int] = Field(default=None, ge=0)
@@ -52,7 +56,7 @@ class RadioHardware(BaseModel):
 
 
 class RadioConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     sf: int = Field(ge=5, le=12)
     # bw: kHz, accepts fractional values (LoRa supports narrow-band
@@ -80,7 +84,7 @@ class RadioConfig(BaseModel):
 
 
 class SimulationConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     duration_ms: int = Field(gt=0)
     step_ms: int = Field(default=1, ge=1)
@@ -109,7 +113,7 @@ class NodeRadioOverride(BaseModel):
     """Per-node nested radio override (subset of RadioConfig). Flat
     sf/bw/cr at the node level take precedence over the values here;
     see core/topology/JsonConfig.cpp:134-142."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     sf: Optional[int] = Field(default=None, ge=5, le=12)
     bw: Optional[float] = Field(default=None, gt=0.0)  # kHz, fractional OK
@@ -117,7 +121,7 @@ class NodeRadioOverride(BaseModel):
 
 
 class NodeConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     name: str = Field(min_length=1, max_length=64)
     script: str = Field(min_length=1)
@@ -156,7 +160,7 @@ class NodeConfig(BaseModel):
 
 
 class TopologyLink(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     from_: str = Field(alias="from")
     to: str
@@ -169,7 +173,7 @@ class TopologyLink(BaseModel):
 
 
 class Topology(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     links: List[TopologyLink] = Field(default_factory=list)
 
@@ -178,7 +182,7 @@ class CommandEntry(BaseModel):
     """Either {at_ms, node, command} (dispatch to a node's on_command) or
     {at_ms, lua} (run a Lua snippet — see core/topology/JsonConfig.cpp).
     Validator below enforces that exactly one of the two pairings is used."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     at_ms: int = Field(ge=0)
     node: Optional[str] = None
@@ -187,14 +191,14 @@ class CommandEntry(BaseModel):
 
 
 class ExpectEntry(BaseModel):
-    model_config = ConfigDict(extra="allow")  # expect[] vocabulary varies; allow extra keys
+    model_config = LUS_MODEL_CONFIG
 
     type: str
 
 
 class LusConfig(BaseModel):
     """Top-level lus scenario config."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = LUS_MODEL_CONFIG
 
     name: Optional[str] = Field(default=None, alias="_name")
     desc: Optional[str] = Field(default=None, alias="_desc")

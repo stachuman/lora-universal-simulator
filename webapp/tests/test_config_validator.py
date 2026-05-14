@@ -103,11 +103,12 @@ def test_sf_rx_set_accepted(minimal_lus_config):
     assert parsed.nodes[0].sf_rx_set == [7, 8, 9]
 
 
-def test_unknown_top_level_rejected(minimal_lus_config):
+def test_unknown_top_level_accepted(minimal_lus_config):
     cfg = dict(minimal_lus_config)
     cfg["unknown_field"] = 42
     parsed, errors = validate(cfg)
-    assert parsed is None  # extra="forbid" rejects
+    assert errors == []
+    assert parsed is not None
 
 
 def test_meshcore_requires_plugins_rejected(minimal_lus_config):
@@ -154,6 +155,18 @@ def test_radio_hardware_nested_block_accepted(minimal_lus_config):
     parsed, errors = validate(cfg)
     assert errors == []
     assert parsed.simulation.radio.hardware.rx_to_tx_delay_ms == 1
+
+
+def test_radio_hardware_extra_fields_accepted(minimal_lus_config):
+    cfg = dict(minimal_lus_config)
+    cfg["simulation"] = dict(cfg["simulation"])
+    cfg["simulation"]["radio"] = dict(
+        cfg["simulation"]["radio"],
+        hardware={"preamble_miss_base": 0.1},
+    )
+    parsed, errors = validate(cfg)
+    assert errors == []
+    assert parsed is not None
 
 
 def test_simulation_seed_and_epoch_accepted(minimal_lus_config):

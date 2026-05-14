@@ -1,0 +1,29 @@
+{
+  "_name": "t39_req_sync_wire",
+  "_desc": "Verifies REQ_SYNC bit round-trips through pack_beacon + parse_beacon. alice starts with req_sync_on_boot disabled, then a test command sets req_sync_pending=true; bob emits bcn_req_sync_observed when it parses the bit.",
+  "simulation": {
+    "duration_ms": 20000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 13,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 3000, "quiet_threshold_ms": 0, "req_sync_on_boot": false } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 3000, "quiet_threshold_ms": 0, "req_sync_on_boot": false } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 5000, "node": "alice", "command": "set_req_sync_pending" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "bcn_req_sync_observed", "value": "" }
+  ]
+}

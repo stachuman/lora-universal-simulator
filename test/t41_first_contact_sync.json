@@ -1,0 +1,30 @@
+{
+  "_name": "t41_first_contact_sync",
+  "_desc": "Verifies receiver-side first-contact detection. alice and bob boot together; carol joins late with req_sync_on_boot=false, so bob's sync_response_tx must come from first-contact detection.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 37,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 8, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "bob",   "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 8, "allowed_data_sfs": [9, 10], "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "req_sync_on_boot": false },
+      "start_at_ms": 15000 }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 12.0, "rssi": -78.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 12.0, "rssi": -78.0, "bidir": true }
+    ]
+  },
+  "expect": [
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "sync_response_tx", "value": "" }
+  ]
+}

@@ -112,15 +112,15 @@ All frames begin with a 1-byte ASCII tag for cheap dispatch. Bit fields
 within bytes are MSB-first within each byte. Multi-byte numeric fields
 are little-endian (lo byte first) where applicable.
 
-### 3.1 Beacon (`'B'`) — 4 + [1+4L]? + 3n bytes
+### 3.1 Beacon (`'B'`) — 4 + [1+4L]? + 3n + [32]? bytes
 
 Wire format (see ROADMAP §7.0.2 for the full bit-assignment rationale):
 
 ```
 byte:  0      1                                        2     3
        ┌───┬─────────────────────────────────────────┬─────┬──────────┐
-       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │ n_entries│
-       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │          │
+       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │S│n_entries│
+       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ (7b)   │
        └───┴─────────────────────────────────────────┴─────┴──────────┘
 
 if has_schedule == 1 (optional schedule block):
@@ -138,6 +138,9 @@ route entries × n_entries (3 bytes each, start after optional schedule block):
        ┌──────┬──────┬────────────────────────────────────────┐
        │ dest │ next │ score_bucket(4) │ (hops-1)(3) │ is_gw(1) │
        └──────┴──────┴────────────────────────────────────────┘
+
+if S == 1:
+  trailing destination-seen bitmap: 32 bytes, bits for node ids 0..254
 ```
 
 **Byte-1 flag bits:**
@@ -151,8 +154,19 @@ route entries × n_entries (3 bytes each, start after optional schedule block):
 
 **Fixed header fields:**
 - `src` (8 bits): beacon sender's node id.
-- `n_entries` (8 bits): route-entry count in this page (capped by
+- `S` (1 bit, bit 7 of byte 3): a 32-byte destination-seen bitmap follows
+  the route-entry block.
+- `n_entries` (7 bits, bits 6:0): route-entry count in this page (capped by
   `beacon_max_entries`, default 49 for a 151-byte frame).
+
+**Destination-seen bitmap:** Set bits mean "the beacon sender has recently
+observed this node id." The bitmap is a freshness hint, not a route
+advertisement. Receiving it updates `dest_seen_ms[dest]`. If the receiver
+already has a candidate for `dest` whose `next_hop` is the bitmap sender,
+that candidate's `last_seen_ms` is refreshed. It never creates route
+candidates, never refreshes candidates via other neighbours, and never
+changes route score, hop count, gateway state, candidate order, or dirty
+status.
 
 **Route entry byte 2 bit fields:**
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
@@ -167,8 +181,9 @@ route entries × n_entries (3 bytes each, start after optional schedule block):
   among candidates by score, and the chosen candidate's `is_gateway` is
   authoritative.
 
-**Frame size:** default 151 bytes = 4-byte header + 49 × 3-byte entries
-(no schedule block). A gateway BCN with L upper layers adds 1 + 4L bytes.
+**Frame size:** default route-entry page is 151 bytes = 4-byte header +
+49 × 3-byte entries (no schedule block). If `S=1`, add 32 bytes after the
+route-entry block. A gateway BCN with L upper layers adds 1 + 4L bytes.
 
 **Pre-bit-pack history:** before Phase 1-2 entries were 4 bytes
 (`dest + next + score_i8(8) + hops(8)`) and the default was 200 bytes.
@@ -754,16 +769,21 @@ defeats the purpose. Half-duplex skip still applies.
    `rt_prune_cycle` when the primary slot is removed. Cleared once the
    route is included in a beacon.
 
-2. **Phase 2 — stable rotation (background):** existing sliding-offset
-   walk fills any remaining slots up to `beacon_max_entries`, skipping
-   destinations already in Phase 1 (dedup within a single beacon).
+2. **Phase 2 — stable rotation (warmup/background):** existing
+   sliding-offset walk fills any remaining slots up to `beacon_max_entries`,
+   skipping destinations already in Phase 1 (dedup within a single beacon).
+   This phase runs during simulator warmup so the collision-free hot-start
+   can seed route tables. After `warmup_ms`, periodic and triggered BCNs
+   skip Phase 2 and become dirty-only route updates plus the optional
+   destination-seen bitmap.
 
 The stable offset only advances by the number of stable slots used.
 When dirty fills the beacon, stable progress isn't lost.
 
-**Steady state with no churn:** every route is clean → Phase 1 is
-empty → only Phase 2 runs → byte-for-byte identical to the
-pre-differential pack_beacon. No regression.
+**Steady state with no churn after warmup:** every route is clean →
+Phase 1 is empty → Phase 2 is skipped → BCN carries only the header and
+optional destination-seen bitmap. Existing same-next-hop candidates are
+kept fresh by bitmap refresh, not by re-advertising full route pages.
 
 **Active state with churn:** route mutations land in the dirty set and
 are guaranteed to ship in the next beacon. Convergence latency for a
@@ -772,19 +792,30 @@ new route change drops from `O(rotation_window × beacon_period)`
 round-trip).
 
 Telemetry: `beacon_diff_breakdown` event fires per beacon with
-`{dirty_n, stable_n, total_dirty, rt_total, kind}`. `total_dirty`
-greater than `dirty_n` means some dirty entries overflowed the page
-and will surface in the next beacon (no information loss).
+`{dirty_n, stable_n, total_dirty, rt_total, kind, n_entries, seen_bits,
+dirty_only}`. `total_dirty` greater than `dirty_n` means some dirty
+entries overflowed the page and will surface in the next beacon (no
+information loss).
 
-Wire format unchanged. The receiver doesn't know whether a route was
-dirty or stable — it just merges via existing rt_merge.
+The receiver doesn't know whether a route entry was dirty or stable — it
+just merges via existing `rt_merge`. Bitmap presence is explicit in byte 3
+and handled separately from route-entry merging.
 
 ### 6.5 Stale-route aging
 
-Per-candidate `last_seen_ms` is refreshed by `rt_merge` whenever a
-beacon advertises that exact `(dest, next_hop)` combination. A periodic
-aging loop walks `rt[]` every `rt_aging_check_period_ms` (default 60 s)
-and evicts candidates older than a **hop-class-specific TTL**:
+Per-candidate `last_seen_ms` is refreshed by scoped evidence that the same
+next hop can still reach the destination:
+
+- `rt_merge` refreshes it when a beacon advertises that exact
+  `(dest, next_hop)` combination.
+- Any successfully received frame from a direct neighbour refreshes the
+  direct one-hop candidate for that neighbour.
+- A destination-seen bitmap from neighbour `B` refreshes only existing
+  candidates whose `next_hop == B`.
+
+A periodic aging loop walks `rt[]` every `rt_aging_check_period_ms`
+(default 60 s) and evicts candidates older than a
+**hop-class-specific TTL**:
 
 - `hops == 1` (direct neighbour) → `rt_aging_ttl_neighbor_ms`
   (default **30 min**)
@@ -1691,8 +1722,9 @@ expectations) subscribe by event_type.
 
 | Event | Trigger | Key data |
 |---|---|---|
-| `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind` |
-| `beacon_rx` | Beacon decoded | `src`, `n_entries` |
+| `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind`, `seen_bits` |
+| `beacon_rx` | Beacon decoded | `src`, `n_entries`, `seen_bits` |
+| `seen_bitmap_tx` / `seen_bitmap_rx` | Destination-seen bitmap emitted/decoded | `bits_set`, `ttl_ms` / `from`, `bits_set`, `applied`, `refreshed` |
 | `beacon_skipped_busy` | Throttle suppressed beacon | `since_rx_ms`, `threshold_ms`, `stage` |
 | `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind` |
 | `beacon_max_idle_force` | Max-idle override bypassed busy throttle (§6.2) | `since_tx_ms`, `max_idle_ms`, `since_rx_ms` |
