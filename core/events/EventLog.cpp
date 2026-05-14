@@ -355,6 +355,61 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
     emitLine(buf);
 }
 
+static void append_optional_text_field(char*& ep, char* end,
+                                       const char* key, const char* value) {
+    if (!value || !*value || ep >= end) return;
+    char esc[1024];
+    json_escape(esc, sizeof(esc), value);
+    size_t room = static_cast<size_t>(end - ep);
+    int n = snprintf(ep, room, ",\"%s\":\"%s\"", key, esc);
+    if (n > 0 && static_cast<size_t>(n) < room) ep += n;
+}
+
+void dropReceiverInactive(unsigned long time_ms, const char* from, const char* to,
+                          const char* reason,
+                          const uint8_t* data, int len, uint32_t airtime_ms,
+                          int sf, int bw_hz,
+                          const char* label, const char* info) {
+    char pkt[9];
+    packetHashHex(pkt, data, len);
+    char extra[1400];
+    char* ep = extra;
+    char* end = extra + sizeof(extra);
+    append_optional_text_field(ep, end, "label", label);
+    append_optional_text_field(ep, end, "info", info);
+    *ep = '\0';
+    char esc_reason[256];
+    json_escape(esc_reason, sizeof(esc_reason), reason ? reason : "");
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"drop_receiver_inactive\",\"time_ms\":%lu,"
+        "\"from\":\"%s\",\"to\":\"%s\",\"reason\":\"%s\","
+        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"sf\":%d,\"bw_hz\":%d%s}\n",
+        time_ms, from, to, esc_reason, pkt, (unsigned)airtime_ms, sf, bw_hz, extra);
+    emitLine(buf);
+}
+
+void dropNoLink(unsigned long time_ms, const char* from, const char* to,
+                const uint8_t* data, int len, uint32_t airtime_ms,
+                int sf, int bw_hz,
+                const char* label, const char* info) {
+    char pkt[9];
+    packetHashHex(pkt, data, len);
+    char extra[1400];
+    char* ep = extra;
+    char* end = extra + sizeof(extra);
+    append_optional_text_field(ep, end, "label", label);
+    append_optional_text_field(ep, end, "info", info);
+    *ep = '\0';
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"drop_no_link\",\"time_ms\":%lu,"
+        "\"from\":\"%s\",\"to\":\"%s\","
+        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"sf\":%d,\"bw_hz\":%d%s}\n",
+        time_ms, from, to, pkt, (unsigned)airtime_ms, sf, bw_hz, extra);
+    emitLine(buf);
+}
+
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     int packet_sf, int rx_sf,
                     float snr, float rssi,

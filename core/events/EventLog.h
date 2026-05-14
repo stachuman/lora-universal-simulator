@@ -104,6 +104,19 @@ void dropLoss(unsigned long time_ms, const char* from, const char* to,
               const uint8_t* data, int len,
               int sf, int bw_hz);
 
+// Diagnostic receiver-side skips. These are normally silent in RF models,
+// but are useful for directed protocol attribution: an intended next-hop may
+// be dead/unstarted or have no physical link from the sender.
+void dropReceiverInactive(unsigned long time_ms, const char* from, const char* to,
+                          const char* reason,
+                          const uint8_t* data, int len, uint32_t airtime_ms,
+                          int sf, int bw_hz,
+                          const char* label = nullptr, const char* info = nullptr);
+void dropNoLink(unsigned long time_ms, const char* from, const char* to,
+                const uint8_t* data, int len, uint32_t airtime_ms,
+                int sf, int bw_hz,
+                const char* label = nullptr, const char* info = nullptr);
+
 // SF mismatch — receiver isn't tuned to the packet's spreading factor
 // (single-SF LoRa hardware). `rx_sf` is the receiver's currently
 // configured SF when its sf_rx_set has exactly one entry, or -1 to

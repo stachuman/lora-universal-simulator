@@ -561,6 +561,8 @@ DROP_TYPES = {
     "drop_preamble_miss", # preamble decode failed
     "drop_halfduplex",    # node TX'ing while a rx was arriving
     "drop_rx_blind",      # node off-air during rx
+    "drop_no_link",       # intended receiver has no physical link
+    "drop_receiver_inactive", # intended receiver is dead/unstarted
     "drop_busy",          # rx queue full / engine busy
     "drop_decoder",       # CRC / payload decoder rejected the frame
     "decoder_fail",
@@ -2090,6 +2092,19 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
     active_ack_marks: dict[tuple[object, object], int] = {}
     rts_after_ack_mark = 0
     rts_after_ack_mark_by_peer: Counter = Counter()
+    peer_suspect_marks = Counter()
+    peer_suspect_by_source = Counter()
+    peer_suspect_by_peer: Counter = Counter()
+    peer_suspect_clears = 0
+    peer_suspect_bcn_rx = 0
+    peer_suspect_bcn_applied = 0
+    peer_suspect_self_heard = 0
+    peer_liveness_bcn_rx = 0
+    peer_liveness_bcn_applied = 0
+    peer_liveness_bcn_dead = 0
+    tx_silent_alt = 0
+    tx_silent_defer = 0
+    rt_skip_silent_n2 = 0
 
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
@@ -2146,6 +2161,28 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
             if expiry is not None and expiry > now:
                 rts_after_ack_mark += 1
                 rts_after_ack_mark_by_peer[peer] += 1
+        elif et == "peer_suspect_mark":
+            level = int(d.get("level", 0) or 0)
+            peer_suspect_marks[level] += 1
+            peer_suspect_by_source[d.get("source", "?")] += 1
+            peer_suspect_by_peer[d.get("node")] += 1
+        elif et == "peer_suspect_clear":
+            peer_suspect_clears += 1
+        elif et == "peer_suspect_bcn_rx":
+            peer_suspect_bcn_rx += 1
+            peer_suspect_bcn_applied += int(d.get("applied", 0) or 0)
+        elif et == "peer_liveness_bcn_rx":
+            peer_liveness_bcn_rx += 1
+            peer_liveness_bcn_applied += int(d.get("applied", 0) or 0)
+            peer_liveness_bcn_dead += int(d.get("dead", 0) or 0)
+        elif et == "peer_suspect_self_heard":
+            peer_suspect_self_heard += 1
+        elif et == "tx_silent_alt":
+            tx_silent_alt += 1
+        elif et == "tx_silent_defer":
+            tx_silent_defer += 1
+        elif et == "rt_skip_silent_n2":
+            rt_skip_silent_n2 += 1
 
     def resolve(nid):
         if isinstance(nid, int):
@@ -2175,6 +2212,20 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
         "rts_after_ack_mark":    rts_after_ack_mark,
         "top_rts_after_ack_mark_peers": [(resolve(n), c)
                                           for n, c in rts_after_ack_mark_by_peer.most_common(5)],
+        "peer_suspect_marks":    peer_suspect_marks,
+        "peer_suspect_by_source": peer_suspect_by_source,
+        "top_peer_suspect_peers": [(resolve(n), c)
+                                    for n, c in peer_suspect_by_peer.most_common(5)],
+        "peer_suspect_clears":   peer_suspect_clears,
+        "peer_suspect_bcn_rx":   peer_suspect_bcn_rx,
+        "peer_suspect_bcn_applied": peer_suspect_bcn_applied,
+        "peer_suspect_self_heard": peer_suspect_self_heard,
+        "peer_liveness_bcn_rx":  peer_liveness_bcn_rx,
+        "peer_liveness_bcn_applied": peer_liveness_bcn_applied,
+        "peer_liveness_bcn_dead": peer_liveness_bcn_dead,
+        "tx_silent_alt":         tx_silent_alt,
+        "tx_silent_defer":       tx_silent_defer,
+        "rt_skip_silent_n2":     rt_skip_silent_n2,
     }
 
 
@@ -2196,6 +2247,30 @@ def print_section_22(r: dict) -> None:
         print(f"  neighbor budget mark sources:")
         for source, c in r["neighbor_marks"].most_common():
             print(f"    {source:<16} {c}")
+    if r["peer_suspect_marks"]:
+        print(f"  peer-suspect marks:")
+        print(f"    suspect={r['peer_suspect_marks'].get(1, 0)} "
+              f"silent={r['peer_suspect_marks'].get(2, 0)} "
+              f"clears={r['peer_suspect_clears']}")
+        print(f"    BCN suspect rx/applied/self-heard: "
+              f"{r['peer_suspect_bcn_rx']} / "
+              f"{r['peer_suspect_bcn_applied']} / "
+              f"{r['peer_suspect_self_heard']}")
+        print(f"    BCN liveness rx/applied/dead: "
+              f"{r['peer_liveness_bcn_rx']} / "
+              f"{r['peer_liveness_bcn_applied']} / "
+              f"{r['peer_liveness_bcn_dead']}")
+        print(f"    silent routing actions: alt={r['tx_silent_alt']} "
+              f"defer+Q={r['tx_silent_defer']} "
+              f"skip_DV_n2={r['rt_skip_silent_n2']}")
+        if r["peer_suspect_by_source"]:
+            print("    sources:")
+            for source, c in r["peer_suspect_by_source"].most_common():
+                print(f"      {source:<16} {c}")
+        if r["top_peer_suspect_peers"]:
+            print("    top suspect peers:")
+            for name, n in r["top_peer_suspect_peers"]:
+                print(f"      {name:<24} {n}")
     c = r["ack_mark_constraints"]
     if c:
         marks = c.get("marks", 0)
@@ -2728,6 +2803,11 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
     nodes = cfg.get("nodes", [])
     id_to_name = {i: n.get("name", str(i)) for i, n in enumerate(nodes)}
     name_to_id = {v: k for k, v in id_to_name.items()}
+    dies_at_by_id = {
+        i: n.get("dies_at_ms")
+        for i, n in enumerate(nodes)
+        if n.get("dies_at_ms") is not None
+    }
 
     pending_rts_emit: dict[str, deque] = defaultdict(deque)
     pending_rts_detail: dict[str, deque] = defaultdict(deque)
@@ -2939,6 +3019,37 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
                 if a:
                     a["response_pkt"] = e.get("pkt")
 
+        elif typ == "tx_deferred":
+            label = e.get("label") or ""
+            node_name = e.get("node")
+            if label in ("RTS", "RTS-fwd", "RTS-rty"):
+                seq = attempt_seq_from_info(e.get("tx_info"))
+                meta = pop_matching(pending_rts_emit.get(node_name), seq)
+                detail = pop_matching(pending_rts_detail.get(node_name), seq)
+                src_id = name_to_id.get(node_name)
+                next_id = meta.get("next")
+                a = {
+                    "t": e.get("time_ms"),
+                    "pkt": None,
+                    "label": label,
+                    "src": src_id,
+                    "src_name": node_name,
+                    "next": next_id,
+                    "next_name": id_to_name.get(next_id, str(next_id)),
+                    "ctr_lo": meta.get("ctr_lo"),
+                    "kind": meta.get("kind", "unknown"),
+                    "retry_reason": meta.get("reason"),
+                    "attempt_seq": meta.get("attempt_seq") or detail.get("attempt_seq"),
+                    "origin": meta.get("origin"),
+                    "dst": meta.get("dst"),
+                    "detail": detail,
+                    "tx_blocked": e.get("reason", "tx_deferred"),
+                    "closed": True,
+                }
+                attempts.append(a)
+                if src_id is not None and a.get("attempt_seq") is not None:
+                    attempts_by_seq[(src_id, a["attempt_seq"])] = a
+
         elif typ in DROP_TYPES or typ == "collision":
             pkt = e.get("pkt")
             a = attempts_by_pkt.get(pkt)
@@ -2957,8 +3068,12 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
     sender_rank_by_cat: dict[str, Counter] = defaultdict(Counter)
     sender_tier_by_cat: dict[str, Counter] = defaultdict(Counter)
     sender_penalty_by_cat: dict[str, Counter] = defaultdict(Counter)
+    sender_suspect_level_by_cat: dict[str, Counter] = defaultdict(Counter)
+    sender_suspect_penalty_by_cat: dict[str, Counter] = defaultdict(Counter)
     sender_viable_alts_by_cat: dict[str, Counter] = defaultdict(Counter)
     receiver_state_by_cat: dict[str, Counter] = defaultdict(Counter)
+    attempts_to_dead_next_by_cat: Counter = Counter()
+    attempts_to_dead_next: Counter = Counter()
     failed_route_ages: list[int] = []
     all_route_ages: list[int] = []
     focused_samples: list[dict] = []
@@ -2968,7 +3083,9 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
     for a in attempts:
         if a.get("response_already_received"):
             already_received_cts += 1
-        if a.get("response_received") == "CTS":
+        if a.get("tx_blocked"):
+            cat = "rts_tx_blocked"
+        elif a.get("response_received") == "CTS":
             cat = "success_cts_rx"
         elif a.get("response_received") == "NACK":
             cat = "nack_rx"
@@ -3012,9 +3129,20 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
         penalty = detail.get("budget_penalty_db")
         if isinstance(penalty, (int, float)):
             sender_penalty_by_cat[cat][round(float(penalty), 1)] += 1
+        suspect_level = detail.get("next_suspect_level")
+        if isinstance(suspect_level, (int, float)):
+            sender_suspect_level_by_cat[cat][int(suspect_level)] += 1
+        suspect_penalty = detail.get("suspect_penalty_db")
+        if isinstance(suspect_penalty, (int, float)):
+            sender_suspect_penalty_by_cat[cat][round(float(suspect_penalty), 1)] += 1
         viable_alts = detail.get("viable_alts")
         if isinstance(viable_alts, (int, float)):
             sender_viable_alts_by_cat[cat][int(viable_alts)] += 1
+        died_at = dies_at_by_id.get(a.get("next"))
+        if isinstance(died_at, (int, float)) and isinstance(a.get("t"), (int, float)) \
+           and a["t"] >= died_at:
+            attempts_to_dead_next_by_cat[cat] += 1
+            attempts_to_dead_next[a.get("next")] += 1
         age = detail.get("route_age_ms")
         if isinstance(age, (int, float)):
             all_route_ages.append(int(age))
@@ -3046,8 +3174,13 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
         "sender_rank_by_cat": sender_rank_by_cat,
         "sender_tier_by_cat": sender_tier_by_cat,
         "sender_penalty_by_cat": sender_penalty_by_cat,
+        "sender_suspect_level_by_cat": sender_suspect_level_by_cat,
+        "sender_suspect_penalty_by_cat": sender_suspect_penalty_by_cat,
         "sender_viable_alts_by_cat": sender_viable_alts_by_cat,
         "receiver_state_by_cat": receiver_state_by_cat,
+        "attempts_to_dead_next_by_cat": attempts_to_dead_next_by_cat,
+        "top_attempts_to_dead_next": [(id_to_name.get(n, str(n)), c)
+                                      for n, c in attempts_to_dead_next.most_common(5)],
         "failed_route_ages": failed_route_ages,
         "all_route_ages": all_route_ages,
         "focused_samples": focused_samples,
@@ -3069,6 +3202,7 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
     order = [
         "success_cts_rx",
         "nack_rx",
+        "rts_tx_blocked",
         "rts_not_decoded_rf",
         "rts_not_decoded_no_observation",
         "rts_decoded_script_drop",
@@ -3081,6 +3215,7 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
     labels = {
         "success_cts_rx": "CTS reached sender",
         "nack_rx": "NACK reached sender",
+        "rts_tx_blocked": "RTS TX blocked before airtime",
         "rts_not_decoded_rf": "RTS lost at intended next-hop (RF drop)",
         "rts_not_decoded_no_observation": "RTS not decoded; no directed RF drop seen",
         "rts_decoded_script_drop": "RTS decoded then script dropped",
@@ -3123,12 +3258,16 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
     rank_total = Counter()
     tier_total = Counter()
     penalty_total = Counter()
+    suspect_level_total = Counter()
+    suspect_penalty_total = Counter()
     viable_alt_total = Counter()
     recv_total = Counter()
     for cat in noisy_cats:
         rank_total.update(r["sender_rank_by_cat"].get(cat, {}))
         tier_total.update(r["sender_tier_by_cat"].get(cat, {}))
         penalty_total.update(r["sender_penalty_by_cat"].get(cat, {}))
+        suspect_level_total.update(r["sender_suspect_level_by_cat"].get(cat, {}))
+        suspect_penalty_total.update(r["sender_suspect_penalty_by_cat"].get(cat, {}))
         viable_alt_total.update(r["sender_viable_alts_by_cat"].get(cat, {}))
         recv_total.update(r["receiver_state_by_cat"].get(cat, {}))
     if rank_total:
@@ -3141,6 +3280,13 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
     if penalty_total:
         penalties = ", ".join(f"{k:g}dB:{v}" for k, v in sorted(penalty_total.items()))
         print(f"    failed-attempt budget penalty: {penalties}")
+    if suspect_level_total:
+        levels = {0: "none", 1: "suspect", 2: "silent"}
+        level_s = ", ".join(f"{levels.get(k, k)}:{v}" for k, v in suspect_level_total.most_common())
+        print(f"    failed-attempt suspect level: {level_s}")
+    if suspect_penalty_total:
+        penalties = ", ".join(f"{k:g}dB:{v}" for k, v in sorted(suspect_penalty_total.items()))
+        print(f"    failed-attempt suspect penalty: {penalties}")
     if viable_alt_total:
         alts = ", ".join(f"{k}:{v}" for k, v in sorted(viable_alt_total.items()))
         print(f"    failed-attempt viable alternatives: {alts}")
@@ -3151,6 +3297,15 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
     if ages:
         print(f"    failed-attempt route age: p50={pctl(ages, 50)/1000:.1f}s "
               f"p95={pctl(ages, 95)/1000:.1f}s max={max(ages)/1000:.1f}s")
+    dead_by_cat = r.get("attempts_to_dead_next_by_cat") or Counter()
+    if dead_by_cat:
+        total_dead = sum(dead_by_cat.values())
+        print(f"    RTS attempts after selected next-hop died: {total_dead}")
+        by_cat = ", ".join(f"{labels.get(k, k)}:{v}" for k, v in dead_by_cat.most_common())
+        print(f"      by outcome: {by_cat}")
+        if r.get("top_attempts_to_dead_next"):
+            top_dead = ", ".join(f"{name}:{n}" for name, n in r["top_attempts_to_dead_next"])
+            print(f"      top dead next-hops: {top_dead}")
 
     names = {i: n.get("name", str(i)) for i, n in enumerate(cfg.get("nodes", []))}
     interesting = [
@@ -3187,7 +3342,274 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
                   f"{'ptx' if rs.get('has_pending_tx') else ('prx' if rs.get('has_pending_rx') else ('tier'+str(rs.get('budget_tier')) if rs else 'n/a'))}")
 
 
-# ---- Section 27: inter-layer gateway efficiency (§7.3 — stub for now) -----
+# ---- Section 27: non-delivered message classifier -------------------------
+
+def section_non_delivered_classifier(events_path: str, cfg: dict,
+                                     since_ms: int = 0) -> dict:
+    names = {i: n.get("name", str(i)) for i, n in enumerate(cfg.get("nodes", []))}
+    dies_at = {
+        i: n.get("dies_at_ms")
+        for i, n in enumerate(cfg.get("nodes", []))
+        if n.get("dies_at_ms") is not None
+    }
+
+    def key_from_data(d: dict) -> tuple | None:
+        origin = d.get("origin")
+        dst = d.get("dst")
+        ctr = d.get("ctr")
+        payload = d.get("payload")
+        if origin is None or dst is None or ctr is None or payload is None:
+            return None
+        return (origin, dst, ctr, payload)
+
+    messages: dict[tuple, dict] = {}
+    delivered: set[tuple] = set()
+    terminal: dict[tuple, tuple[int, str, dict, str | None]] = {}
+    last_state: dict[tuple, tuple[int, str, dict, str | None]] = {}
+    state_counts = Counter()
+    terminal_counts = Counter()
+    unresolved_by_dst = Counter()
+    unresolved_dead_dst = Counter()
+    unresolved_rts_next = Counter()
+    unresolved_rts_suspect = Counter()
+    unresolved_rts_tier = Counter()
+    unresolved_rts_rank = Counter()
+    unresolved_rts_dead_next = Counter()
+    unresolved_rts_route_ages: list[int] = []
+    unresolved_samples: list[tuple[tuple, dict, tuple[int, str, dict, str | None] | None]] = []
+
+    terminal_events = {
+        "path_cascade_exhausted",
+        "send_giveup",
+        "send_no_route",
+        "rts_giveup",
+        "data_ack_giveup",
+    }
+    state_events = {
+        "tx_enqueue",
+        "tx_dequeue",
+        "send_deferred",
+        "send_drained",
+        "tx_silent_defer",
+        "tx_silent_alt",
+        "q_tx",
+        "q_suppressed",
+        "rts_attempt_detail",
+        "rts_attempt_timeout",
+        "rts_retry",
+        "cts_rx",
+        "nack_rx",
+        "tx_requeued",
+        "cascade_requeue",
+        "path_cascade",
+    }
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        t = int(e.get("time_ms", 0) or 0)
+        node = e.get("node")
+        k = key_from_data(d)
+        if et == "tx_enqueue" and k is not None:
+            messages[k] = {
+                "time_ms": t,
+                "node": node,
+                "data": d,
+            }
+            last_state[k] = (t, et, d, node)
+        elif et == "delivered" and k is not None:
+            delivered.add(k)
+            last_state[k] = (t, et, d, node)
+        elif et in terminal_events and k is not None:
+            old = terminal.get(k)
+            # path_cascade_exhausted carries the protocol trigger
+            # (budget_low/rts_giveup/ack_giveup). Keep it over the legacy
+            # follow-up rts_giveup/data_ack_giveup events.
+            if old is None or old[1] != "path_cascade_exhausted":
+                terminal[k] = (t, et, d, node)
+            last_state[k] = (t, et, d, node)
+        elif et in state_events and k is not None:
+            if k in messages:
+                last_state[k] = (t, et, d, node)
+
+    def classify(k: tuple, msg: dict) -> str:
+        if k in delivered:
+            return "delivered"
+        if k in terminal:
+            _, et, d, _ = terminal[k]
+            if et == "path_cascade_exhausted":
+                return f"terminal:{d.get('trigger', 'path_cascade_exhausted')}"
+            if et == "send_giveup":
+                return f"terminal:send_giveup:{d.get('reason', '?')}"
+            return f"terminal:{et}"
+        st = last_state.get(k)
+        if st is None:
+            return "unresolved:no_state"
+        _, et, d, _ = st
+        if et == "send_deferred":
+            return f"unresolved:deferred:{d.get('reason', 'no_route')}"
+        if et == "tx_silent_defer":
+            return "unresolved:silent_defer"
+        if et in ("q_tx", "q_suppressed"):
+            return "unresolved:waiting_q_response"
+        if et in ("rts_attempt_timeout", "rts_retry", "rts_attempt_detail", "path_cascade"):
+            return "unresolved:rts_setup"
+        if et == "cts_rx":
+            return "unresolved:post_cts_data_or_ack"
+        if et == "nack_rx":
+            return f"unresolved:nack:{d.get('reason', '?')}"
+        if et in ("tx_requeued", "cascade_requeue"):
+            return "unresolved:requeued"
+        if et == "send_drained":
+            return "unresolved:queued_after_defer"
+        if et == "tx_dequeue":
+            return "unresolved:dequeued"
+        if et == "tx_enqueue":
+            return "unresolved:queued_never_dequeued"
+        return f"unresolved:last:{et}"
+
+    for k, msg in messages.items():
+        cls = classify(k, msg)
+        if cls == "delivered":
+            state_counts["delivered"] += 1
+            continue
+        dst = k[1]
+        state_counts[cls] += 1
+        if cls.startswith("terminal:"):
+            terminal_counts[cls] += 1
+        else:
+            unresolved_by_dst[dst] += 1
+            if cls == "unresolved:rts_setup":
+                st = last_state.get(k)
+                if st is not None:
+                    _, _, d, _ = st
+                    next_hop = d.get("next")
+                    if next_hop is not None:
+                        unresolved_rts_next[next_hop] += 1
+                        death_t = dies_at.get(next_hop)
+                        if death_t is not None and st[0] >= death_t:
+                            unresolved_rts_dead_next[next_hop] += 1
+                    level = d.get("next_suspect_level")
+                    if isinstance(level, (int, float)):
+                        unresolved_rts_suspect[int(level)] += 1
+                    tier = d.get("next_tier")
+                    if isinstance(tier, (int, float)):
+                        unresolved_rts_tier[int(tier)] += 1
+                    rank = d.get("candidate_rank")
+                    cnt = d.get("candidate_count")
+                    if rank is not None:
+                        unresolved_rts_rank[f"{rank}/{cnt or '?'}"] += 1
+                    age = d.get("route_age_ms")
+                    if isinstance(age, (int, float)):
+                        unresolved_rts_route_ages.append(int(age))
+            if dst in dies_at:
+                enq_t = msg["time_ms"]
+                death_t = dies_at[dst]
+                if enq_t >= death_t:
+                    unresolved_dead_dst["dead_before_enqueue"] += 1
+                else:
+                    unresolved_dead_dst["died_after_enqueue"] += 1
+        if not cls.startswith("delivered") and len(unresolved_samples) < 10:
+            unresolved_samples.append((k, msg, last_state.get(k)))
+
+    return {
+        "total": len(messages),
+        "delivered": len(delivered & set(messages.keys())),
+        "state_counts": state_counts,
+        "terminal_counts": terminal_counts,
+        "top_unresolved_dst": [(names.get(n, str(n)), c, dies_at.get(n))
+                               for n, c in unresolved_by_dst.most_common(8)],
+        "unresolved_dead_dst": unresolved_dead_dst,
+        "unresolved_rts_next": [(names.get(n, str(n)), c, dies_at.get(n))
+                                for n, c in unresolved_rts_next.most_common(8)],
+        "unresolved_rts_suspect": unresolved_rts_suspect,
+        "unresolved_rts_tier": unresolved_rts_tier,
+        "unresolved_rts_rank": unresolved_rts_rank,
+        "unresolved_rts_dead_next": [(names.get(n, str(n)), c, dies_at.get(n))
+                                     for n, c in unresolved_rts_dead_next.most_common(8)],
+        "unresolved_rts_route_ages": unresolved_rts_route_ages,
+        "samples": unresolved_samples,
+        "names": names,
+    }
+
+
+def print_section_27_non_delivered(r: dict) -> None:
+    print("\n=== (27) non-delivered message classifier ===")
+    total = r["total"]
+    delivered = r["delivered"]
+    not_delivered = total - delivered
+    print(f"  originator messages: {total}")
+    print(f"    delivered:     {delivered}")
+    print(f"    not delivered: {not_delivered}")
+    if not_delivered == 0:
+        return
+    print("\n  final classification:")
+    for cls, n in r["state_counts"].most_common():
+        if cls == "delivered":
+            continue
+        pct = 100.0 * n / not_delivered if not_delivered else 0.0
+        print(f"    {cls:<36} {n:>4} ({pct:>5.1f}%)")
+    if r["unresolved_dead_dst"]:
+        print("\n  undelivered destination lifecycle:")
+        print(f"    dead before enqueue: {r['unresolved_dead_dst'].get('dead_before_enqueue', 0)}")
+        print(f"    died after enqueue:  {r['unresolved_dead_dst'].get('died_after_enqueue', 0)}")
+    if r["top_unresolved_dst"]:
+        print("\n  top destinations among unresolved/non-terminal:")
+        for name, count, died_at in r["top_unresolved_dst"]:
+            extra = f" died_at={died_at/60000:.1f}m" if died_at is not None else ""
+            print(f"    {name:<24} {count:>3}{extra}")
+    if r["unresolved_rts_next"]:
+        print("\n  unresolved RTS setup detail:")
+        print("    last selected next-hop:")
+        for name, count, died_at in r["unresolved_rts_next"]:
+            extra = f" died_at={died_at/60000:.1f}m" if died_at is not None else ""
+            print(f"      {name:<24} {count:>3}{extra}")
+        if r["unresolved_rts_dead_next"]:
+            print("    selected next-hop already dead:")
+            for name, count, died_at in r["unresolved_rts_dead_next"]:
+                extra = f" died_at={died_at/60000:.1f}m" if died_at is not None else ""
+                print(f"      {name:<24} {count:>3}{extra}")
+        levels = {0: "none", 1: "suspect", 2: "silent", 3: "dead"}
+        if r["unresolved_rts_suspect"]:
+            s = ", ".join(f"{levels.get(k, k)}:{v}"
+                          for k, v in r["unresolved_rts_suspect"].most_common())
+            print(f"    next-hop suspect level: {s}")
+        tiers = {0: "HEALTHY", 1: "STRAINED", 2: "CRITICAL", 3: "EXHAUSTED"}
+        if r["unresolved_rts_tier"]:
+            s = ", ".join(f"{tiers.get(k, k)}:{v}"
+                          for k, v in r["unresolved_rts_tier"].most_common())
+            print(f"    next-hop budget tier:   {s}")
+        if r["unresolved_rts_rank"]:
+            s = ", ".join(f"{k}:{v}" for k, v in r["unresolved_rts_rank"].most_common())
+            print(f"    candidate rank/count:   {s}")
+        ages = r["unresolved_rts_route_ages"]
+        if ages:
+            ages = sorted(ages)
+            p50 = ages[len(ages)//2]
+            p95 = ages[min(len(ages)-1, int(0.95 * len(ages)))]
+            print(f"    route age: p50={p50/1000:.1f}s p95={p95/1000:.1f}s "
+                  f"max={ages[-1]/1000:.1f}s")
+    if r["samples"]:
+        print("\n  sample not-delivered messages:")
+        names = r["names"]
+        for k, msg, st in r["samples"][:6]:
+            origin, dst, ctr, payload = k
+            if st:
+                t, et, d, node = st
+                last = f"{et} at {t/60000:.1f}m on {node}"
+                if d.get("reason"):
+                    last += f" reason={d.get('reason')}"
+                if d.get("trigger"):
+                    last += f" trigger={d.get('trigger')}"
+            else:
+                last = "no state"
+            print(f"    {names.get(origin, origin)} -> {names.get(dst, dst)} "
+                  f"ctr={ctr} payload={payload!r}: {last}")
+
+
+# ---- Section 28: inter-layer gateway efficiency (§7.3 — stub for now) -----
 
 def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
     """Inter-layer gateway TDM scheduling (roadmap §7.3, NOT YET IMPLEMENTED
@@ -3243,7 +3665,7 @@ def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
 
 
 def print_section_27_inter_layer(r: dict) -> None:
-    print("\n=== (27) inter-layer gateway efficiency (§7.3) ===")
+    print("\n=== (28) inter-layer gateway efficiency (§7.3) ===")
     total = (r["sweep_start"] + r["cross_layer_handoffs"] +
              r["gateway_schedule_announced"] + len(r["is_gateway_count"]))
     if total == 0:
@@ -3378,6 +3800,7 @@ def section_lifecycle_fast(cfg: dict, events_path: str) -> dict:
     delivered_unknown_phase = 0
     seen_bitmap = Counter()
     seen_bitmap_bits = Counter()
+    suspect_ext = Counter()
     node_starts: list[tuple[int, str]] = []
     node_deaths: list[tuple[int, str]] = []
     event_count = 0
@@ -3409,8 +3832,11 @@ def section_lifecycle_fast(cfg: dict, events_path: str) -> dict:
                 bcn_tx[f"kind:{data.get('kind', '?')}"] += 1
                 bcn_entries[int(data.get("n_entries", 0) or 0)] += 1
                 bcn_seen_bits[int(data.get("seen_bits", 0) or 0)] += 1
+                suspect_ext["tx_nodes"] += int(data.get("suspect_nodes", 0) or 0)
+                suspect_ext["tx_ext_len"] += int(data.get("ext_len", 0) or 0)
             elif emit == "beacon_rx":
                 bcn_rx += 1
+                suspect_ext["rx_nodes"] += int(data.get("suspect_nodes", 0) or 0)
             elif emit == "seen_bitmap_tx":
                 seen_bitmap["tx"] += 1
                 seen_bitmap_bits["tx_bits"] += int(data.get("bits_set", 0) or 0)
@@ -3422,6 +3848,26 @@ def section_lifecycle_fast(cfg: dict, events_path: str) -> dict:
             elif emit == "rt_update":
                 rt_updates += 1
                 rt_updates_by_phase[phase_at(phases, t)] += 1
+            elif emit == "peer_suspect_mark":
+                suspect_ext["marks"] += 1
+                suspect_ext[f"mark_level:{int(data.get('level', 0) or 0)}"] += 1
+            elif emit == "peer_suspect_clear":
+                suspect_ext["clears"] += 1
+            elif emit == "peer_suspect_bcn_rx":
+                suspect_ext["bcn_rx"] += 1
+                suspect_ext["bcn_applied"] += int(data.get("applied", 0) or 0)
+            elif emit == "peer_liveness_bcn_rx":
+                suspect_ext["liveness_bcn_rx"] += 1
+                suspect_ext["liveness_bcn_applied"] += int(data.get("applied", 0) or 0)
+                suspect_ext["liveness_bcn_dead"] += int(data.get("dead", 0) or 0)
+            elif emit == "peer_suspect_self_heard":
+                suspect_ext["self_heard"] += 1
+            elif emit == "tx_silent_alt":
+                suspect_ext["silent_alt"] += 1
+            elif emit == "tx_silent_defer":
+                suspect_ext["silent_defer"] += 1
+            elif emit == "rt_skip_silent_n2":
+                suspect_ext["skip_silent_n2"] += 1
             elif emit == "delivered":
                 delivered_total += 1
                 origin = data.get("origin")
@@ -3451,6 +3897,7 @@ def section_lifecycle_fast(cfg: dict, events_path: str) -> dict:
         "bcn_seen_bits": bcn_seen_bits,
         "seen_bitmap": seen_bitmap,
         "seen_bitmap_bits": seen_bitmap_bits,
+        "suspect_ext": suspect_ext,
         "rt_updates": rt_updates,
         "rt_updates_by_phase": rt_updates_by_phase,
     }
@@ -3513,6 +3960,23 @@ def print_lifecycle_fast(r: dict) -> None:
           f"{r['seen_bitmap_bits'].get('rx_bits', 0)} / "
           f"{r['seen_bitmap_bits'].get('applied', 0)} / "
           f"{r['seen_bitmap_bits'].get('refreshed', 0)}")
+    s = r["suspect_ext"]
+    if s:
+        print("\n  suspect extension:")
+        print(f"    BCN suspect nodes tx/rx: {s.get('tx_nodes', 0)} / {s.get('rx_nodes', 0)}")
+        print(f"    peer marks suspect/silent/clears: "
+              f"{s.get('mark_level:1', 0)} / {s.get('mark_level:2', 0)} / "
+              f"{s.get('clears', 0)}")
+        print(f"    suspect BCN rx/applied/self-heard: "
+              f"{s.get('bcn_rx', 0)} / {s.get('bcn_applied', 0)} / "
+              f"{s.get('self_heard', 0)}")
+        print(f"    liveness BCN rx/applied/dead: "
+              f"{s.get('liveness_bcn_rx', 0)} / "
+              f"{s.get('liveness_bcn_applied', 0)} / "
+              f"{s.get('liveness_bcn_dead', 0)}")
+        print(f"    silent routing actions alt/defer/skip_DV_n2: "
+              f"{s.get('silent_alt', 0)} / {s.get('silent_defer', 0)} / "
+              f"{s.get('skip_silent_n2', 0)}")
 
     print("\n  routing updates:")
     print(f"    rt_update total: {r['rt_updates']}")
@@ -3638,6 +4102,9 @@ def main() -> None:
 
     print_section_26_rts_setup(
         section_rts_setup_attribution(args.events, cfg, pkt_label, warmup_end_ms), cfg)
+
+    print_section_27_non_delivered(
+        section_non_delivered_classifier(args.events, cfg, warmup_end_ms))
 
     print_section_27_inter_layer(section_inter_layer(args.events, cfg, warmup_end_ms))
 

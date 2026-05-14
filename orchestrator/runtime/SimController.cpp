@@ -119,6 +119,15 @@ static bool isMobileNode(const SimConfig::NodeDef& node) {
     return node.velocity_mps > 0.0f;
 }
 
+static bool isRtsLabel(const std::string& label) {
+    return label == "RTS" || label == "RTS-fwd" || label == "RTS-rty";
+}
+
+static bool infoNamesNextHop(const std::string& info, const std::string& node_name) {
+    if (info.empty() || node_name.empty()) return false;
+    return info.find("next=" + node_name) != std::string::npos;
+}
+
 }  // namespace
 
 SimController::SimController(const SimConfig& cfg, std::ostream& events_out)
@@ -670,11 +679,44 @@ void SimController::deliverReceptionsForStep() {
 
         for (int rcv = 0; rcv < n; ++rcv) {
             if (rcv == tx.sender_id) continue;
-            // Skip dead / unborn receivers — no rx event, no drops.
-            if (!_node_alive[rcv]) continue;
+            const bool intended_rts_next =
+                isRtsLabel(tx.label) && infoNamesNextHop(tx.info, _nodes[rcv]->name());
+            // Skip dead / unborn receivers. For the intended RTS next-hop,
+            // emit a diagnostic mark so setup attribution can distinguish
+            // "receiver inactive" from "RF loss not observed".
+            if (!_node_alive[rcv]) {
+                if (intended_rts_next) {
+                    EventLog::dropReceiverInactive(
+                        static_cast<unsigned long>(now),
+                        _nodes[tx.sender_id]->name().c_str(),
+                        _nodes[rcv]->name().c_str(),
+                        "node_not_alive",
+                        reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                        static_cast<int>(tx.bytes.size()),
+                        static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                        tx.sf, tx.bw_hz,
+                        tx.label.empty() ? nullptr : tx.label.c_str(),
+                        tx.info.empty() ? nullptr : tx.info.c_str());
+                }
+                continue;
+            }
 
             LinkParams lp;
-            if (!_links->getLink(tx.sender_id, rcv, lp)) continue;  // no link
+            if (!_links->getLink(tx.sender_id, rcv, lp)) {
+                if (intended_rts_next) {
+                    EventLog::dropNoLink(
+                        static_cast<unsigned long>(now),
+                        _nodes[tx.sender_id]->name().c_str(),
+                        _nodes[rcv]->name().c_str(),
+                        reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                        static_cast<int>(tx.bytes.size()),
+                        static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                        tx.sf, tx.bw_hz,
+                        tx.label.empty() ? nullptr : tx.label.c_str(),
+                        tx.info.empty() ? nullptr : tx.info.c_str());
+                }
+                continue;
+            }
 
             // Per-link fading. advanceFading() is a no-op when
             // lp.snr_std_dev <= 0 (returns 0.0f), so configs without
@@ -1180,6 +1222,8 @@ void SimController::registerTransmissionsForStep() {
             f.start_ms      = now;
             f.end_ms        = now + airtime;
             f.bytes         = std::move(p.bytes);
+            f.label         = p.label;
+            f.info          = p.info;
             f.sf            = sf;
             f.bw_hz         = bw_hz;
             f.cr            = cr;

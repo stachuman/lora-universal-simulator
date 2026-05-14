@@ -6,7 +6,7 @@
     "step_ms": 1,
     "warmup_ms": 0,
     "beacon_period_ms": 900000,
-    "seed": 87,
+    "seed": 88,
     "node_startup_jitter_ms": 0,
     "radio": {
       "sf": 8,
@@ -14,7 +14,7 @@
       "cr": 5,
       "max_packet_bytes": 255,
       "snr_coherence_ms": 0,
-      "duty_cycle": 0.01
+      "duty_cycle": 0.1
     }
   },
   "commands": [
@@ -765,11 +765,7 @@
       "name": "Fremont01_KF7EGZ_Sol",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.555214,
       "lon": -122.253456,
@@ -779,11 +775,7 @@
       "name": "dmatestbednode0",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.620513,
       "lon": -122.216034,
@@ -793,11 +785,7 @@
       "name": "The_Winchester_Repea",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.606163,
       "lon": -122.286072,
@@ -808,11 +796,7 @@
       "name": "Central_District",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.577221,
       "lon": -122.28693,
@@ -822,11 +806,7 @@
       "name": "KG6GXY_Greenwood",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.725699,
       "lon": -122.318859,
@@ -836,11 +816,7 @@
       "name": "Hankest_Extendus",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6905,
       "lon": -122.28,
@@ -850,11 +826,7 @@
       "name": "University_District",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6603,
       "lon": -122.273026,
@@ -864,11 +836,7 @@
       "name": "2CBA_Repeater_v4",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6663,
       "lon": -122.301,
@@ -878,11 +846,7 @@
       "name": "Wedgwood_Solar",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6879,
       "lon": -122.284,
@@ -892,11 +856,7 @@
       "name": "usa_narrow_bridge",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.622595,
       "lon": -122.229252,
@@ -907,11 +867,7 @@
       "name": "Capitol_Hill_Prime",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.59181,
       "lon": -122.225647,
@@ -921,11 +877,7 @@
       "name": "RavennaPark",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6737,
       "lon": -122.308,
@@ -935,11 +887,7 @@
       "name": "Licton_Springs_Chat",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.743479,
       "lon": -122.305298,
@@ -949,11 +897,7 @@
       "name": "CrossNet_Room",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.635437,
       "lon": -122.228394,
@@ -963,11 +907,7 @@
       "name": "Crow_Repeater",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.519056,
       "lon": -122.337227,
@@ -977,11 +917,7 @@
       "name": "Portage_Bay_G2_2",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6559,
       "lon": -122.321,
@@ -991,11 +927,7 @@
       "name": "devhackchat",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.636015,
       "lon": -122.283669,
@@ -1005,11 +937,7 @@
       "name": "Maple_Leaf_Manor",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6924,
       "lon": -122.313,
@@ -1019,11 +947,7 @@
       "name": "DMASpaceMesh",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.616926,
       "lon": -122.289162,
@@ -1033,11 +957,7 @@
       "name": "WedgBreadMesh",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6797,
       "lon": -122.291,
@@ -1048,11 +968,7 @@
       "name": "N7GRN5_Portage_Bay_r",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6465,
       "lon": -122.319,
@@ -1062,11 +978,7 @@
       "name": "Washington_Park",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6282,
       "lon": -122.296,
@@ -1077,11 +989,7 @@
       "name": "Stevens",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6286,
       "lon": -122.302,
@@ -1091,11 +999,7 @@
       "name": "Martin_Room",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6957,
       "lon": -122.293,
@@ -1105,11 +1009,7 @@
       "name": "Cafe",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.712303,
       "lon": -122.300148,
@@ -1119,11 +1019,7 @@
       "name": "SEA_Bryant_KM7ECH",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.680876,
       "lon": -122.208996,
@@ -1134,11 +1030,7 @@
       "name": "repeather",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6629,
       "lon": -122.315,
@@ -1148,11 +1040,7 @@
       "name": "Fremont01_Greenwood3",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.544091,
       "lon": -122.216721,
@@ -1162,11 +1050,7 @@
       "name": "RavennaEckstein_CC",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.6765,
       "lon": -122.304,
@@ -1176,11 +1060,7 @@
       "name": "CrossNet_RPT1",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.653825,
       "lon": -122.199211,
@@ -1190,11 +1070,7 @@
       "name": "Take_His_Face_Off",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.734821,
       "lon": -122.252941,
@@ -1204,11 +1080,7 @@
       "name": "bob",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.715999,
       "lon": -122.244873,
@@ -1218,11 +1090,7 @@
       "name": "dave",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,
-        "allowed_data_sfs": [
-          7,
-          9
-        ]
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
       },
       "lat": 47.578726,
       "lon": -122.23835,

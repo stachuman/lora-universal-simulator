@@ -118,6 +118,8 @@ private:
         uint64_t start_ms;
         uint64_t end_ms;
         std::string bytes;
+        std::string label;
+        std::string info;
         int      sf;
         int      bw_hz;
         int      cr;

@@ -46,7 +46,7 @@ coexist on the same channel via a 4-bit `leaf_id` filter.
   SNR EWMA.
 - **Hop-level reliable, end-to-end best-effort.** Each hop is
   acknowledged. End-to-end delivery rides on per-hop reliability; the
-  application layer can layer dedup via `(origin, ctr)`.
+  application layer can layer dedup via `(origin, dst, ctr)`.
 - **Routing is decentralized DV.** No central controller. Each node
   announces its known routes via beacon; receivers merge into a local
   K=3 candidate list per destination, pick the best for forwarding.
@@ -55,7 +55,7 @@ coexist on the same channel via a 4-bit `leaf_id` filter.
   channel. Triggered beacons fire urgently for routing changes;
   periodic beacons are slow keep-alive.
 - **Bit-tight wire format.** Routing fields are 4-8 bits as needed.
-  Total control overhead per flight is ~12 bytes (RTS+CTS+ACK), down
+  Total control overhead per flight is ~14 bytes (RTS+CTS+ACK), down
   from 17 in the byte-aligned baseline.
 
 ---
@@ -112,16 +112,16 @@ All frames begin with a 1-byte ASCII tag for cheap dispatch. Bit fields
 within bytes are MSB-first within each byte. Multi-byte numeric fields
 are little-endian (lo byte first) where applicable.
 
-### 3.1 Beacon (`'B'`) — 4 + [1+4L]? + 3n + [32]? bytes
+### 3.1 Beacon (`'B'`) — 4 + [1+4L]? + 3n + [32]? + [1+ext]? bytes
 
 Wire format (see ROADMAP §7.0.2 for the full bit-assignment rationale):
 
 ```
 byte:  0      1                                        2     3
-       ┌───┬──────────────────────────────────────────┬─────┬───────────┐
-       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │S│n_entries│
-       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ (7b)    │
-       └───┴──────────────────────────────────────────┴─────┴───────────┘
+       ┌───┬──────────────────────────────────────────┬─────┬──────────────┐
+       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │S│E│n_entries │
+       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ │ (6b)     │
+       └───┴──────────────────────────────────────────┴─────┴──────────────┘
 
 if has_schedule == 1 (optional schedule block):
   byte 4:       layer_count(8)
@@ -141,6 +141,19 @@ route entries × n_entries (3 bytes each, start after optional schedule block):
 
 if S == 1:
   trailing destination-seen bitmap: 32 bytes, bits for node ids 0..254
+
+if E == 1:
+  trailing extension block after the optional bitmap:
+    ext_len(8), then TLVs totalling ext_len bytes
+
+  TLV header byte:
+       ┌─────────┬────────┐
+       │ type(4) │ len(4) │
+       └─────────┴────────┘
+
+  type 1: suspect/silent node ids, payload = len × node_id(8)
+  type 2: explicit liveness state, payload = repeated {node_id(8), state(8)}
+          state: 1=suspect, 2=silent, 3=dead
 ```
 
 **Byte-1 flag bits:**
@@ -156,7 +169,9 @@ if S == 1:
 - `src` (8 bits): beacon sender's node id.
 - `S` (1 bit, bit 7 of byte 3): a 32-byte destination-seen bitmap follows
   the route-entry block.
-- `n_entries` (7 bits, bits 6:0): route-entry count in this page (capped by
+- `E` (1 bit, bit 6 of byte 3): a compact extension block follows after the
+  route-entry block and optional bitmap.
+- `n_entries` (6 bits, bits 5:0): route-entry count in this page (capped by
   `beacon_max_entries`, default 49 for a 151-byte frame).
 
 **Destination-seen bitmap:** Set bits mean "the beacon sender has recently
@@ -168,11 +183,30 @@ candidates, never refreshes candidates via other neighbours, and never
 changes route score, hop count, gateway state, candidate order, or dirty
 status.
 
+**Extension TLVs:** BCN extensions are optional and bounded. The first byte
+after the optional bitmap is `ext_len`; receivers then parse TLVs where the
+high nibble is `type` and the low nibble is payload length. Unknown types are
+skipped.
+
+Type `1` carries the compact legacy suspect/silent list. Type `2` carries an
+explicit liveness state. `suspect` is a soft penalty, `silent` is temporarily
+ineligible for RTS selection, and `dead` is an explicit longer-lived claim
+after repeated non-responsiveness. None of these delete route knowledge; they
+gate candidate eligibility until TTL expiry or until any valid frame from that
+node clears the mark.
+
+Receivers apply remote liveness states locally, but do not re-gossip remote
+reports. Only local RTS-timeout evidence is advertised, which keeps this from
+becoming a beacon storm. If a node hears itself listed, it emits
+`peer_suspect_self_heard` and schedules a corrective BCN only when its own
+budget tier is below CRITICAL.
+
 **Route entry byte 2 bit fields:**
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
   via `bucket_of_snr_4b` (16 buckets, 2 dB resolution, range −20..+10 dB).
   Decoded via `snr_of_bucket_4b`. ACK uses a separate 2-bit coarse SNR
-  encoding so it can also carry budget back-pressure while staying 2 bytes.
+  encoding so it can also carry budget back-pressure plus an addressed
+  recipient byte.
 - `(hops-1)` (3 bits, 3:1): wire carries `hops − 1` (range 0..7). In-memory
   `rt[]` candidates store decoded `hops` (range 1..8). The 8-hop cap is
   preserved: `combined_hops > 8` routes are rejected at the receiver.
@@ -230,15 +264,15 @@ byte:  0   1    2    3                        4    5                   6        
   plus MAC (= `#inner + MAC_LEN`). Lets the receiver size
   `pending_rx_expiry` to actual airtime instead of worst-case.
 
-### 3.3 CTS (`'C'`) — 2 bytes
+### 3.3 CTS (`'C'`) — 3 bytes
 
 ```
-byte:  0   1
-       ┌───┬───────────────────────────────────┐
-       │'C'│ ctr_lo (4 hi)                     │
-       │   │ chosen_data_sf - 5 (3)            │
-       │   │ already_received (1)              │
-       └───┴───────────────────────────────────┘
+byte:  0   1                                2
+       ┌───┬───────────────────────────────┬────┐
+       │'C'│ ctr_lo (4 hi)                 │ to │
+       │   │ chosen_data_sf - 5 (3)        │    │
+       │   │ already_received (1)          │    │
+       └───┴───────────────────────────────┴────┘
 ```
 
 - `ctr_lo` (4 bits): echoes the RTS's ctr_lo. Originator matches
@@ -249,10 +283,13 @@ byte:  0   1
   and ACKed this DATA, but the sender retried RTS because that ACK was
   lost. The sender treats this CTS as hop-complete and does not transmit
   DATA again.
+- `to` (8 bits): intended requester id. Nodes can overhear CTS for
+  passive blind-window marking, but only the addressed node may match it
+  to `pending_tx`.
 
 No `leaf_id` — CTS is matched at the originator by
-`pending_tx.ctr_lo`, which was set after the originator's already-
-validated RTS.
+`to`, responder source, and `pending_tx.ctr_lo`, which was set after the
+originator's already-validated RTS.
 
 ### 3.4 DATA (`'D'`) — 10 + n bytes (in-leaf, addr_len=0)
 
@@ -307,14 +344,14 @@ hop-level ctr_lo: low nibble of ctr (ctr & 0xf), used for pending_rx matching.
 - In-leaf size: 10 + n bytes (vs 8 + n before §7.0.1). The +2 B overhead
   is the crypto/privacy stub cost; wire layout is identical once §8 lands.
 
-### 3.5 ACK (`'K'`) — 2 bytes
+### 3.5 ACK (`'K'`) — 3 bytes
 
 ```
-byte:  0   1
-       ┌───┬───────────────────────────────────┐
-       │'K'│ ctr_lo (4 hi)                     │
-       │   │ budget_hint (2) | snr_coarse (2) │
-       └───┴───────────────────────────────────┘
+byte:  0   1                                2
+       ┌───┬───────────────────────────────┬────┐
+       │'K'│ ctr_lo (4 hi)                 │ to │
+       │   │ budget_hint (2) | snr_coarse  │    │
+       └───┴───────────────────────────────┴────┘
 ```
 
 - `ctr_lo` (4 bits): echoes the DATA's ctr_lo.
@@ -324,6 +361,8 @@ byte:  0   1
   does not mark the receiver blind.
 - `snr_coarse` (2 bits): receiver's coarse DATA-leg SNR. `0=poor`,
   `1=usable`, `2=good`, `3=no info`.
+- `to` (8 bits): intended previous-hop id. Other nodes ignore the ACK
+  even if `ctr_lo` and responder source appear to match a local flight.
 
 The originator/forwarder feeds the decoded SNR into
 `snr_ewma_out[next_hop]` — outbound link-quality estimate, separate
@@ -334,6 +373,14 @@ On ACK reception, non-zero `budget_hint` updates the sender's temporary
 candidates through that next-hop. Unlike a budget NACK, ACK warning
 does not set `blind_until` and does not trigger a dirty route beacon;
 it is early local back-pressure for the upstream router.
+
+Lost ACK recovery has one additional passive path: if a sender is still
+waiting for hop completion and overhears its selected next-hop emitting an
+RTS/RTS-fwd for the same `(dst, ctr_lo, payload_len)`, it treats that
+overheard forward RTS as an implicit hop ACK. The next-hop could not forward
+the packet unless it had decoded the sender's DATA, so the sender cancels its
+ACK/RTS retry timers and marks the hop complete. Any already-scheduled
+LBT-deferred RTS retry for that stale `pending_tx` is cancelled before TX.
 
 ### 3.7 Q (`'Q'`) — 4 bytes (query/control)
 
@@ -383,18 +430,14 @@ responder suppresses its pending sync response if it hears another
 useful BCN before its timer fires. This lets one good neighbour satisfy
 a joiner without all nearby nodes transmitting full BCNs at once.
 
-### 3.6 NACK (`'N'`) — 3 bytes
-
-Shrunk from 4→3 bytes (ROADMAP §7.0.5). The fourth byte of the old
-encoding was dropped; the remaining payload byte encodes per-reason
-data with sufficient fidelity for all current use-cases.
+### 3.6 NACK (`'N'`) — 4 bytes
 
 ```
-byte:  0   1                       2
-       ┌───┬───────────────────┬───────────────────┐
-       │'N'│ reason   (4 hi)   │ payload           │
-       │   │ ctr_lo   (4 lo)   │ (reason-specific) │
-       └───┴───────────────────┴───────────────────┘
+byte:  0   1                       2                   3
+       ┌───┬───────────────────┬───────────────────┬────┐
+       │'N'│ reason   (4 hi)   │ payload           │ to │
+       │   │ ctr_lo   (4 lo)   │ (reason-specific) │    │
+       └───┴───────────────────┴───────────────────┴────┘
 ```
 
 - `ctr_lo` (4 bits, lo nibble of byte 1): RTS's `ctr_lo` being NACKed.
@@ -412,6 +455,7 @@ byte:  0   1                       2
     EXHAUSTED=3); `headroom_buckets` 0..15 → 0–100% remaining budget
     (value/15 × 100%). Pass 0 for headroom when unknown.
   - 2..15 reserved.
+- `to` (8 bits): intended requester/upstream id. Other nodes ignore it.
 
 **Payload decoding summary:**
 
@@ -432,12 +476,12 @@ hears it regardless of which SF it is listening on at that moment.
 | BCN | 4 + 3n (plain leaf); 4 + [1 + 4L] + 3n (gateway w/ L upper-layer schedule records) | n entries (3 B each, bit-packed); default cap 49 → max ~151 B for plain leaf |
 | Q   | 4      | RREQ-route (one-hop) |
 | RTS | 8 | fixed |
-| CTS | 2 | fixed |
+| CTS | 3 | fixed; addressed response |
 | DATA | 10 + n | in-leaf (addr_len=0): 6 B hdr + 2 B inner-hdr + n B body + 4 B MAC |
-| ACK | 2 | fixed |
-| NACK | 3 | fixed |
+| ACK | 3 | fixed; addressed response |
+| NACK | 4 | fixed; addressed response |
 
-Per-flight control overhead (RTS + CTS + ACK) = **12 bytes**.
+Per-flight control overhead (RTS + CTS + ACK) = **14 bytes**.
 
 ---
 
@@ -652,12 +696,15 @@ format.
 Composes §11.5 budget tiers with `rt_merge`'s candidate ordering. The
 per-neighbour duty-cycle tier signal — set when a peer sends us a
 budget-NACK (§3.6 reason=`budget_low`) — propagates from the
-reactive blind-mark machinery into route comparison. Raw route
-candidates remain factual; the temporary neighbour-health overlay
-changes only the effective score used while ordering and choosing
-candidates. Saturated next-hops are demoted from the primary slot when
-there is a usable alternative, not just temporarily skipped during
-`classify_blind`.
+reactive blind-mark machinery into route comparison. Route candidates store a
+conservative score: control/DATA RX SNR samples are reduced by
+`route_snr_conservatism_db` before they enter `rt_merge`. This keeps marginal
+links available, but makes route ordering prefer cleaner alternatives because
+one successful SF8 control decode is not treated as a stable DATA-plane
+margin guarantee. Temporary neighbour-health overlays then adjust the
+effective score used while ordering and choosing candidates. Saturated
+next-hops are demoted from the primary slot when there is a usable
+alternative, not just temporarily skipped during `classify_blind`.
 
 ```
 TIER_SCORE_PENALTY_BY_ALTS_DB:
@@ -666,7 +713,9 @@ TIER_SCORE_PENALTY_BY_ALTS_DB:
   EXHAUSTED: no viable alt=8,  one alt=15, two+ alts=25
 
 effective_score(c) =
-  c.score - penalty[get_tier(c.next_hop)][viable_alt_count_for_dest(c)]
+  c.score
+  - penalty[get_tier(c.next_hop)][viable_alt_count_for_dest(c)]
+  - peer_suspect_penalty(c.next_hop)
 
 route_strictly_better uses effective_score wherever it used raw score
 ```
@@ -677,14 +726,44 @@ route_strictly_better uses effective_score wherever it used raw score
 - `neighbor_budget_tier_ttl_ms` — expiry (default 5 min). After this,
   `get_neighbor_tier(X)` returns HEALTHY → saturated peers return to
   the primary pool when no fresh NACKs arrive.
+- `peer_rts_timeouts[X]` — consecutive sender-side RTS timeouts while
+  targeting peer X.
+- `peer_suspect_until[X]` / `peer_silent_until[X]` / `peer_dead_until[X]` —
+  temporary peer-liveness overlays. They penalize or gate candidates via X;
+  they do not delete routes.
+- `peer_suspect_advertise_until[X]` — local-only advertisement window. Set
+  only from this node's RTS timeouts, not from remote suspect TLVs.
+- `peer_dead_advertise_until[X]` — local-only explicit dead advertisement
+  window. Set only from local long-window RTS timeout evidence.
 
 **Set on:** budget NACK reception (§3.6 reason=`budget_low`), alongside
 the `blind_until` mark. On receipt, the node immediately re-sorts any
 local route entries that use the penalized neighbour; if the advertised
 primary changes, it marks the entry dirty and schedules a normal
-triggered beacon. Route selection also refreshes candidate order before
+triggered beacon. Repeated RTS silence sets `peer_suspect_until` after
+`peer_suspect_rts_timeouts` attempts and `peer_silent_until` after
+`peer_silent_rts_timeouts`; the next BCN can carry the suspect-node TLV from
+§3.1. Route selection also refreshes candidate order before
 issuing/cascading sends so expired penalties naturally allow recovered
-peers back into the primary pool.
+peers back into the primary pool. A `suspect` peer is only penalized; a
+`silent` peer is temporarily ineligible for new RTS selection.
+
+Immediate next-hop liveness is gated separately from destination-route
+freshness. Before any RTS is issued, the selected immediate next-hop must
+have been directly heard within `next_hop_live_ttl_ms`; otherwise that
+candidate is skipped even if the destination route entry has not aged out.
+This prevents spending RTS attempts on routes whose destination knowledge is
+still fresh but whose relay has disappeared. If all candidates are stale or
+silent, the sender defers the packet and emits `Q:ROUTE_QUERY` instead of
+burning more RTS attempts. BCN/DV route entries whose advertised second hop
+is locally `silent` are skipped so a neighbour does not reintroduce a
+proposal through a known-dead node.
+
+Promotion to `dead` requires longer evidence: by default at least
+`peer_dead_rts_timeouts` local RTS timeouts spread across
+`peer_dead_evidence_window_ms` (15 min). Dead state is advertised in BCN TLV
+type 2 and expires by `peer_dead_ttl_ms`, or immediately on any valid frame
+from that node.
 
 **Pays off when:** load is **asymmetrically distributed** — some hubs
 have slack, others are saturated. The proactive demotion shifts
@@ -850,9 +929,10 @@ The stable offset only advances by the number of stable slots used.
 When dirty fills the beacon, stable progress isn't lost.
 
 **Steady state with no churn after discovery:** every route is clean →
-Phase 1 is empty → Phase 2 is skipped → BCN carries only the header and
-optional destination-seen bitmap. Existing same-next-hop candidates are
-kept fresh by bitmap refresh, not by re-advertising full route pages.
+Phase 1 is empty → Phase 2 is skipped → BCN carries only the header, optional
+destination-seen bitmap, and optional extension TLVs. Existing same-next-hop
+candidates are kept fresh by bitmap refresh, not by re-advertising full route
+pages. Suspect-node TLVs are a separate temporary liveness hint.
 
 **Active state with churn:** route mutations land in the dirty set and
 are guaranteed to ship in the next beacon. Convergence latency for a
@@ -862,7 +942,8 @@ round-trip).
 
 Telemetry: `beacon_diff_breakdown` event fires per beacon with
 `{dirty_n, stable_n, total_dirty, rt_total, kind, n_entries, seen_bits,
-dirty_only}`. `total_dirty` greater than `dirty_n` means some dirty
+suspect_nodes, ext_len, dirty_only}`. `total_dirty` greater than `dirty_n`
+means some dirty
 entries overflowed the page and will surface in the next beacon (no
 information loss).
 
@@ -1087,7 +1168,7 @@ acting on them).
 ```
 Originator calls send_e2e <dst> <text>:
   - allocate ctr = self:next_ctr(dst_id)   (per-(self,dst) 16-bit counter)
-  - record pending_e2e[ctr] = { sent_at, dst, text }
+  - record pending_e2e[dst_id, ctr] = { sent_at, dst, ctr, text }
   - emit e2e_ack_pending
   - enqueue with E2E_ACK_REQ set on wire byte 1 (flags = DATA_FLAG_E2E_ACK_REQ)
 ```
@@ -1109,7 +1190,7 @@ Note: the return frame never sets E2E_ACK_REQ — no recursion.
 ```
 on_recv "D" → delivered branch (d.e2e_is_ack = true):
   - acked_ctr = d.body:byte(1) | (d.body:byte(2) << 8)
-  - look up pending_e2e[acked_ctr]:
+  - look up pending_e2e[d.origin, acked_ctr]:
       - present: emit delivered_confirmed (payload = info.user_text), clear entry
       - absent : emit e2e_ack_unmatched (duplicate or already timed out)
   - DO NOT emit a normal `delivered` (this is an ACK, not user content)
@@ -1192,8 +1273,9 @@ busy node is the originator's only target).
 ### 8.2 RTS already acked (sender retried after losing previous ACK)
 
 ```
-on_recv 'R' with last_acked_from[r.src].ctr_lo == r.ctr_lo
-       AND (now − last_acked_from[r.src].t_ms) < last_acked_ttl_ms (10 s):
+ack_key = (r.src, r.dst, r.ctr_lo, r.payload_len)
+on_recv 'R' with last_acked_from[ack_key]
+       AND (now − last_acked_from[ack_key].t_ms) < last_acked_ttl_ms (10 s):
   emit rts_already_acked
   pack_cts(r.ctr_lo, chosen_data_sf, already_received=1) → tx 'C' on routing_sf
   return  (skip CTS + DATA)
@@ -1204,16 +1286,20 @@ with CTS `already_received=1`, so they clear `pending_tx` without
 retransmitting DATA and without us reprocessing or forwarding the
 message twice.
 
-The 10s TTL is what makes 4-bit ctr_lo safe under wraparound: at any
-plausible per-sender send rate, 16 sends take much longer than 10 s,
-so the cache never false-positives on a wrapped id.
+The cache key includes destination and RTS `payload_len`, not only
+`(sender, ctr_lo)`. The 4-bit `ctr_lo` is intentionally small, so a
+sender can have different in-flight or recent packets with the same low
+counter. The 10s TTL bounds wraparound exposure; the wider key prevents
+cross-packet false positives during normal retry traffic.
 
 ### 8.3 Duplicate RTS while we're mid-flight as receiver
 
 ```
 on_recv 'R' with pending_rx ~= nil AND
             pending_rx.from == r.src AND
-            pending_rx.ctr_lo == r.ctr_lo:
+            pending_rx.dst == r.dst AND
+            pending_rx.ctr_lo == r.ctr_lo AND
+            pending_rx.payload_len == r.payload_len:
   emit rts_rx_dup
   pack_cts(r.ctr_lo, pending_rx.chosen_data_sf)
   tx 'C' on routing_sf  (CTS-dup label)
@@ -1246,6 +1332,13 @@ Three call sites consult `blind_until` before TXing an RTS:
 - `issue_send` — first attempt
 - `tx_rts_retry` — every retry
 - `rts_timeout_fire` — when timeout fires, re-check
+
+Forwarder route selection also applies the `previous_hop` loop guard to
+the initial primary candidate before RTS emission. If the best local
+route points back to the node that just handed us the DATA, `issue_send`
+uses the first fresh, non-blind, non-suspect alternate and emits
+`tx_previous_hop_alt`; if none exists it emits `send_no_route` with
+`reason=previous_hop_only`.
 
 ```
 classify_blind(self, dst, current_next_hop, alts_tried, previous_hop):
@@ -1358,10 +1451,10 @@ Receiving a DATA frame:
 on_recv 'D' (matches pending_rx):
   d = parse_data(frame)    -- yields flags, ctr, origin, body, e2e_ack_req, e2e_is_ack
   ack the frame regardless (sender clears pending_tx)
-  if (d.origin, d.ctr) in seen_origins:
+  if (d.origin, d.dst, d.ctr) in seen_origins:
     emit dup_drop
     return  (don't deliver-twice or forward-twice)
-  record (d.origin, d.ctr) in seen_origins with TTL
+  record (d.origin, d.dst, d.ctr) in seen_origins with TTL
   if dst == self.id:
     if d.e2e_is_ack:
       handle E2E ACK arrival (see §7.4)
@@ -1740,11 +1833,11 @@ Per-node state populated:
 | `tx_queue` | array | Queued sends, drained by become_free |
 | `tx_stash` | table | label → frame for on_radio_busy retry |
 | `blind_until` | table | nbr → absolute_ms (F1 mitigation) |
-| `last_acked_from` | table | sender → {ctr_lo, t_ms} (RTS dedup) |
-| `seen_origins` | table | (origin, ctr) → t_ms (end-to-end dedup) |
+| `last_acked_from` | table | (sender, dst, ctr_lo, payload_len) → {t_ms, chosen_data_sf} (RTS dedup) |
+| `seen_origins` | table | (origin, dst, ctr) → t_ms (end-to-end dedup) |
 | `peer_send_counter` | table | peer_id → outbound 16-bit ctr (per-(self,peer)) |
 | `peer_last_seen_ctr` | table | peer_id → highest inbound ctr seen (replay window) |
-| `pending_e2e` | table | ctr → {sent_at, dst, text} (E2E ACK pending state) |
+| `pending_e2e` | table | (dst, ctr) → {sent_at, dst, ctr, text} (E2E ACK pending state) |
 | `snr_ewma_in` / `snr_ewma_out` | table | nbr → SNR estimate |
 | `last_rx_routing_sf_ms` | int | Beacon throttle witness |
 | `leaf_id` | int | 4-bit mesh identifier |
@@ -1814,11 +1907,22 @@ expectations) subscribe by event_type.
 
 | Event | Trigger | Key data |
 |---|---|---|
-| `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind`, `seen_bits`, `dirty_only` |
-| `beacon_rx` | Beacon decoded | `src`, `n_entries`, `seen_bits` |
+| `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind`, `seen_bits`, `suspect_nodes`, `ext_len`, `dirty_only` |
+| `beacon_rx` | Beacon decoded | `src`, `n_entries`, `seen_bits`, `suspect_nodes` |
 | `seen_bitmap_tx` / `seen_bitmap_rx` | Destination-seen bitmap emitted/decoded | `bits_set`, `ttl_ms` / `from`, `bits_set`, `applied`, `refreshed` |
+| `peer_suspect_mark` | RTS silence or BCN suspect TLV applied a temporary peer penalty | `node`, `level`, `previous_level`, `source`, `remote_src`, `rts_timeouts`, `reranked` |
+| `peer_suspect_clear` | A valid frame from a suspected peer cleared local suspicion | `node`, `source`, `reranked` |
+| `peer_suspect_bcn_rx` | BCN suspect-node TLV decoded | `from`, `count`, `applied`, `self_marked` |
+| `peer_liveness_bcn_rx` | BCN explicit liveness-state TLV decoded | `from`, `count`, `applied`, `dead`, `self_marked` |
+| `peer_suspect_self_heard` | This node heard another peer list it as suspect | `from`, `budget_tier` |
+| `tx_silent_alt` | Silent next-hop skipped in favor of another candidate | `origin`, `dst`, `from_next`, `to_next`, `source` |
+| `tx_silent_defer` | All usable candidates were silent; packet deferred and Q requested | `origin`, `dst`, `next`, `source` |
+| `rt_skip_stale_next` | Route candidate skipped because immediate next-hop was not directly heard within `next_hop_live_ttl_ms` | `dest`, `next`, `age_ms`, `ttl_ms`, `source` |
+| `tx_stale_next_alt` | Stale immediate next-hop skipped in favor of another candidate | `origin`, `dst`, `from_next`, `to_next`, `source` |
+| `tx_stale_next_defer` | All usable candidates had stale immediate next-hops; packet deferred and Q requested | `origin`, `dst`, `next`, `source` |
+| `rt_skip_silent_n2` | BCN/DV route proposal skipped because its advertised next hop is locally silent | `dest`, `via`, `advertised_next`, `suspect_level` |
 | `beacon_skipped_busy` | Throttle suppressed beacon | `since_rx_ms`, `threshold_ms`, `stage` |
-| `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind`, `n_entries`, `seen_bits`, `dirty_only` |
+| `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind`, `n_entries`, `seen_bits`, `suspect_nodes`, `ext_len`, `dirty_only` |
 | `beacon_max_idle_force` | Max-idle override bypassed busy throttle (§6.2) | `since_tx_ms`, `max_idle_ms`, `since_rx_ms` |
 | `beacon_max_idle_skip_clean` | B+C composite skipped override (no dirty + recent neighbour BCN) (§6.2) | `dirty_n`, `since_bcn_rx_ms`, `max_idle_ms` |
 | `beacon_skipped_budget` | Beacon skipped because budget tier ≥ CRITICAL (§11.5) | `tier`, `pct_used` |
@@ -1842,28 +1946,37 @@ expectations) subscribe by event_type.
 | `send_giveup` | Defer TTL elapsed without route appearing | `origin`, `dst`, `waited_ms`, `reason` |
 | `rts_tx` | RTS emitted | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `sf_bitmap` |
 | `rts_retry` | tx_rts_retry fired | `attempt_seq`, `reason`, `attempt` |
-| `rts_attempt_detail` | Sender-side focused RTS attempt telemetry | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `candidate_rank`, `candidate_count`, `route_score`, `route_score_eff`, `budget_penalty_db`, `viable_alts`, `route_hops`, `route_age_ms`, `next_tier`, `next_blind` |
+| `rts_attempt_detail` | Sender-side focused RTS attempt telemetry | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `candidate_rank`, `candidate_count`, `route_score`, `route_score_eff`, `budget_penalty_db`, `suspect_penalty_db`, `viable_alts`, `route_hops`, `route_age_ms`, `next_tier`, `next_suspect_level`, `next_seen_fresh`, `next_seen_age_ms`, `next_blind` |
 | `rts_attempt_timeout` | Sender-side RTS attempt reached CTS timeout | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `reason` |
+| `rts_tx_blocked` | Runtime LBT/half-duplex blocked an RTS-class TX after the sender entered pending state; CTS for this attempt is ignored until retry | `attempt_seq`, `origin`, `dst`, `next`, `ctr`, `ctr_lo`, `payload`, `label`, `reason`, `busy_until_ms` |
 | `rts_receiver_state` | Intended receiver state immediately after RTS decode | `from`, `dst`, `ctr_lo`, `rx_snr`, `ewma_snr`, `has_pending_tx`, `has_pending_rx`, `budget_tier` |
 | `rts_rx` | RTS decoded, addressed to us | `from`, `dst`, `ctr_lo`, `chosen_data_sf`, `rx_snr`, `ewma_snr` |
-| `rts_rx_dup` | Duplicate RTS while pending_rx active | `from`, `ctr_lo` |
-| `rts_already_acked` | Cached ACK short-circuit; receiver sends CTS `already_received=1` | `from`, `ctr_lo` |
+| `rts_rx_dup` | Duplicate RTS while pending_rx active | `from`, `dst`, `ctr_lo`, `payload_len` |
+| `rts_already_acked` | Cached ACK short-circuit; receiver sends CTS `already_received=1` | `from`, `dst`, `ctr_lo`, `payload_len` |
 | `rts_drop_no_sf` | RTS bitmap intersection empty | `from`, `ctr_lo`, `sf_bitmap` |
 | `rts_drop_pending_tx` | Silent-drop RTS while we're busy as sender (§8.1) | `from`, `ctr_lo` |
 | `cts_tx` | CTS emitted | `to`, `ctr_lo`, `chosen_data_sf`, `already_received` when set |
 | `cts_rx` | CTS decoded, matches pending_tx | `from`, `ctr_lo`, `chosen_data_sf`, `already_received` |
+| `cts_drop_no_active_rts` | CTS had matching `ctr_lo`, but this node's RTS attempt was blocked before it reached the radio | `from`, `ctr_lo`, `origin`, `dst`, `next`, `payload`, `attempt_seq` |
+| `cts_drop_unexpected_src` | CTS had matching `ctr_lo` but came from a node other than selected next-hop | `expected`, `from`, `ctr_lo`, `origin`, `dst` |
 | `cts_already_received_rx` | CTS says receiver already decoded this DATA from an earlier try; sender completes hop without DATA retransmit | `from`, `ctr_lo`, `chosen_data_sf`, `origin`, `dst`, `ctr` |
 | `cts_invalid_sf` | Receiver picked an SF outside our bitmap | `from`, `ctr_lo`, `chosen_data_sf` |
 | `data_tx` | DATA emitted | `dst`, `next`, `ctr_lo`, `payload` |
+| `data_tx_blocked` | Runtime LBT/half-duplex blocked a DATA TX after CTS; ACK for this attempt is ignored until DATA is handed to the radio | `attempt_seq`, `origin`, `dst`, `next`, `ctr`, `ctr_lo`, `payload`, `label`, `reason`, `busy_until_ms` |
 | `data_rx` | DATA decoded, matches pending_rx | `from`, `ctr_lo`, `len` |
 | `data_rx_timeout` | pending_rx_expiry fired | `from`, `ctr_lo` |
 | `ack_tx` | ACK emitted | `to`, `ctr_lo`, `data_snr`, `budget_tier`, `budget_hint` |
 | `ack_rx` | ACK decoded, matches pending_tx | `from`, `ctr_lo`, `data_snr_db`, `snr_bucket_coarse`, `budget_hint`, `budget_reranked` |
+| `implicit_ack_from_forward` | Sender overheard its selected next-hop forwarding the same DATA, so the hop is complete despite a lost ACK | `from`, `next`, `forward_next`, `origin`, `dst`, `ctr`, `ctr_lo`, `payload`, `attempt_seq` |
+| `ack_drop_no_active_data` | ACK had matching `ctr_lo`, but this node's DATA attempt was blocked before it reached the radio | `from`, `ctr_lo`, `origin`, `dst`, `next`, `payload`, `attempt_seq` |
+| `ack_drop_unexpected_src` | ACK had matching `ctr_lo` but came from a node other than selected next-hop | `expected`, `from`, `ctr_lo`, `origin`, `dst` |
 | `ack_snr_feedback` | snr_ewma_out updated from ACK piggyback | `from`, `data_snr_db`, `snr_bucket`, `snr_bucket_coarse`, `ewma_out` |
+| `rts_tx_cancelled_stale` | LBT-deferred RTS retry was about to fire, but its original `pending_tx` was already completed/replaced | `label`, `reason` |
 | `nack_tx` | NACK emitted | `to`, `ctr_lo`, `reason` (`busy_rx` or `budget_low`), plus per-reason: `busy_for_ms` OR `tier` |
 | `nack_rx` | NACK decoded, matches pending_tx | `from`, `ctr_lo`, `reason`, plus per-reason: `busy_for_ms` OR `tier`, `blind_ms` |
+| `nack_drop_unexpected_src` | NACK had matching `ctr_lo` but came from a node other than selected next-hop | `expected`, `from`, `ctr_lo`, `origin`, `dst`, `reason` |
 | `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `ctr` |
-| `dup_drop` | Duplicate (origin, ctr) | `origin`, `ctr` |
+| `dup_drop` | Duplicate `(origin, dst, ctr)` | `origin`, `dst`, `ctr` |
 | `forward_queued` | Forwarder enqueued the relay | `origin`, `dst` |
 | `q_tx` | Q (RREQ-route) emitted by sender (§3.7) | `dst`, `dst_name` |
 | `q_rx` | Q decoded; receiver matches leaf_id | `from`, `dest` |
@@ -1948,6 +2061,7 @@ the JSON scenario). Defaults shown.
 | `quiet_threshold_ms` | 30000 | Adaptive throttle silence requirement |
 | `beacon_silence_jitter_ms` | 10000 | Defer-jitter after silence detected |
 | `beacon_max_idle_ms` | 900000 (15 min) | Max idle before busy throttle is bypassed (§6.2). Set to 0 to disable. |
+| `peer_suspect_bcn_max` | 8 | Max suspected node ids carried in one BCN extension TLV. Wire TLV caps this at 15. |
 
 ### 14.3 Data plane
 
@@ -1957,6 +2071,18 @@ the JSON scenario). Defaults shown.
 | `rts_timeout_ms` | computed | airtime(routing_sf, RTS) + airtime(data_sf, CTS) |
 | `rts_busy_retry_ms` | 30 | Retry delay when our retry timer fires while we're mid-RX |
 | `rts_max_retries` | 3 | RTS retry budget. Was 8 before fix `7ba772c` (drop pending_tx NACK + cap retries). With base ~5 s `rts_timeout` under load, 8 retries = ~30+ s per next-hop before alt-switching; 3 retries = ~12 s per next-hop, ~36 s across K=3 alts. Bounds wallclock pending_tx time so a stuck flight clears faster. |
+| `route_snr_conservatism_db` | 3.0 | SNR subtracted before storing route candidate score, so marginal control-plane samples do not over-promote DATA paths. |
+| `next_hop_live_ttl_ms` | 1200000 | Hard route-selection freshness TTL for immediate next-hop liveness. Shorter than destination route TTL. |
+| `peer_suspect_rts_timeouts` | 2 | Consecutive RTS timeouts before a next-hop is marked suspect. |
+| `peer_silent_rts_timeouts` | 3 | Consecutive RTS timeouts before a next-hop is marked silent. |
+| `peer_dead_rts_timeouts` | 6 | RTS timeouts before a next-hop can be promoted to explicit dead, subject to the evidence window. |
+| `peer_suspect_ttl_ms` | 300000 | Suspect mark TTL. |
+| `peer_silent_ttl_ms` | 900000 | Silent mark TTL. |
+| `peer_dead_ttl_ms` | 3600000 | Dead mark TTL; cleared immediately by any valid frame from that node. |
+| `peer_dead_evidence_window_ms` | 900000 | Minimum elapsed time from first RTS timeout before dead promotion. |
+| `peer_suspect_penalty_db` | 12.0 | Effective route-score penalty for suspect next-hops. |
+| `peer_silent_penalty_db` | 40.0 | Effective route-score penalty for silent next-hops. |
+| `peer_dead_penalty_db` | 80.0 | Effective route-score penalty for dead next-hops. |
 | `max_payload_bytes` | 50 | Receiver's pending_rx_expiry budget cap |
 | `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |

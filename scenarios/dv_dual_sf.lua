@@ -5,7 +5,7 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|n_entries(7)](1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}, seen_bitmap(32B)?  →  4 + [1+4L]? + 3n + [32]? B |
+-- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|has_ext(1)|n_entries(6)](1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}, seen_bitmap(32B)?, ext_len(1)+TLVs?  →  4 + [1+4L]? + 3n + [32]? + [1+ext]? B |
 -- | `'R'` | RTS    | `R`, src(1), next(1), [addr_len(3)|rsv(1)|leaf_id(4)](1), dst(1 when addr_len=0), [ctr_lo(4)|rsv(4)](1), sf_bitmap(1), payload_len(1)  →  8 B (in-leaf) |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|already_received(1)](1)  →  2 B                      |
 -- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
@@ -210,10 +210,11 @@
 --     pending_tx, retunes RX to data_sf, starts rts_timeout
 --
 --   NEXT-HOP (on_recv 'R' with next == self.id):
---     • last_acked_from[r.src] == r.ctr_lo  → tx CTS already_received=1,
+--     • last_acked_from[(r.src,r.dst,r.ctr_lo,payload_len)] hit
+--                                      → tx CTS already_received=1,
 --                                              return (sender retried after
 --                                              losing previous ACK)
---     • pending_rx busy + same (from,ctr_lo) → re-tx CTS-dup, restart
+--     • pending_rx busy + same DATA identity → re-tx CTS-dup, restart
 --                                              pending_rx_expiry, return
 --     • pending_rx busy + different sender   → emit rts_rejected_busy
 --     • else: set_rx_sf(data_sf); pending_rx = {from,dst,ctr_lo,...};
@@ -231,12 +232,12 @@
 --     1. parse_data gives d.origin, d.ctr, d.flags, d.body, d.inner directly
 --        (no inner-payload header to strip; origin + ctr are on the wire)
 --     2. cancel pending_rx_expiry; set_rx_sf(routing_sf); pending_rx = nil
---     3. cache last_acked_from[pending_rx.from] = d.ctr_lo; tx 'K' on routing_sf
---     4. ORIGIN-LEVEL DEDUP: if (d.origin, d.ctr) seen recently,
+--     3. cache last_acked_from[(pending_rx.from,d.dst,d.ctr_lo,len)]; tx 'K' on routing_sf
+--     4. ORIGIN-LEVEL DEDUP: if (d.origin, d.dst, d.ctr) seen recently,
 --        emit dup_drop and return — ACK was already sent; we just don't
 --        deliver-twice or forward-twice. Catches DV routing loops and
 --        legitimate same-payload retries via different paths.
---     5. record the (origin, ctr) in seen_origins with a TTL
+--     5. record the (origin, dst, ctr) in seen_origins with a TTL
 --     6. if dst == self.id → emit "delivered" (payload = d.body)
 --        else (forward) → after ack_air_ms+1: enqueue forward (d.inner
 --        verbatim, d.ctr, d.flags), become_free
@@ -346,8 +347,9 @@
 -- Beacons advertise only candidates[1] (single best route per dest).
 --
 -- Receiver-side NACK triggers (in on_recv 'R' with next == self.id):
---   1. last_acked_from[r.src] == r.ctr_lo  → CTS already_received=1, return
---   2. pending_rx busy + same (from,ctr_lo) → CTS-dup, restart expiry
+--   1. last_acked_from[(r.src,r.dst,r.ctr_lo,payload_len)] hit
+--      → CTS already_received=1, return
+--   2. pending_rx busy + same DATA identity → CTS-dup, restart expiry
 --   3. pending_rx busy + different sender   → NACK on data_sf, busy_for =
 --      max(0, set_at + pending_rx_expiry_ms − now)
 --   4. pending_tx in flight                  → REMOVED. Used to NACK with a
@@ -445,7 +447,7 @@
 -- FLOW.
 --   1. Originator calls "send_e2e <dst> <text>". on_command:
 --        - allocates ctr via self:next_ctr(dst)
---        - records pending_e2e[ctr] = {sent_at, dst, text}
+--        - records pending_e2e[dst|ctr] = {sent_at, dst, ctr, text}
 --        - emits e2e_ack_pending
 --        - enqueues the send with DATA_FLAG_E2E_ACK_REQ set on the wire flags
 --   2. The send travels via normal RTS-CTS-DATA-ACK chain to destination.
@@ -461,7 +463,7 @@
 --   5. Origin's on_recv "D" delivered branch:
 --        - sees d.e2e_is_ack
 --        - extracts acked_ctr = body:byte(1) | (body:byte(2) << 8)
---        - looks up pending_e2e[acked_ctr]
+--        - looks up pending_e2e[d.origin|acked_ctr]
 --          - if present: emit delivered_confirmed, clear pending entry
 --          - if not: emit e2e_ack_unmatched (duplicate or already timed out)
 --        - does NOT emit "delivered" (this is an ACK, not user content)
@@ -740,7 +742,7 @@
 --   byte 0 : tag 'B'
 --   byte 1 : leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
 --   byte 2 : src (8)
---   byte 3 : has_seen_bitmap(1 hi) | n_entries(7 lo)
+--   byte 3 : has_seen_bitmap(1 hi) | has_ext(1) | n_entries(6 lo)
 --   if has_schedule == 1:
 --     byte 4 : layer_count (8)
 --     layer_count × 4-byte schedule records (parser skips today — runtime
@@ -818,8 +820,14 @@ end
 -- Steady state after discovery with no churn → all flags clean → Phase 2 is
 -- skipped → BCN carries only the header plus the optional seen bitmap.
 local BCN_N_HAS_SEEN_BITMAP = 0x80
-local BCN_N_ENTRIES_MASK    = 0x7f
+local BCN_N_HAS_EXT         = 0x40
+local BCN_N_ENTRIES_MASK    = 0x3f
 local BCN_SEEN_BITMAP_BYTES = 32
+local BCN_EXT_TYPE_SUSPECT_NODES = 1
+local BCN_EXT_TYPE_LIVENESS_STATE = 2
+local PEER_LEVEL_SUSPECT = 1
+local PEER_LEVEL_SILENT  = 2
+local PEER_LEVEL_DEAD    = 3
 
 local function bitmap_set_bit(bytes, id)
   if id < 0 or id > 254 then return end
@@ -926,6 +934,54 @@ local function apply_seen_bitmap(self, bitmap, source, bitmap_src)
   return n, refreshed
 end
 
+local function build_suspect_nodes_ext(node)
+  if node.peer_suspect_bcn_max == 0 then return nil, 0 end
+  local now = node:now()
+  local max_ids = math.min(node.peer_suspect_bcn_max or 8, 15)
+  local records = {}
+  local seen = {}
+  local function add_from(tbl, state)
+    for node_id, until_ms in pairs(tbl or {}) do
+      if node_id ~= node.id and node_id >= 0 and node_id <= 254
+         and until_ms ~= nil and until_ms > now and not seen[node_id] then
+        seen[node_id] = true
+        table.insert(records, { node_id = node_id, state = state })
+      end
+    end
+  end
+  -- Only locally observed RTS silence is advertised. Remote suspect TLVs are
+  -- applied to local routing but are not re-gossiped, otherwise one stale peer
+  -- can create a beacon storm.
+  add_from(node.peer_dead_advertise_until, PEER_LEVEL_DEAD)
+  add_from(node.peer_suspect_advertise_until, PEER_LEVEL_SILENT)
+  if #records == 0 then return nil, 0 end
+  table.sort(records, function(a, b)
+    if a.state ~= b.state then return a.state > b.state end
+    return a.node_id < b.node_id
+  end)
+  while #records > max_ids do table.remove(records) end
+  local payload = {}
+  local any_dead = false
+  for _, r in ipairs(records) do
+    if r.state >= PEER_LEVEL_DEAD then any_dead = true end
+  end
+  if any_dead then
+    for _, r in ipairs(records) do
+      table.insert(payload, string.char(r.node_id))
+      table.insert(payload, string.char(r.state & 0x03))
+    end
+    local body = table.concat(payload)
+    return string.char((BCN_EXT_TYPE_LIVENESS_STATE << 4) | (#body & 0x0f)) .. body,
+           #records
+  end
+  for _, r in ipairs(records) do
+    table.insert(payload, string.char(r.node_id))
+  end
+  local body = table.concat(payload)
+  return string.char((BCN_EXT_TYPE_SUSPECT_NODES << 4) | (#body & 0x0f)) .. body,
+         #records
+end
+
 local function pack_beacon_byte1(node)
   local b = (node.leaf_id & 0xf) << 4
   if node.has_schedule  then b = b | 0x08 end
@@ -948,15 +1004,20 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   if node.seen_bitmap_enabled then
     seen_bitmap, seen_bits = build_seen_bitmap(node)
   end
+  local ext_payload, suspect_bits = build_suspect_nodes_ext(node)
   local total = #all_dests
   if total == 0 then
     local n_byte = seen_bitmap and BCN_N_HAS_SEEN_BITMAP or 0
+    if ext_payload then n_byte = n_byte | BCN_N_HAS_EXT end
     return "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_byte)
-           .. (seen_bitmap or ""),
+           .. (seen_bitmap or "")
+           .. (ext_payload and (string.char(#ext_payload) .. ext_payload) or ""),
            0,
            {
              dirty_n = 0, stable_n = 0, total_dirty = 0,
              n_entries = 0, seen_bits = seen_bits,
+             suspect_nodes = suspect_bits or 0,
+             ext_len = ext_payload and #ext_payload or 0,
            }
   end
 
@@ -998,6 +1059,7 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   local n_total = dirty_n + stable_n
   local n_byte = n_total & BCN_N_ENTRIES_MASK
   if seen_bitmap then n_byte = n_byte | BCN_N_HAS_SEEN_BITMAP end
+  if ext_payload then n_byte = n_byte | BCN_N_HAS_EXT end
   local out = "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_byte)
   local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
@@ -1012,6 +1074,7 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   for i = 1, dirty_n do pack_one(dirty_in_order[i]) end
   for _, d  in ipairs(stable_page) do pack_one(d) end
   if seen_bitmap then out = out .. seen_bitmap end
+  if ext_payload then out = out .. string.char(#ext_payload) .. ext_payload end
 
   -- Clear dirty for routes that landed in this beacon (those that overflowed
   -- stay dirty for the next one).
@@ -1025,6 +1088,8 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
     total_dirty = total_dirty,
     n_entries   = n_total,
     seen_bits   = seen_bits,
+    suspect_nodes = suspect_bits or 0,
+    ext_len     = ext_payload and #ext_payload or 0,
     dirty_only   = dirty_only == true,
   }
 end
@@ -1042,8 +1107,10 @@ local function parse_beacon(frame)
   }
   local n_byte = frame:byte(4)
   local has_seen_bitmap = (n_byte & BCN_N_HAS_SEEN_BITMAP) ~= 0
+  local has_ext = (n_byte & BCN_N_HAS_EXT) ~= 0
   local n   = n_byte & BCN_N_ENTRIES_MASK
   out.has_seen_bitmap = has_seen_bitmap
+  out.has_ext = has_ext
   local pos = 5               -- next byte after n_entries
   if out.has_schedule then
     if #frame < pos then return nil end           -- need at least the layer_count byte
@@ -1076,6 +1143,38 @@ local function parse_beacon(frame)
     out.seen_bitmap = frame:sub(pos, pos + BCN_SEEN_BITMAP_BYTES - 1)
     out.seen_bits = bitmap_count_bits(out.seen_bitmap)
     pos = pos + BCN_SEEN_BITMAP_BYTES
+  end
+  if has_ext then
+    if #frame < pos then return nil end
+    local ext_len = frame:byte(pos)
+    pos = pos + 1
+    local ext_end = pos + ext_len - 1
+    if #frame < ext_end then return nil end
+    while pos <= ext_end do
+      local tl = frame:byte(pos)
+      pos = pos + 1
+      local typ = (tl >> 4) & 0x0f
+      local len = tl & 0x0f
+      if pos + len - 1 > ext_end then return nil end
+      if typ == BCN_EXT_TYPE_SUSPECT_NODES then
+        out.suspect_nodes = out.suspect_nodes or {}
+        for i = 0, len - 1 do
+          table.insert(out.suspect_nodes, frame:byte(pos + i))
+        end
+      elseif typ == BCN_EXT_TYPE_LIVENESS_STATE then
+        if (len % 2) ~= 0 then return nil end
+        out.liveness_states = out.liveness_states or {}
+        local i = 0
+        while i < len do
+          table.insert(out.liveness_states, {
+            node = frame:byte(pos + i),
+            state = frame:byte(pos + i + 1) & 0x03,
+          })
+          i = i + 2
+        end
+      end
+      pos = pos + len
+    end
   end
   if pos <= #frame then
     return nil
@@ -1142,40 +1241,43 @@ local function parse_rts(frame)
   }
 end
 
--- CTS — 2 bytes, bit-packed:
+-- CTS — 3 bytes, addressed response:
 --   byte 0 : tag 'C'
 --   byte 1 : ctr_lo (4 hi nibble) | (chosen_data_sf - 5) (3) | already_received (1)
-local function pack_cts(ctr_lo, chosen_data_sf, already_received)
+--   byte 2 : intended requester id
+local function pack_cts(ctr_lo, chosen_data_sf, already_received, to_id)
   local sf_off = (chosen_data_sf - 5) & 0x7
   local ack_bit = already_received and 1 or 0
   local b1 = ((ctr_lo & 0xf) << 4) | (sf_off << 1) | ack_bit
-  return "C" .. string.char(b1)
+  return "C" .. string.char(b1) .. string.char(to_id or 255)
 end
 
 local function parse_cts(frame)
-  if #frame < 2 or frame:sub(1,1) ~= "C" then return nil end
+  if #frame < 3 or frame:sub(1,1) ~= "C" then return nil end
   local b1 = frame:byte(2)
   return {
     ctr_lo         = (b1 >> 4) & 0xf,
     chosen_data_sf = ((b1 >> 1) & 0x7) + 5,
     already_received = (b1 & 0x1) ~= 0,
+    to             = frame:byte(3),
   }
 end
 
--- ACK — 2 bytes, bit-packed:
+-- ACK — 3 bytes, addressed response:
 --   byte 0 : tag 'K'
 --   byte 1 : ctr_lo (4 hi) | budget_hint (2) | snr_bucket_coarse (2 lo)
-local function pack_ack(ctr_lo, snr_db, budget_hint)
+--   byte 2 : intended previous-hop id
+local function pack_ack(ctr_lo, snr_db, budget_hint, to_id)
   local bucket = bucket_of_snr_2b(snr_db)
   local hint = budget_hint or 0
   if hint < 0 then hint = 0 end
   if hint > 3 then hint = 3 end
   local b1 = ((ctr_lo & 0xf) << 4) | ((hint & 0x3) << 2) | (bucket & 0x3)
-  return "K" .. string.char(b1)
+  return "K" .. string.char(b1) .. string.char(to_id or 255)
 end
 
 local function parse_ack(frame)
-  if #frame < 2 or frame:sub(1,1) ~= "K" then return nil end
+  if #frame < 3 or frame:sub(1,1) ~= "K" then return nil end
   local b1 = frame:byte(2)
   local bucket = b1 & 0x3
   return {
@@ -1184,6 +1286,7 @@ local function parse_ack(frame)
     snr_db            = snr_of_bucket_2b(bucket),
     snr_bucket        = bucket,
     snr_bucket_coarse = bucket,
+    to                = frame:byte(3),
   }
 end
 
@@ -1206,9 +1309,9 @@ end
 -- `ctr` is allocated by self:next_ctr(peer_id) per outbound (self → peer).
 -- It triple-duties as crypto-nonce entropy (when §8 lands), replay
 -- protection (today: TTL-based seen_origins dedup; strict-monotonic NV
--- counters land with §8), and the (origin, ctr) key used by seen_origins
--- dedup and pending_e2e lookup. CTS/ACK/NACK echo only the LOW NIBBLE
--- (ctr_lo = ctr & 0xf) for hop-level matching.
+-- counters land with §8), and the (origin, dst, ctr) key used by
+-- seen_origins dedup. CTS/ACK/NACK echo only the LOW NIBBLE (ctr_lo =
+-- ctr & 0xf) for hop-level matching.
 --
 -- Frame design rationale (see §5 in docs/ROADMAP.md):
 --   • Per-message opt-in via DATA_FLAG_E2E_ACK_REQ — bulk chat doesn't
@@ -1228,6 +1331,19 @@ local DATA_FLAG_E2E_ACK_REQ = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)
 local DATA_FLAG_E2E_IS_ACK  = 0x04   -- bit 2 of byte 1 (E2E_IS_ACK)
 local DATA_FLAG_IS_MCAST    = 0x02   -- bit 1 of byte 1 (IS_MULTICAST, always 0 this phase)
 local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
+
+local function seen_origin_key(origin_id, dst_id, ctr)
+  return string.format("%d|%d|%d", origin_id or -1, dst_id or -1, ctr or -1)
+end
+
+local function pending_e2e_key(dst_id, ctr)
+  return string.format("%d|%d", dst_id or -1, ctr or -1)
+end
+
+local function last_acked_key(sender_id, dst_id, ctr_lo, payload_len)
+  return string.format("%d|%d|%d|%d",
+    sender_id or -1, dst_id or -1, ctr_lo or -1, payload_len or -1)
+end
 
 -- NACK — 3 bytes:
 --   byte 0 : tag 'N'
@@ -1258,23 +1374,24 @@ local NACK_REASON_HOP_BUDGET = 2   -- §7.6: flight exceeded hop budget
 
 local NACK_BUSY_QUANTUM_MS = 16   -- granularity of BUSY_RX payload
 
--- NACK — 3 bytes:
+-- NACK — 4 bytes, addressed response:
 --   byte 0 : tag 'N'
 --   byte 1 : reason (4 hi) | ctr_lo (4 lo)
 --   byte 2 : payload (reason-specific)
+--   byte 3 : intended requester/upstream id
 --             BUSY_RX:    busy_for_ms / 16  (0..4080 ms, 16 ms granularity)
 --             BUDGET:     tier (4 hi) | headroom_buckets (4 lo)
 --             HOP_BUDGET: committed_hops (4 hi) | reserved (4 lo)
-local function pack_nack(ctr_lo, reason, payload)
+local function pack_nack(ctr_lo, reason, payload, to_id)
   reason  = reason or NACK_REASON_BUSY_RX
   payload = payload or 0
   if payload < 0 then payload = 0 elseif payload > 255 then payload = 255 end
   local byte1 = ((reason & 0xf) << 4) | (ctr_lo & 0xf)
-  return "N" .. string.char(byte1) .. string.char(payload)
+  return "N" .. string.char(byte1) .. string.char(payload) .. string.char(to_id or 255)
 end
 
 local function parse_nack(frame)
-  if #frame < 3 or frame:sub(1,1) ~= "N" then return nil end
+  if #frame < 4 or frame:sub(1,1) ~= "N" then return nil end
   local b1 = frame:byte(2)
   local payload = frame:byte(3)
   local reason = (b1 >> 4) & 0xf
@@ -1282,6 +1399,7 @@ local function parse_nack(frame)
     reason  = reason,
     ctr_lo  = b1 & 0xf,
     payload = payload,
+    to      = frame:byte(4),
   }
   if reason == NACK_REASON_BUSY_RX then
     out.busy_for_ms = payload * NACK_BUSY_QUANTUM_MS
@@ -1422,13 +1540,13 @@ end
 -- table at top of file so airtime predictions stay precise as we extend the
 -- protocol — bump these if the frame layout changes.
 local RTS_LEN = 8       -- 'R' + src + next + [addr_len|rsv|leaf_id] + dst + [ctr_lo<<4|rsv] + sf_bitmap + payload_len
-local CTS_LEN = 2       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | already_received)
+local CTS_LEN = 3       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | already_received) + to
 local DATA_HDR_LEN = 8  -- 'D' + byte1 + next + dst + hop_budget + prev_fwd_rt_hops + ctr_lo + ctr_hi (inner+MAC follow)
 -- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
 -- RTS payload_len = #body + DATA_INNER_OVERHEAD for in-leaf frames.
 local DATA_INNER_OVERHEAD = 2 + MAC_LEN  -- src_addr_len(1) + src_addr(1) + MAC(4) = 6
-local ACK_LEN = 2       -- 'K' + (ctr_lo<<4 | snr_bucket)
-local NACK_LEN = 3      -- 'N' + (reason_4|ctr_lo_4) + payload (reason-specific encoding)
+local ACK_LEN = 3       -- 'K' + (ctr_lo<<4 | hint_2 | snr_bucket_2) + to
+local NACK_LEN = 4      -- 'N' + (reason_4|ctr_lo_4) + payload + to
 local Q_LEN    = 4      -- 'Q' + src + dest + (leaf_id_4|reserved_4)
 
 -- LoRa on-air time in milliseconds (Semtech AN1200.13). This is intentionally
@@ -1507,11 +1625,26 @@ local function select_data_sf(rx_snr_db, sf_bitmap, margin_db)
   return nil   -- empty bitmap
 end
 
+local function data_sf_selection_snr(self, peer_id, current_snr)
+  local ewma = self.snr_ewma_in[peer_id]
+  if ewma == nil then return current_snr, nil end
+  -- For marginal edges, a stale/high EWMA can make CTS advertise a DATA SF
+  -- the current RTS sample cannot support. Use the conservative side of both.
+  return math.min(current_snr, ewma), ewma
+end
+
+local function route_score_from_snr(self, snr_db)
+  if snr_db == nil then return nil end
+  return snr_db - (self.route_snr_conservatism_db or 0.0)
+end
+
 -- Labels eligible for on_radio_busy retry. BCN is periodic — the next
 -- beacon-fire will retry naturally, no point re-queuing. RTS-class frames
 -- have their own rts_timeout retry path; running on_radio_busy retries on
 -- top would race the timeout. Only the receiver-side / DATA labels (where
--- there is no other recovery mechanism) get rescheduled.
+-- there is no other recovery mechanism) get rescheduled. Q also gets a
+-- runtime retry: if the initial route query is blocked before it reaches the
+-- radio, the deferred-send TTL can expire without anyone learning a route.
 local RETRY_ELIGIBLE = {
   ["CTS"]     = true,
   ["CTS-dup"] = true,
@@ -1519,6 +1652,7 @@ local RETRY_ELIGIBLE = {
   ["ACK"]     = true,
   ["K-dup"]   = true,
   ["NACK"]    = true,
+  ["Q"]       = true,
 }
 local TX_DEFER_MAX_RETRIES = 3
 
@@ -1559,6 +1693,9 @@ end
 
 local refresh_route_order
 local schedule_triggered_beacon
+local get_peer_suspect_level
+local is_next_hop_fresh
+local next_hop_selectable
 
 -- F1 mitigation: blind_until tracks when each 1-hop neighbour will
 -- finish its data_sf RX window (deaf on routing_sf). Populated by
@@ -1591,13 +1728,12 @@ local function classify_blind(self, dst_id, current_next_hop, alts_tried, previo
   if not entry then return "defer", remaining + 1 end
   -- Walk the candidates list; skip the current next_hop, the previous_hop
   -- loop guard, any next_hop already tried (per pending_tx.alts_tried),
-  -- and any candidate currently in a blind window. alts_tried is a
-  -- table-as-set keyed by next_hop id; nil/empty means "nothing tried
-  -- yet" so the first non-blind alt qualifies.
+  -- stale/silent next-hops, and any candidate currently in a blind window.
+  -- alts_tried is a table-as-set keyed by next_hop id; nil/empty means
+  -- "nothing tried yet" so the first non-blind alt qualifies.
   for _, c in ipairs(entry.candidates) do
-    if c.next_hop ~= current_next_hop
-       and not (alts_tried and alts_tried[c.next_hop])
-       and c.next_hop ~= previous_hop
+    if next_hop_selectable(self, dst_id, c, previous_hop, alts_tried,
+                           current_next_hop, "blind_alt")
        and not is_blind(self, c.next_hop) then
       return "alt", c.next_hop
     end
@@ -1805,9 +1941,11 @@ local function tx_with_retry(self, bytes, opts)
       source     = "tx_with_retry",
     })
     self:after(wait_ms, function() tx_with_retry(self, bytes, opts) end)
-    return
+    return false
   end
   self:tx(bytes, opts)
+  if opts.on_handed then opts.on_handed() end
+  return true
 end
 
 -- ---------- TX policy classes -----------------------------------------------
@@ -1850,6 +1988,11 @@ end
 -- — RTS callers use this to start rts_timeout from the *actual* TX time,
 -- otherwise the timer can fire mid-defer and burn a retry for nothing.
 local function tx_initiating(self, bytes, opts, after_tx)
+  local label = opts.label or ""
+  local is_rts_label = (label == "RTS" or label == "RTS-fwd" or label == "RTS-rty")
+  if is_rts_label and opts.__pending_tx_ref == nil then
+    opts.__pending_tx_ref = self.pending_tx
+  end
   if self.lbt_enabled and not opts.__lbt_done then
     local now = self:now()
     local busy_until = self:channel_busy_until() or 0
@@ -1865,8 +2008,16 @@ local function tx_initiating(self, bytes, opts, after_tx)
       return
     end
   end
-  tx_with_retry(self, bytes, opts)
-  if after_tx then after_tx() end
+  if is_rts_label and opts.__pending_tx_ref ~= nil
+     and self.pending_tx ~= opts.__pending_tx_ref then
+    self:emit("rts_tx_cancelled_stale", {
+      label = label,
+      reason = "pending_tx_changed",
+    })
+    return
+  end
+  local handed_to_radio = tx_with_retry(self, bytes, opts)
+  if handed_to_radio and after_tx then after_tx() end
 end
 
 -- Used by FLOOD frames (beacons). Same LBT pre-check as initiating, but
@@ -1994,13 +2145,86 @@ local function budget_penalty_db(self, c, candidates, viab_db)
   return by_alts[viable_alts] or by_alts[2] or 0.0, viable_alts
 end
 
+get_peer_suspect_level = function(self, node_id)
+  if node_id == nil then return 0 end
+  local now = self:now()
+  local dead_until = self.peer_dead_until and self.peer_dead_until[node_id]
+  if dead_until ~= nil then
+    if dead_until > now then return PEER_LEVEL_DEAD end
+    self.peer_dead_until[node_id] = nil
+  end
+  local silent_until = self.peer_silent_until and self.peer_silent_until[node_id]
+  if silent_until ~= nil then
+    if silent_until > now then return PEER_LEVEL_SILENT end
+    self.peer_silent_until[node_id] = nil
+  end
+  local suspect_until = self.peer_suspect_until and self.peer_suspect_until[node_id]
+  if suspect_until ~= nil then
+    if suspect_until > now then return PEER_LEVEL_SUSPECT end
+    self.peer_suspect_until[node_id] = nil
+  end
+  return 0
+end
+
+local function peer_suspect_penalty_db(self, node_id)
+  local level = get_peer_suspect_level(self, node_id)
+  if level >= PEER_LEVEL_DEAD then return self.peer_dead_penalty_db or 80.0, level end
+  if level >= PEER_LEVEL_SILENT then return self.peer_silent_penalty_db or 40.0, level end
+  if level == PEER_LEVEL_SUSPECT then return self.peer_suspect_penalty_db or 12.0, level end
+  return 0.0, 0
+end
+
+is_next_hop_fresh = function(self, node_id)
+  if node_id == nil then return false, nil end
+  if node_id == self.id then return true, 0 end
+  local last_seen = self.dest_seen_ms and self.dest_seen_ms[node_id]
+  if last_seen == nil then return false, nil end
+  local age_ms = self:now() - last_seen
+  return age_ms <= (self.next_hop_live_ttl_ms or 1200000), age_ms
+end
+
+local function emit_stale_next_skip(self, dst_id, next_hop, source)
+  local _, age_ms = is_next_hop_fresh(self, next_hop)
+  self:emit("rt_skip_stale_next", {
+    dest = dst_id,
+    next = next_hop,
+    age_ms = age_ms,
+    ttl_ms = self.next_hop_live_ttl_ms or 1200000,
+    source = source or "route_select",
+  })
+end
+
+next_hop_selectable = function(self, dst_id, c, previous_hop, alts_tried,
+                               current_next_hop, source)
+  if not c or c.next_hop == nil then return false end
+  if current_next_hop ~= nil and c.next_hop == current_next_hop then
+    return false
+  end
+  if previous_hop ~= nil and c.next_hop == previous_hop then
+    return false
+  end
+  if alts_tried and alts_tried[c.next_hop] then
+    return false
+  end
+  if get_peer_suspect_level(self, c.next_hop) >= PEER_LEVEL_SILENT then
+    return false
+  end
+  local fresh = is_next_hop_fresh(self, c.next_hop)
+  if not fresh then
+    emit_stale_next_skip(self, dst_id, c.next_hop, source)
+    return false
+  end
+  return true
+end
+
 -- Tier-aware effective score: c.score minus dynamic dB penalty for its
--- next_hop's known budget tier. Use this anywhere we previously
--- compared raw c.score, so the routing table tracks usable capacity
--- not just radio quality.
+-- next_hop's known budget tier and temporary silence suspicion. Use this
+-- anywhere we previously compared raw c.score, so the routing table tracks
+-- usable capacity/liveness, not just radio quality.
 local function effective_score(self, c, candidates, viab_db)
   local penalty = budget_penalty_db(self, c, candidates, viab_db)
-  return c.score - penalty
+  local suspect_penalty = peer_suspect_penalty_db(self, c.next_hop)
+  return c.score - penalty - suspect_penalty
 end
 
 local function route_candidate_context(self, dst_id, next_hop)
@@ -2013,8 +2237,15 @@ local function route_candidate_context(self, dst_id, next_hop)
     route_age_ms = nil,
     next_tier = get_neighbor_tier(self, next_hop),
     budget_penalty_db = 0,
+    next_suspect_level = get_peer_suspect_level(self, next_hop),
+    suspect_penalty_db = 0,
+    next_seen_age_ms = nil,
+    next_seen_fresh = false,
     viable_alts = 0,
   }
+  local next_seen_fresh, next_seen_age_ms = is_next_hop_fresh(self, next_hop)
+  out.next_seen_fresh = next_seen_fresh
+  out.next_seen_age_ms = next_seen_age_ms
   local blind, blind_remaining = is_blind(self, next_hop)
   out.next_blind = blind
   out.next_blind_ms = blind_remaining
@@ -2029,6 +2260,9 @@ local function route_candidate_context(self, dst_id, next_hop)
       local penalty, viable_alts = budget_penalty_db(
         self, c, entry.candidates, self.routing_snr_floor_db)
       out.budget_penalty_db = penalty
+      local suspect_penalty, suspect_level = peer_suspect_penalty_db(self, c.next_hop)
+      out.suspect_penalty_db = suspect_penalty
+      out.next_suspect_level = suspect_level
       out.viable_alts = viable_alts
       out.route_score_eff = effective_score(self, c, entry.candidates, self.routing_snr_floor_db)
       out.route_hops = c.hops
@@ -2059,10 +2293,14 @@ local function emit_rts_attempt_detail(self, kind, px)
     route_score = ctx.route_score,
     route_score_eff = ctx.route_score_eff,
     budget_penalty_db = ctx.budget_penalty_db,
+    suspect_penalty_db = ctx.suspect_penalty_db,
     viable_alts = ctx.viable_alts,
     route_hops = ctx.route_hops,
     route_age_ms = ctx.route_age_ms,
     next_tier = ctx.next_tier,
+    next_suspect_level = ctx.next_suspect_level,
+    next_seen_fresh = ctx.next_seen_fresh,
+    next_seen_age_ms = ctx.next_seen_age_ms,
     next_blind = ctx.next_blind,
     next_blind_ms = ctx.next_blind_ms,
     previous_hop = px.previous_hop,
@@ -2185,6 +2423,114 @@ local function mark_neighbor_budget_tier(self, node_id, tier, source, local_only
     nonprimary_entries = stats and stats.nonprimary_entries or 0,
   })
   return reranked
+end
+
+local function clear_peer_suspect(self, node_id, source)
+  if node_id == nil or node_id == self.id then return false end
+  local had = false
+  if self.peer_rts_timeouts and self.peer_rts_timeouts[node_id] then
+    self.peer_rts_timeouts[node_id] = nil
+    had = true
+  end
+  if self.peer_first_rts_timeout_ms and self.peer_first_rts_timeout_ms[node_id] then
+    self.peer_first_rts_timeout_ms[node_id] = nil
+    had = true
+  end
+  if self.peer_suspect_until and self.peer_suspect_until[node_id] then
+    self.peer_suspect_until[node_id] = nil
+    had = true
+  end
+  if self.peer_silent_until and self.peer_silent_until[node_id] then
+    self.peer_silent_until[node_id] = nil
+    had = true
+  end
+  if self.peer_dead_until and self.peer_dead_until[node_id] then
+    self.peer_dead_until[node_id] = nil
+    had = true
+  end
+  if self.peer_suspect_advertise_until and self.peer_suspect_advertise_until[node_id] then
+    self.peer_suspect_advertise_until[node_id] = nil
+    had = true
+  end
+  if self.peer_dead_advertise_until and self.peer_dead_advertise_until[node_id] then
+    self.peer_dead_advertise_until[node_id] = nil
+    had = true
+  end
+  if not had then return false end
+  local reranked = resort_routes_for_neighbor_penalty(
+    self, node_id, source or "peer_suspect_clear", true)
+  self:emit("peer_suspect_clear", {
+    node = node_id,
+    source = source or "rx_frame",
+    reranked = reranked or 0,
+  })
+  return true
+end
+
+local function mark_peer_suspect(self, node_id, level, source, remote_src)
+  if node_id == nil or node_id == self.id then return 0 end
+  local now = self:now()
+  local prev_level = get_peer_suspect_level(self, node_id)
+  if level >= PEER_LEVEL_DEAD then
+    self.peer_dead_until[node_id] = now + (self.peer_dead_ttl_ms or 3600000)
+  elseif level >= PEER_LEVEL_SILENT then
+    self.peer_silent_until[node_id] = now + (self.peer_silent_ttl_ms or 900000)
+  else
+    self.peer_suspect_until[node_id] = now + (self.peer_suspect_ttl_ms or 300000)
+  end
+  if source == "rts_timeout" then
+    local ttl = (level >= PEER_LEVEL_DEAD) and (self.peer_dead_ttl_ms or 3600000)
+                or (level >= PEER_LEVEL_SILENT) and (self.peer_silent_ttl_ms or 900000)
+                or (self.peer_suspect_ttl_ms or 300000)
+    if level >= PEER_LEVEL_DEAD then
+      self.peer_dead_advertise_until[node_id] = now + ttl
+      self.peer_suspect_advertise_until[node_id] = nil
+    else
+      self.peer_suspect_advertise_until[node_id] = now + ttl
+    end
+  end
+  local new_level = get_peer_suspect_level(self, node_id)
+  local reranked = 0
+  if new_level > prev_level then
+    reranked = resort_routes_for_neighbor_penalty(
+      self, node_id, source or "peer_suspect", true)
+    if source == "rts_timeout" then
+      schedule_triggered_beacon(self)
+    end
+  end
+  self:emit("peer_suspect_mark", {
+    node = node_id,
+    level = new_level,
+    previous_level = prev_level,
+    source = source or "unknown",
+    remote_src = remote_src,
+    rts_timeouts = self.peer_rts_timeouts and self.peer_rts_timeouts[node_id] or nil,
+    reranked = reranked or 0,
+  })
+  return reranked or 0
+end
+
+local function record_peer_rts_timeout(self, node_id, ctr_lo)
+  if node_id == nil or node_id == self.id then return end
+  self.peer_rts_timeouts[node_id] = (self.peer_rts_timeouts[node_id] or 0) + 1
+  local n = self.peer_rts_timeouts[node_id]
+  self:emit("peer_rts_timeout_count", {
+    node = node_id,
+    ctr_lo = ctr_lo,
+    count = n,
+  })
+  if n >= (self.peer_silent_rts_timeouts or 3) then
+    local first_ms = self.peer_first_rts_timeout_ms[node_id] or self:now()
+    self.peer_first_rts_timeout_ms[node_id] = first_ms
+    if n >= (self.peer_dead_rts_timeouts or 6)
+       and (self:now() - first_ms) >= (self.peer_dead_evidence_window_ms or 900000) then
+      mark_peer_suspect(self, node_id, PEER_LEVEL_DEAD, "rts_timeout")
+    else
+      mark_peer_suspect(self, node_id, PEER_LEVEL_SILENT, "rts_timeout")
+    end
+  elseif n >= (self.peer_suspect_rts_timeouts or 2) then
+    mark_peer_suspect(self, node_id, PEER_LEVEL_SUSPECT, "rts_timeout")
+  end
 end
 
 refresh_route_order = function(self, dest_id, reason)
@@ -2423,8 +2769,8 @@ local function pick_next_cascade_hop(self, px)
   local entry = refresh_route_order(self, px.dst, "cascade_order")
   if not entry then return nil end
   for _, c in ipairs(entry.candidates) do
-    if c.next_hop ~= px.previous_hop
-       and not px.alts_tried[c.next_hop]
+    if next_hop_selectable(self, px.dst, c, px.previous_hop, px.alts_tried,
+                           nil, "cascade_order")
        and not is_blind(self, c.next_hop) then
       return c.next_hop
     end
@@ -2440,6 +2786,103 @@ local function set_size(t)
   return n
 end
 
+local function candidate_silent_counts(self, entry, previous_hop)
+  local total = 0
+  local silent = 0
+  if not entry or not entry.candidates then return 0, 0 end
+  for _, c in ipairs(entry.candidates) do
+    if c.next_hop ~= previous_hop then
+      total = total + 1
+      if get_peer_suspect_level(self, c.next_hop) >= 2 then
+        silent = silent + 1
+      end
+    end
+  end
+  return total, silent
+end
+
+local function candidate_stale_next_counts(self, entry, previous_hop)
+  local total = 0
+  local stale = 0
+  if not entry or not entry.candidates then return 0, 0 end
+  for _, c in ipairs(entry.candidates) do
+    if c.next_hop ~= previous_hop then
+      total = total + 1
+      local fresh = is_next_hop_fresh(self, c.next_hop)
+      if not fresh then
+        stale = stale + 1
+      end
+    end
+  end
+  return total, stale
+end
+
+local function emit_route_query(self, dst_id, dst_name, reason)
+  local now_q = self:now()
+  local last_q = self.q_queried[dst_id]
+  if last_q and (now_q - last_q) < self.q_query_ttl_ms then
+    return last_q, false
+  end
+  self.q_queried[dst_id] = now_q
+  self:emit("q_tx", {
+    opcode = Q_OP_ROUTE_QUERY,
+    dst = dst_id,
+    dst_name = dst_name,
+    requester_mobile = self.is_mobile == true,
+    reason = reason or "route_query",
+  })
+  self:log(string.format(
+    "q_tx -> dst=%s (route query, reason=%s, requester_mobile=%s)",
+    dst_name, reason or "route_query", tostring(self.is_mobile == true)))
+  tx_initiating(self, pack_q(self.leaf_id, self.id, dst_id,
+                             Q_OP_ROUTE_QUERY, self.is_mobile == true), {
+    sf    = self.routing_sf,
+    label = "Q",
+    info  = string.format("dst=%s reason=%s", dst_name, reason or "route_query"),
+  })
+  return now_q, true
+end
+
+local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
+                                    user_text, ctr, flags, reason,
+                                    previous_hop, queue_meta,
+                                    candidate_total, blocked_count, blocked_kind)
+  local deferred = {
+    origin       = origin, dst_id = dst_id, dst_name = dst_name,
+    payload      = payload, user_text = user_text, ctr = ctr, flags = flags,
+    previous_hop = previous_hop,
+    queued_at_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
+    reason       = reason,
+  }
+  table.insert(self.deferred_sends, deferred)
+  self:emit("send_deferred", {
+    origin     = origin, dst = dst_id, dst_name = dst_name,
+    payload    = user_text, ctr = ctr,
+    ttl_ms     = self.send_defer_ttl_ms,
+    depth      = #self.deferred_sends,
+    reason     = reason or "no_route",
+    silent_candidates = blocked_kind == "silent" and blocked_count or nil,
+    stale_next_candidates = blocked_kind == "stale_next" and blocked_count or nil,
+    blocked_candidates = blocked_count,
+    route_blocked_kind = blocked_kind,
+    candidate_count = candidate_total,
+  })
+  self:log(string.format(
+    "send_deferred dst=%s reason=%s (holding for up to %dms; depth=%d)",
+    dst_name, reason or "no_route", self.send_defer_ttl_ms, #self.deferred_sends))
+  local q_at, q_sent = emit_route_query(self, dst_id, dst_name, reason or "no_route")
+  deferred.q_sent_at_ms = q_at
+  if not q_sent then
+    self:emit("q_suppressed", {
+      opcode = Q_OP_ROUTE_QUERY,
+      dst = dst_id,
+      dst_name = dst_name,
+      reason = reason or "no_route",
+      last_q_ms = q_at,
+    })
+  end
+end
+
 -- Re-send the current pending_tx's RTS with the same ctr_lo. Shared by
 -- rts_timeout_fire (CTS lost) and ack_timeout_fire (DATA-ACK lost): both
 -- recover by re-running the dance from the beginning. Caller must have
@@ -2450,6 +2893,80 @@ local function tx_rts_retry(self, reason)
   -- and when its self:after callback fires (e.g., the ACK arrived during
   -- the defer window). Bail out gracefully — no flight to retry.
   if px == nil then return end
+
+  local px_next_fresh = is_next_hop_fresh(self, px.next)
+  if not px_next_fresh then
+    emit_stale_next_skip(self, px.dst, px.next, "tx_rts_retry")
+    px.alts_tried[px.next] = true
+    local next_hop = pick_next_cascade_hop(self, px)
+    if next_hop ~= nil then
+      self:emit("tx_stale_next_alt", {
+        origin = px.origin, payload = px.user_text, ctr = px.ctr,
+        ctr_lo = px.ctr_lo, dst = px.dst,
+        from_next = px.next, to_next = next_hop,
+        source = "tx_rts_retry",
+      })
+      self:log(string.format("tx_stale_next_alt (tx_rts_retry) msg=%d %s -> %s",
+        px.ctr_lo, name_of(self, px.next), name_of(self, next_hop)))
+      px.next = next_hop
+      px.retries_left = effective_rts_max_retries(self, px.requeue_count)
+    else
+      local saved = px
+      self.pending_tx = nil
+      self:emit("tx_stale_next_defer", {
+        origin = saved.origin, payload = saved.user_text, ctr = saved.ctr,
+        ctr_lo = saved.ctr_lo, dst = saved.dst, next = saved.next,
+        source = "tx_rts_retry",
+      })
+      defer_send_for_route(self, saved.origin, saved.dst, name_of(self, saved.dst),
+                           saved.payload, saved.user_text, saved.ctr,
+                           saved.flags or 0, "all_candidates_stale_next",
+                           saved.previous_hop,
+                           {
+                             enqueue_time_ms = saved.enqueue_time_ms,
+                             requeue_count = saved.requeue_count or 0,
+                           },
+                           nil, nil, "stale_next")
+      become_free(self)
+      return
+    end
+  end
+
+  if get_peer_suspect_level(self, px.next) >= 2 then
+    px.alts_tried[px.next] = true
+    local next_hop = pick_next_cascade_hop(self, px)
+    if next_hop ~= nil then
+      self:emit("tx_silent_alt", {
+        origin = px.origin, payload = px.user_text, ctr = px.ctr,
+        ctr_lo = px.ctr_lo, dst = px.dst,
+        from_next = px.next, to_next = next_hop,
+        source = "tx_rts_retry",
+      })
+      self:log(string.format("tx_silent_alt (tx_rts_retry) msg=%d %s -> %s",
+        px.ctr_lo, name_of(self, px.next), name_of(self, next_hop)))
+      px.next = next_hop
+      px.retries_left = effective_rts_max_retries(self, px.requeue_count)
+    else
+      local saved = px
+      self.pending_tx = nil
+      self:emit("tx_silent_defer", {
+        origin = saved.origin, payload = saved.user_text, ctr = saved.ctr,
+        ctr_lo = saved.ctr_lo, dst = saved.dst, next = saved.next,
+        source = "tx_rts_retry",
+      })
+      defer_send_for_route(self, saved.origin, saved.dst, name_of(self, saved.dst),
+                           saved.payload, saved.user_text, saved.ctr,
+                           saved.flags or 0, "all_candidates_silent",
+                           saved.previous_hop,
+                           {
+                             enqueue_time_ms = saved.enqueue_time_ms,
+                             requeue_count = saved.requeue_count or 0,
+                           },
+                           nil, nil, "silent")
+      become_free(self)
+      return
+    end
+  end
 
   -- F1 mitigation: if next-hop is now known-blind, defer the retry or
   -- switch to alt. Reset retries budget on alt-switch (fresh path).
@@ -2711,6 +3228,66 @@ local function rts_timeout_fire(self, captured_ctr_lo)
     return
   end
 
+  record_peer_rts_timeout(self, self.pending_tx.next, captured_ctr_lo)
+
+  if get_peer_suspect_level(self, self.pending_tx.next) >= 2 then
+    self.pending_tx.alts_tried[self.pending_tx.next] = true
+    local next_hop = pick_next_cascade_hop(self, self.pending_tx)
+    if next_hop ~= nil then
+      local prev_next = self.pending_tx.next
+      self:emit("path_cascade", {
+        origin     = self.pending_tx.origin,
+        payload    = self.pending_tx.user_text,
+        ctr        = self.pending_tx.ctr,
+        dst        = self.pending_tx.dst,
+        ctr_lo     = captured_ctr_lo,
+        from_next  = prev_next,
+        to_next    = next_hop,
+        attempt    = set_size(self.pending_tx.alts_tried),
+        trigger    = "silent_next",
+      })
+      self:emit("tx_silent_alt", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        ctr_lo = captured_ctr_lo,
+        dst = self.pending_tx.dst,
+        from_next = prev_next,
+        to_next = next_hop,
+        source = "rts_timeout",
+      })
+      self:log(string.format("tx_silent_alt (rts_timeout) msg=%d %s -> %s",
+        captured_ctr_lo, name_of(self, prev_next), name_of(self, next_hop)))
+      self.pending_tx.next = next_hop
+      self.pending_tx.retries_left = effective_rts_max_retries(self, self.pending_tx.requeue_count)
+      tx_rts_retry(self, "silent_next")
+      return
+    end
+
+    local saved = self.pending_tx
+    self.pending_tx = nil
+    self:emit("tx_silent_defer", {
+      origin = saved.origin,
+      payload = saved.user_text,
+      ctr = saved.ctr,
+      ctr_lo = captured_ctr_lo,
+      dst = saved.dst,
+      next = saved.next,
+      source = "rts_timeout",
+    })
+    defer_send_for_route(self, saved.origin, saved.dst, name_of(self, saved.dst),
+                         saved.payload, saved.user_text, saved.ctr,
+                         saved.flags or 0, "all_candidates_silent",
+                         saved.previous_hop,
+                           {
+                           enqueue_time_ms = saved.enqueue_time_ms,
+                           requeue_count = saved.requeue_count or 0,
+                         },
+                         nil, nil, "silent")
+    become_free(self)
+    return
+  end
+
   if self.pending_tx.retries_left <= 0 then
     -- K=3 failure cascade: mark the current next_hop tried, walk to
     -- the next non-tried candidate. If found, switch + reset retries.
@@ -2896,6 +3473,8 @@ end
 -- spurious retry before pending_tx clears via the cts-to-data-gap path).
 start_rts_timeout = function(self)
   if not self.pending_tx then return end
+  self.pending_tx.awaiting_cts = true
+  self.pending_tx.awaiting_ack = false
   if self.rts_timeout_handle then
     self:cancel(self.rts_timeout_handle)
     self.rts_timeout_handle = nil
@@ -3028,6 +3607,16 @@ try_drain_deferred = function(self)
         "send_giveup dst=%s waited=%dms (defer TTL %dms expired without route)",
         d.dst_name, now - d.queued_at_ms, self.send_defer_ttl_ms))
     else
+      local q_at, q_sent = emit_route_query(self, d.dst_id, d.dst_name,
+                                            d.reason or "deferred_no_route")
+      if q_sent then
+        d.q_sent_at_ms = q_at
+        self:emit("send_defer_requery", {
+          origin = d.origin, dst = d.dst_id, dst_name = d.dst_name,
+          payload = d.user_text, ctr = d.ctr,
+          waited_ms = now - d.queued_at_ms,
+        })
+      end
       table.insert(kept, d)
     end
   end
@@ -3098,56 +3687,98 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
         dst_name))
       return
     end
-    -- Originator with no route: defer up to send_defer_ttl_ms for the
-    -- route to appear (e.g., new node still bootstrapping). The drain
-    -- loop (periodic + on_recv 'B' hook) will retry on rt_update.
-    local deferred = {
-      origin       = origin, dst_id = dst_id, dst_name = dst_name,
-      payload      = payload, user_text = user_text, ctr = ctr, flags = flags,
-      queued_at_ms = self:now(),
-    }
-    table.insert(self.deferred_sends, deferred)
-    self:emit("send_deferred", {
-      origin     = origin, dst = dst_id, dst_name = dst_name,
-      payload    = user_text, ctr = ctr,
-      ttl_ms     = self.send_defer_ttl_ms,
-      depth      = #self.deferred_sends,
-    })
-    self:log(string.format(
-      "send_deferred dst=%s (no route yet; holding for up to %dms; depth=%d)",
-      dst_name, self.send_defer_ttl_ms, #self.deferred_sends))
-    -- Q escalation: alongside the passive defer, actively request the
-    -- route from neighbours via a one-hop Q frame. Whichever brings
-    -- the route in faster (passive wait or Q response) wins. Dedup so
-    -- repeated sends to the same unknown dst don't spam Q.
-    local now_q = self:now()
-    local last_q = self.q_queried[dst_id]
-    if last_q and (now_q - last_q) < self.q_query_ttl_ms then
-      deferred.q_sent_at_ms = last_q
-    end
-    if not last_q or (now_q - last_q) >= self.q_query_ttl_ms then
-      self.q_queried[dst_id] = now_q
-      deferred.q_sent_at_ms = now_q
-      self:emit("q_tx", {
-        opcode = Q_OP_ROUTE_QUERY,
-        dst = dst_id,
-        dst_name = dst_name,
-        requester_mobile = self.is_mobile == true,
-      })
-      self:log(string.format(
-        "q_tx -> dst=%s (route query, requester_mobile=%s)",
-        dst_name, tostring(self.is_mobile == true)))
-      tx_initiating(self, pack_q(self.leaf_id, self.id, dst_id,
-                                 Q_OP_ROUTE_QUERY, self.is_mobile == true), {
-        sf    = self.routing_sf,
-        label = "Q",
-        info  = string.format("dst=%s", dst_name),
-      })
-    end
+    -- Originator with no route: defer and actively ask neighbours via Q.
+    defer_send_for_route(self, origin, dst_id, dst_name, payload, user_text,
+                         ctr, flags, "no_route", previous_hop, queue_meta)
     return
   end
   entry = refresh_route_order(self, dst_id, "issue_send_order") or entry
   local primary_next = entry.candidates[1].next_hop
+  if previous_hop ~= nil and primary_next == previous_hop then
+    local replacement = nil
+    for _, c in ipairs(entry.candidates) do
+      if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
+                             "issue_send_previous_hop_alt")
+         and not is_blind(self, c.next_hop) then
+        replacement = c.next_hop
+        break
+      end
+    end
+    if replacement ~= nil then
+      self:emit("tx_previous_hop_alt", {
+        origin = origin, payload = user_text, ctr = ctr,
+        dst = dst_id, from_next = primary_next, to_next = replacement,
+      })
+      self:log(string.format("tx_previous_hop_alt (issue_send) dst=%s %s -> %s",
+        dst_name, name_of(self, primary_next), name_of(self, replacement)))
+      primary_next = replacement
+    else
+      self:emit("send_no_route", {
+        origin = origin, payload = user_text, ctr = ctr, dst = dst_id,
+        reason = "previous_hop_only",
+      })
+      self:log(string.format(
+        "send_no_route dst=%s (forwarder only route points back to previous hop)",
+        dst_name))
+      return
+    end
+  end
+  local primary_fresh = is_next_hop_fresh(self, primary_next)
+  if not primary_fresh then
+    emit_stale_next_skip(self, dst_id, primary_next, "issue_send_primary")
+    local total_cands, stale_cands = candidate_stale_next_counts(self, entry, previous_hop)
+    local replacement = nil
+    for _, c in ipairs(entry.candidates) do
+      if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
+                             "issue_send_stale_alt")
+         and not is_blind(self, c.next_hop) then
+        replacement = c.next_hop
+        break
+      end
+    end
+    if replacement ~= nil then
+      self:emit("tx_stale_next_alt", {
+        origin = origin, payload = user_text, ctr = ctr,
+        dst = dst_id, from_next = primary_next, to_next = replacement,
+        stale_candidates = stale_cands, candidate_count = total_cands,
+      })
+      self:log(string.format("tx_stale_next_alt (issue_send) dst=%s %s -> %s",
+        dst_name, name_of(self, primary_next), name_of(self, replacement)))
+      primary_next = replacement
+    else
+      defer_send_for_route(self, origin, dst_id, dst_name, payload, user_text,
+                           ctr, flags, "all_candidates_stale_next", previous_hop,
+                           queue_meta, total_cands, stale_cands, "stale_next")
+      return
+    end
+  end
+  if get_peer_suspect_level(self, primary_next) >= 2 then
+    local total_cands, silent_cands = candidate_silent_counts(self, entry, previous_hop)
+    local replacement = nil
+    for _, c in ipairs(entry.candidates) do
+      if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
+                             "issue_send_silent_alt")
+         and not is_blind(self, c.next_hop) then
+        replacement = c.next_hop
+        break
+      end
+    end
+    if replacement ~= nil then
+      self:emit("tx_silent_alt", {
+        origin = origin, payload = user_text, ctr = ctr,
+        dst = dst_id, from_next = primary_next, to_next = replacement,
+        silent_candidates = silent_cands, candidate_count = total_cands,
+      })
+      self:log(string.format("tx_silent_alt (issue_send) dst=%s %s -> %s",
+        dst_name, name_of(self, primary_next), name_of(self, replacement)))
+      primary_next = replacement
+    else
+      defer_send_for_route(self, origin, dst_id, dst_name, payload, user_text,
+                           ctr, flags, "all_candidates_silent", previous_hop,
+                           queue_meta, total_cands, silent_cands, "silent")
+      return
+    end
+  end
   -- F1 mitigation: if the chosen next-hop is currently blind on
   -- routing_sf (we overheard its CTS), either alt-switch or defer
   -- the issue. Defer re-queues at the head so ordering is preserved.
@@ -3388,9 +4019,10 @@ end
 
 local function learn_direct_from_frame(self, src_id, snr_db, source)
   if src_id == nil or src_id == self.id or snr_db == nil then return "no_src" end
+  local route_score = route_score_from_snr(self, snr_db)
   local cand = {
     next_hop = src_id,
-    score = snr_db,
+    score = route_score,
     hops = 1,
     last_seen_ms = self:now(),
   }
@@ -3399,7 +4031,9 @@ local function learn_direct_from_frame(self, src_id, snr_db, source)
     self:emit("rt_update", {
       dest = src_id,
       next = src_id,
-      score = snr_db,
+      score = route_score,
+      rx_snr = snr_db,
+      route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
       hops = 1,
       slot = "primary",
       trigger = source or "direct_frame",
@@ -3409,7 +4043,9 @@ local function learn_direct_from_frame(self, src_id, snr_db, source)
     self:emit("rt_update", {
       dest = src_id,
       next = src_id,
-      score = snr_db,
+      score = route_score,
+      rx_snr = snr_db,
+      route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
       hops = 1,
       slot = "alt",
       trigger = source or "direct_frame",
@@ -3456,6 +4092,8 @@ local function send_beacon_page(self, kind)
     offset = self.beacon_offset, next_offset = new_offset,
     kind = kind,
     seen_bits = diff.seen_bits or 0,
+    suspect_nodes = diff.suspect_nodes or 0,
+    ext_len = diff.ext_len or 0,
     dirty_only = diff.dirty_only == true,
     discovery = in_discovery(self),
   })
@@ -3470,6 +4108,8 @@ local function send_beacon_page(self, kind)
     kind        = kind,
     n_entries   = page_n,
     seen_bits   = diff.seen_bits or 0,
+    suspect_nodes = diff.suspect_nodes or 0,
+    ext_len     = diff.ext_len or 0,
     dirty_only   = diff.dirty_only == true,
     discovery    = in_discovery(self),
   })
@@ -4025,6 +4665,40 @@ function on_init(self, config)
   self.neighbor_budget_tier         = {}
   self.neighbor_budget_tier_set_at  = {}
   self.neighbor_budget_tier_ttl_ms  = config.neighbor_budget_tier_ttl_ms or 300000   -- 5 min
+  -- Route scoring is intentionally more conservative than the instantaneous
+  -- SNR sample used to decode a control frame. DATA can select a slower SF,
+  -- but marginal links fluctuate; this offset keeps them usable while
+  -- preferring cleaner alternatives when they exist.
+  self.route_snr_conservatism_db    = config.route_snr_conservatism_db or 0
+  -- Direct next-hop liveness is intentionally shorter than route TTL:
+  -- a destination route may still be useful, but the immediate relay must
+  -- have been heard recently before we spend RTS attempts on it.
+  self.next_hop_live_ttl_ms         = config.next_hop_live_ttl_ms or 1200000  -- 20 min
+  -- Peer-silence suspicion. Repeated RTS timeouts against the same next-hop
+  -- are local evidence that a route is stale or the peer is temporarily
+  -- unreachable. We do not delete routes; we apply a temporary score penalty
+  -- and advertise a compact BCN extension so nearby nodes can avoid the
+  -- peer while it is silent. Any valid frame from the peer clears the mark.
+  self.peer_rts_timeouts        = {}
+  self.peer_first_rts_timeout_ms = {}
+  self.peer_suspect_until       = {}
+  self.peer_silent_until        = {}
+  self.peer_dead_until          = {}
+  self.peer_suspect_advertise_until = {}
+  self.peer_dead_advertise_until = {}
+  self.peer_suspect_rts_timeouts = config.peer_suspect_rts_timeouts or 2
+  self.peer_silent_rts_timeouts  = config.peer_silent_rts_timeouts  or 3
+  self.peer_dead_rts_timeouts    = config.peer_dead_rts_timeouts    or 6
+  self.peer_suspect_ttl_ms       = config.peer_suspect_ttl_ms       or 300000
+  self.peer_silent_ttl_ms        = config.peer_silent_ttl_ms        or 900000
+  self.peer_dead_ttl_ms          = config.peer_dead_ttl_ms          or 3600000
+  self.peer_dead_evidence_window_ms =
+    config.peer_dead_evidence_window_ms or 900000
+  self.peer_suspect_penalty_db   = config.peer_suspect_penalty_db   or 12.0
+  self.peer_silent_penalty_db    = config.peer_silent_penalty_db    or 40.0
+  self.peer_dead_penalty_db      = config.peer_dead_penalty_db      or 80.0
+  self.peer_suspect_bcn_max      = (config.peer_suspect_bcn_max ~= nil)
+                                    and config.peer_suspect_bcn_max or 8
   -- Inter-frame gap between CTS RX and DATA TX (originator side). The
   -- simulator's set_rx_sf is instantaneous, but real hardware needs a
   -- handful of µs to settle on the new SF — pad with 5ms by default.
@@ -4275,8 +4949,9 @@ function on_init(self, config)
   self.state_snapshot_period_ms = config.state_snapshot_period_ms or 60000
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
-  -- (origin_id, ctr) pair and rejects subsequent arrivals of the same id
-  -- (after still ACKing the previous hop, so it clears its pending_tx).
+  -- (origin_id, dst_id, ctr) tuple and rejects subsequent arrivals of the
+  -- same message id (after still ACKing the previous hop, so it clears its
+  -- pending_tx). ctr is per-(origin,dst), so dst must be part of the key.
   -- This catches routing loops + legitimate same-payload retransmissions
   -- in real firmware. TTL is generous (30s default) because a flight at
   -- SF10 can take a few seconds with retries.
@@ -4285,10 +4960,10 @@ function on_init(self, config)
   -- Per-(self → peer) outbound 16-bit counter. Replaces the old flat next_origin_seq.
   -- RAM-only this phase; NV persistence deferred to §8 crypto. Keyed by peer_id.
   self.peer_send_counter  = {}   -- [peer_id] → last sent ctr value (0 = never sent)
-  -- End-to-end ACK state. Originator-side per-message pending map keyed
-  -- by ctr (the outbound counter for this (self,dst) pair). Set on send_e2e;
-  -- cleared when matching E2E ACK arrives (emit delivered_confirmed); pruned
-  -- on TTL expiry (emit e2e_ack_timeout).
+  -- End-to-end ACK state. Originator-side per-message pending map keyed by
+  -- (dst, ctr), because ctr is per-(self,dst). Set on send_e2e; cleared when
+  -- matching E2E ACK arrives (emit delivered_confirmed); pruned on TTL expiry
+  -- (emit e2e_ack_timeout).
   self.pending_e2e        = {}
   self.e2e_ack_ttl_ms     = config.e2e_ack_ttl_ms or 60000   -- 1 min default
 
@@ -4363,11 +5038,11 @@ function on_init(self, config)
   local function drain_loop()
     try_drain_deferred(self)
     local now = self:now()
-    for ctr, info in pairs(self.pending_e2e) do
+    for key, info in pairs(self.pending_e2e) do
       if now - info.sent_at_ms >= self.e2e_ack_ttl_ms then
         self:emit("e2e_ack_timeout", {
           origin     = self.id,
-          ctr        = ctr,
+          ctr        = info.ctr,
           dst        = info.dst_id,
           payload    = info.user_text,
           ttl_ms     = self.e2e_ack_ttl_ms,
@@ -4375,8 +5050,8 @@ function on_init(self, config)
         })
         self:log(string.format(
           "e2e_ack_timeout ctr=%d dst=%s elapsed=%dms (no E2E ACK in %dms)",
-          ctr, info.dst_name, now - info.sent_at_ms, self.e2e_ack_ttl_ms))
-        self.pending_e2e[ctr] = nil
+          info.ctr, info.dst_name, now - info.sent_at_ms, self.e2e_ack_ttl_ms))
+        self.pending_e2e[key] = nil
       end
     end
     self:after(1000, drain_loop)
@@ -4473,6 +5148,7 @@ function on_recv(self, frame, meta)
   end
   if meta.src ~= nil then
     mark_dest_seen(self, meta.src, "direct")
+    clear_peer_suspect(self, meta.src, "rx_frame")
   end
   local tag = frame:sub(1, 1)
 
@@ -4488,6 +5164,8 @@ function on_recv(self, frame, meta)
       src = b.src,
       n_entries = #b.entries,
       seen_bits = b.seen_bits or 0,
+      suspect_nodes = b.suspect_nodes and #b.suspect_nodes or 0,
+      liveness_states = b.liveness_states and #b.liveness_states or 0,
     })
     if b.seen_bitmap then
       local seen_n, refreshed_n = apply_seen_bitmap(self, b.seen_bitmap, "bitmap", b.src)
@@ -4497,6 +5175,66 @@ function on_recv(self, frame, meta)
         applied = seen_n,
         refreshed = refreshed_n,
       })
+    end
+    if b.suspect_nodes then
+      local applied = 0
+      local self_marked = false
+      for _, node_id in ipairs(b.suspect_nodes) do
+        if node_id == self.id then
+          self_marked = true
+        elseif node_id ~= b.src then
+          applied = applied + mark_peer_suspect(self, node_id, 1, "bcn_suspect", b.src)
+        end
+      end
+      self:emit("peer_suspect_bcn_rx", {
+        from = b.src,
+        count = #b.suspect_nodes,
+        applied = applied,
+        self_marked = self_marked,
+      })
+      if self_marked then
+        local tier = compute_budget_tier(self)
+        self:emit("peer_suspect_self_heard", {
+          from = b.src,
+          budget_tier = tier,
+        })
+        if tier < BUDGET_TIER_CRITICAL then
+          schedule_triggered_beacon(self)
+        end
+      end
+    end
+    if b.liveness_states then
+      local applied = 0
+      local self_marked = false
+      local dead_n = 0
+      for _, rec in ipairs(b.liveness_states) do
+        local node_id = rec.node
+        local state = rec.state or 0
+        if node_id == self.id then
+          self_marked = true
+        elseif node_id ~= b.src and state > 0 then
+          if state >= PEER_LEVEL_DEAD then dead_n = dead_n + 1 end
+          applied = applied + mark_peer_suspect(self, node_id, state, "bcn_liveness", b.src)
+        end
+      end
+      self:emit("peer_liveness_bcn_rx", {
+        from = b.src,
+        count = #b.liveness_states,
+        applied = applied,
+        dead = dead_n,
+        self_marked = self_marked,
+      })
+      if self_marked then
+        local tier = compute_budget_tier(self)
+        self:emit("peer_suspect_self_heard", {
+          from = b.src,
+          budget_tier = tier,
+          source = "bcn_liveness",
+        })
+        if tier < BUDGET_TIER_CRITICAL then
+          schedule_triggered_beacon(self)
+        end
+      end
     end
 
     local now = self:now()
@@ -4533,15 +5271,24 @@ function on_recv(self, frame, meta)
     -- primary) to avoid spamming on every refresh round.
     do
       mark_dest_seen(self, b.src, "beacon_src")
-      local cand = { next_hop = b.src, score = meta.snr, hops = 1, last_seen_ms = now }
+      local direct_score = route_score_from_snr(self, meta.snr)
+      local cand = { next_hop = b.src, score = direct_score, hops = 1, last_seen_ms = now }
       local action = rt_merge(self, self.rt, b.src, cand, self.routing_snr_floor_db)
       if action == "new" or action == "promote" then
-        self:emit("rt_update", { dest = b.src, next = b.src, score = meta.snr, hops = 1, slot = "primary" })
-        self:log(string.format("rt[%s] direct → primary, snr=%.1f dB hops=1",
-          name_of(self, b.src), meta.snr))
+        self:emit("rt_update", {
+          dest = b.src, next = b.src, score = direct_score, rx_snr = meta.snr,
+          route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+          hops = 1, slot = "primary",
+        })
+        self:log(string.format("rt[%s] direct → primary, score=%.1f dB rx_snr=%.1f dB hops=1",
+          name_of(self, b.src), direct_score, meta.snr))
         rt_changed = true
       elseif action == "alt_install" then
-        self:emit("rt_update", { dest = b.src, next = b.src, score = meta.snr, hops = 1, slot = "alt" })
+        self:emit("rt_update", {
+          dest = b.src, next = b.src, score = direct_score, rx_snr = meta.snr,
+          route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+          hops = 1, slot = "alt",
+        })
       elseif learned_direct_pre and self.rt[b.src] ~= nil then
         -- The top-of-on_recv direct-frame learner already installed or
         -- promoted this direct route from the same BCN source. Treat the
@@ -4565,8 +5312,16 @@ function on_recv(self, frame, meta)
         -- detect any 3-cycle me→X→N→me already cached in our own rt[e.dest]:
         -- prune slots whose stored n2_hop equals N.
         rt_prune_cycle(self, e.dest, b.src)
+      elseif get_peer_suspect_level(self, e.next) >= 2 then
+        self:emit("rt_skip_silent_n2", {
+          dest = e.dest,
+          via = b.src,
+          advertised_next = e.next,
+          suspect_level = get_peer_suspect_level(self, e.next),
+        })
       else
-        local combined_score = math.min(meta.snr, e.score)
+        local rx_score = route_score_from_snr(self, meta.snr)
+        local combined_score = math.min(rx_score, e.score)
         local combined_hops  = e.hops + 1
         if combined_hops <= 8 then
           local cand = {
@@ -4581,18 +5336,22 @@ function on_recv(self, frame, meta)
           if action == "new" or action == "promote" then
             self:emit("rt_update", {
               dest = e.dest, next = b.src,
-              score = combined_score, hops = combined_hops, slot = "primary",
+              score = combined_score, rx_snr = meta.snr,
+              route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+              advertised_score = e.score, hops = combined_hops, slot = "primary",
             })
-            self:log(string.format("rt[%s] via %s, hops=%d score=%.1f dB (primary)",
-              name_of(self, e.dest), name_of(self, b.src), combined_hops, combined_score))
+            self:log(string.format("rt[%s] via %s, hops=%d score=%.1f dB rx_snr=%.1f dB (primary)",
+              name_of(self, e.dest), name_of(self, b.src), combined_hops, combined_score, meta.snr))
             rt_changed = true
           elseif action == "alt_install" then
             self:emit("rt_update", {
               dest = e.dest, next = b.src,
-              score = combined_score, hops = combined_hops, slot = "alt",
+              score = combined_score, rx_snr = meta.snr,
+              route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+              advertised_score = e.score, hops = combined_hops, slot = "alt",
             })
-            self:log(string.format("rt[%s] via %s, hops=%d score=%.1f dB (alt)",
-              name_of(self, e.dest), name_of(self, b.src), combined_hops, combined_score))
+            self:log(string.format("rt[%s] via %s, hops=%d score=%.1f dB rx_snr=%.1f dB (alt)",
+              name_of(self, e.dest), name_of(self, b.src), combined_hops, combined_score, meta.snr))
           end
         end
       end
@@ -4622,6 +5381,43 @@ function on_recv(self, frame, meta)
     track_originator_observation(self, meta.src, "rts", r.ctr_lo,
       airtime_ms(self.routing_sf, self.bw_hz, self.cr,
                  self.preamble_sym, #frame))
+    -- If we are waiting for a hop ACK from our selected next-hop and we
+    -- overhear that next-hop forwarding the same DATA onward, that RTS-fwd is
+    -- an implicit ACK: the next-hop must have decoded our DATA. This prevents
+    -- the upstream retry from colliding with the forwarder's downstream DATA
+    -- after a lost hop ACK.
+    if self.pending_tx ~= nil
+       and meta.src == self.pending_tx.next
+       and r.src == self.pending_tx.next
+       and r.dst == self.pending_tx.dst
+       and r.ctr_lo == self.pending_tx.ctr_lo
+       and r.payload_len == (#self.pending_tx.payload + MAC_LEN) then
+      if self.rts_timeout_handle then
+        self:cancel(self.rts_timeout_handle)
+        self.rts_timeout_handle = nil
+      end
+      if self.ack_timeout_handle then
+        self:cancel(self.ack_timeout_handle)
+        self.ack_timeout_handle = nil
+      end
+      self:emit("implicit_ack_from_forward", {
+        from = meta.src,
+        origin = self.pending_tx.origin,
+        dst = self.pending_tx.dst,
+        next = self.pending_tx.next,
+        ctr = self.pending_tx.ctr,
+        ctr_lo = self.pending_tx.ctr_lo,
+        payload = self.pending_tx.user_text,
+        forward_next = r.next,
+        attempt_seq = self.pending_tx.last_rts_attempt_seq,
+      })
+      self:log(string.format(
+        "implicit_ack_from_forward <- %s ctr_lo=%d forwarding to %s -> hop complete",
+        name_of(self, meta.src), r.ctr_lo, name_of(self, r.next)))
+      self.pending_tx = nil
+      become_free(self)
+      return
+    end
     if r.next ~= self.id then return end  -- not for us; silent discard
     -- Cross-network filter — drop foreign-network RTSes before any CTS
     -- work. Without this, two networks merging during enhanced RF
@@ -4648,23 +5444,25 @@ function on_recv(self, frame, meta)
     -- (their previous ACK was lost in flight). Reply with CTS carrying
     -- already_received=1: the sender clears pending_tx without sending
     -- DATA again, and we avoid reprocessing/duplicating the message.
-    -- last_acked_from holds the most recent acked ctr_lo per sender,
-    -- scoped by TTL so the 4-bit ctr_lo wrap (every 16 sends per sender)
-    -- doesn't false-positive at slow send rates.
-    local cached = self.last_acked_from[r.src]
-    if cached and cached.ctr_lo == r.ctr_lo
-       and (self:now() - cached.t_ms) < self.last_acked_ttl_ms then
+    -- last_acked_from holds recently acked DATA identities. Scope by
+    -- sender + destination + ctr_lo + payload_len so the 4-bit ctr_lo
+    -- shortcut cannot match a different packet from the same sender.
+    local ack_key = last_acked_key(r.src, r.dst, r.ctr_lo, r.payload_len)
+    local cached = self.last_acked_from[ack_key]
+    if cached and (self:now() - cached.t_ms) < self.last_acked_ttl_ms then
       self:emit("rts_already_acked", {
-        from = r.src, ctr_lo = r.ctr_lo,
+        from = r.src, dst = r.dst, ctr_lo = r.ctr_lo,
+        payload_len = r.payload_len,
       })
-      self:log(string.format("rts_already_acked <- %s ctr_lo=%d -> CTS already_received",
-        name_of(self, r.src), r.ctr_lo))
+      self:log(string.format("rts_already_acked <- %s dst=%s ctr_lo=%d len=%d -> CTS already_received",
+        name_of(self, r.src), name_of(self, r.dst), r.ctr_lo, r.payload_len))
       local chosen_sf = cached.chosen_data_sf
       if chosen_sf ~= nil and not sf_in_bitmap(r.sf_bitmap, chosen_sf) then
         chosen_sf = nil
       end
+      local sf_select_snr, ewma_snr = data_sf_selection_snr(self, r.src, meta.snr)
       chosen_sf = chosen_sf or select_data_sf(
-        self.snr_ewma_in[r.src] or meta.snr, r.sf_bitmap, self.sf_margin_db)
+        sf_select_snr, r.sf_bitmap, self.sf_margin_db)
       if chosen_sf == nil then
         for sf = 5, 12 do
           if sf_in_bitmap(r.sf_bitmap, sf) then
@@ -4674,11 +5472,14 @@ function on_recv(self, frame, meta)
         end
       end
       if chosen_sf == nil then return end
-      local cts = pack_cts(r.ctr_lo, chosen_sf, true)
+      local cts = pack_cts(r.ctr_lo, chosen_sf, true, r.src)
       self:emit("cts_tx", {
         to = r.src, ctr_lo = r.ctr_lo,
         chosen_data_sf = chosen_sf,
         already_received = true,
+        rx_snr = meta.snr,
+        ewma_snr = ewma_snr,
+        sf_select_snr = sf_select_snr,
       })
       tx_with_retry(self, cts, {
         sf    = self.routing_sf,
@@ -4690,17 +5491,22 @@ function on_recv(self, frame, meta)
     end
 
     if self.pending_rx ~= nil then
-      -- Duplicate RTS from the same originator for the same ctr_lo: their
+      -- Duplicate RTS from the same originator for the same DATA identity: their
       -- previous CTS may have been lost, or DATA was sent and ACK was
       -- lost (and our pending_rx hasn't expired yet). Re-send the CTS so
       -- they can re-attempt DATA.
-      if self.pending_rx.from == r.src and self.pending_rx.ctr_lo == r.ctr_lo then
+      if self.pending_rx.from == r.src
+         and self.pending_rx.dst == r.dst
+         and self.pending_rx.ctr_lo == r.ctr_lo
+         and self.pending_rx.payload_len == r.payload_len then
         self:emit("rts_rx_dup", {
-          from = r.src, ctr_lo = r.ctr_lo,
+          from = r.src, dst = r.dst, ctr_lo = r.ctr_lo,
+          payload_len = r.payload_len,
         })
-        self:log(string.format("rts_rx_dup <- %s ctr_lo=%d -> resending CTS (sf=%d)",
-          name_of(self, r.src), r.ctr_lo, self.pending_rx.chosen_data_sf))
-        local cts = pack_cts(r.ctr_lo, self.pending_rx.chosen_data_sf)
+        self:log(string.format("rts_rx_dup <- %s dst=%s ctr_lo=%d len=%d -> resending CTS (sf=%d)",
+          name_of(self, r.src), name_of(self, r.dst), r.ctr_lo, r.payload_len,
+          self.pending_rx.chosen_data_sf))
+        local cts = pack_cts(r.ctr_lo, self.pending_rx.chosen_data_sf, false, r.src)
         self:emit("cts_tx", {
           to = r.src, ctr_lo = r.ctr_lo, dup = true,
           chosen_data_sf = self.pending_rx.chosen_data_sf,
@@ -4728,7 +5534,7 @@ function on_recv(self, frame, meta)
       if busy_for > 65535 then busy_for = 65535 end
       local busy_payload = math.floor((busy_for + NACK_BUSY_QUANTUM_MS - 1) / NACK_BUSY_QUANTUM_MS)
       if busy_payload > 255 then busy_payload = 255 end
-      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUSY_RX, busy_payload)
+      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUSY_RX, busy_payload, r.src)
       self:emit("nack_tx", {
         to = r.src, ctr_lo = r.ctr_lo, busy_for_ms = busy_for, reason = "pending_rx",
       })
@@ -4808,7 +5614,7 @@ function on_recv(self, frame, meta)
     -- is a stalled flight that the sender must rts_timeout out of.
     local my_tier = compute_budget_tier(self)
     if my_tier >= BUDGET_TIER_CRITICAL then
-      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUDGET, ((my_tier & 0xf) << 4) | 0)
+      local nack = pack_nack(r.ctr_lo, NACK_REASON_BUDGET, ((my_tier & 0xf) << 4) | 0, r.src)
       self:emit("nack_tx", {
         to = r.src, ctr_lo = r.ctr_lo,
         reason = "budget_low", tier = my_tier,
@@ -4825,15 +5631,12 @@ function on_recv(self, frame, meta)
       return
     end
 
-    -- Pick a data SF from the RTS's allowed-SF bitmap based on the
-    -- per-neighbor inbound SNR EWMA (smoothed across recent RXes from
-    -- this sender, not just this single RTS). Falls back to the raw
-    -- meta.snr if we have no EWMA yet — but the on_recv top-of-function
-    -- hook just updated `_in[r.src]` with `meta.snr`, so the EWMA is
-    -- always populated for any neighbor we just received from. Empty
-    -- bitmap → nothing we can do; silent drop (sender's rts_timeout will
-    -- handle it).
-    local snr_for_sf = self.snr_ewma_in[r.src] or meta.snr
+    -- Pick a data SF from the RTS's allowed-SF bitmap using a conservative
+    -- SNR estimate. The current RTS proves the immediate channel state;
+    -- EWMA only helps when it is lower than that sample.
+    -- Empty bitmap → nothing we can do; silent drop (sender's rts_timeout
+    -- will handle it).
+    local snr_for_sf, ewma_snr = data_sf_selection_snr(self, r.src, meta.snr)
     local chosen_sf  = select_data_sf(snr_for_sf, r.sf_bitmap, self.sf_margin_db)
     if chosen_sf == nil then
       self:emit("rts_drop_no_sf", {
@@ -4848,7 +5651,7 @@ function on_recv(self, frame, meta)
     self:emit("rts_rx", {
       from = r.src, dst = r.dst, ctr_lo = r.ctr_lo,
       sf_bitmap = r.sf_bitmap, chosen_data_sf = chosen_sf,
-      rx_snr = meta.snr, ewma_snr = snr_for_sf,
+      rx_snr = meta.snr, ewma_snr = ewma_snr, sf_select_snr = snr_for_sf,
     })
     self:log(string.format(
       "rts_rx <- %s (dst=%s ctr_lo=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
@@ -4865,10 +5668,13 @@ function on_recv(self, frame, meta)
     -- Arm the expiry timer so a never-arriving DATA can't freeze us.
     start_pending_rx_expiry(self)
 
-    local cts = pack_cts(r.ctr_lo, chosen_sf)
+    local cts = pack_cts(r.ctr_lo, chosen_sf, false, r.src)
     self:emit("cts_tx", {
       to = r.src, ctr_lo = r.ctr_lo,
       chosen_data_sf = chosen_sf,
+      rx_snr = meta.snr,
+      ewma_snr = ewma_snr,
+      sf_select_snr = snr_for_sf,
     })
     self:log(string.format("cts_tx -> %s ctr_lo=%d chose SF%d (on routing SF%d)",
       name_of(self, r.src), r.ctr_lo, chosen_sf, self.routing_sf))
@@ -4921,8 +5727,35 @@ function on_recv(self, frame, meta)
       end
     end
 
+    if c.to ~= self.id then
+      return
+    end
+
     if self.pending_tx == nil then return end
     if c.ctr_lo ~= self.pending_tx.ctr_lo then return end
+    if self.pending_tx.awaiting_cts == false then
+      self:emit("cts_drop_no_active_rts", {
+        from = meta.src,
+        ctr_lo = c.ctr_lo,
+        origin = self.pending_tx.origin,
+        dst = self.pending_tx.dst,
+        next = self.pending_tx.next,
+        payload = self.pending_tx.user_text,
+        attempt_seq = self.pending_tx.last_rts_attempt_seq,
+      })
+      return
+    end
+    if meta.src ~= nil and meta.src ~= self.pending_tx.next then
+      self:emit("cts_drop_unexpected_src", {
+        expected = self.pending_tx.next,
+        from = meta.src,
+        ctr_lo = c.ctr_lo,
+        origin = self.pending_tx.origin,
+        dst = self.pending_tx.dst,
+        payload = self.pending_tx.user_text,
+      })
+      return
+    end
 
     -- CTS matched — cancel the rts_timeout. Without this, the timer fires
     -- on the same tick (rts_timeout_ms = exact RTS+CTS airtime) before the
@@ -5000,17 +5833,26 @@ function on_recv(self, frame, meta)
       })
       self:log(string.format("data_tx -> %s ctr_lo=%d ctr=%d payload=%q on SF%d (ACK on SF%d)",
         name_of(self, px.next), px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf, self.routing_sf))
-      tx_with_retry(self, d, {
+      local handed = tx_with_retry(self, d, {
         sf    = px.chosen_data_sf,
         label = "DATA",
         info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf=%d payload=%q",
           name_of(self, px.origin), name_of(self, px.dst),
           name_of(self, px.next), px.ctr_lo, px.ctr, px.chosen_data_sf, px.user_text),
+        on_handed = function()
+          if self.pending_tx == nil or self.pending_tx.ctr_lo ~= px.ctr_lo then
+            return
+          end
+          self.pending_tx.awaiting_ack = true
+          -- Sender's RX has been on routing_sf throughout — no retune needed.
+          -- DATA TX uses the per-tx sf override; the modem's RX state is
+          -- independent of TX SF. Keep pending_tx for ack_timeout matching.
+          start_ack_timeout(self)
+        end,
       })
-      -- Sender's RX has been on routing_sf throughout — no retune needed.
-      -- DATA TX uses the per-tx sf override; the modem's RX state is
-      -- independent of TX SF. Keep pending_tx for ack_timeout matching.
-      start_ack_timeout(self)
+      if not handed and self.pending_tx ~= nil and self.pending_tx.ctr_lo == px.ctr_lo then
+        self.pending_tx.awaiting_ack = false
+      end
     end)
     return
   end
@@ -5018,8 +5860,32 @@ function on_recv(self, frame, meta)
   if tag == "K" then
     local k = parse_ack(frame)
     if not k then return end
+    if k.to ~= self.id then return end
     if self.pending_tx == nil then return end
     if k.ctr_lo ~= self.pending_tx.ctr_lo then return end
+    if self.pending_tx.awaiting_ack ~= true then
+      self:emit("ack_drop_no_active_data", {
+        from = meta.src,
+        ctr_lo = k.ctr_lo,
+        origin = self.pending_tx.origin,
+        dst = self.pending_tx.dst,
+        next = self.pending_tx.next,
+        payload = self.pending_tx.user_text,
+        attempt_seq = self.pending_tx.last_rts_attempt_seq,
+      })
+      return
+    end
+    if meta.src ~= nil and meta.src ~= self.pending_tx.next then
+      self:emit("ack_drop_unexpected_src", {
+        expected = self.pending_tx.next,
+        from = meta.src,
+        ctr_lo = k.ctr_lo,
+        origin = self.pending_tx.origin,
+        dst = self.pending_tx.dst,
+        payload = self.pending_tx.user_text,
+      })
+      return
+    end
 
     -- ACK matched. Cancel the ack_timeout, clear pending_tx, drain the
     -- queue. The ack_timeout retry path (re-RTS on ack-loss) is what
@@ -5076,8 +5942,21 @@ function on_recv(self, frame, meta)
   if tag == "N" then
     local n = parse_nack(frame)
     if not n then return end
+    if n.to ~= self.id then return end
     if self.pending_tx == nil then return end
     if n.ctr_lo ~= self.pending_tx.ctr_lo then return end
+    if meta.src ~= nil and meta.src ~= self.pending_tx.next then
+      self:emit("nack_drop_unexpected_src", {
+        expected = self.pending_tx.next,
+        from = meta.src,
+        ctr_lo = n.ctr_lo,
+        origin = self.pending_tx.origin,
+        dst = self.pending_tx.dst,
+        payload = self.pending_tx.user_text,
+        reason = n.reason,
+      })
+      return
+    end
 
     -- NACK matched: chosen next-hop can't take us right now. Cancel the
     -- rts_timeout (NACK is a faster, definitive signal). NACK rides on
@@ -5348,22 +6227,27 @@ function on_recv(self, frame, meta)
       local carrier_claim = d.prev_fwd_rt_hops or 0
       local candidate_hops = carrier_claim + 1
       if carrier_claim > 0 and candidate_hops <= 8 and d.dst ~= self.id then
+        local data_route_score = route_score_from_snr(self, meta.snr)
         local cand = {
           next_hop     = carrier,
           hops         = candidate_hops,
-          score        = meta.snr,
+          score        = data_route_score,
           last_seen_ms = self:now(),
         }
         local action = rt_merge(self, self.rt, d.dst, cand, self.routing_snr_floor_db)
         if action == "new" or action == "promote" then
           self:emit("rt_update", {
-            dest = d.dst, next = carrier, score = meta.snr,
+            dest = d.dst, next = carrier, score = data_route_score,
+            rx_snr = meta.snr,
+            route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
             hops = candidate_hops, slot = "primary",
             trigger = "data_rt_learn",
           })
         elseif action == "alt_install" then
           self:emit("rt_update", {
-            dest = d.dst, next = carrier, score = meta.snr,
+            dest = d.dst, next = carrier, score = data_route_score,
+            rx_snr = meta.snr,
+            route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
             hops = candidate_hops, slot = "alt",
             trigger = "data_rt_learn",
           })
@@ -5399,10 +6283,11 @@ function on_recv(self, frame, meta)
 
     -- DATA decoded. Cancel the pending_rx_expiry, retune RX, clear
     -- pending_rx. Then immediately TX the per-hop ACK on routing_sf and
-    -- cache (sender, ctr_lo) so future retried RTS-from-this-sender
+    -- cache the DATA identity so future retried RTS for this same packet
     -- short-circuits via CTS already_received without re-processing DATA.
     local rx_from = self.pending_rx.from
     local rx_chosen_sf = self.pending_rx.chosen_data_sf
+    local rx_payload_len = #d.inner + MAC_LEN
     if self.pending_rx_expiry_handle then
       self:cancel(self.pending_rx_expiry_handle)
       self.pending_rx_expiry_handle = nil
@@ -5410,8 +6295,10 @@ function on_recv(self, frame, meta)
     self:set_rx_sf(self.routing_sf)
     self.pending_rx = nil
 
-    self.last_acked_from[rx_from] = {
+    self.last_acked_from[last_acked_key(rx_from, d.dst, d.ctr_lo, rx_payload_len)] = {
       ctr_lo = d.ctr_lo,
+      dst = d.dst,
+      payload_len = rx_payload_len,
       t_ms = self:now(),
       chosen_data_sf = rx_chosen_sf,
     }
@@ -5434,16 +6321,16 @@ function on_recv(self, frame, meta)
       self:log(string.format(
         "hop_budget_exceeded origin=%s dst=%s ctr=%d committed=%d (NACK, no forward)",
         name_of(self, d.origin), name_of(self, d.dst), d.ctr, hb_new_committed))
-      -- Record (origin, ctr) in seen_origins so any later duplicate
+      -- Record (origin, dst, ctr) in seen_origins so any later duplicate
       -- arriving at us short-circuits via dup_drop. We DID receive the
       -- frame; we just can't carry it further.
-      self.seen_origins[string.format("%d|%d", d.origin, d.ctr)] =
+      self.seen_origins[seen_origin_key(d.origin, d.dst, d.ctr)] =
         self:now() + self.seen_origin_ttl_ms
       -- NACK back to the upstream so it learns rt[dst] was under-estimating.
       -- Use tx_with_retry (RESPONSE class, same priority as ACK would have
       -- been) so the NACK reaches upstream within its ACK-await window.
       local nack_payload = ((hb_new_committed & 0xf) << 4) | 0
-      local nack = pack_nack(d.ctr_lo, NACK_REASON_HOP_BUDGET, nack_payload)
+      local nack = pack_nack(d.ctr_lo, NACK_REASON_HOP_BUDGET, nack_payload, rx_from)
       self:emit("nack_tx", {
         origin = d.origin, payload = user_text, ctr = d.ctr,
         to = rx_from, ctr_lo = d.ctr_lo,
@@ -5472,7 +6359,7 @@ function on_recv(self, frame, meta)
     local my_budget_tier = compute_budget_tier(self)
     local ack_budget_hint = my_budget_tier
     if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
-    local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint)
+    local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint, rx_from)
     self:emit("ack_tx", {
       origin = d.origin, payload = user_text, ctr = d.ctr,
       to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
@@ -5489,16 +6376,16 @@ function on_recv(self, frame, meta)
 
     -- Origin-level dedup. Now that the ACK is on its way (the
     -- previous hop will clear pending_tx whether or not we forward),
-    -- check whether we've already seen this (origin, ctr).
-    -- Re-keyed from (origin, origin_seq) → (origin, ctr) per §7.0.1.
+    -- check whether we've already seen this (origin, dst, ctr). ctr is
+    -- per-(origin,dst), so dst is part of the replay key.
     do
-      local seen_key = string.format("%d|%d", d.origin, d.ctr)
+      local seen_key = seen_origin_key(d.origin, d.dst, d.ctr)
       local now_ms = self:now()
       local exp = self.seen_origins[seen_key]
       if exp and exp > now_ms then
         self:emit("dup_drop", {
           origin = d.origin, payload = user_text, ctr = d.ctr,
-          from = rx_from, ctr_lo = d.ctr_lo,
+          dst = d.dst, from = rx_from, ctr_lo = d.ctr_lo,
         })
         self:log(string.format(
           "dup_drop <- %s (origin=%s ctr=%d, already seen — ACK only)",
@@ -5550,7 +6437,8 @@ function on_recv(self, frame, meta)
         if #d_user_text >= 2 then
           local acked_ctr = d_user_text:byte(1) | (d_user_text:byte(2) << 8)
           local actual_hops = (#d_user_text >= 3) and d_user_text:byte(3) or nil
-          local info = self.pending_e2e[acked_ctr]
+          local e2e_key = pending_e2e_key(d_origin, acked_ctr)
+          local info = self.pending_e2e[e2e_key]
           if info ~= nil then
             self:emit("delivered_confirmed", {
               origin     = self.id,         -- the original originator (us)
@@ -5565,7 +6453,7 @@ function on_recv(self, frame, meta)
               "delivered_confirmed acked_ctr=%d dst=%s elapsed=%dms actual_hops=%s (E2E ACK from %s)",
               acked_ctr, info.dst_name, self:now() - info.sent_at_ms,
               tostring(actual_hops), name_of(self, d_origin)))
-            self.pending_e2e[acked_ctr] = nil
+            self.pending_e2e[e2e_key] = nil
             -- §7.6 Phase D: rt-cost learning from the E2E ACK's actual_hops.
             -- Update self.rt[info.dst_id].hops with empirical truth. If
             -- shorter than current rt: shave the estimate (better route).
@@ -5595,6 +6483,7 @@ function on_recv(self, frame, meta)
             -- corresponding e2e. Cheap diagnostic emit for the analyzer.
             self:emit("e2e_ack_unmatched", {
               ctr = acked_ctr, from = d_origin,
+              pending_key = e2e_key,
             })
           end
         end
@@ -5804,8 +6693,10 @@ function on_command(self, cmd_str)
     -- Register pending_e2e BEFORE enqueueing the send so a fast E2E ACK
     -- (e.g. test scenario with 1-hop path) doesn't arrive before the
     -- bookkeeping is in place.
-    self.pending_e2e[ctr] = {
+    local e2e_key = pending_e2e_key(dst_id, ctr)
+    self.pending_e2e[e2e_key] = {
       sent_at_ms = self:now(),
+      ctr        = ctr,
       dst_id     = dst_id,
       dst_name   = dst_name,
       user_text  = text,
@@ -5814,8 +6705,8 @@ function on_command(self, cmd_str)
       origin = self.id, ctr = ctr, dst = dst_id,
       ttl_ms = self.e2e_ack_ttl_ms,
     })
-    self:log(string.format("send_e2e: pending_e2e[%d] dst=%s ttl=%dms",
-      ctr, dst_name, self.e2e_ack_ttl_ms))
+    self:log(string.format("send_e2e: pending_e2e[%s] dst=%s ctr=%d ttl=%dms",
+      e2e_key, dst_name, ctr, self.e2e_ack_ttl_ms))
   end
   table.insert(self.tx_queue, {
     origin     = self.id,
@@ -5857,6 +6748,43 @@ function on_radio_busy(self, info)
     busy_until_ms = info.busy_until_ms,
   })
 
+  if (info.label == "RTS" or info.label == "RTS-fwd" or info.label == "RTS-rty")
+     and self.pending_tx ~= nil then
+    self.pending_tx.awaiting_cts = false
+    self:emit("rts_tx_blocked", {
+      attempt_seq = self.pending_tx.last_rts_attempt_seq,
+      origin = self.pending_tx.origin,
+      dst = self.pending_tx.dst,
+      next = self.pending_tx.next,
+      ctr = self.pending_tx.ctr,
+      ctr_lo = self.pending_tx.ctr_lo,
+      payload = self.pending_tx.user_text,
+      label = info.label,
+      reason = info.reason,
+      busy_until_ms = info.busy_until_ms,
+    })
+  end
+
+  if info.label == "DATA" and self.pending_tx ~= nil then
+    self.pending_tx.awaiting_ack = false
+    if self.ack_timeout_handle then
+      self:cancel(self.ack_timeout_handle)
+      self.ack_timeout_handle = nil
+    end
+    self:emit("data_tx_blocked", {
+      attempt_seq = self.pending_tx.last_rts_attempt_seq,
+      origin = self.pending_tx.origin,
+      dst = self.pending_tx.dst,
+      next = self.pending_tx.next,
+      ctr = self.pending_tx.ctr,
+      ctr_lo = self.pending_tx.ctr_lo,
+      payload = self.pending_tx.user_text,
+      label = info.label,
+      reason = info.reason,
+      busy_until_ms = info.busy_until_ms,
+    })
+  end
+
   local stash = self.tx_stash[info.label]
   if not stash then
     -- Either a non-retry-eligible label or a retry-eligible one whose stash
@@ -5874,14 +6802,20 @@ function on_radio_busy(self, info)
   end
   stash.retries_left = stash.retries_left - 1
 
-  local now   = self:now()
-  local delay = info.busy_until_ms - now
-  if delay < 0 then delay = 0 end  -- channel already free; fire next step
+  local now = self:now()
+  local wait_ms = (info.busy_until_ms or now) - now
+  if wait_ms < 0 then wait_ms = 0 end
+  -- Runtime busy_until is the end of the currently-observed flight. Retrying
+  -- at or before that exact timestamp can consume all stash retries before the
+  -- channel is usable, so add a small guard plus jitter.
+  local guard_ms = 2
+  local delay = wait_ms + guard_ms + self:rand(0, self.lbt_backoff_ms + 1)
   self:log(string.format(
     "radio_busy %s reason=%s busy_until=%d -> retry in %dms (retries_left=%d)",
     info.label, info.reason, info.busy_until_ms, delay, stash.retries_left))
   self:after(delay, function()
     self:tx(stash.bytes, stash.opts)
+    if stash.opts and stash.opts.on_handed then stash.opts.on_handed() end
   end)
 end
 
