@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter, defaultdict, deque
@@ -2084,12 +2085,18 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
     degraded_bits_rx = 0
     degraded_marked = 0
     neighbor_marks = Counter()
+    ack_mark_constraints = Counter()
+    ack_mark_by_peer: Counter = Counter()
+    active_ack_marks: dict[tuple[object, object], int] = {}
+    rts_after_ack_mark = 0
+    rts_after_ack_mark_by_peer: Counter = Counter()
 
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
             continue
         et = e.get("emit_type", "")
         d = e.get("data") or {}
+        now = int(e.get("time_ms", 0) or 0)
         if et == "blind_observed":
             blind_observed_total += 1
             reason = d.get("reason", "")
@@ -2118,7 +2125,27 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
             degraded_bits_rx += int(d.get("applied", 0) or 0)
             degraded_marked += int(d.get("marked", 0) or 0)
         elif et == "neighbor_budget_mark":
-            neighbor_marks[d.get("source", "?")] += 1
+            source = d.get("source", "?")
+            neighbor_marks[source] += 1
+            if source == "ack_budget":
+                peer = d.get("node")
+                observer = e.get("node")
+                ack_mark_by_peer[peer] += 1
+                active_ack_marks[(observer, peer)] = now + 300000
+                ack_mark_constraints["marks"] += 1
+                for key in (
+                    "candidate_entries", "primary_entries", "primary_no_alt",
+                    "primary_with_alt", "primary_still_primary",
+                    "primary_demoted", "nonprimary_entries", "reranked",
+                ):
+                    ack_mark_constraints[key] += int(d.get(key, 0) or 0)
+        elif et == "rts_attempt_detail":
+            peer = d.get("next")
+            observer = e.get("node")
+            expiry = active_ack_marks.get((observer, peer))
+            if expiry is not None and expiry > now:
+                rts_after_ack_mark += 1
+                rts_after_ack_mark_by_peer[peer] += 1
 
     def resolve(nid):
         if isinstance(nid, int):
@@ -2142,12 +2169,19 @@ def section_tier_routing(events_path: str, cfg: dict, since_ms: int = 0) -> dict
         "degraded_bits_rx":      degraded_bits_rx,
         "degraded_marked":       degraded_marked,
         "neighbor_marks":        neighbor_marks,
+        "ack_mark_constraints":  ack_mark_constraints,
+        "top_ack_mark_peers":    [(resolve(n), c)
+                                   for n, c in ack_mark_by_peer.most_common(5)],
+        "rts_after_ack_mark":    rts_after_ack_mark,
+        "top_rts_after_ack_mark_peers": [(resolve(n), c)
+                                          for n, c in rts_after_ack_mark_by_peer.most_common(5)],
     }
 
 
 def print_section_22(r: dict) -> None:
     print("\n=== (22) tier-aware routing impact ===")
-    if r["blind_observed_total"] == 0 and r["tx_blind_defer"] == 0:
+    if (r["blind_observed_total"] == 0 and r["tx_blind_defer"] == 0
+            and not r["neighbor_marks"]):
         print("  (no blind/tier events — feature inactive in this run)")
         return
     print(f"  blind_observed (total):       {r['blind_observed_total']}")
@@ -2162,6 +2196,25 @@ def print_section_22(r: dict) -> None:
         print(f"  neighbor budget mark sources:")
         for source, c in r["neighbor_marks"].most_common():
             print(f"    {source:<16} {c}")
+    c = r["ack_mark_constraints"]
+    if c:
+        marks = c.get("marks", 0)
+        avg = lambda key: (c.get(key, 0) / marks) if marks else 0.0
+        print(f"  ACK-budget mark constraints:")
+        print(f"    marks={marks}  reranked_entries={c.get('reranked', 0)}")
+        print(f"    avg candidate entries touched: {avg('candidate_entries'):.1f}")
+        print(f"    avg primary entries touched:   {avg('primary_entries'):.1f}")
+        print(f"    primary no-alt / with-alt:     {c.get('primary_no_alt', 0)} / {c.get('primary_with_alt', 0)}")
+        print(f"    primary demoted / stayed:      {c.get('primary_demoted', 0)} / {c.get('primary_still_primary', 0)}")
+        print(f"    later RTS still targeting ACK-warned peer: {r['rts_after_ack_mark']}")
+        if r["top_ack_mark_peers"]:
+            print("    top ACK-warned peers:")
+            for name, n in r["top_ack_mark_peers"]:
+                print(f"      {name:<24} {n}")
+        if r["top_rts_after_ack_mark_peers"]:
+            print("    top warned peers still used by later RTS:")
+            for name, n in r["top_rts_after_ack_mark_peers"]:
+                print(f"      {name:<24} {n}")
     if r["top_observers"]:
         print(f"  top observers (sending budget-driven blind marks):")
         for name, c in r["top_observers"]:
@@ -2463,6 +2516,9 @@ def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
     top_cts_timeout_next: Counter = Counter()
     top_data_timeout_from: Counter = Counter()
     top_terminal_dst: Counter = Counter()
+    ack_budget_tx: Counter = Counter()
+    ack_budget_rx: Counter = Counter()
+    ack_budget_reranked = 0
     multi_next_rts = 0
     multi_next_retry = 0
 
@@ -2475,6 +2531,7 @@ def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
             d = e.get("data") or {}
             if et in {
                 "tx_enqueue", "rts_tx", "rts_retry", "cts_tx", "cts_rx",
+                "cts_already_received_rx",
                 "data_tx", "data_rx", "ack_tx", "ack_rx", "nack_tx",
                 "nack_rx", "data_rx_timeout", "path_cascade",
                 "cascade_requeue", "path_cascade_exhausted", "rts_giveup",
@@ -2496,6 +2553,13 @@ def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
                     top_cts_timeout_next[d.get("next")] += 1
             elif et == "data_rx_timeout":
                 top_data_timeout_from[d.get("from")] += 1
+            elif et == "ack_tx":
+                hint = int(d.get("budget_hint", 0) or 0)
+                ack_budget_tx[hint] += 1
+            elif et == "ack_rx":
+                hint = int(d.get("budget_hint", 0) or 0)
+                ack_budget_rx[hint] += 1
+                ack_budget_reranked += int(d.get("budget_reranked", 0) or 0)
             elif et == "path_cascade":
                 cascade_triggers[d.get("trigger", "?")] += 1
             elif et == "cascade_requeue":
@@ -2509,6 +2573,7 @@ def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
 
     rts_attempts = ev_counts["rts_tx"] + ev_counts["rts_retry"]
     cts_rx = ev_counts["cts_rx"]
+    cts_already_received_rx = ev_counts["cts_already_received_rx"]
     data_tx = ev_counts["data_tx"]
     data_rx = ev_counts["data_rx"]
     ack_tx = ev_counts["ack_tx"]
@@ -2531,6 +2596,7 @@ def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
         "requeue_triggers": requeue_triggers,
         "rts_attempts": rts_attempts,
         "setup_success": cts_rx,
+        "cts_already_received_rx": cts_already_received_rx,
         "setup_no_cts_symptom": cts_timeout_retries,
         "nack_rx": nack_rx,
         "data_tx": data_tx,
@@ -2547,6 +2613,9 @@ def section_data_loss_attribution(events_path: str, pkt_label: dict[str, str],
         "top_cts_timeout_next": top_cts_timeout_next,
         "top_data_timeout_from": top_data_timeout_from,
         "top_terminal_dst": top_terminal_dst,
+        "ack_budget_tx": ack_budget_tx,
+        "ack_budget_rx": ack_budget_rx,
+        "ack_budget_reranked": ack_budget_reranked,
         "rf_by_label_type": rf_by_label_type,
     }
 
@@ -2568,12 +2637,18 @@ def print_section_25_data_loss(r: dict, cfg: dict) -> None:
           f"(initial={ev['rts_tx']}, retry={ev['rts_retry']})")
     print(f"    CTS received by sender:   {r['setup_success']:>5} "
           f"({pct(r['setup_success'], rts_attempts)} of RTS attempts)")
+    print(f"      already-received CTS:   {r['cts_already_received_rx']:>5} "
+          f"(ACK-loss recovery; DATA skipped)")
     print(f"    DATA transmitted:         {data_tx:>5}")
     print(f"    DATA decoded at next hop: {data_rx:>5} "
           f"({pct(data_rx, data_tx)} of DATA TX)")
     print(f"    ACK transmitted:          {ack_tx:>5}")
     print(f"    ACK received by sender:   {ack_rx:>5} "
           f"({pct(ack_rx, ack_tx)} of ACK TX)")
+    hinted_tx = sum(c for h, c in r["ack_budget_tx"].items() if h)
+    hinted_rx = sum(c for h, c in r["ack_budget_rx"].items() if h)
+    print(f"      ACK budget hints TX/RX: {hinted_tx:>5} / {hinted_rx:<5} "
+          f"(reranked routes={r['ack_budget_reranked']})")
 
     print("\n  loss symptoms by stage:")
     print(f"    no CTS / setup timeout retries:       {r['setup_no_cts_symptom']:>5}")
@@ -2655,9 +2730,11 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
     name_to_id = {v: k for k, v in id_to_name.items()}
 
     pending_rts_emit: dict[str, deque] = defaultdict(deque)
+    pending_rts_detail: dict[str, deque] = defaultdict(deque)
     pending_response_emit: dict[str, deque] = defaultdict(deque)
     open_by_key: dict[tuple[int, int, int], deque] = defaultdict(deque)
     attempts_by_pkt: dict[str, dict] = {}
+    attempts_by_seq: dict[tuple[int, int], dict] = {}
     responses_by_pkt: dict[str, dict] = {}
     attempts: list[dict] = []
 
@@ -2701,6 +2778,31 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
             a["timeout"] = True
             a["closed"] = True
 
+    def pop_matching(q: deque, attempt_seq: int | None) -> dict:
+        if not q:
+            return {}
+        if attempt_seq is None:
+            return q.popleft()
+        for idx, item in enumerate(q):
+            if item.get("attempt_seq") == attempt_seq:
+                del q[idx]
+                return item
+        return q.popleft()
+
+    def attempt_seq_from_info(info: str | None) -> int | None:
+        if not info:
+            return None
+        m = re.search(r"\battempt_seq=(\d+)\b", info)
+        return int(m.group(1)) if m else None
+
+    def mark_timeout_seq(sender_id: int | None, attempt_seq: int | None) -> None:
+        if sender_id is None or attempt_seq is None:
+            return
+        a = attempts_by_seq.get((sender_id, attempt_seq))
+        if a and not a.get("closed"):
+            a["timeout"] = True
+            a["closed"] = True
+
     for e in iter_events(events_path, since_ms):
         typ = e.get("type")
         if typ == "script_emit":
@@ -2718,7 +2820,11 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
                         "ctr": d.get("ctr"),
                         "ctr_lo": d.get("ctr_lo"),
                         "next": d.get("next"),
+                        "attempt_seq": d.get("attempt_seq"),
                     })
+            elif et == "rts_attempt_detail":
+                if node_name is not None:
+                    pending_rts_detail[node_name].append(d)
             elif et == "rts_retry":
                 mark_timeout(node_id, d.get("next"), d.get("ctr_lo")) \
                     if d.get("reason") == "cts_timeout" else None
@@ -2731,13 +2837,21 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
                         "ctr": d.get("ctr"),
                         "ctr_lo": d.get("ctr_lo"),
                         "next": d.get("next"),
+                        "attempt_seq": d.get("attempt_seq"),
                     })
+            elif et == "rts_attempt_timeout":
+                mark_timeout_seq(node_id, d.get("attempt_seq"))
             elif et in ("rts_rx", "rts_rx_dup"):
                 key = (node_id, d.get("from"), d.get("ctr_lo"))
                 a = first_open(key)
                 if a:
                     a["rts_decoded"] = True
                     a["rts_decode_kind"] = et
+            elif et == "rts_receiver_state":
+                key = (node_id, d.get("from"), d.get("ctr_lo"))
+                a = first_open(key)
+                if a:
+                    a["receiver_state"] = d
             elif et in ("rts_drop_pending_tx", "rts_drop_originator_throttle", "rts_drop_no_sf"):
                 key = (node_id, d.get("from"), d.get("ctr_lo"))
                 a = first_open(key)
@@ -2751,27 +2865,37 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
                         "to": d.get("to"),
                         "ctr_lo": d.get("ctr_lo"),
                         "reason": d.get("reason"),
+                        "already_received": d.get("already_received"),
                     })
                 key = (node_id, d.get("to"), d.get("ctr_lo"))
                 a = first_open(key)
                 if a:
                     a["response_emitted"] = "CTS" if et == "cts_tx" else "NACK"
                     a["response_reason"] = d.get("reason")
+                    if d.get("already_received"):
+                        a["response_already_received"] = True
             elif et in ("cts_rx", "nack_rx"):
                 sender_id = node_id
                 next_id = d.get("from")
-                key = (next_id, sender_id, d.get("ctr_lo"))
-                a = first_open(key)
+                a = attempts_by_seq.get((sender_id, d.get("attempt_seq"))) \
+                    if d.get("attempt_seq") is not None else None
+                if a is None:
+                    key = (next_id, sender_id, d.get("ctr_lo"))
+                    a = first_open(key)
                 if a:
                     a["response_received"] = "CTS" if et == "cts_rx" else "NACK"
                     a["response_rx_reason"] = d.get("reason")
+                    if d.get("already_received"):
+                        a["response_already_received"] = True
                     a["closed"] = True
 
         elif typ == "tx":
             label = e.get("label") or pkt_label.get(e.get("pkt"), "")
             node_name = e.get("node")
             if label in ("RTS", "RTS-fwd", "RTS-rty"):
-                meta = pending_rts_emit[node_name].popleft() if pending_rts_emit.get(node_name) else {}
+                seq = attempt_seq_from_info(e.get("info"))
+                meta = pop_matching(pending_rts_emit.get(node_name), seq)
+                detail = pop_matching(pending_rts_detail.get(node_name), seq)
                 src_id = name_to_id.get(node_name)
                 next_id = meta.get("next")
                 a = {
@@ -2785,12 +2909,16 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
                     "ctr_lo": meta.get("ctr_lo"),
                     "kind": meta.get("kind", "unknown"),
                     "retry_reason": meta.get("reason"),
+                    "attempt_seq": meta.get("attempt_seq") or detail.get("attempt_seq"),
                     "origin": meta.get("origin"),
                     "dst": meta.get("dst"),
+                    "detail": detail,
                     "closed": False,
                 }
                 attempts.append(a)
                 attempts_by_pkt[e.get("pkt")] = a
+                if src_id is not None and a.get("attempt_seq") is not None:
+                    attempts_by_seq[(src_id, a["attempt_seq"])] = a
                 if src_id is not None and next_id is not None and meta.get("ctr_lo") is not None:
                     open_by_key[(next_id, src_id, meta.get("ctr_lo"))].append(a)
             elif label in ("CTS", "CTS-dup", "NACK"):
@@ -2826,9 +2954,20 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
     rf_resp: Counter = Counter()
     script_drops: Counter = Counter()
     top_next_by_cat: dict[str, Counter] = defaultdict(Counter)
+    sender_rank_by_cat: dict[str, Counter] = defaultdict(Counter)
+    sender_tier_by_cat: dict[str, Counter] = defaultdict(Counter)
+    sender_penalty_by_cat: dict[str, Counter] = defaultdict(Counter)
+    sender_viable_alts_by_cat: dict[str, Counter] = defaultdict(Counter)
+    receiver_state_by_cat: dict[str, Counter] = defaultdict(Counter)
+    failed_route_ages: list[int] = []
+    all_route_ages: list[int] = []
+    focused_samples: list[dict] = []
     unresolved = 0
+    already_received_cts = 0
 
     for a in attempts:
+        if a.get("response_already_received"):
+            already_received_cts += 1
         if a.get("response_received") == "CTS":
             cat = "success_cts_rx"
         elif a.get("response_received") == "NACK":
@@ -2861,7 +3000,41 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
             unresolved += 1
 
         categories[cat] += 1
+        a["cat"] = cat
         top_next_by_cat[cat][a.get("next")] += 1
+        detail = a.get("detail") or {}
+        rank = detail.get("candidate_rank")
+        if rank is None:
+            sender_rank_by_cat[cat]["unknown"] += 1
+        else:
+            sender_rank_by_cat[cat][rank] += 1
+        sender_tier_by_cat[cat][detail.get("next_tier", 0)] += 1
+        penalty = detail.get("budget_penalty_db")
+        if isinstance(penalty, (int, float)):
+            sender_penalty_by_cat[cat][round(float(penalty), 1)] += 1
+        viable_alts = detail.get("viable_alts")
+        if isinstance(viable_alts, (int, float)):
+            sender_viable_alts_by_cat[cat][int(viable_alts)] += 1
+        age = detail.get("route_age_ms")
+        if isinstance(age, (int, float)):
+            all_route_ages.append(int(age))
+            if cat != "success_cts_rx":
+                failed_route_ages.append(int(age))
+        rs = a.get("receiver_state") or {}
+        if rs:
+            if rs.get("has_pending_tx"):
+                state = "receiver_pending_tx"
+            elif rs.get("has_pending_rx"):
+                same = (rs.get("pending_rx_from") == a.get("src")
+                        and rs.get("pending_rx_ctr_lo") == a.get("ctr_lo"))
+                state = "receiver_pending_rx_same" if same else "receiver_pending_rx_other"
+            elif rs.get("budget_tier", 0) >= 2:
+                state = "receiver_budget_critical"
+            else:
+                state = "receiver_free"
+            receiver_state_by_cat[cat][state] += 1
+        if cat != "success_cts_rx" and len(focused_samples) < 10:
+            focused_samples.append(a)
 
     return {
         "attempts": len(attempts),
@@ -2870,7 +3043,16 @@ def section_rts_setup_attribution(events_path: str, cfg: dict,
         "rf_resp": rf_resp,
         "script_drops": script_drops,
         "top_next_by_cat": top_next_by_cat,
+        "sender_rank_by_cat": sender_rank_by_cat,
+        "sender_tier_by_cat": sender_tier_by_cat,
+        "sender_penalty_by_cat": sender_penalty_by_cat,
+        "sender_viable_alts_by_cat": sender_viable_alts_by_cat,
+        "receiver_state_by_cat": receiver_state_by_cat,
+        "failed_route_ages": failed_route_ages,
+        "all_route_ages": all_route_ages,
+        "focused_samples": focused_samples,
         "unresolved": unresolved,
+        "already_received_cts": already_received_cts,
     }
 
 
@@ -2913,6 +3095,8 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
         n = r["categories"].get(k, 0)
         if n:
             print(f"    {labels[k]:<52} {n:>5}  ({pct(n)})")
+    if r.get("already_received_cts", 0):
+        print(f"      of CTS successes, already-received recovery: {r['already_received_cts']}")
 
     if r["rf_rts"]:
         print("\n  RTS RF loss at intended next-hop:")
@@ -2926,6 +3110,47 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
         print("\n  RTS decoded then script-dropped:")
         for reason, n in r["script_drops"].most_common():
             print(f"    {reason:<28} {n:>5}")
+
+    def pctl(vals: list[int], pct: float) -> int | None:
+        if not vals:
+            return None
+        vals = sorted(vals)
+        idx = min(len(vals) - 1, max(0, int(round((pct / 100.0) * (len(vals) - 1)))))
+        return vals[idx]
+
+    noisy_cats = [k for k in order if k != "success_cts_rx"]
+    print("\n  focused sender/receiver telemetry:")
+    rank_total = Counter()
+    tier_total = Counter()
+    penalty_total = Counter()
+    viable_alt_total = Counter()
+    recv_total = Counter()
+    for cat in noisy_cats:
+        rank_total.update(r["sender_rank_by_cat"].get(cat, {}))
+        tier_total.update(r["sender_tier_by_cat"].get(cat, {}))
+        penalty_total.update(r["sender_penalty_by_cat"].get(cat, {}))
+        viable_alt_total.update(r["sender_viable_alts_by_cat"].get(cat, {}))
+        recv_total.update(r["receiver_state_by_cat"].get(cat, {}))
+    if rank_total:
+        ranks = ", ".join(f"{k}:{v}" for k, v in rank_total.most_common())
+        print(f"    failed-attempt selected candidate rank: {ranks}")
+    if tier_total:
+        tiers = {0: "HEALTHY", 1: "STRAINED", 2: "CRITICAL", 3: "EXHAUSTED"}
+        tier_s = ", ".join(f"{tiers.get(k, k)}:{v}" for k, v in tier_total.most_common())
+        print(f"    failed-attempt selected next-hop tier: {tier_s}")
+    if penalty_total:
+        penalties = ", ".join(f"{k:g}dB:{v}" for k, v in sorted(penalty_total.items()))
+        print(f"    failed-attempt budget penalty: {penalties}")
+    if viable_alt_total:
+        alts = ", ".join(f"{k}:{v}" for k, v in sorted(viable_alt_total.items()))
+        print(f"    failed-attempt viable alternatives: {alts}")
+    if recv_total:
+        states = ", ".join(f"{k}:{v}" for k, v in recv_total.most_common())
+        print(f"    intended receiver state after RTS decode: {states}")
+    ages = r.get("failed_route_ages") or []
+    if ages:
+        print(f"    failed-attempt route age: p50={pctl(ages, 50)/1000:.1f}s "
+              f"p95={pctl(ages, 95)/1000:.1f}s max={max(ages)/1000:.1f}s")
 
     names = {i: n.get("name", str(i)) for i, n in enumerate(cfg.get("nodes", []))}
     interesting = [
@@ -2942,6 +3167,24 @@ def print_section_26_rts_setup(r: dict, cfg: dict) -> None:
         top = ", ".join(f"{names.get(node, str(node))}:{n}"
                         for node, n in c.most_common(4))
         print(f"    {labels[cat]:<52} {top}")
+
+    samples = r.get("focused_samples") or []
+    if samples:
+        print("\n  sample focused failed attempts:")
+        for a in samples[:6]:
+            d = a.get("detail") or {}
+            rs = a.get("receiver_state") or {}
+            print("    "
+                  f"{a.get('src_name')} -> {a.get('next_name')} "
+                  f"dst={names.get(a.get('dst'), a.get('dst'))} "
+                  f"cat={a.get('cat')} "
+                  f"rank={d.get('candidate_rank')}/{d.get('candidate_count')} "
+                  f"hops={d.get('route_hops')} "
+                  f"penalty={d.get('budget_penalty_db')} "
+                  f"alts={d.get('viable_alts')} "
+                  f"age_ms={d.get('route_age_ms')} "
+                  f"rx_state="
+                  f"{'ptx' if rs.get('has_pending_tx') else ('prx' if rs.get('has_pending_rx') else ('tier'+str(rs.get('budget_tier')) if rs else 'n/a'))}")
 
 
 # ---- Section 27: inter-layer gateway efficiency (§7.3 — stub for now) -----
@@ -3050,6 +3293,244 @@ def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -
         print(f"  payload airtime efficiency: {100*data/total:.1f}%")
 
 
+# ---- Fast lifecycle report ------------------------------------------------
+
+def lifecycle_phase_boundaries(cfg: dict) -> list[tuple[str, int, int]]:
+    duration = int(cfg.get("simulation", {}).get("duration_ms", 0) or 0)
+    starts = sorted(
+        int(n.get("start_at_ms", 0) or 0)
+        for n in cfg.get("nodes", [])
+        if int(n.get("start_at_ms", 0) or 0) >= 3_600_000
+    )
+    deaths = sorted(
+        int(n.get("dies_at_ms", 0) or 0)
+        for n in cfg.get("nodes", [])
+        if int(n.get("dies_at_ms", 0) or 0) > 0
+    )
+    if not starts and not deaths:
+        return [("whole-run", 0, duration)]
+
+    join_start = starts[0] if starts else duration
+    join_end = starts[-1] if starts else join_start
+    death_start = deaths[0] if deaths else duration
+    death_end = deaths[-1] if deaths else death_start
+
+    phases: list[tuple[str, int, int]] = []
+    if join_start > 0:
+        phases.append(("cold-start", 0, join_start))
+    if starts:
+        phases.append(("join-window", join_start, min(duration, join_end + 600_000)))
+    post_join_start = min(duration, join_end + 600_000) if starts else 0
+    if deaths and death_start > post_join_start:
+        phases.append(("post-join", post_join_start, death_start))
+    if deaths:
+        phases.append(("death-window", death_start, min(duration, death_end + 600_000)))
+    tail_start = min(duration, death_end + 600_000) if deaths else post_join_start
+    if tail_start < duration:
+        phases.append(("tail", tail_start, duration))
+    return [(name, start, end) for name, start, end in phases if end > start]
+
+
+def phase_at(phases: list[tuple[str, int, int]], time_ms: int) -> str:
+    for name, start, end in phases:
+        if start <= time_ms < end:
+            return name
+    return phases[-1][0] if phases else "whole-run"
+
+
+def command_payload(command: str) -> str:
+    parts = command.split(maxsplit=2)
+    return parts[2] if len(parts) >= 3 else ""
+
+
+def section_lifecycle_fast(cfg: dict, events_path: str) -> dict:
+    names_by_id = {i: n["name"] for i, n in enumerate(cfg.get("nodes", []))}
+    name_to_id = {v: k for k, v in names_by_id.items()}
+    phases = lifecycle_phase_boundaries(cfg)
+
+    sent_by_phase = Counter()
+    delivered_by_enqueue_phase = Counter()
+    commands_by_key: dict[tuple[int, str], str] = {}
+    for c in cfg.get("commands", []):
+        cmd = c.get("command", "")
+        verb = cmd.split(maxsplit=1)[0] if cmd else ""
+        if verb not in ("send", "send_e2e"):
+            continue
+        origin_name = c.get("node")
+        origin_id = name_to_id.get(origin_name)
+        payload = command_payload(cmd)
+        ph = phase_at(phases, int(c.get("at_ms", 0) or 0))
+        sent_by_phase[ph] += 1
+        if origin_id is not None and payload:
+            commands_by_key[(origin_id, payload)] = ph
+
+    tx_count_by_label = Counter()
+    tx_air_by_label = Counter()
+    drop_by_type = Counter()
+    lifecycle = Counter()
+    bcn_tx = Counter()
+    bcn_rx = 0
+    bcn_entries = Counter()
+    bcn_seen_bits = Counter()
+    rt_updates = 0
+    rt_updates_by_phase = Counter()
+    delivered_total = 0
+    delivered_unknown_phase = 0
+    seen_bitmap = Counter()
+    seen_bitmap_bits = Counter()
+    node_starts: list[tuple[int, str]] = []
+    node_deaths: list[tuple[int, str]] = []
+    event_count = 0
+
+    for e in iter_events(events_path, 0):
+        event_count += 1
+        typ = e.get("type")
+        t = int(e.get("time_ms", 0) or 0)
+        if typ == "tx":
+            lbl = e.get("label", "?")
+            tx_count_by_label[lbl] += 1
+            tx_air_by_label[lbl] += e.get("airtime_ms", 0)
+        elif typ and typ.startswith("drop_"):
+            drop_by_type[typ] += 1
+        elif typ == "collision":
+            drop_by_type["collision"] += 1
+        elif typ == "node_started":
+            lifecycle["node_started"] += 1
+            node_starts.append((t, e.get("node", "?")))
+        elif typ == "node_died":
+            lifecycle["node_died"] += 1
+            node_deaths.append((t, e.get("node", "?")))
+        elif typ == "script_emit":
+            emit = e.get("emit_type")
+            data = e.get("data") or {}
+            if emit == "beacon_tx":
+                bcn_tx["total"] += 1
+                bcn_tx["dirty_only" if data.get("dirty_only") else "full"] += 1
+                bcn_tx[f"kind:{data.get('kind', '?')}"] += 1
+                bcn_entries[int(data.get("n_entries", 0) or 0)] += 1
+                bcn_seen_bits[int(data.get("seen_bits", 0) or 0)] += 1
+            elif emit == "beacon_rx":
+                bcn_rx += 1
+            elif emit == "seen_bitmap_tx":
+                seen_bitmap["tx"] += 1
+                seen_bitmap_bits["tx_bits"] += int(data.get("bits_set", 0) or 0)
+            elif emit == "seen_bitmap_rx":
+                seen_bitmap["rx"] += 1
+                seen_bitmap_bits["rx_bits"] += int(data.get("bits_set", 0) or 0)
+                seen_bitmap_bits["applied"] += int(data.get("applied", 0) or 0)
+                seen_bitmap_bits["refreshed"] += int(data.get("refreshed", 0) or 0)
+            elif emit == "rt_update":
+                rt_updates += 1
+                rt_updates_by_phase[phase_at(phases, t)] += 1
+            elif emit == "delivered":
+                delivered_total += 1
+                origin = data.get("origin")
+                payload = data.get("payload", "")
+                ph = commands_by_key.get((origin, payload))
+                if ph:
+                    delivered_by_enqueue_phase[ph] += 1
+                else:
+                    delivered_unknown_phase += 1
+
+    return {
+        "phases": phases,
+        "event_count": event_count,
+        "sent_by_phase": sent_by_phase,
+        "delivered_by_enqueue_phase": delivered_by_enqueue_phase,
+        "delivered_unknown_phase": delivered_unknown_phase,
+        "delivered_total": delivered_total,
+        "tx_count_by_label": tx_count_by_label,
+        "tx_air_by_label": tx_air_by_label,
+        "drop_by_type": drop_by_type,
+        "lifecycle": lifecycle,
+        "node_starts": node_starts,
+        "node_deaths": node_deaths,
+        "bcn_tx": bcn_tx,
+        "bcn_rx": bcn_rx,
+        "bcn_entries": bcn_entries,
+        "bcn_seen_bits": bcn_seen_bits,
+        "seen_bitmap": seen_bitmap,
+        "seen_bitmap_bits": seen_bitmap_bits,
+        "rt_updates": rt_updates,
+        "rt_updates_by_phase": rt_updates_by_phase,
+    }
+
+
+def print_lifecycle_fast(r: dict) -> None:
+    print("\n=== fast lifecycle report ===")
+    print(f"  events scanned: {r['event_count']}")
+    print("  phases:")
+    for name, start, end in r["phases"]:
+        print(f"    {name:<12} {start/60000:7.1f}m → {end/60000:7.1f}m")
+
+    print("\n  delivery by enqueue phase:")
+    total_sent = sum(r["sent_by_phase"].values())
+    total_deliv = sum(r["delivered_by_enqueue_phase"].values())
+    for name, _, _ in r["phases"]:
+        sent = r["sent_by_phase"].get(name, 0)
+        got = r["delivered_by_enqueue_phase"].get(name, 0)
+        pct = 100.0 * got / sent if sent else 0.0
+        print(f"    {name:<12} sent={sent:>4} delivered={got:>4} rate={pct:>5.1f}%")
+    if r["delivered_unknown_phase"]:
+        print(f"    unmatched delivered events: {r['delivered_unknown_phase']}")
+    if total_sent:
+        print(f"    TOTAL        sent={total_sent:>4} delivered={total_deliv:>4} "
+              f"rate={100.0 * total_deliv / total_sent:>5.1f}%")
+
+    print("\n  lifecycle events:")
+    print(f"    node_started: {r['lifecycle'].get('node_started', 0)}")
+    print(f"    node_died:    {r['lifecycle'].get('node_died', 0)}")
+    if r["node_starts"]:
+        late = [(t, n) for t, n in r["node_starts"] if t >= 3_600_000]
+        if late:
+            print("    first late starts:")
+            for t, n in late[:5]:
+                print(f"      {t/60000:7.1f}m  {n}")
+    if r["node_deaths"]:
+        print("    first deaths:")
+        for t, n in r["node_deaths"][:5]:
+            print(f"      {t/60000:7.1f}m  {n}")
+
+    print("\n  BCN activity:")
+    bcn = r["bcn_tx"]
+    total = bcn.get("total", 0)
+    print(f"    beacon_tx: {total}  full={bcn.get('full', 0)} "
+          f"dirty_only={bcn.get('dirty_only', 0)}")
+    print(f"    beacon_rx: {r['bcn_rx']}")
+    if total:
+        entries_total = sum(k * v for k, v in r["bcn_entries"].items())
+        seen_total = sum(k * v for k, v in r["bcn_seen_bits"].items())
+        print(f"    avg entries/BCN: {entries_total / total:.1f}")
+        print(f"    avg seen bits/BCN: {seen_total / total:.1f}")
+        kind_counts = {k.removeprefix("kind:"): v for k, v in bcn.items() if k.startswith("kind:")}
+        print(f"    kinds: {dict(sorted(kind_counts.items()))}")
+
+    print("\n  seen bitmap:")
+    print(f"    tx={r['seen_bitmap'].get('tx', 0)} "
+          f"rx={r['seen_bitmap'].get('rx', 0)}")
+    print(f"    bits tx/rx/applied/refreshed: "
+          f"{r['seen_bitmap_bits'].get('tx_bits', 0)} / "
+          f"{r['seen_bitmap_bits'].get('rx_bits', 0)} / "
+          f"{r['seen_bitmap_bits'].get('applied', 0)} / "
+          f"{r['seen_bitmap_bits'].get('refreshed', 0)}")
+
+    print("\n  routing updates:")
+    print(f"    rt_update total: {r['rt_updates']}")
+    for name, _, _ in r["phases"]:
+        print(f"    {name:<12} {r['rt_updates_by_phase'].get(name, 0)}")
+
+    print("\n  TX airtime top labels:")
+    total_air = sum(r["tx_air_by_label"].values())
+    for lbl, air in r["tx_air_by_label"].most_common(8):
+        pct = 100.0 * air / total_air if total_air else 0.0
+        print(f"    {lbl:<8} count={r['tx_count_by_label'][lbl]:>6} "
+              f"airtime_ms={air:>10.0f} {pct:>5.1f}%")
+
+    print("\n  RF/drop observations:")
+    for typ, count in r["drop_by_type"].most_common(8):
+        print(f"    {typ:<22} {count}")
+
+
 # ---- Driver ---------------------------------------------------------------
 
 def main() -> None:
@@ -3059,6 +3540,8 @@ def main() -> None:
     p.add_argument("--run", action="store_true",
                    help="Run lus on the config first; events file written to /tmp.")
     p.add_argument("--lus", default="build/orchestrator/lus")
+    p.add_argument("--fast-lifecycle", action="store_true",
+                   help="Single-pass lifecycle/cold-start summary; skips expensive full sections.")
     args = p.parse_args()
 
     if args.events is None:
@@ -3085,6 +3568,10 @@ def main() -> None:
     else:
         analyzed_ms = duration_ms
         print(f"# warmup:   none (no warmup_end event in stream)")
+
+    if args.fast_lifecycle:
+        print_lifecycle_fast(section_lifecycle_fast(cfg, args.events))
+        return
 
     # One pre-pass over the file: pkt_id → label map. All sections that
     # need to classify rx events by their origin-tx label use this.

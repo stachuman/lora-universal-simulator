@@ -171,7 +171,8 @@ status.
 **Route entry byte 2 bit fields:**
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
   via `bucket_of_snr_4b` (16 buckets, 2 dB resolution, range −20..+10 dB).
-  Same encoding as ACK piggyback SNR. Decoded via `snr_of_bucket_4b`.
+  Decoded via `snr_of_bucket_4b`. ACK uses a separate 2-bit coarse SNR
+  encoding so it can also carry budget back-pressure while staying 2 bytes.
 - `(hops-1)` (3 bits, 3:1): wire carries `hops − 1` (range 0..7). In-memory
   `rt[]` candidates store decoded `hops` (range 1..8). The 8-hop cap is
   preserved: `combined_hops > 8` routes are rejected at the receiver.
@@ -236,7 +237,7 @@ byte:  0   1
        ┌───┬───────────────────────────────────┐
        │'C'│ ctr_lo (4 hi)                     │
        │   │ chosen_data_sf - 5 (3)            │
-       │   │ reserved (1)                      │
+       │   │ already_received (1)              │
        └───┴───────────────────────────────────┘
 ```
 
@@ -244,7 +245,10 @@ byte:  0   1
   against `pending_tx.ctr_lo`.
 - `chosen_data_sf` (3 bits, encoded as offset from 5): SF the
   receiver picked for the DATA leg. Range 5..12 → encoded 0..7.
-- `reserved` (1 bit): set to 0.
+- `already_received` (1 bit): set when the receiver has already decoded
+  and ACKed this DATA, but the sender retried RTS because that ACK was
+  lost. The sender treats this CTS as hop-complete and does not transmit
+  DATA again.
 
 No `leaf_id` — CTS is matched at the originator by
 `pending_tx.ctr_lo`, which was set after the originator's already-
@@ -309,48 +313,57 @@ hop-level ctr_lo: low nibble of ctr (ctr & 0xf), used for pending_rx matching.
 byte:  0   1
        ┌───┬───────────────────────────────────┐
        │'K'│ ctr_lo (4 hi)                     │
-       │   │ snr_bucket (4 lo)                 │
+       │   │ budget_hint (2) | snr_coarse (2) │
        └───┴───────────────────────────────────┘
 ```
 
 - `ctr_lo` (4 bits): echoes the DATA's ctr_lo.
-- `snr_bucket` (4 bits): receiver's quantized DATA-leg SNR. 16
-  buckets, 2 dB bins, range −20..+10 dB. Bucket `n` represents bin
-  center `−19 + 2n` dB. Bucket 15 is the "no info" sentinel when
-  the sender called `pack_ack(ctr_lo, nil)`.
+- `budget_hint` (2 bits): receiver's local duty-budget warning.
+  `0=OK`, `1=STRAINED`, `2=CRITICAL/EXHAUSTED`, `3=reserved`.
+  This is a soft routing signal only: it does not fail the hop and it
+  does not mark the receiver blind.
+- `snr_coarse` (2 bits): receiver's coarse DATA-leg SNR. `0=poor`,
+  `1=usable`, `2=good`, `3=no info`.
 
 The originator/forwarder feeds the decoded SNR into
 `snr_ewma_out[next_hop]` — outbound link-quality estimate, separate
 from `snr_ewma_in` (inbound).
 
-### 3.7 Q (`'Q'`) — 4 bytes (RREQ-route)
+On ACK reception, non-zero `budget_hint` updates the sender's temporary
+`neighbor_budget_tier[next_hop]` mark and locally reranks route
+candidates through that next-hop. Unlike a budget NACK, ACK warning
+does not set `blind_until` and does not trigger a dirty route beacon;
+it is early local back-pressure for the upstream router.
+
+### 3.7 Q (`'Q'`) — 4 bytes (query/control)
 
 ```
 byte:  0   1     2      3
        ┌───┬─────┬──────┬───────────────────────────────────┐
-       │'Q'│ src │ dest │ leaf_id (4 hi)                 │
-       │   │     │      │ reserved (4 lo)                   │
+       │'Q'│ src │ dest │ leaf_id (4 hi)                    │
+       │   │     │      │ opcode/mobile flags (4 lo)        │
        └───┴─────┴──────┴───────────────────────────────────┘
 ```
 
 - `src` (8 bits): the requester's node id.
-- `dest` (8 bits): destination they want a route for.
+- `dest` (8 bits): destination for `ROUTE_QUERY`; `0xff` for `REQ_SYNC`.
 - `leaf_id` (4 bits): mesh identifier. Receivers reject foreign-
   network Q frames.
+- low nibble:
+  - bits 0-1: opcode (`0=ROUTE_QUERY`, `1=REQ_SYNC`)
+  - bit 2: requester is mobile
+  - bit 3: reserved
 
-One-hop only — receivers don't forward Q frames. Direct neighbours that
-have `rt[dest]` mark it dirty + schedule a triggered beacon (the
-differential beacon mechanism then prioritises that dest in the
-next emission).
+One-hop only — receivers don't forward Q frames.
 
-**Sender behaviour:** in `issue_send` for an originator, when
+**ROUTE_QUERY sender behaviour:** in `issue_send` for an originator, when
 `rt[dst]` is missing, alongside the defer-queue push (§11a.2) we
 also fire a Q to actively request the route from neighbours.
 Whichever brings the route in faster (passive defer wait or active
 Q response) wins. Dedup at sender via `q_queried[dest]` (default
 TTL 5 s) prevents Q-spam for repeated sends to the same unknown.
 
-**Receiver behaviour:** dedup via `q_responded_to[src+dest]` (default
+**ROUTE_QUERY receiver behaviour:** dedup via `q_responded_to[opcode,src,dest]` (default
 TTL 10 s) prevents responding to the same query multiple times — if
 multiple neighbours hear the same Q, the existing triggered-beacon
 jitter (50-500 ms) spreads their responses naturally. Receivers
@@ -360,6 +373,15 @@ Special cases:
 - `q.src == self.id`: loop guard, drop.
 - `q.dest == self.id`: someone's asking for ME; schedule triggered
   beacon (receivers learn us via the BCN src field, not entries).
+
+**REQ_SYNC behaviour:** during node-local DISCOVERY, a node whose route
+table is still poor may send `Q{opcode=REQ_SYNC,dest=0xff}` after a
+listen window. The request carries whether the requester is mobile.
+Eligible neighbours schedule a full `kind=sync` BCN response with
+randomized backoff. Mobile responders add extra backoff, and any
+responder suppresses its pending sync response if it hears another
+useful BCN before its timer fires. This lets one good neighbour satisfy
+a joiner without all nearby nodes transmitting full BCNs at once.
 
 ### 3.6 NACK (`'N'`) — 3 bytes
 
@@ -427,7 +449,7 @@ The protocol maintains two per-neighbor SNR estimates:
   RX from that neighbor. Used by `select_data_sf` to pick the data SF
   in a CTS based on smoothed signal estimate, not a single noisy
   snapshot.
-- `self.snr_ewma_out[nbr_id]` — fed by the 4-bit ACK SNR bucket. The
+- `self.snr_ewma_out[nbr_id]` — fed by the 2-bit coarse ACK SNR bucket. The
   receiver of our DATA tells us via the ACK how strongly our DATA
   arrived. Used for: routing-cost weighting (future), per-link RTS
   bitmap trimming (future), link-asymmetry detection.
@@ -467,10 +489,32 @@ self.rt[dest_id] = {
 - All `candidates[i].next_hop` distinct.
 - `n2_hop`: the chosen neighbor's claimed next-hop for this dest
   (from the beacon entry). Used for 3-cycle detection.
+- Mobile/stationary identity is not part of route candidates today.
+  It is carried in Q/BCN frames for coordination policy, but route
+  selection currently uses link score, hop count, freshness, budget
+  tier penalties, and blind-neighbor state.
+
+### 5.1a Direct-neighbor learning
+
+Any valid in-leaf frame with `meta.src` and SNR is direct proof that the
+sender is alive and reachable in one hop. Receivers therefore install or
+refresh:
+
+```lua
+rt[src] = { next_hop=src, score=rx_snr, hops=1, last_seen_ms=now }
+```
+
+This applies to BCN, Q, RTS, CTS, DATA, ACK, and NACK. BCN still carries
+the richer DV payload, but a node does not need to wait for a peer's BCN
+before it can answer "I know that peer directly" in response to a route
+query. If this direct observation creates or promotes the primary route,
+the node marks the route dirty and schedules a normal triggered beacon;
+it does not force a full BCN by itself.
 
 ### 5.2 DV merge (`rt_merge`)
 
-For each candidate `cand` derived from a beacon entry:
+For each candidate `cand` derived from a direct observation or beacon
+entry:
 
 ```
 1. Look up rt[dest]. If absent, install cand as primary; emit "rt_update".
@@ -608,13 +652,22 @@ format.
 Composes §11.5 budget tiers with `rt_merge`'s candidate ordering. The
 per-neighbour duty-cycle tier signal — set when a peer sends us a
 budget-NACK (§3.6 reason=`budget_low`) — propagates from the
-reactive blind-mark machinery into routing-table-level comparisons
-so saturated next-hops get DEMOTED from the primary slot, not just
-temporarily skipped during classify_blind.
+reactive blind-mark machinery into route comparison. Raw route
+candidates remain factual; the temporary neighbour-health overlay
+changes only the effective score used while ordering and choosing
+candidates. Saturated next-hops are demoted from the primary slot when
+there is a usable alternative, not just temporarily skipped during
+`classify_blind`.
 
 ```
-TIER_SCORE_PENALTY_DB = { HEALTHY=0, STRAINED=2, CRITICAL=5, EXHAUSTED=20 }
-effective_score(c) = c.score - TIER_PENALTY_DB[get_tier(c.next_hop)]
+TIER_SCORE_PENALTY_BY_ALTS_DB:
+  STRAINED:  no viable alt=1,  one alt=4,  two+ alts=7
+  CRITICAL:  no viable alt=5,  one alt=10, two+ alts=15
+  EXHAUSTED: no viable alt=8,  one alt=15, two+ alts=25
+
+effective_score(c) =
+  c.score - penalty[get_tier(c.next_hop)][viable_alt_count_for_dest(c)]
+
 route_strictly_better uses effective_score wherever it used raw score
 ```
 
@@ -626,7 +679,12 @@ route_strictly_better uses effective_score wherever it used raw score
   the primary pool when no fresh NACKs arrive.
 
 **Set on:** budget NACK reception (§3.6 reason=`budget_low`), alongside
-the `blind_until` mark.
+the `blind_until` mark. On receipt, the node immediately re-sorts any
+local route entries that use the penalized neighbour; if the advertised
+primary changes, it marks the entry dirty and schedules a normal
+triggered beacon. Route selection also refreshes candidate order before
+issuing/cascading sends so expired penalties naturally allow recovered
+peers back into the primary pool.
 
 **Pays off when:** load is **asymmetrically distributed** — some hubs
 have slack, others are saturated. The proactive demotion shifts
@@ -653,9 +711,9 @@ Every beacon_fire:
      - period = beacon_period_ms after DISCOVERY
 ```
 
-Defaults: discovery period 5 s, operational period 5 min. Real LoRa
-deployments use longer operational periods; the simulator compresses
-time. Firmware behavior does not depend on simulator `warmup_ms`.
+Defaults: discovery period 5 s, operational period 15 min. Firmware
+behavior does not depend on simulator `warmup_ms`; a node that boots
+late gets the same local discovery window as a node present at t=0.
 
 ### 6.2 Adaptive throttle (heard-channel busy)
 
@@ -692,7 +750,7 @@ with no fresh advertisements arriving, and the network can collapse
 into a stable 0%-delivery state.
 
 The override: if a node hasn't BCN'd in `beacon_max_idle_ms`
-(default **480 s = 8 min**, just under the 30 min default
+(default **900 s = 15 min**, comfortably below the 30 min default
 `rt_aging_ttl_neighbor_ms`), bypass the busy throttle on the next
 periodic timer fire and emit anyway. Both gate-check sites (pre-
 jitter and post-jitter) honour the override. Emit
@@ -717,7 +775,7 @@ The composite filter dampens this:
   our override. The first nodes to hit max_idle fire, their BCNs land
   at neighbours, neighbours see fresh `last_rx_bcn_ms` and defer their
   own overrides → naturally cascading the burst across `max_idle/3`
-  (~2.7 min for the 8 min default) instead of compressing into the
+  (~5 min for the 15 min default) instead of compressing into the
   silence-jitter's 10 s window.
 
 - **(C) Skip-if-clean.** When override eligible AND we have **zero
@@ -746,19 +804,28 @@ before they age out. Multi-hop entries
 
 Any `rt` mutation (new entry, primary promote, 3-cycle prune)
 schedules a one-shot beacon within `[beacon_trigger_jitter_min_ms,
-beacon_trigger_jitter_max_ms]` (default 50–500 ms).
+beacon_trigger_jitter_max_ms]` (default 2–10 s).
 
 ```
 schedule_triggered_beacon:
   if triggered_beacon_pending: no-op (coalesced)
   triggered_beacon_pending = true
-  after rand(50, 500): triggered_beacon_pending = false
-                       send_beacon_page("triggered")
+  delay = rand(2s, 10s)
+  if outside discovery/boot grace and last BCN < trigger_min_interval:
+      delay until last BCN + trigger_min_interval + rand(2s, 10s)
+      emit beacon_trigger_deferred
+  after delay: triggered_beacon_pending = false
+               send_beacon_page("triggered")
 ```
 
 **Triggered beacons bypass the adaptive throttle.** They exist to
 propagate routing changes urgently; suppressing them on busy channels
-defeats the purpose. Half-duplex skip still applies.
+defeats the purpose. Half-duplex skip still applies. The steady-state
+minimum interval is the firmware realism guard: a burst of route
+changes coalesces into at most one dirty BCN every
+`beacon_trigger_min_interval_ms` per node. Node-local DISCOVERY and the
+first `beacon_boot_grace_ms` after boot bypass the minimum interval so
+joiners can converge quickly.
 
 ### 6.4 Differential beacons (dirty-first emission)
 
@@ -939,7 +1006,7 @@ after cts_to_data_gap_ms:
                                 set_rx_sf(routing_sf)           routing_sf
                                 pending_rx = nil
                                 last_acked_from[alice] = {ctr_lo, t_ms}
-                                pack_ack(ctr_lo, meta.snr) →
+                                pack_ack(ctr_lo, meta.snr, budget_hint) →
                                 tx 'K' on routing_sf
                           <─K──
 on_recv "K", matches pending_tx.ctr_lo
@@ -990,7 +1057,7 @@ Three categories, each with different LBT timing constraints:
 | Class | Frames | Policy |
 |---|---|---|
 | **RESPONSE-DIRECTED** | CTS, DATA, ACK | Goes straight through `tx_with_retry`. Peer's timer is already running and was sized to the *minimum* round-trip airtime; any LBT defer here would burn a retry. |
-| **INITIATING-DIRECTED** | RTS, NACK | Routed through `tx_initiating`. Pre-checks `channel_busy_until()` once (single politeness wait). If busy, schedules emit at busy_until + random jitter, then commits even if still busy. |
+| **INITIATING-DIRECTED** | RTS, NACK | Routed through `tx_initiating`. Pre-checks `channel_busy_until()` once (single politeness wait). If busy, schedules emit at `busy_until + rand(0, lbt_backoff_ms)`, then commits even if still busy. |
 | **FLOOD** | BCN | Routed through `tx_flood`. LBT-defers up to `flood_lbt_max_defer_ms`, then drops the page (`tx_flood_skipped`). Stale routing info isn't worth queueing. |
 
 All three set `pending_tx` (where applicable) BEFORE the actual emit,
@@ -1128,13 +1195,14 @@ busy node is the originator's only target).
 on_recv 'R' with last_acked_from[r.src].ctr_lo == r.ctr_lo
        AND (now − last_acked_from[r.src].t_ms) < last_acked_ttl_ms (10 s):
   emit rts_already_acked
-  pack_ack(r.ctr_lo, meta.snr) → tx 'K' on routing_sf
+  pack_cts(r.ctr_lo, chosen_data_sf, already_received=1) → tx 'C' on routing_sf
   return  (skip CTS + DATA)
 ```
 
-The sender's previous ACK was lost; they retried the RTS. We re-send
-the ACK so they clear pending_tx without us reprocessing or
-forwarding the message twice.
+The sender's previous ACK was lost; they retried the RTS. We answer
+with CTS `already_received=1`, so they clear `pending_tx` without
+retransmitting DATA and without us reprocessing or forwarding the
+message twice.
 
 The 10s TTL is what makes 4-bit ctr_lo safe under wraparound: at any
 plausible per-sender send rate, 16 sends take much longer than 10 s,
@@ -1234,7 +1302,7 @@ pending_rx_expiry_fire:
 | Receiver busy | NACK at sender | Wait or requeue based on busy_for |
 | Receiver blind (post-CTS) | overheard CTS → blind_until | classify_blind switches to alt or defers |
 | DATA lost | ack_timeout at sender | Retry from RTS; sender re-RTSes, receiver re-CTSes (rts_rx_dup path) |
-| ACK lost | ack_timeout at sender + last_acked_from at receiver | Retry RTS; receiver short-circuits to re-ACK (rts_already_acked) |
+| ACK lost | ack_timeout at sender + last_acked_from at receiver | Retry RTS; receiver short-circuits with CTS `already_received=1` (`rts_already_acked`) |
 | Routing-table mismatch | rts_giveup after K alts | path_cascade_exhausted; flight dropped, sender app-layer aware |
 
 ---
@@ -1415,8 +1483,10 @@ fire, the runtime samples the channel:
   detection probability between these SNR thresholds.
 
 Script-side `tx_initiating` / `tx_flood` pre-check
-`self:channel_busy_until()` and defer if busy. This avoids the round-
-trip of TX → runtime defers → on_radio_busy → re-tx.
+`self:channel_busy_until()` and defer if busy. Initiating-directed
+frames wait until the observed busy window ends, then add a small
+random LBT backoff. This avoids the round-trip of TX → runtime defers
+→ on_radio_busy → re-tx.
 
 ### 11.3 PreambleDetected → throttle witness
 
@@ -1507,6 +1577,11 @@ The tier is consulted at three sites:
    alts. After the blind window expires we'll try the peer again; if
    they're still saturated they'll budget-NACK us again.
 
+4. **At route selection.** The same budget-NACK also records a temporary
+   neighbour tier. While that mark is live, candidates through that
+   neighbour receive an effective-score penalty during route ordering.
+   This is a local overlay; it does not overwrite the raw route score.
+
 | Key | Default | Description |
 |---|---|---|
 | `budget_strained_pct` | 50 | ≤ this → HEALTHY; > this → STRAINED |
@@ -1515,6 +1590,7 @@ The tier is consulted at three sites:
 | `budget_blind_strained_ms` | 60000 (1 min) | Sender-side blind window for STRAINED-NACKed peer |
 | `budget_blind_critical_ms` | 180000 (3 min) | Same, for CRITICAL |
 | `budget_blind_exhausted_ms` | 300000 (5 min) | Same, for EXHAUSTED |
+| `neighbor_budget_tier_ttl_ms` | 300000 (5 min) | Temporary route-order penalty window after budget-NACK |
 
 ### 11.6 Periodic node state snapshot
 
@@ -1580,6 +1656,15 @@ Drain happens at:
 - `on_recv 'B'` after rt mutations (fastest, ~hundreds of ms after boot)
 - A periodic 1 s timer (fallback when no routing traffic flows)
 
+If the deferred send was waiting on an active `Q:ROUTE_QUERY`, draining
+does not immediately RTS. The send is moved to `tx_queue` with
+`next_attempt_ms = now + settle`, where settle lasts until
+`q_sent_at_ms + q_response_settle_ms` plus small jitter. This lets most
+nearby Q-response BCNs finish before the first DATA RTS, avoiding the
+hidden-terminal pattern where a requester hears the first useful BCN,
+immediately RTSes, and collides at the chosen next-hop with a late BCN
+from another responder.
+
 Forwarders (`previous_hop ~= nil`) never defer — a route gone
 mid-flight is a real failure; the originator's app-layer retry is the
 recovery path. They keep the legacy `send_no_route` emit.
@@ -1623,6 +1708,8 @@ being the bootstrap wait. The user sees `send_deferred` immediately
 | Key | Default | Description |
 |---|---|---|
 | `send_defer_ttl_ms` | 30000 | How long deferred originator sends are held before `send_giveup` fires |
+| `q_response_settle_ms` | trigger jitter max + max BCN airtime + LBT backoff | Hold a Q-drained send until most Q-response BCNs have finished |
+| `q_response_settle_jitter_ms` | `lbt_backoff_ms` | Extra random spread before first RTS after Q discovery |
 
 No new wire format. No additional state at neighbours. Pure script-side
 addition that uses existing primitives.
@@ -1736,6 +1823,8 @@ expectations) subscribe by event_type.
 | `beacon_max_idle_skip_clean` | B+C composite skipped override (no dirty + recent neighbour BCN) (§6.2) | `dirty_n`, `since_bcn_rx_ms`, `max_idle_ms` |
 | `beacon_skipped_budget` | Beacon skipped because budget tier ≥ CRITICAL (§11.5) | `tier`, `pct_used` |
 | `rt_update` | Route added/promoted to a slot | `dest`, `next`, `score`, `hops`, `slot` |
+| `rt_penalty_rerank` | Temporary neighbour-health penalty changed candidate order | `dest`, `from_next`, `to_next`, `penalized`, `reason` |
+| `neighbor_budget_mark` | Budget hint/NACK updated temporary neighbour tier | `node`, `tier`, `source`, `local_only`, `reranked`, `candidate_entries`, `primary_entries`, `primary_no_alt`, `primary_with_alt`, `primary_still_primary`, `primary_demoted`, `nonprimary_entries` |
 | `rt_prune` | 3-cycle prune dropped a candidate | `dest`, `pruned_via` |
 | `rt_aged` | Stale-route aging evicted a candidate (§6.5) | `dest`, `slot`, `next_hop`, `hops`, `age_ms`, `ttl_ms` |
 | `rt_full` | Routing table covers all peers | `peers` |
@@ -1749,24 +1838,28 @@ expectations) subscribe by event_type.
 | `tx_requeued` | NACK with long busy_for; pending_tx pushed back | `origin`, `dst`, `busy_for_ms` |
 | `send_no_route` | Forwarder has no rt[dst] mid-flight (route went stale) | `origin`, `dst` |
 | `send_deferred` | Originator has no rt[dst] yet — held in defer queue | `origin`, `dst`, `dst_name`, `ttl_ms`, `depth` |
-| `send_drained` | Deferred send drained back to tx_queue (route appeared) | `origin`, `dst`, `waited_ms` |
+| `send_drained` | Deferred send drained back to tx_queue (route appeared) | `origin`, `dst`, `waited_ms`, `settle_ms`, `next_attempt_ms` |
 | `send_giveup` | Defer TTL elapsed without route appearing | `origin`, `dst`, `waited_ms`, `reason` |
-| `rts_tx` | RTS emitted | `origin`, `dst`, `next`, `ctr_lo`, `sf_bitmap` |
-| `rts_retry` | tx_rts_retry fired | `reason`, `attempt` |
+| `rts_tx` | RTS emitted | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `sf_bitmap` |
+| `rts_retry` | tx_rts_retry fired | `attempt_seq`, `reason`, `attempt` |
+| `rts_attempt_detail` | Sender-side focused RTS attempt telemetry | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `candidate_rank`, `candidate_count`, `route_score`, `route_score_eff`, `budget_penalty_db`, `viable_alts`, `route_hops`, `route_age_ms`, `next_tier`, `next_blind` |
+| `rts_attempt_timeout` | Sender-side RTS attempt reached CTS timeout | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `reason` |
+| `rts_receiver_state` | Intended receiver state immediately after RTS decode | `from`, `dst`, `ctr_lo`, `rx_snr`, `ewma_snr`, `has_pending_tx`, `has_pending_rx`, `budget_tier` |
 | `rts_rx` | RTS decoded, addressed to us | `from`, `dst`, `ctr_lo`, `chosen_data_sf`, `rx_snr`, `ewma_snr` |
 | `rts_rx_dup` | Duplicate RTS while pending_rx active | `from`, `ctr_lo` |
-| `rts_already_acked` | Cached ack short-circuit | `from`, `ctr_lo` |
+| `rts_already_acked` | Cached ACK short-circuit; receiver sends CTS `already_received=1` | `from`, `ctr_lo` |
 | `rts_drop_no_sf` | RTS bitmap intersection empty | `from`, `ctr_lo`, `sf_bitmap` |
 | `rts_drop_pending_tx` | Silent-drop RTS while we're busy as sender (§8.1) | `from`, `ctr_lo` |
-| `cts_tx` | CTS emitted | `to`, `ctr_lo`, `chosen_data_sf` |
-| `cts_rx` | CTS decoded, matches pending_tx | `from`, `ctr_lo`, `chosen_data_sf` |
+| `cts_tx` | CTS emitted | `to`, `ctr_lo`, `chosen_data_sf`, `already_received` when set |
+| `cts_rx` | CTS decoded, matches pending_tx | `from`, `ctr_lo`, `chosen_data_sf`, `already_received` |
+| `cts_already_received_rx` | CTS says receiver already decoded this DATA from an earlier try; sender completes hop without DATA retransmit | `from`, `ctr_lo`, `chosen_data_sf`, `origin`, `dst`, `ctr` |
 | `cts_invalid_sf` | Receiver picked an SF outside our bitmap | `from`, `ctr_lo`, `chosen_data_sf` |
 | `data_tx` | DATA emitted | `dst`, `next`, `ctr_lo`, `payload` |
 | `data_rx` | DATA decoded, matches pending_rx | `from`, `ctr_lo`, `len` |
 | `data_rx_timeout` | pending_rx_expiry fired | `from`, `ctr_lo` |
-| `ack_tx` | ACK emitted | `to`, `ctr_lo`, `data_snr` |
-| `ack_rx` | ACK decoded, matches pending_tx | `from`, `ctr_lo`, `data_snr_db` |
-| `ack_snr_feedback` | snr_ewma_out updated from ACK piggyback | `from`, `data_snr_db`, `snr_bucket`, `ewma_out` |
+| `ack_tx` | ACK emitted | `to`, `ctr_lo`, `data_snr`, `budget_tier`, `budget_hint` |
+| `ack_rx` | ACK decoded, matches pending_tx | `from`, `ctr_lo`, `data_snr_db`, `snr_bucket_coarse`, `budget_hint`, `budget_reranked` |
+| `ack_snr_feedback` | snr_ewma_out updated from ACK piggyback | `from`, `data_snr_db`, `snr_bucket`, `snr_bucket_coarse`, `ewma_out` |
 | `nack_tx` | NACK emitted | `to`, `ctr_lo`, `reason` (`busy_rx` or `budget_low`), plus per-reason: `busy_for_ms` OR `tier` |
 | `nack_rx` | NACK decoded, matches pending_tx | `from`, `ctr_lo`, `reason`, plus per-reason: `busy_for_ms` OR `tier`, `blind_ms` |
 | `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `ctr` |
@@ -1843,16 +1936,18 @@ the JSON scenario). Defaults shown.
 |---|---|---|
 | `discovery_beacon_period_ms` | 5000 | Fast beacon period while node-local DISCOVERY is active |
 | `beacon_period_warmup_ms` | 5000 | Legacy alias for `discovery_beacon_period_ms` |
-| `beacon_period_ms` | 300000 | Operational period (5 min) |
+| `beacon_period_ms` | 900000 | Operational period (15 min) |
 | `discovery_ms` | 60000 | Max node-local discovery duration after boot |
+| `beacon_boot_grace_ms` | 120000 | After boot, allow fast triggered BCNs despite the steady-state minimum interval |
 | `discovery_min_bcn_rx` | 3 | Exit discovery after this many BCN receptions |
 | `discovery_min_routes` | 8 | Exit discovery after this many route-table destinations |
 | `beacon_max_bytes` | 151 | Max beacon frame size — 4-byte header + 49 × 3-byte entries (post-bit-pack default; was 200 with 4-byte entries) |
-| `beacon_trigger_jitter_min_ms` | 50 | Triggered beacon delay min |
-| `beacon_trigger_jitter_max_ms` | 500 | Triggered beacon delay max |
+| `beacon_trigger_jitter_min_ms` | 2000 | Triggered beacon coalescing delay min |
+| `beacon_trigger_jitter_max_ms` | 10000 | Triggered beacon coalescing delay max |
+| `beacon_trigger_min_interval_ms` | 120000 | Steady-state minimum interval between this node's successful BCN TX and a triggered BCN |
 | `quiet_threshold_ms` | 30000 | Adaptive throttle silence requirement |
 | `beacon_silence_jitter_ms` | 10000 | Defer-jitter after silence detected |
-| `beacon_max_idle_ms` | 480000 (8 min) | Max idle before busy throttle is bypassed (§6.2). Set to 0 to disable. |
+| `beacon_max_idle_ms` | 900000 (15 min) | Max idle before busy throttle is bypassed (§6.2). Set to 0 to disable. |
 
 ### 14.3 Data plane
 
@@ -1867,7 +1962,20 @@ the JSON scenario). Defaults shown.
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
 | `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
 | `q_query_ttl_ms` | 5000 | Sender Q dedup window — don't re-fire for same dest (§3.7) |
-| `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (src,dest) (§3.7) |
+| `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (opcode,src,dest) (§3.7) |
+| `q_response_settle_ms` | trigger jitter max + max BCN airtime + LBT backoff | Hold first RTS after `Q:ROUTE_QUERY` until most response BCNs finish (§11a.2) |
+| `q_response_settle_jitter_ms` | `lbt_backoff_ms` | Extra random spread for Q-drained sends |
+| `req_sync_on_boot` | true | During DISCOVERY, send `Q:REQ_SYNC` if route table remains poor |
+| `req_sync_listen_ms` | 8000 | Listen before first boot-time `REQ_SYNC` |
+| `req_sync_retry_ms` | 30000 | Retry interval for boot-time `REQ_SYNC` while still in DISCOVERY |
+| `req_sync_min_routes` | `discovery_min_routes` | Suppress boot-time `REQ_SYNC` once this many routes are known |
+| `sync_response_enabled` | true | Allow node to answer `Q:REQ_SYNC` with full sync BCN |
+| `sync_response_min_routes` | 1 | Minimum route count before answering `REQ_SYNC` |
+| `sync_response_backoff_min_ms` | 500 | Min randomized sync-response delay |
+| `sync_response_backoff_max_ms` | 6000 | Max randomized sync-response delay |
+| `sync_response_mobile_penalty_ms` | 8000 | Extra delay when responder is mobile |
+| `sync_response_requester_mobile_penalty_ms` | 2000 | Extra delay when requester is mobile |
+| `sync_response_suppress_window_ms` | 12000 | Suppress pending response after hearing another useful BCN |
 | `rt_aging_ttl_neighbor_ms` | 1800000 (30 min) | Direct-neighbour candidate TTL — see §6.5 |
 | `rt_aging_ttl_remote_ms` | 5400000 (90 min) | Multi-hop candidate TTL — see §6.5 |
 | `rt_aging_check_period_ms` | 60000 | Aging-scan period — see §6.5 |
@@ -1883,7 +1991,8 @@ the JSON scenario). Defaults shown.
 
 | Key | Default | Description |
 |---|---|---|
-| `lbt_enabled` | false | Pre-check `channel_busy_until` before TX |
+| `lbt_enabled` | true | Pre-check `channel_busy_until` before initiating/flood TX |
+| `lbt_backoff_ms` | half RTS-airtime | Random slack added after `busy_until` for LBT defers |
 | `retry_jitter_ms` | one RTS-airtime | RTS retry randomization width |
 | `flood_lbt_max_defer_ms` | one beacon-airtime | LBT defer cap for FLOOD |
 | `duty_cycle` | 0.01 | ETSI EN 300 220 default |

@@ -115,6 +115,10 @@ CapturedSignal toCaptured(const InFlightT& f, float snr_db_at_rcv) {
     return s;
 }
 
+static bool isMobileNode(const SimConfig::NodeDef& node) {
+    return node.velocity_mps > 0.0f;
+}
+
 }  // namespace
 
 SimController::SimController(const SimConfig& cfg, std::ostream& events_out)
@@ -248,10 +252,20 @@ void SimController::initialize() {
     // Explicit topology.links entries apply AFTER the path-loss baseline
     // (when present), overriding per-pair values. When path_loss is
     // absent, this is the only source of link configuration.
+    //
+    // Exception: links touching a mobile node stay path-loss-driven.
+    // A generated/static topology.links matrix is a snapshot; applying it
+    // to a moving endpoint would pin that endpoint's connectivity and
+    // defeat the position-based recompute path.
     for (const auto& l : _cfg.topology.links) {
         auto fit = _name_to_id.find(l.from);
         auto tit = _name_to_id.find(l.to);
         if (fit == _name_to_id.end() || tit == _name_to_id.end()) continue;
+        if (_path_loss &&
+            (isMobileNode(_cfg.nodes[fit->second]) ||
+             isMobileNode(_cfg.nodes[tit->second]))) {
+            continue;
+        }
         _links->setLink(fit->second, tit->second,
                         l.snr, l.rssi, l.snr_std_dev, l.loss);
         if (l.bidir) {
@@ -493,7 +507,8 @@ void SimController::processLifecycleAtStep() {
     for (int i = 0; i < n; ++i) {
         const uint64_t start_at =
             static_cast<uint64_t>(_cfg.nodes[i].start_at_ms);
-        if (!_node_alive[i] && start_at > 0 && now >= start_at) {
+        if (!_node_alive[i] && !_nodes[i]->isInitialized()
+            && start_at > 0 && now >= start_at) {
             _node_alive[i] = true;
             EventLog::nodeStarted(static_cast<unsigned long>(now),
                                   _cfg.nodes[i].name.c_str());
@@ -1354,10 +1369,16 @@ void SimController::rebuildLinksFromPathLoss() {
         }
     }
     // Re-apply explicit overrides — same precedence as initialize().
+    // Links touching mobile nodes remain path-loss-derived; static JSON link
+    // snapshots must not freeze a moving endpoint's connectivity.
     for (const auto& l : _cfg.topology.links) {
         auto fit = _name_to_id.find(l.from);
         auto tit = _name_to_id.find(l.to);
         if (fit == _name_to_id.end() || tit == _name_to_id.end()) continue;
+        if (isMobileNode(_cfg.nodes[fit->second]) ||
+            isMobileNode(_cfg.nodes[tit->second])) {
+            continue;
+        }
         _links->setLink(fit->second, tit->second,
                         l.snr, l.rssi, l.snr_std_dev, l.loss);
         if (l.bidir) {

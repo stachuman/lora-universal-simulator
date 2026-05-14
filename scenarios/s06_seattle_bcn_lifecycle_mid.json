@@ -1,0 +1,3028 @@
+{
+  "_name": "s06_seattle_bcn_lifecycle_mid",
+  "_desc": "Seattle lifecycle cold-start baseline generated from s03. No warmup/hot-start. 25 initial nodes boot over 45s, 8 nodes join from 15m, and 5 initial nodes die from 35m. Purpose: observe fresh network formation, early message delivery, new-node registration, and stale-route behavior after node departure.",
+  "simulation": {
+    "duration_ms": 3600000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "beacon_period_ms": 900000,
+    "seed": 87,
+    "node_startup_jitter_ms": 0,
+    "radio": {
+      "sf": 8,
+      "bw": 62.5,
+      "cr": 5,
+      "max_packet_bytes": 255,
+      "snr_coherence_ms": 0,
+      "duty_cycle": 0.01
+    }
+  },
+  "commands": [
+    {
+      "at_ms": 30000,
+      "node": "dmatestbednode0",
+      "command": "send dave c1 dmatestbednode0->dave"
+    },
+    {
+      "at_ms": 84281,
+      "node": "CrossNet_RPT1",
+      "command": "send_e2e dmatestbednode0 c1 CrossNet_RPT1->dmatestbednode0"
+    },
+    {
+      "at_ms": 102916,
+      "node": "Fremont01_Greenwood3",
+      "command": "send_e2e devhackchat c1 Fremont01_Greenwood3->devhackchat"
+    },
+    {
+      "at_ms": 148158,
+      "node": "Licton_Springs_Chat",
+      "command": "send dave c1 Licton_Springs_Chat->dave"
+    },
+    {
+      "at_ms": 210646,
+      "node": "Crow_Repeater",
+      "command": "send_e2e RavennaPark c1 Crow_Repeater->RavennaPark"
+    },
+    {
+      "at_ms": 259644,
+      "node": "Stevens",
+      "command": "send usa_narrow_bridge c1 Stevens->usa_narrow_bridge"
+    },
+    {
+      "at_ms": 267515,
+      "node": "Licton_Springs_Chat",
+      "command": "send Wedgwood_Solar c2 Licton_Springs_Chat->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 272515,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e RavennaPark c1 Capitol_Hill_Prime->RavennaPark"
+    },
+    {
+      "at_ms": 285381,
+      "node": "usa_narrow_bridge",
+      "command": "send Washington_Park c1 usa_narrow_bridge->Washington_Park"
+    },
+    {
+      "at_ms": 328047,
+      "node": "University_District",
+      "command": "send_e2e devhackchat c1 University_District->devhackchat"
+    },
+    {
+      "at_ms": 400859,
+      "node": "SEA_Bryant_KM7ECH",
+      "command": "send Licton_Springs_Chat c1 SEA_Bryant_KM7ECH->Licton_Springs_Chat"
+    },
+    {
+      "at_ms": 432704,
+      "node": "RavennaEckstein_CC",
+      "command": "send Wedgwood_Solar c1 RavennaEckstein_CC->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 437704,
+      "node": "SEA_Bryant_KM7ECH",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c2 SEA_Bryant_KM7ECH->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 505266,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e dmatestbednode0 c1 Fremont01_KF7EGZ_Sol->dmatestbednode0"
+    },
+    {
+      "at_ms": 517278,
+      "node": "RavennaPark",
+      "command": "send_e2e usa_narrow_bridge c1 RavennaPark->usa_narrow_bridge"
+    },
+    {
+      "at_ms": 529823,
+      "node": "dmatestbednode0",
+      "command": "send_e2e CrossNet_Room c2 dmatestbednode0->CrossNet_Room"
+    },
+    {
+      "at_ms": 534823,
+      "node": "SEA_Bryant_KM7ECH",
+      "command": "send_e2e Fremont01_Greenwood3 c3 SEA_Bryant_KM7ECH->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 539968,
+      "node": "Wedgwood_Solar",
+      "command": "send_e2e bob c1 Wedgwood_Solar->bob"
+    },
+    {
+      "at_ms": 549885,
+      "node": "CrossNet_Room",
+      "command": "send Fremont01_Greenwood3 c1 CrossNet_Room->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 567811,
+      "node": "bob",
+      "command": "send_e2e University_District c1 bob->University_District"
+    },
+    {
+      "at_ms": 622715,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e Wedgwood_Solar c2 RavennaEckstein_CC->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 641848,
+      "node": "bob",
+      "command": "send_e2e Fremont01_Greenwood3 c2 bob->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 651045,
+      "node": "Washington_Park",
+      "command": "send_e2e DMASpaceMesh c1 Washington_Park->DMASpaceMesh"
+    },
+    {
+      "at_ms": 675406,
+      "node": "devhackchat",
+      "command": "send Central_District c1 devhackchat->Central_District"
+    },
+    {
+      "at_ms": 717387,
+      "node": "The_Winchester_Repea",
+      "command": "send WedgBreadMesh c1 The_Winchester_Repea->WedgBreadMesh"
+    },
+    {
+      "at_ms": 727282,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e dave c2 Fremont01_KF7EGZ_Sol->dave"
+    },
+    {
+      "at_ms": 735077,
+      "node": "dave",
+      "command": "send_e2e Wedgwood_Solar c1 dave->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 766886,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c3 RavennaEckstein_CC->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 808384,
+      "node": "SEA_Bryant_KM7ECH",
+      "command": "send_e2e Fremont01_Greenwood3 c4 SEA_Bryant_KM7ECH->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 813384,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e Washington_Park c4 RavennaEckstein_CC->Washington_Park"
+    },
+    {
+      "at_ms": 846617,
+      "node": "usa_narrow_bridge",
+      "command": "send_e2e RavennaEckstein_CC c2 usa_narrow_bridge->RavennaEckstein_CC"
+    },
+    {
+      "at_ms": 876103,
+      "node": "Stevens",
+      "command": "send_e2e dave c2 Stevens->dave"
+    },
+    {
+      "at_ms": 886047,
+      "node": "bob",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c3 bob->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 940024,
+      "node": "WedgBreadMesh",
+      "command": "send dmatestbednode0 c1 WedgBreadMesh->dmatestbednode0"
+    },
+    {
+      "at_ms": 971917,
+      "node": "Maple_Leaf_Manor",
+      "command": "send_e2e RavennaPark j3 Maple_Leaf_Manor->RavennaPark"
+    },
+    {
+      "at_ms": 980767,
+      "node": "Crow_Repeater",
+      "command": "send Central_District c2 Crow_Repeater->Central_District"
+    },
+    {
+      "at_ms": 985767,
+      "node": "The_Winchester_Repea",
+      "command": "send_e2e SEA_Bryant_KM7ECH c2 The_Winchester_Repea->SEA_Bryant_KM7ECH"
+    },
+    {
+      "at_ms": 990767,
+      "node": "DMASpaceMesh",
+      "command": "send_e2e Take_His_Face_Off c1 DMASpaceMesh->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 995767,
+      "node": "Wedgwood_Solar",
+      "command": "send_e2e N7GRN5_Portage_Bay_r c2 Wedgwood_Solar->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 1005500,
+      "node": "Take_His_Face_Off",
+      "command": "send_e2e Wedgwood_Solar j3 Take_His_Face_Off->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 1022029,
+      "node": "devhackchat",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c2 devhackchat->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 1029864,
+      "node": "Crow_Repeater",
+      "command": "send_e2e Wedgwood_Solar c3 Crow_Repeater->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 1051917,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e Maple_Leaf_Manor j10 RavennaEckstein_CC->Maple_Leaf_Manor"
+    },
+    {
+      "at_ms": 1059047,
+      "node": "Martin_Room",
+      "command": "send_e2e Wedgwood_Solar j6 Martin_Room->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 1085500,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e Take_His_Face_Off j4 Capitol_Hill_Prime->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 1099373,
+      "node": "devhackchat",
+      "command": "send DMASpaceMesh c3 devhackchat->DMASpaceMesh"
+    },
+    {
+      "at_ms": 1107629,
+      "node": "Hankest_Extendus",
+      "command": "send_e2e Central_District j2 Hankest_Extendus->Central_District"
+    },
+    {
+      "at_ms": 1127695,
+      "node": "CrossNet_Room",
+      "command": "send_e2e Maple_Leaf_Manor c2 CrossNet_Room->Maple_Leaf_Manor"
+    },
+    {
+      "at_ms": 1139047,
+      "node": "University_District",
+      "command": "send_e2e Martin_Room j5 University_District->Martin_Room"
+    },
+    {
+      "at_ms": 1164735,
+      "node": "KG6GXY_Greenwood",
+      "command": "send_e2e dave j4 KG6GXY_Greenwood->dave"
+    },
+    {
+      "at_ms": 1187629,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e Hankest_Extendus j7 Fremont01_KF7EGZ_Sol->Hankest_Extendus"
+    },
+    {
+      "at_ms": 1187933,
+      "node": "Cafe",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol j4 Cafe->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 1193656,
+      "node": "Central_District",
+      "command": "send_e2e RavennaPark c1 Central_District->RavennaPark"
+    },
+    {
+      "at_ms": 1211917,
+      "node": "Maple_Leaf_Manor",
+      "command": "send_e2e CrossNet_RPT1 j4 Maple_Leaf_Manor->CrossNet_RPT1"
+    },
+    {
+      "at_ms": 1244735,
+      "node": "Crow_Repeater",
+      "command": "send_e2e KG6GXY_Greenwood j7 Crow_Repeater->KG6GXY_Greenwood"
+    },
+    {
+      "at_ms": 1245500,
+      "node": "Take_His_Face_Off",
+      "command": "send_e2e devhackchat j4 Take_His_Face_Off->devhackchat"
+    },
+    {
+      "at_ms": 1254908,
+      "node": "Cafe",
+      "command": "send_e2e devhackchat c1 Cafe->devhackchat"
+    },
+    {
+      "at_ms": 1257402,
+      "node": "repeather",
+      "command": "send_e2e Licton_Springs_Chat j2 repeather->Licton_Springs_Chat"
+    },
+    {
+      "at_ms": 1261406,
+      "node": "dmatestbednode0",
+      "command": "send_e2e Take_His_Face_Off c3 dmatestbednode0->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 1267933,
+      "node": "DMASpaceMesh",
+      "command": "send_e2e Cafe j4 DMASpaceMesh->Cafe"
+    },
+    {
+      "at_ms": 1291277,
+      "node": "Portage_Bay_G2_2",
+      "command": "send_e2e RavennaEckstein_CC j4 Portage_Bay_G2_2->RavennaEckstein_CC"
+    },
+    {
+      "at_ms": 1299047,
+      "node": "Martin_Room",
+      "command": "send_e2e dmatestbednode0 j7 Martin_Room->dmatestbednode0"
+    },
+    {
+      "at_ms": 1337402,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e repeather j11 RavennaEckstein_CC->repeather"
+    },
+    {
+      "at_ms": 1347629,
+      "node": "Hankest_Extendus",
+      "command": "send_e2e DMASpaceMesh j3 Hankest_Extendus->DMASpaceMesh"
+    },
+    {
+      "at_ms": 1371277,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e Portage_Bay_G2_2 j5 Capitol_Hill_Prime->Portage_Bay_G2_2"
+    },
+    {
+      "at_ms": 1380277,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e RavennaEckstein_CC c3 Fremont01_KF7EGZ_Sol->RavennaEckstein_CC"
+    },
+    {
+      "at_ms": 1404735,
+      "node": "KG6GXY_Greenwood",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol j5 KG6GXY_Greenwood->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 1427933,
+      "node": "Cafe",
+      "command": "send_e2e N7GRN5_Portage_Bay_r j5 Cafe->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 1464454,
+      "node": "WedgBreadMesh",
+      "command": "send University_District c2 WedgBreadMesh->University_District"
+    },
+    {
+      "at_ms": 1485742,
+      "node": "usa_narrow_bridge",
+      "command": "send_e2e dmatestbednode0 c3 usa_narrow_bridge->dmatestbednode0"
+    },
+    {
+      "at_ms": 1490904,
+      "node": "University_District",
+      "command": "send_e2e repeather c2 University_District->repeather"
+    },
+    {
+      "at_ms": 1497402,
+      "node": "repeather",
+      "command": "send_e2e University_District j3 repeather->University_District"
+    },
+    {
+      "at_ms": 1500486,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e CrossNet_Room c2 Capitol_Hill_Prime->CrossNet_Room"
+    },
+    {
+      "at_ms": 1531277,
+      "node": "Portage_Bay_G2_2",
+      "command": "send_e2e Central_District j5 Portage_Bay_G2_2->Central_District"
+    },
+    {
+      "at_ms": 1634455,
+      "node": "Licton_Springs_Chat",
+      "command": "send_e2e RavennaEckstein_CC c3 Licton_Springs_Chat->RavennaEckstein_CC"
+    },
+    {
+      "at_ms": 1639455,
+      "node": "Martin_Room",
+      "command": "send_e2e repeather c1 Martin_Room->repeather"
+    },
+    {
+      "at_ms": 1671988,
+      "node": "bob",
+      "command": "send_e2e usa_narrow_bridge c4 bob->usa_narrow_bridge"
+    },
+    {
+      "at_ms": 1676988,
+      "node": "Maple_Leaf_Manor",
+      "command": "send_e2e Take_His_Face_Off c1 Maple_Leaf_Manor->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 1734499,
+      "node": "CrossNet_RPT1",
+      "command": "send_e2e Fremont01_Greenwood3 c2 CrossNet_RPT1->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 1760862,
+      "node": "Licton_Springs_Chat",
+      "command": "send_e2e Martin_Room c4 Licton_Springs_Chat->Martin_Room"
+    },
+    {
+      "at_ms": 1838802,
+      "node": "dave",
+      "command": "send_e2e DMASpaceMesh c2 dave->DMASpaceMesh"
+    },
+    {
+      "at_ms": 1849380,
+      "node": "Stevens",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c3 Stevens->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 1876894,
+      "node": "usa_narrow_bridge",
+      "command": "send_e2e Maple_Leaf_Manor c4 usa_narrow_bridge->Maple_Leaf_Manor"
+    },
+    {
+      "at_ms": 1901494,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e devhackchat c1 2CBA_Repeater_v4->devhackchat"
+    },
+    {
+      "at_ms": 1946256,
+      "node": "Martin_Room",
+      "command": "send_e2e University_District c2 Martin_Room->University_District"
+    },
+    {
+      "at_ms": 1959649,
+      "node": "repeather",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c1 repeather->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 1964649,
+      "node": "SEA_Bryant_KM7ECH",
+      "command": "send_e2e KG6GXY_Greenwood c5 SEA_Bryant_KM7ECH->KG6GXY_Greenwood"
+    },
+    {
+      "at_ms": 2040090,
+      "node": "Crow_Repeater",
+      "command": "send dave c4 Crow_Repeater->dave"
+    },
+    {
+      "at_ms": 2058223,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol c2 2CBA_Repeater_v4->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 2068594,
+      "node": "2CBA_Repeater_v4",
+      "command": "send Fremont01_KF7EGZ_Sol c3 2CBA_Repeater_v4->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 2078173,
+      "node": "bob",
+      "command": "send The_Winchester_Repea c5 bob->The_Winchester_Repea"
+    },
+    {
+      "at_ms": 2089324,
+      "node": "Take_His_Face_Off",
+      "command": "send 2CBA_Repeater_v4 c1 Take_His_Face_Off->2CBA_Repeater_v4"
+    },
+    {
+      "at_ms": 2110900,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e Portage_Bay_G2_2 c4 2CBA_Repeater_v4->Portage_Bay_G2_2"
+    },
+    {
+      "at_ms": 2115900,
+      "node": "Portage_Bay_G2_2",
+      "command": "send_e2e dave c1 Portage_Bay_G2_2->dave"
+    },
+    {
+      "at_ms": 2188707,
+      "node": "Fremont01_Greenwood3",
+      "command": "send_e2e WedgBreadMesh c2 Fremont01_Greenwood3->WedgBreadMesh"
+    },
+    {
+      "at_ms": 2223683,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e The_Winchester_Repea d6 Capitol_Hill_Prime->The_Winchester_Repea"
+    },
+    {
+      "at_ms": 2268721,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e Hankest_Extendus c5 RavennaEckstein_CC->Hankest_Extendus"
+    },
+    {
+      "at_ms": 2302363,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e usa_narrow_bridge d7 2CBA_Repeater_v4->usa_narrow_bridge"
+    },
+    {
+      "at_ms": 2316585,
+      "node": "N7GRN5_Portage_Bay_r",
+      "command": "send Central_District c1 N7GRN5_Portage_Bay_r->Central_District"
+    },
+    {
+      "at_ms": 2321585,
+      "node": "CrossNet_RPT1",
+      "command": "send Stevens c3 CrossNet_RPT1->Stevens"
+    },
+    {
+      "at_ms": 2361416,
+      "node": "dave",
+      "command": "send devhackchat c3 dave->devhackchat"
+    },
+    {
+      "at_ms": 2379945,
+      "node": "repeather",
+      "command": "send_e2e SEA_Bryant_KM7ECH d4 repeather->SEA_Bryant_KM7ECH"
+    },
+    {
+      "at_ms": 2398939,
+      "node": "Hankest_Extendus",
+      "command": "send WedgBreadMesh c1 Hankest_Extendus->WedgBreadMesh"
+    },
+    {
+      "at_ms": 2403988,
+      "node": "University_District",
+      "command": "send_e2e Capitol_Hill_Prime c3 University_District->Capitol_Hill_Prime"
+    },
+    {
+      "at_ms": 2410560,
+      "node": "University_District",
+      "command": "send_e2e Washington_Park d6 University_District->Washington_Park"
+    },
+    {
+      "at_ms": 2420741,
+      "node": "devhackchat",
+      "command": "send dave c4 devhackchat->dave"
+    },
+    {
+      "at_ms": 2449456,
+      "node": "Capitol_Hill_Prime",
+      "command": "send CrossNet_Room c3 Capitol_Hill_Prime->CrossNet_Room"
+    },
+    {
+      "at_ms": 2467115,
+      "node": "Martin_Room",
+      "command": "send Wedgwood_Solar c3 Martin_Room->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 2472115,
+      "node": "KG6GXY_Greenwood",
+      "command": "send Crow_Repeater c1 KG6GXY_Greenwood->Crow_Repeater"
+    },
+    {
+      "at_ms": 2522182,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e WedgBreadMesh d8 2CBA_Repeater_v4->WedgBreadMesh"
+    },
+    {
+      "at_ms": 2528990,
+      "node": "Take_His_Face_Off",
+      "command": "send bob c2 Take_His_Face_Off->bob"
+    },
+    {
+      "at_ms": 2541355,
+      "node": "CrossNet_Room",
+      "command": "send_e2e bob c3 CrossNet_Room->bob"
+    },
+    {
+      "at_ms": 2552564,
+      "node": "Stevens",
+      "command": "send_e2e Take_His_Face_Off c4 Stevens->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 2557564,
+      "node": "devhackchat",
+      "command": "send Crow_Repeater c5 devhackchat->Crow_Repeater"
+    },
+    {
+      "at_ms": 2564028,
+      "node": "Martin_Room",
+      "command": "send_e2e Capitol_Hill_Prime c4 Martin_Room->Capitol_Hill_Prime"
+    },
+    {
+      "at_ms": 2582660,
+      "node": "Stevens",
+      "command": "send_e2e Take_His_Face_Off c5 Stevens->Take_His_Face_Off"
+    },
+    {
+      "at_ms": 2590321,
+      "node": "Crow_Repeater",
+      "command": "send_e2e dmatestbednode0 c5 Crow_Repeater->dmatestbednode0"
+    },
+    {
+      "at_ms": 2682614,
+      "node": "RavennaEckstein_CC",
+      "command": "send dave c6 RavennaEckstein_CC->dave"
+    },
+    {
+      "at_ms": 2691552,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e Crow_Repeater c4 Fremont01_KF7EGZ_Sol->Crow_Repeater"
+    },
+    {
+      "at_ms": 2732733,
+      "node": "dmatestbednode0",
+      "command": "send Martin_Room c4 dmatestbednode0->Martin_Room"
+    },
+    {
+      "at_ms": 2801943,
+      "node": "DMASpaceMesh",
+      "command": "send_e2e repeather c2 DMASpaceMesh->repeather"
+    },
+    {
+      "at_ms": 2809843,
+      "node": "KG6GXY_Greenwood",
+      "command": "send_e2e N7GRN5_Portage_Bay_r c2 KG6GXY_Greenwood->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 2905670,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send CrossNet_Room c5 Fremont01_KF7EGZ_Sol->CrossNet_Room"
+    },
+    {
+      "at_ms": 2954229,
+      "node": "dave",
+      "command": "send_e2e University_District c4 dave->University_District"
+    },
+    {
+      "at_ms": 3018007,
+      "node": "Portage_Bay_G2_2",
+      "command": "send_e2e Stevens c2 Portage_Bay_G2_2->Stevens"
+    },
+    {
+      "at_ms": 3041756,
+      "node": "Licton_Springs_Chat",
+      "command": "send_e2e Fremont01_Greenwood3 c5 Licton_Springs_Chat->Fremont01_Greenwood3"
+    },
+    {
+      "at_ms": 3081116,
+      "node": "KG6GXY_Greenwood",
+      "command": "send Licton_Springs_Chat c3 KG6GXY_Greenwood->Licton_Springs_Chat"
+    },
+    {
+      "at_ms": 3118000,
+      "node": "Crow_Repeater",
+      "command": "send_e2e Licton_Springs_Chat c6 Crow_Repeater->Licton_Springs_Chat"
+    },
+    {
+      "at_ms": 3161415,
+      "node": "Central_District",
+      "command": "send_e2e dmatestbednode0 c2 Central_District->dmatestbednode0"
+    },
+    {
+      "at_ms": 3170110,
+      "node": "University_District",
+      "command": "send_e2e devhackchat c4 University_District->devhackchat"
+    },
+    {
+      "at_ms": 3196786,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send Crow_Repeater c6 Fremont01_KF7EGZ_Sol->Crow_Repeater"
+    },
+    {
+      "at_ms": 3261565,
+      "node": "Maple_Leaf_Manor",
+      "command": "send_e2e 2CBA_Repeater_v4 c2 Maple_Leaf_Manor->2CBA_Repeater_v4"
+    },
+    {
+      "at_ms": 3274617,
+      "node": "DMASpaceMesh",
+      "command": "send_e2e devhackchat c3 DMASpaceMesh->devhackchat"
+    },
+    {
+      "at_ms": 3279617,
+      "node": "Wedgwood_Solar",
+      "command": "send_e2e Cafe c3 Wedgwood_Solar->Cafe"
+    },
+    {
+      "at_ms": 3284617,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e N7GRN5_Portage_Bay_r c7 RavennaEckstein_CC->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 3302858,
+      "node": "Cafe",
+      "command": "send bob c2 Cafe->bob"
+    },
+    {
+      "at_ms": 3326728,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e RavennaPark c5 2CBA_Repeater_v4->RavennaPark"
+    },
+    {
+      "at_ms": 3351167,
+      "node": "Cafe",
+      "command": "send 2CBA_Repeater_v4 c3 Cafe->2CBA_Repeater_v4"
+    },
+    {
+      "at_ms": 3364584,
+      "node": "dave",
+      "command": "send_e2e RavennaPark c5 dave->RavennaPark"
+    },
+    {
+      "at_ms": 3400704,
+      "node": "dmatestbednode0",
+      "command": "send_e2e Wedgwood_Solar c5 dmatestbednode0->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 3405704,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e CrossNet_RPT1 c8 RavennaEckstein_CC->CrossNet_RPT1"
+    },
+    {
+      "at_ms": 3413818,
+      "node": "2CBA_Repeater_v4",
+      "command": "send_e2e CrossNet_RPT1 c6 2CBA_Repeater_v4->CrossNet_RPT1"
+    },
+    {
+      "at_ms": 3429073,
+      "node": "Wedgwood_Solar",
+      "command": "send_e2e Maple_Leaf_Manor c4 Wedgwood_Solar->Maple_Leaf_Manor"
+    },
+    {
+      "at_ms": 3436487,
+      "node": "RavennaEckstein_CC",
+      "command": "send Martin_Room c9 RavennaEckstein_CC->Martin_Room"
+    },
+    {
+      "at_ms": 3441487,
+      "node": "RavennaPark",
+      "command": "send_e2e repeather c2 RavennaPark->repeather"
+    },
+    {
+      "at_ms": 3483280,
+      "node": "Portage_Bay_G2_2",
+      "command": "send_e2e Martin_Room c3 Portage_Bay_G2_2->Martin_Room"
+    },
+    {
+      "at_ms": 3497710,
+      "node": "Martin_Room",
+      "command": "send_e2e bob c5 Martin_Room->bob"
+    },
+    {
+      "at_ms": 3505011,
+      "node": "Stevens",
+      "command": "send_e2e Portage_Bay_G2_2 c6 Stevens->Portage_Bay_G2_2"
+    }
+  ],
+  "expect": [],
+  "nodes": [
+    {
+      "name": "Fremont01_KF7EGZ_Sol",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.555214,
+      "lon": -122.253456,
+      "start_at_ms": 17087
+    },
+    {
+      "name": "dmatestbednode0",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.620513,
+      "lon": -122.216034,
+      "start_at_ms": 2312
+    },
+    {
+      "name": "The_Winchester_Repea",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.606163,
+      "lon": -122.286072,
+      "start_at_ms": 3983,
+      "dies_at_ms": 2133683
+    },
+    {
+      "name": "Central_District",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.577221,
+      "lon": -122.28693,
+      "start_at_ms": 15257
+    },
+    {
+      "name": "KG6GXY_Greenwood",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.725699,
+      "lon": -122.318859,
+      "start_at_ms": 1104735
+    },
+    {
+      "name": "Hankest_Extendus",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6905,
+      "lon": -122.28,
+      "start_at_ms": 1047629
+    },
+    {
+      "name": "University_District",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6603,
+      "lon": -122.273026,
+      "start_at_ms": 20723
+    },
+    {
+      "name": "2CBA_Repeater_v4",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6663,
+      "lon": -122.301,
+      "start_at_ms": 33016
+    },
+    {
+      "name": "Wedgwood_Solar",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6879,
+      "lon": -122.284,
+      "start_at_ms": 41939
+    },
+    {
+      "name": "usa_narrow_bridge",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.622595,
+      "lon": -122.229252,
+      "start_at_ms": 411,
+      "dies_at_ms": 2212363
+    },
+    {
+      "name": "Capitol_Hill_Prime",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.59181,
+      "lon": -122.225647,
+      "start_at_ms": 13170
+    },
+    {
+      "name": "RavennaPark",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6737,
+      "lon": -122.308,
+      "start_at_ms": 39632
+    },
+    {
+      "name": "Licton_Springs_Chat",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.743479,
+      "lon": -122.305298,
+      "start_at_ms": 29404
+    },
+    {
+      "name": "CrossNet_Room",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.635437,
+      "lon": -122.228394,
+      "start_at_ms": 7366
+    },
+    {
+      "name": "Crow_Repeater",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.519056,
+      "lon": -122.337227,
+      "start_at_ms": 22023
+    },
+    {
+      "name": "Portage_Bay_G2_2",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6559,
+      "lon": -122.321,
+      "start_at_ms": 1231277
+    },
+    {
+      "name": "devhackchat",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.636015,
+      "lon": -122.283669,
+      "start_at_ms": 24110
+    },
+    {
+      "name": "Maple_Leaf_Manor",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6924,
+      "lon": -122.313,
+      "start_at_ms": 911917
+    },
+    {
+      "name": "DMASpaceMesh",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.616926,
+      "lon": -122.289162,
+      "start_at_ms": 30672
+    },
+    {
+      "name": "WedgBreadMesh",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6797,
+      "lon": -122.291,
+      "start_at_ms": 18664,
+      "dies_at_ms": 2432182
+    },
+    {
+      "name": "N7GRN5_Portage_Bay_r",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6465,
+      "lon": -122.319,
+      "start_at_ms": 27983
+    },
+    {
+      "name": "Washington_Park",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6282,
+      "lon": -122.296,
+      "start_at_ms": 38503,
+      "dies_at_ms": 2320560
+    },
+    {
+      "name": "Stevens",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6286,
+      "lon": -122.302,
+      "start_at_ms": 34414
+    },
+    {
+      "name": "Martin_Room",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6957,
+      "lon": -122.293,
+      "start_at_ms": 999047
+    },
+    {
+      "name": "Cafe",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.712303,
+      "lon": -122.300148,
+      "start_at_ms": 1127933
+    },
+    {
+      "name": "SEA_Bryant_KM7ECH",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.680876,
+      "lon": -122.208996,
+      "start_at_ms": 6539,
+      "dies_at_ms": 2289945
+    },
+    {
+      "name": "repeather",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6629,
+      "lon": -122.315,
+      "start_at_ms": 1197402
+    },
+    {
+      "name": "Fremont01_Greenwood3",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.544091,
+      "lon": -122.216721,
+      "start_at_ms": 10858
+    },
+    {
+      "name": "RavennaEckstein_CC",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.6765,
+      "lon": -122.304,
+      "start_at_ms": 36585
+    },
+    {
+      "name": "CrossNet_RPT1",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.653825,
+      "lon": -122.199211,
+      "start_at_ms": 25599
+    },
+    {
+      "name": "Take_His_Face_Off",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.734821,
+      "lon": -122.252941,
+      "start_at_ms": 945500
+    },
+    {
+      "name": "bob",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.715999,
+      "lon": -122.244873,
+      "start_at_ms": 44169
+    },
+    {
+      "name": "dave",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ]
+      },
+      "lat": 47.578726,
+      "lon": -122.23835,
+      "start_at_ms": 9626
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "DMASpaceMesh",
+        "to": "Stevens",
+        "snr": 38.45,
+        "rssi": -81.59,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "DMASpaceMesh",
+        "snr": 37.87,
+        "rssi": -82.18,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "Washington_Park",
+        "snr": 36.33,
+        "rssi": -83.71,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Washington_Park",
+        "to": "DMASpaceMesh",
+        "snr": 36.51,
+        "rssi": -83.53,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Washington_Park",
+        "to": "Stevens",
+        "snr": 36.06,
+        "rssi": -83.98,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "Washington_Park",
+        "snr": 36.17,
+        "rssi": -83.88,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "Capitol_Hill_Prime",
+        "snr": 32.01,
+        "rssi": -88.03,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "dmatestbednode0",
+        "snr": 32.7,
+        "rssi": -87.34,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "bob",
+        "snr": 30.88,
+        "rssi": -89.17,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "Hankest_Extendus",
+        "snr": 31.57,
+        "rssi": -88.47,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "repeather",
+        "snr": 31.39,
+        "rssi": -88.65,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "repeather",
+        "to": "Stevens",
+        "snr": 30.85,
+        "rssi": -89.19,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "WedgBreadMesh",
+        "snr": 31.27,
+        "rssi": -88.77,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "University_District",
+        "snr": 30.89,
+        "rssi": -89.15,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "Stevens",
+        "snr": 30.85,
+        "rssi": -89.19,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "2CBA_Repeater_v4",
+        "snr": 30.42,
+        "rssi": -89.62,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaPark",
+        "to": "RavennaEckstein_CC",
+        "snr": 30.48,
+        "rssi": -89.56,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "RavennaPark",
+        "snr": 30.69,
+        "rssi": -89.35,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "Stevens",
+        "snr": 30.15,
+        "rssi": -89.89,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "University_District",
+        "snr": 30.5,
+        "rssi": -89.54,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "bob",
+        "snr": 29.78,
+        "rssi": -90.26,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "Martin_Room",
+        "snr": 30.3,
+        "rssi": -89.74,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "bob",
+        "snr": 29.83,
+        "rssi": -90.22,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "Wedgwood_Solar",
+        "snr": 30.08,
+        "rssi": -89.96,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "RavennaEckstein_CC",
+        "snr": 28.99,
+        "rssi": -91.05,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "devhackchat",
+        "snr": 29.72,
+        "rssi": -90.32,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaPark",
+        "to": "devhackchat",
+        "snr": 29.32,
+        "rssi": -90.72,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "RavennaPark",
+        "snr": 29.64,
+        "rssi": -90.4,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "bob",
+        "snr": 28.78,
+        "rssi": -91.26,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "Cafe",
+        "snr": 29.23,
+        "rssi": -90.82,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "dave",
+        "snr": 28.73,
+        "rssi": -91.31,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "dmatestbednode0",
+        "snr": 28.92,
+        "rssi": -91.12,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "Take_His_Face_Off",
+        "snr": 28.85,
+        "rssi": -91.19,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "Martin_Room",
+        "snr": 28.08,
+        "rssi": -91.96,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Maple_Leaf_Manor",
+        "to": "repeather",
+        "snr": 28.84,
+        "rssi": -91.2,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "repeather",
+        "to": "Maple_Leaf_Manor",
+        "snr": 28.22,
+        "rssi": -91.82,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Washington_Park",
+        "to": "RavennaEckstein_CC",
+        "snr": 28.06,
+        "rssi": -91.98,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "Washington_Park",
+        "snr": 28.71,
+        "rssi": -91.33,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "RavennaEckstein_CC",
+        "snr": 28.17,
+        "rssi": -91.87,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "Stevens",
+        "snr": 28.57,
+        "rssi": -91.47,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "dave",
+        "snr": 28.48,
+        "rssi": -91.56,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "usa_narrow_bridge",
+        "snr": 28.51,
+        "rssi": -91.53,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "bob",
+        "snr": 28.44,
+        "rssi": -91.6,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "KG6GXY_Greenwood",
+        "snr": 27.27,
+        "rssi": -92.77,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "Wedgwood_Solar",
+        "snr": 28.25,
+        "rssi": -91.79,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "Hankest_Extendus",
+        "snr": 28.37,
+        "rssi": -91.67,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "RavennaPark",
+        "snr": 28.29,
+        "rssi": -91.75,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaPark",
+        "to": "2CBA_Repeater_v4",
+        "snr": 27.41,
+        "rssi": -92.63,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "repeather",
+        "snr": 28.27,
+        "rssi": -91.78,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "repeather",
+        "to": "DMASpaceMesh",
+        "snr": 27.93,
+        "rssi": -92.12,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "DMASpaceMesh",
+        "snr": 27.97,
+        "rssi": -92.07,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "dmatestbednode0",
+        "snr": 28.16,
+        "rssi": -91.88,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "The_Winchester_Repea",
+        "snr": 27.38,
+        "rssi": -92.66,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "dmatestbednode0",
+        "snr": 28.08,
+        "rssi": -91.96,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Maple_Leaf_Manor",
+        "to": "bob",
+        "snr": 27.85,
+        "rssi": -92.19,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "Maple_Leaf_Manor",
+        "snr": 27.61,
+        "rssi": -92.43,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "bob",
+        "snr": 27.75,
+        "rssi": -92.29,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "WedgBreadMesh",
+        "snr": 27.61,
+        "rssi": -92.43,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Maple_Leaf_Manor",
+        "to": "RavennaEckstein_CC",
+        "snr": 27.05,
+        "rssi": -92.99,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "Maple_Leaf_Manor",
+        "snr": 27.55,
+        "rssi": -92.5,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "RavennaPark",
+        "snr": 26.72,
+        "rssi": -93.32,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaPark",
+        "to": "University_District",
+        "snr": 27.5,
+        "rssi": -92.54,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "devhackchat",
+        "snr": 27.28,
+        "rssi": -92.76,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "2CBA_Repeater_v4",
+        "snr": 27.32,
+        "rssi": -92.73,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "Licton_Springs_Chat",
+        "snr": 27.25,
+        "rssi": -92.79,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "KG6GXY_Greenwood",
+        "snr": 27.07,
+        "rssi": -92.97,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "The_Winchester_Repea",
+        "snr": 26.41,
+        "rssi": -93.63,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": 27.05,
+        "rssi": -92.99,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Portage_Bay_G2_2",
+        "to": "N7GRN5_Portage_Bay_r",
+        "snr": 27.04,
+        "rssi": -93.01,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "N7GRN5_Portage_Bay_r",
+        "to": "Portage_Bay_G2_2",
+        "snr": 26.82,
+        "rssi": -93.23,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "Stevens",
+        "snr": 26.32,
+        "rssi": -93.72,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "dmatestbednode0",
+        "snr": 26.91,
+        "rssi": -93.13,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "Maple_Leaf_Manor",
+        "snr": 26.66,
+        "rssi": -93.38,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Maple_Leaf_Manor",
+        "to": "devhackchat",
+        "snr": 26.09,
+        "rssi": -93.95,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "CrossNet_RPT1",
+        "snr": 26.59,
+        "rssi": -93.45,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "devhackchat",
+        "snr": 26.51,
+        "rssi": -93.54,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "dave",
+        "snr": 25.96,
+        "rssi": -94.08,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "CrossNet_Room",
+        "snr": 26.52,
+        "rssi": -93.52,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Maple_Leaf_Manor",
+        "to": "Take_His_Face_Off",
+        "snr": 26.32,
+        "rssi": -93.72,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "Maple_Leaf_Manor",
+        "snr": 26.46,
+        "rssi": -93.58,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "RavennaEckstein_CC",
+        "snr": 26.43,
+        "rssi": -93.61,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "DMASpaceMesh",
+        "snr": 26.24,
+        "rssi": -93.8,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "devhackchat",
+        "snr": 25.97,
+        "rssi": -94.07,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "Capitol_Hill_Prime",
+        "snr": 26.43,
+        "rssi": -93.61,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Maple_Leaf_Manor",
+        "to": "Stevens",
+        "snr": 26.17,
+        "rssi": -93.88,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Stevens",
+        "to": "Maple_Leaf_Manor",
+        "snr": 26.14,
+        "rssi": -93.9,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Central_District",
+        "to": "Fremont01_Greenwood3",
+        "snr": 26,
+        "rssi": -94.04,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_Greenwood3",
+        "to": "Central_District",
+        "snr": 26.08,
+        "rssi": -93.96,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "WedgBreadMesh",
+        "snr": 25.37,
+        "rssi": -94.67,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "CrossNet_Room",
+        "snr": 25.76,
+        "rssi": -94.28,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "WedgBreadMesh",
+        "snr": 25.62,
+        "rssi": -94.42,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "DMASpaceMesh",
+        "snr": 25.64,
+        "rssi": -94.4,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "Washington_Park",
+        "snr": 25,
+        "rssi": -95.04,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Washington_Park",
+        "to": "2CBA_Repeater_v4",
+        "snr": 25.2,
+        "rssi": -94.84,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 25.01,
+        "rssi": -95.03,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "devhackchat",
+        "snr": 25.14,
+        "rssi": -94.9,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "bob",
+        "snr": 24.92,
+        "rssi": -95.13,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "CrossNet_RPT1",
+        "snr": 24.59,
+        "rssi": -95.45,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "CrossNet_RPT1",
+        "snr": 24.23,
+        "rssi": -95.81,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "DMASpaceMesh",
+        "snr": 24.9,
+        "rssi": -95.14,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "DMASpaceMesh",
+        "snr": 24.56,
+        "rssi": -95.48,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "DMASpaceMesh",
+        "to": "2CBA_Repeater_v4",
+        "snr": 24.52,
+        "rssi": -95.52,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "Capitol_Hill_Prime",
+        "snr": 24.38,
+        "rssi": -95.66,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "University_District",
+        "snr": 24,
+        "rssi": -96.04,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "CrossNet_RPT1",
+        "snr": 24.18,
+        "rssi": -95.86,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "The_Winchester_Repea",
+        "snr": 24.13,
+        "rssi": -95.91,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "N7GRN5_Portage_Bay_r",
+        "to": "CrossNet_RPT1",
+        "snr": 23.95,
+        "rssi": -96.09,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "N7GRN5_Portage_Bay_r",
+        "snr": 23.49,
+        "rssi": -96.55,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "N7GRN5_Portage_Bay_r",
+        "snr": 23.53,
+        "rssi": -96.51,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "N7GRN5_Portage_Bay_r",
+        "to": "dmatestbednode0",
+        "snr": 23.12,
+        "rssi": -96.92,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "CrossNet_RPT1",
+        "snr": 22.62,
+        "rssi": -97.42,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "Cafe",
+        "snr": 23.12,
+        "rssi": -96.92,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 22.72,
+        "rssi": -97.33,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "The_Winchester_Repea",
+        "snr": 22.6,
+        "rssi": -97.44,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 22.37,
+        "rssi": -97.67,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "Licton_Springs_Chat",
+        "snr": 22.61,
+        "rssi": -97.43,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "University_District",
+        "snr": 22.13,
+        "rssi": -97.91,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": 20.95,
+        "rssi": -99.09,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "WedgBreadMesh",
+        "snr": 21.92,
+        "rssi": -98.12,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "Capitol_Hill_Prime",
+        "snr": 22.09,
+        "rssi": -97.95,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dmatestbednode0",
+        "to": "usa_narrow_bridge",
+        "snr": 21.59,
+        "rssi": -98.45,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "dmatestbednode0",
+        "snr": 21.76,
+        "rssi": -98.28,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "RavennaEckstein_CC",
+        "snr": 21.14,
+        "rssi": -98.91,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "Capitol_Hill_Prime",
+        "snr": 21.31,
+        "rssi": -98.73,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "Cafe",
+        "snr": 21.02,
+        "rssi": -99.02,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "Hankest_Extendus",
+        "snr": 20.72,
+        "rssi": -99.32,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "CrossNet_RPT1",
+        "snr": 20.75,
+        "rssi": -99.29,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 20.98,
+        "rssi": -99.06,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "CrossNet_RPT1",
+        "snr": 20.71,
+        "rssi": -99.33,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_RPT1",
+        "to": "Licton_Springs_Chat",
+        "snr": 20.81,
+        "rssi": -99.23,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "dave",
+        "snr": 20.36,
+        "rssi": -99.68,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 19.62,
+        "rssi": -100.42,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "WedgBreadMesh",
+        "snr": 20.16,
+        "rssi": -99.88,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": 19.86,
+        "rssi": -100.18,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "CrossNet_Room",
+        "snr": 19.92,
+        "rssi": -100.12,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "Licton_Springs_Chat",
+        "snr": 19.29,
+        "rssi": -100.75,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "WedgBreadMesh",
+        "snr": 19.48,
+        "rssi": -100.56,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "Wedgwood_Solar",
+        "snr": 18.82,
+        "rssi": -101.22,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "Wedgwood_Solar",
+        "snr": 19.37,
+        "rssi": -100.67,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": 19.2,
+        "rssi": -100.84,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "CrossNet_Room",
+        "snr": 18.42,
+        "rssi": -101.62,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "usa_narrow_bridge",
+        "snr": 19.17,
+        "rssi": -100.87,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "Capitol_Hill_Prime",
+        "snr": 19.09,
+        "rssi": -100.95,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "2CBA_Repeater_v4",
+        "snr": 18.38,
+        "rssi": -101.66,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "Central_District",
+        "snr": 16.47,
+        "rssi": -103.57,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Central_District",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": 16.59,
+        "rssi": -103.45,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "Martin_Room",
+        "snr": 16.36,
+        "rssi": -103.68,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "Hankest_Extendus",
+        "snr": 16.24,
+        "rssi": -103.8,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "dave",
+        "snr": 15.4,
+        "rssi": -104.64,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "Capitol_Hill_Prime",
+        "snr": 15.3,
+        "rssi": -104.74,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Portage_Bay_G2_2",
+        "to": "devhackchat",
+        "snr": 14.74,
+        "rssi": -105.3,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "devhackchat",
+        "to": "Portage_Bay_G2_2",
+        "snr": 15.18,
+        "rssi": -104.86,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "RavennaEckstein_CC",
+        "snr": 15.17,
+        "rssi": -104.87,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "RavennaEckstein_CC",
+        "to": "2CBA_Repeater_v4",
+        "snr": 14.95,
+        "rssi": -105.09,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "Take_His_Face_Off",
+        "snr": 14.68,
+        "rssi": -105.36,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "Wedgwood_Solar",
+        "snr": 14.8,
+        "rssi": -105.24,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "Martin_Room",
+        "snr": 13.95,
+        "rssi": -106.09,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "Wedgwood_Solar",
+        "snr": 13.98,
+        "rssi": -106.06,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "Cafe",
+        "snr": 12.67,
+        "rssi": -107.37,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "Wedgwood_Solar",
+        "snr": 12.55,
+        "rssi": -107.49,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 12.08,
+        "rssi": -107.96,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "CrossNet_Room",
+        "snr": 11.63,
+        "rssi": -108.41,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "N7GRN5_Portage_Bay_r",
+        "snr": 10.04,
+        "rssi": -110,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "N7GRN5_Portage_Bay_r",
+        "to": "University_District",
+        "snr": 10.73,
+        "rssi": -109.31,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "University_District",
+        "to": "CrossNet_Room",
+        "snr": 9.62,
+        "rssi": -110.42,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "University_District",
+        "snr": 9.2,
+        "rssi": -110.84,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "WedgBreadMesh",
+        "to": "Take_His_Face_Off",
+        "snr": 9.26,
+        "rssi": -110.78,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "WedgBreadMesh",
+        "snr": 9.24,
+        "rssi": -110.8,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 7.66,
+        "rssi": -112.38,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "usa_narrow_bridge",
+        "snr": 8.18,
+        "rssi": -111.86,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "Take_His_Face_Off",
+        "snr": 7.62,
+        "rssi": -112.42,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "Cafe",
+        "snr": 7.81,
+        "rssi": -112.24,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Portage_Bay_G2_2",
+        "to": "Washington_Park",
+        "snr": 6.73,
+        "rssi": -113.31,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Washington_Park",
+        "to": "Portage_Bay_G2_2",
+        "snr": 7.52,
+        "rssi": -112.52,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "Take_His_Face_Off",
+        "snr": 6.93,
+        "rssi": -113.11,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "Hankest_Extendus",
+        "snr": 6.64,
+        "rssi": -113.4,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_Greenwood3",
+        "to": "dave",
+        "snr": 6.15,
+        "rssi": -113.89,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "Fremont01_Greenwood3",
+        "snr": 6.46,
+        "rssi": -113.58,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "Capitol_Hill_Prime",
+        "snr": 5.66,
+        "rssi": -114.38,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Capitol_Hill_Prime",
+        "to": "usa_narrow_bridge",
+        "snr": 5.79,
+        "rssi": -114.26,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "Take_His_Face_Off",
+        "snr": 5.46,
+        "rssi": -114.58,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "Licton_Springs_Chat",
+        "snr": 5.6,
+        "rssi": -114.44,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "SEA_Bryant_KM7ECH",
+        "snr": 4.54,
+        "rssi": -115.51,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "SEA_Bryant_KM7ECH",
+        "to": "KG6GXY_Greenwood",
+        "snr": 5.2,
+        "rssi": -114.85,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "Take_His_Face_Off",
+        "snr": 4.4,
+        "rssi": -115.64,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Take_His_Face_Off",
+        "to": "KG6GXY_Greenwood",
+        "snr": 4.04,
+        "rssi": -116.01,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "Fremont01_Greenwood3",
+        "snr": 0.63,
+        "rssi": -119.41,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_Greenwood3",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": 0.66,
+        "rssi": -119.38,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "Fremont01_Greenwood3",
+        "snr": 0.56,
+        "rssi": -119.48,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_Greenwood3",
+        "to": "The_Winchester_Repea",
+        "snr": -0.09,
+        "rssi": -120.14,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "Central_District",
+        "snr": 0.25,
+        "rssi": -119.79,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Central_District",
+        "to": "The_Winchester_Repea",
+        "snr": 0.26,
+        "rssi": -119.78,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "usa_narrow_bridge",
+        "snr": 0.24,
+        "rssi": -119.8,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "The_Winchester_Repea",
+        "snr": 0.21,
+        "rssi": -119.83,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "Cafe",
+        "snr": -0.05,
+        "rssi": -120.09,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "Martin_Room",
+        "snr": -0.54,
+        "rssi": -120.58,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Wedgwood_Solar",
+        "to": "Washington_Park",
+        "snr": -1.88,
+        "rssi": -121.92,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Washington_Park",
+        "to": "Wedgwood_Solar",
+        "snr": -1.45,
+        "rssi": -121.49,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "The_Winchester_Repea",
+        "to": "CrossNet_Room",
+        "snr": -4.35,
+        "rssi": -124.39,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "The_Winchester_Repea",
+        "snr": -4.03,
+        "rssi": -124.07,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "Martin_Room",
+        "snr": -4.54,
+        "rssi": -124.58,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "KG6GXY_Greenwood",
+        "snr": -4.82,
+        "rssi": -124.86,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "Licton_Springs_Chat",
+        "snr": -5.41,
+        "rssi": -125.45,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "Hankest_Extendus",
+        "snr": -5.33,
+        "rssi": -125.37,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "2CBA_Repeater_v4",
+        "snr": -6.02,
+        "rssi": -126.06,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "2CBA_Repeater_v4",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": -6.77,
+        "rssi": -126.81,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "Fremont01_Greenwood3",
+        "snr": -6.94,
+        "rssi": -126.98,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_Greenwood3",
+        "to": "usa_narrow_bridge",
+        "snr": -7.11,
+        "rssi": -127.15,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Licton_Springs_Chat",
+        "to": "Martin_Room",
+        "snr": -7.34,
+        "rssi": -127.39,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Martin_Room",
+        "to": "Licton_Springs_Chat",
+        "snr": -7.67,
+        "rssi": -127.71,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_KF7EGZ_Sol",
+        "to": "Crow_Repeater",
+        "snr": -8.24,
+        "rssi": -128.28,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Crow_Repeater",
+        "to": "Fremont01_KF7EGZ_Sol",
+        "snr": -8,
+        "rssi": -128.04,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "usa_narrow_bridge",
+        "to": "Crow_Repeater",
+        "snr": -9.33,
+        "rssi": -129.37,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Crow_Repeater",
+        "to": "usa_narrow_bridge",
+        "snr": -10.51,
+        "rssi": -130.55,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Central_District",
+        "to": "Crow_Repeater",
+        "snr": -9.38,
+        "rssi": -129.42,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Crow_Repeater",
+        "to": "Central_District",
+        "snr": -9.48,
+        "rssi": -129.52,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "Cafe",
+        "snr": -10.07,
+        "rssi": -130.11,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Cafe",
+        "to": "KG6GXY_Greenwood",
+        "snr": -9.43,
+        "rssi": -129.47,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "KG6GXY_Greenwood",
+        "to": "Hankest_Extendus",
+        "snr": -11.76,
+        "rssi": -131.8,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Hankest_Extendus",
+        "to": "KG6GXY_Greenwood",
+        "snr": -11.94,
+        "rssi": -131.98,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "CrossNet_Room",
+        "to": "Fremont01_Greenwood3",
+        "snr": -14.2,
+        "rssi": -134.24,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Fremont01_Greenwood3",
+        "to": "CrossNet_Room",
+        "snr": -14.14,
+        "rssi": -134.18,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "Central_District",
+        "to": "dave",
+        "snr": -14.67,
+        "rssi": -134.71,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "Central_District",
+        "snr": -14.39,
+        "rssi": -134.44,
+        "snr_std_dev": 0,
+        "bidir": false
+      }
+    ]
+  }
+}
