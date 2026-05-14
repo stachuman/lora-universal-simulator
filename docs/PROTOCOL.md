@@ -118,10 +118,10 @@ Wire format (see ROADMAP §7.0.2 for the full bit-assignment rationale):
 
 ```
 byte:  0      1                                        2     3
-       ┌───┬─────────────────────────────────────────┬─────┬──────────┐
+       ┌───┬──────────────────────────────────────────┬─────┬───────────┐
        │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │S│n_entries│
-       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ (7b)   │
-       └───┴─────────────────────────────────────────┴─────┴──────────┘
+       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ (7b)    │
+       └───┴──────────────────────────────────────────┴─────┴───────────┘
 
 if has_schedule == 1 (optional schedule block):
   byte 4:       layer_count(8)
@@ -643,17 +643,19 @@ diagnostic for future scenarios with asymmetric load.
 ### 6.1 Periodic beacon
 
 ```
-on_init schedules first beacon at rand(0, beacon_period_warmup_ms)
+on_init enters node-local DISCOVERY and schedules first beacon at
+rand(0, discovery_beacon_period_ms)
 Every beacon_fire:
   1. If pending_tx ~= nil OR pending_rx ~= nil: log + skip emission
   2. Else: adaptive-throttle gate (see §6.2)
   3. Always: re-arm next periodic at rand(0.8×period, 1.2×period)
-     - period = beacon_period_warmup_ms during warmup
-     - period = beacon_period_ms after warmup
+     - period = discovery_beacon_period_ms during DISCOVERY
+     - period = beacon_period_ms after DISCOVERY
 ```
 
-Defaults: warmup period 5 s, operational period 5 min. Real LoRa
-deployments use 30+ min; the simulator compresses time.
+Defaults: discovery period 5 s, operational period 5 min. Real LoRa
+deployments use longer operational periods; the simulator compresses
+time. Firmware behavior does not depend on simulator `warmup_ms`.
 
 ### 6.2 Adaptive throttle (heard-channel busy)
 
@@ -685,7 +687,7 @@ jitter (used by unit tests).
 **Max-idle override (`beacon_max_idle_ms`):** in dense meshes (100+
 nodes), the channel never goes quiet for the 30 s threshold —
 periodic beacons are suppressed indefinitely once the network is
-busy. Routes from the warmup phase then age out (~10-30 min later)
+busy. Routes learned during discovery then age out (~10-30 min later)
 with no fresh advertisements arriving, and the network can collapse
 into a stable 0%-delivery state.
 
@@ -769,18 +771,18 @@ defeats the purpose. Half-duplex skip still applies.
    `rt_prune_cycle` when the primary slot is removed. Cleared once the
    route is included in a beacon.
 
-2. **Phase 2 — stable rotation (warmup/background):** existing
+2. **Phase 2 — stable rotation (discovery/background):** existing
    sliding-offset walk fills any remaining slots up to `beacon_max_entries`,
    skipping destinations already in Phase 1 (dedup within a single beacon).
-   This phase runs during simulator warmup so the collision-free hot-start
-   can seed route tables. After `warmup_ms`, periodic and triggered BCNs
-   skip Phase 2 and become dirty-only route updates plus the optional
+   This phase runs during node-local DISCOVERY so a booting node can learn
+   and advertise enough topology. After DISCOVERY, periodic and triggered
+   BCNs skip Phase 2 and become dirty-only route updates plus the optional
    destination-seen bitmap.
 
 The stable offset only advances by the number of stable slots used.
 When dirty fills the beacon, stable progress isn't lost.
 
-**Steady state with no churn after warmup:** every route is clean →
+**Steady state with no churn after discovery:** every route is clean →
 Phase 1 is empty → Phase 2 is skipped → BCN carries only the header and
 optional destination-seen bitmap. Existing same-next-hop candidates are
 kept fresh by bitmap refresh, not by re-advertising full route pages.
@@ -1537,28 +1539,29 @@ The "new user installs the app, opens it, immediately taps send" case
 needs explicit handling — without it, the user sees a silent drop and
 abandons the app. Two mechanisms:
 
-### 11a.1 Cold-start fast first beacon
+### 11a.1 Node-local discovery
 
 In `on_init`:
 
 ```
-boot_at = self:now()
-if boot_at < warmup_ms or warmup_ms == 0:
-  # Mass-boot scenario (everyone starts at t=0, or no warmup configured)
-  # — must jitter to avoid beacon storm
-  schedule first beacon at rand(0, beacon_period_warmup_ms)  # ~5 s
-else:
-  # Cold-start joiner past warmup — single new node, no storm risk
-  # — fire ASAP so neighbours' triggered beacons populate our rt within
-  # ~hundreds of ms instead of waiting up to a full operational period
-  schedule first beacon at rand(1, 200)  # ~100 ms avg
+discovery_mode = true
+discovery_until_ms = now + discovery_ms
+schedule first beacon at rand(0, discovery_beacon_period_ms)
+
+while discovery_mode:
+  emit fast/full BCNs
+  exit discovery when:
+    - enough BCN traffic has been heard, or
+    - enough routes are installed, or
+    - discovery_until_ms expires
+
+after discovery:
+  emit normal dirty-only BCNs plus seen bitmap
 ```
 
-The cold-start path cuts mean bootstrap latency from ~2.5 s (random
-offset within warmup beacon period) to ~150 ms (immediate beacon +
-neighbour's triggered beacon back to us). For real hardware, the
-"detect we're a cold-start joiner vs. mass-boot" test falls back to
-"always jitter" since `warmup_ms` is 0.
+This is firmware state, not simulator state. `warmup_ms` may still be
+used by the orchestrator to create collision-free test windows, but Lua
+protocol decisions must not depend on it.
 
 ### 11a.2 Defer queue for originator sends
 
@@ -1583,11 +1586,12 @@ recovery path. They keep the legacy `send_no_route` emit.
 
 ### 11a.3 Bootstrap timeline (measured on t27)
 
-5-node line `a-b-c-d-e`, eve boots at t=20000 (past warmup_ms=10000):
+5-node line `a-b-c-d-e`, eve boots at t=20000:
 
 ```
 t = 20000 ms   eve.on_init runs
-                schedules first beacon at t+150ms (cold-start path)
+                enters DISCOVERY
+                schedules first beacon at rand(0, discovery_beacon_period_ms)
                 schedules periodic drain at t+1000ms
 
 t = 20100 ms   eve issues "send alice hello"
@@ -1636,7 +1640,8 @@ on_init(self, config):
   compute peer_count = #nodes - 1
   initialize all per-node state (rt, snr_ewma_in/out, blind_until,
                                  last_acked_from, seen_origins, ...)
-  schedule first beacon at rand(0, beacon_period_warmup_ms)
+  enter DISCOVERY
+  schedule first beacon at rand(0, discovery_beacon_period_ms)
 ```
 
 Per-node state populated:
@@ -1722,11 +1727,11 @@ expectations) subscribe by event_type.
 
 | Event | Trigger | Key data |
 |---|---|---|
-| `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind`, `seen_bits` |
+| `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind`, `seen_bits`, `dirty_only` |
 | `beacon_rx` | Beacon decoded | `src`, `n_entries`, `seen_bits` |
 | `seen_bitmap_tx` / `seen_bitmap_rx` | Destination-seen bitmap emitted/decoded | `bits_set`, `ttl_ms` / `from`, `bits_set`, `applied`, `refreshed` |
 | `beacon_skipped_busy` | Throttle suppressed beacon | `since_rx_ms`, `threshold_ms`, `stage` |
-| `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind` |
+| `beacon_diff_breakdown` | Per-beacon dirty/stable split (§6.4) | `dirty_n`, `stable_n`, `total_dirty`, `rt_total`, `kind`, `n_entries`, `seen_bits`, `dirty_only` |
 | `beacon_max_idle_force` | Max-idle override bypassed busy throttle (§6.2) | `since_tx_ms`, `max_idle_ms`, `since_rx_ms` |
 | `beacon_max_idle_skip_clean` | B+C composite skipped override (no dirty + recent neighbour BCN) (§6.2) | `dirty_n`, `since_bcn_rx_ms`, `max_idle_ms` |
 | `beacon_skipped_budget` | Beacon skipped because budget tier ≥ CRITICAL (§11.5) | `tier`, `pct_used` |
@@ -1836,8 +1841,12 @@ the JSON scenario). Defaults shown.
 
 | Key | Default | Description |
 |---|---|---|
-| `beacon_period_warmup_ms` | 5000 | Period during warmup_ms |
+| `discovery_beacon_period_ms` | 5000 | Fast beacon period while node-local DISCOVERY is active |
+| `beacon_period_warmup_ms` | 5000 | Legacy alias for `discovery_beacon_period_ms` |
 | `beacon_period_ms` | 300000 | Operational period (5 min) |
+| `discovery_ms` | 60000 | Max node-local discovery duration after boot |
+| `discovery_min_bcn_rx` | 3 | Exit discovery after this many BCN receptions |
+| `discovery_min_routes` | 8 | Exit discovery after this many route-table destinations |
 | `beacon_max_bytes` | 151 | Max beacon frame size — 4-byte header + 49 × 3-byte entries (post-bit-pack default; was 200 with 4-byte entries) |
 | `beacon_trigger_jitter_min_ms` | 50 | Triggered beacon delay min |
 | `beacon_trigger_jitter_max_ms` | 500 | Triggered beacon delay max |
@@ -1911,7 +1920,6 @@ wire `origin`).
 
 | Key | Source | Description |
 |---|---|---|
-| `_sim_warmup_ms` | runtime | Warmup window from simulation config |
 | `_sim_bw_hz` | runtime | Resolved BW in Hz from radio block |
 | `_sim_cr` | runtime | Resolved CR from radio block |
 | `_sim_duty_cycle` | runtime | Resolved duty_cycle from radio block |

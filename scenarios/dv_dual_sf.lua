@@ -67,11 +67,9 @@
 -- on_init
 --   build name↔id maps from sim:nodes(); peer_count = N-1
 --   RX defaults to routing_sf
---   first-beacon scheduling (cold-start aware):
---     boot_at < warmup_ms OR warmup_ms == 0 → rand(0, beacon_period_warmup_ms)
---                                              (mass-boot, jitter to avoid storm)
---     else (single late joiner past warmup)  → rand(1, 200) ms
---                                              (cold-start; bootstrap ASAP)
+--   first-beacon scheduling:
+--     node-local DISCOVERY state → rand(0, discovery_beacon_period_ms)
+--                                  (mass-boot/joiner jitter to avoid storm)
 --   periodic 1s drain timer → try_drain_deferred (TTL pruning + retry
 --                                                  for originator defer queue)
 --   See "Bootstrap UX (cold-start joiners)" section below.
@@ -155,12 +153,10 @@
 --   feedback ("connecting... sending... delivered") rather than a silent
 --   drop. Two pieces:
 --
---   1. Cold-start fast first beacon. If on_init runs AFTER warmup_ms
---      (single new joiner, mesh already converged), schedule the first
---      beacon at rand(1, 200) ms instead of rand(0, beacon_period_warmup).
---      Neighbours' triggered beacons bring this node into routing tables
---      within ~hundreds of ms instead of waiting up to a full operational
---      beacon period (5 min default).
+--   1. Node-local DISCOVERY. Every boot starts in a short discovery
+--      state: fast/full BCNs with jitter, then normal dirty-only BCNs
+--      after enough neighbours/routes are observed or the discovery
+--      timeout expires. This is firmware state, not simulator warmup.
 --
 --   2. Defer queue for originator sends with no route. Instead of
 --      dropping with send_no_route, hold the send for up to
@@ -791,16 +787,17 @@ end
 --   the primary was pruned). Sorted by dest_id for determinism. Capped at
 --   max_entries — overflow waits for the next beacon (no information loss).
 --
--- Phase 2 (warmup/background): the existing sliding-offset rotation fills
+-- Phase 2 (discovery/background): the existing sliding-offset rotation fills
 --   any remaining slots, skipping destinations already in the dirty page so
---   we never duplicate within a single beacon. After warmup, periodic and
---   triggered BCNs skip this phase and rely on the seen bitmap for freshness.
+--   we never duplicate within a single beacon. In normal mode, periodic
+--   and triggered BCNs skip this phase and rely on dirty entries plus the
+--   seen bitmap for freshness.
 --
 -- After emission: dirty flags for sent routes are cleared. The stable
 -- offset advances ONLY by the number of stable slots used — so when
 -- dirty fills the beacon, stable progress isn't lost.
 --
--- Steady state after warmup with no churn → all flags clean → Phase 2 is
+-- Steady state after discovery with no churn → all flags clean → Phase 2 is
 -- skipped → BCN carries only the header plus the optional seen bitmap.
 local BCN_N_HAS_SEEN_BITMAP = 0x80
 local BCN_N_ENTRIES_MASK    = 0x7f
@@ -958,9 +955,9 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   local dirty_n = math.min(total_dirty, max_entries)
 
   -- Phase 2: stable rotation — walk from offset, skip dirty, fill remaining.
-  -- Post-warmup dirty-only BCNs deliberately skip this phase: route changes
-  -- travel as dirty entries, while the destination-seen bitmap refreshes
-  -- existing same-next-hop candidates without paying full route-page airtime.
+  -- Normal dirty-only BCNs deliberately skip this phase: route changes travel
+  -- as dirty entries, while the destination-seen bitmap refreshes existing
+  -- same-next-hop candidates without paying full route-page airtime.
   local stable_page = {}
   local remaining = max_entries - dirty_n
   local new_offset = offset
@@ -3078,6 +3075,34 @@ end
 
 -- ---------- script lifecycle ------------------------------------------------
 
+local function in_discovery(self)
+  return self.discovery_mode == true
+end
+
+local function maybe_exit_discovery(self, reason)
+  if not in_discovery(self) then return end
+  local now = self:now()
+  local timeout_ms = self.discovery_until_ms or 0
+  local heard_n = self.discovery_bcn_rx_count or 0
+  local route_n = rt_count(self.rt)
+  local enough_heard = heard_n >= (self.discovery_min_bcn_rx or 0)
+  local enough_routes = route_n >= (self.discovery_min_routes or 0)
+  local timed_out = timeout_ms > 0 and now >= timeout_ms
+  if timed_out or enough_heard or enough_routes then
+    self.discovery_mode = false
+    self:emit("bcn_discovery_exit", {
+      reason = reason or (timed_out and "timeout" or "learned"),
+      heard_bcn = heard_n,
+      rt_total = route_n,
+      elapsed_ms = now - (self.discovery_started_ms or now),
+    })
+    self:log(string.format(
+      "bcn_discovery_exit reason=%s heard_bcn=%d rt_total=%d elapsed=%dms",
+      reason or (timed_out and "timeout" or "learned"),
+      heard_n, route_n, now - (self.discovery_started_ms or now)))
+  end
+end
+
 -- Shared core: send a single beacon page. Skipped (returns false) if the
 -- node is in a data exchange — half-duplex radio means a TX would clobber
 -- pending RX of CTS/DATA/ACK. Used by both periodic and triggered fires.
@@ -3103,7 +3128,8 @@ local function send_beacon_page(self, kind)
       compute_budget_tier(self), kind))
     return false
   end
-  local dirty_only = (self.warmup_ms > 0 and self:now() >= self.warmup_ms)
+  maybe_exit_discovery(self, "before_bcn")
+  local dirty_only = not in_discovery(self)
   local frame, new_offset, diff = pack_beacon(self,
                                               self.beacon_max_entries,
                                               self.beacon_offset,
@@ -3116,6 +3142,7 @@ local function send_beacon_page(self, kind)
     kind = kind,
     seen_bits = diff.seen_bits or 0,
     dirty_only = diff.dirty_only == true,
+    discovery = in_discovery(self),
   })
   -- Differential breakdown: how many of the n_entries were dirty (priority)
   -- vs stable (background rotation), and how many dirty routes overflowed
@@ -3129,6 +3156,7 @@ local function send_beacon_page(self, kind)
     n_entries   = page_n,
     seen_bits   = diff.seen_bits or 0,
     dirty_only   = diff.dirty_only == true,
+    discovery    = in_discovery(self),
   })
   if self.seen_bitmap_enabled then
     self:emit("seen_bitmap_tx", {
@@ -3327,10 +3355,11 @@ local function beacon_fire(self)
 
   -- Always re-arm the periodic timer, regardless of whether we actually
   -- emitted. Jittered ±20% to avoid phase-lock between co-booting nodes.
-  -- During warmup we use a fast rate so the network learns routes quickly;
-  -- afterwards we drop to the operational rate (minutes apart).
-  local period = (self:now() < self.warmup_ms)
-                 and self.beacon_period_warmup_ms
+  -- During node-local discovery, use a fast rate so routes form quickly.
+  -- Afterwards drop to the operational rate.
+  maybe_exit_discovery(self, "timer")
+  local period = in_discovery(self)
+                 and self.discovery_beacon_period_ms
                  or  self.beacon_period_ms
   local lo = period * 4 // 5
   local hi = period * 6 // 5
@@ -3382,16 +3411,26 @@ function on_init(self, config)
   -- borderline) but never preferred over an actually-decodable path.
   self.routing_snr_floor_db = (SF_DEMOD_THRESHOLD[self.routing_sf] or -15.0)
                               + self.sf_margin_db
-  -- Two beacon periods: a fast one used during warmup so the network
-  -- learns its routes quickly (in real LoRa deployment this represents
-  -- the early hours of network bring-up — we compress that here), and a
-  -- much slower one for steady-state operation. The runtime injects
-  -- _sim_warmup_ms into config so we know when to switch. Without
-  -- _sim_warmup_ms (older scenarios or non-lus harnesses) we just stay
-  -- at the operational rate.
-  self.beacon_period_warmup_ms = config.beacon_period_warmup_ms or 5000
+  -- Two beacon periods: a fast one used during firmware-local discovery
+  -- after node boot, and a much slower one for steady-state operation.
+  -- `beacon_period_warmup_ms` is accepted as a legacy scenario alias, but
+  -- simulator warmup itself must not drive firmware decisions.
+  self.discovery_beacon_period_ms = config.discovery_beacon_period_ms
+                                    or config.beacon_period_warmup_ms
+                                    or 5000
   self.beacon_period_ms        = config.beacon_period_ms        or 300000
-  self.warmup_ms               = config._sim_warmup_ms          or 0
+  -- Real firmware does not know about simulator warmup. A node that just
+  -- booted briefly runs discovery: fast/full BCNs until it has heard enough
+  -- of the mesh or a bounded timeout expires. After that, normal BCNs are
+  -- dirty-only plus the seen bitmap. Late joiners get the same local
+  -- discovery window starting at their own boot time.
+  self.discovery_ms            = config.discovery_ms            or 60000
+  self.discovery_min_bcn_rx    = config.discovery_min_bcn_rx    or 3
+  self.discovery_min_routes    = config.discovery_min_routes    or 8
+  self.discovery_started_ms    = self:now()
+  self.discovery_until_ms      = self.discovery_started_ms + self.discovery_ms
+  self.discovery_bcn_rx_count  = 0
+  self.discovery_mode          = (self.discovery_ms > 0)
   -- Optional destination freshness bitmap appended to BCN frames. It is
   -- not a route advertisement: receivers update dest_seen_ms only, and
   -- route candidates refresh only when the existing candidate's next_hop
@@ -3840,24 +3879,15 @@ function on_init(self, config)
     self.ack_air_ms, self.routing_sf,
     self.rts_timeout_ms, self.pending_rx_expiry_max_ms))
 
-  -- First-beacon scheduling, two cases:
-  --   1. Boot at t=0 OR within warmup window: mass-boot scenario, MUST
-  --      jitter across the warmup beacon period (default 5 s) so the
-  --      first round doesn't collide. Same as before.
-  --   2. Boot AFTER warmup ended (start_at_ms set, single new joiner
-  --      coming up after the mesh has converged): no storm risk —
-  --      fire ASAP with tiny jitter so neighbours' triggered beacons
-  --      bring us into the routing table within ~hundreds of ms instead
-  --      of waiting up to a full operational beacon period.
-  local boot_at = self:now()
-  if boot_at < self.warmup_ms or self.warmup_ms == 0 then
-    -- Case 1: mass-boot or no-warmup-configured. Jitter across warmup period.
-    local first_period = self.beacon_period_warmup_ms
-    self:after(self:rand(0, first_period), function() beacon_fire(self) end)
-  else
-    -- Case 2: cold-start joiner past warmup. Fire fast (~100ms avg).
-    self:after(self:rand(1, 200), function() beacon_fire(self) end)
-  end
+  -- First-beacon scheduling:
+  --   - discovery nodes jitter across the discovery beacon period so mass
+  --     boot or a small group of new joiners does not collapse into one
+  --     collision burst.
+  --   - if discovery is disabled, use the operational beacon period.
+  local first_period = in_discovery(self)
+                       and self.discovery_beacon_period_ms
+                       or  self.beacon_period_ms
+  self:after(self:rand(0, first_period), function() beacon_fire(self) end)
 
   -- Periodic 1s drain of self.deferred_sends — fires regardless of
   -- beacon traffic, so deferred originator sends have a deterministic
@@ -4014,6 +4044,9 @@ function on_recv(self, frame, meta)
     -- already covered, so we defer our own override even if the
     -- generic channel-busy throttle would fire it. See beacon_fire.
     self.last_rx_bcn_ms = now
+    if in_discovery(self) then
+      self.discovery_bcn_rx_count = (self.discovery_bcn_rx_count or 0) + 1
+    end
 
     -- Track whether anything in our rt actually changed during this beacon
     -- so we can fire a single triggered re-beacon at the end (one trigger
@@ -4084,6 +4117,8 @@ function on_recv(self, frame, meta)
         end
       end
     end
+
+    maybe_exit_discovery(self, rt_changed and "rt_update" or "beacon_rx")
 
     if rt_changed then schedule_triggered_beacon(self) end
 
