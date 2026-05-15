@@ -110,6 +110,7 @@ static SimConfig parseJson(const json& j) {
             if (pl.contains("ref_loss_db"))    cfg.simulation.path_loss.ref_loss_db    = pl["ref_loss_db"].get<double>();
             if (pl.contains("noise_floor_db")) cfg.simulation.path_loss.noise_floor_db = pl["noise_floor_db"].get<double>();
             if (pl.contains("tx_power_dbm"))   cfg.simulation.path_loss.tx_power_dbm   = pl["tx_power_dbm"].get<double>();
+            if (pl.contains("mobile_only"))    cfg.simulation.path_loss.mobile_only    = pl["mobile_only"].get<bool>();
             if (pl.contains("node_tx_offset_sigma_db"))
                 cfg.simulation.path_loss.node_tx_offset_sigma_db = pl["node_tx_offset_sigma_db"].get<double>();
             if (pl.contains("node_rx_offset_sigma_db"))

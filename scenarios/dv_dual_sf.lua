@@ -897,6 +897,17 @@ local function mark_dest_seen(self, dest_id, source)
   return prev == nil
 end
 
+local function is_mobile_peer(self, node_id)
+  return self.mobile_peers and self.mobile_peers[node_id] == true
+end
+
+local function route_uses_mobile_as_transit(self, dest_id, next_hop)
+  return next_hop ~= nil
+     and dest_id ~= nil
+     and next_hop ~= dest_id
+     and is_mobile_peer(self, next_hop)
+end
+
 local function refresh_bitmap_candidates(self, dest_id, next_hop)
   local entry = self.rt[dest_id]
   if not entry or not entry.candidates then return 0 end
@@ -1364,6 +1375,11 @@ end
 --     short and possibly trigger Q-frame re-discovery.
 --     payload = committed_hops(4 hi) | reserved(4 lo)
 --     committed_hops 0..15 — how many hops the flight already walked.
+--   NACK_REASON_LOOP_DUP (3): DATA was decoded, but this receiver has
+--     already seen the same (origin,dst,ctr) from a different previous hop.
+--     That means the packet looped back through the mesh; upstream should
+--     try a different candidate rather than treating the hop as successful.
+--     payload = prior previous-hop id, or 255 if unknown.
 --
 -- Shrunk from 4→3 bytes per ROADMAP §7.0.5. busy_for_ms quantum = 16 ms
 -- (well below the 50 ms natural retry-jitter floor). Max range 4080 ms
@@ -1371,6 +1387,7 @@ end
 local NACK_REASON_BUSY_RX    = 0
 local NACK_REASON_BUDGET     = 1
 local NACK_REASON_HOP_BUDGET = 2   -- §7.6: flight exceeded hop budget
+local NACK_REASON_LOOP_DUP   = 3   -- looped duplicate from another previous hop
 
 local NACK_BUSY_QUANTUM_MS = 16   -- granularity of BUSY_RX payload
 
@@ -1382,6 +1399,7 @@ local NACK_BUSY_QUANTUM_MS = 16   -- granularity of BUSY_RX payload
 --             BUSY_RX:    busy_for_ms / 16  (0..4080 ms, 16 ms granularity)
 --             BUDGET:     tier (4 hi) | headroom_buckets (4 lo)
 --             HOP_BUDGET: committed_hops (4 hi) | reserved (4 lo)
+--             LOOP_DUP:   prior previous-hop id (or 255)
 local function pack_nack(ctr_lo, reason, payload, to_id)
   reason  = reason or NACK_REASON_BUSY_RX
   payload = payload or 0
@@ -1408,6 +1426,8 @@ local function parse_nack(frame)
     out.budget_headroom_buckets = payload & 0xf
   elseif reason == NACK_REASON_HOP_BUDGET then
     out.committed_hops = (payload >> 4) & 0xf
+  elseif reason == NACK_REASON_LOOP_DUP then
+    out.prior_from = payload
   end
   return out
 end
@@ -2206,6 +2226,14 @@ next_hop_selectable = function(self, dst_id, c, previous_hop, alts_tried,
   if alts_tried and alts_tried[c.next_hop] then
     return false
   end
+  if route_uses_mobile_as_transit(self, dst_id, c.next_hop) then
+    self:emit("rt_skip_mobile_transit", {
+      dest = dst_id,
+      next = c.next_hop,
+      source = source or "route_select",
+    })
+    return false
+  end
   if get_peer_suspect_level(self, c.next_hop) >= PEER_LEVEL_SILENT then
     return false
   end
@@ -2566,6 +2594,14 @@ end
 -- propagate within one beacon period instead of waiting for the
 -- sliding-offset rotation to come around.
 local function rt_merge(self, rt, dest_id, cand, viab_db)
+  if route_uses_mobile_as_transit(self, dest_id, cand and cand.next_hop) then
+    self:emit("rt_skip_mobile_transit", {
+      dest = dest_id,
+      next = cand.next_hop,
+      hops = cand.hops,
+    })
+    return "mobile_transit_skip"
+  end
   local entry = rt[dest_id]
   if entry == nil then
     rt[dest_id] = { candidates = { cand }, dirty = true }   -- new dest
@@ -4153,7 +4189,10 @@ end
 -- deferred fire time. Defends against thundering herd when many nodes
 -- simultaneously detect a busy→quiet transition.
 local function beacon_fire(self)
-  if self.pending_tx ~= nil or self.pending_rx ~= nil then
+  if self.is_mobile then
+    -- Mobile nodes discover with Q/REQ_SYNC and should not publish normal
+    -- periodic DV beacons; their route view goes stale as they move.
+  elseif self.pending_tx ~= nil or self.pending_rx ~= nil then
     -- Existing data-exchange skip — preserved verbatim from send_beacon_page's
     -- guard (we still call send_beacon_page below in the unthrottled path
     -- which double-checks; this branch logs the same reason).
@@ -4330,6 +4369,9 @@ end
 -- also rate-limited against the last successful BCN; discovery and boot
 -- grace are exempt so joiners can converge quickly.
 schedule_triggered_beacon = function(self)
+  if self.is_mobile then
+    return
+  end
   if self.triggered_beacon_pending then return end
   self.triggered_beacon_pending = true
   local lo = self.beacon_trigger_jitter_min_ms or 2000
@@ -4956,6 +4998,7 @@ function on_init(self, config)
   -- in real firmware. TTL is generous (30s default) because a flight at
   -- SF10 can take a few seconds with retries.
   self.seen_origins       = {}
+  self.seen_origin_from   = {}
   self.seen_origin_ttl_ms = config.seen_origin_ttl_ms or 30000
   -- Per-(self → peer) outbound 16-bit counter. Replaces the old flat next_origin_seq.
   -- RAM-only this phase; NV persistence deferred to §8 crypto. Keyed by peer_id.
@@ -4989,10 +5032,14 @@ function on_init(self, config)
 
   self.name_to_id = {}
   self.id_to_name = {}
+  self.mobile_peers = {}
   local nodes = sim:nodes()
   for _, n in ipairs(nodes) do
     self.name_to_id[n.name] = n.id
     self.id_to_name[n.id]   = n.name
+    if n.is_mobile then
+      self.mobile_peers[n.id] = true
+    end
   end
   self.peer_count = #nodes - 1
 
@@ -5967,6 +6014,12 @@ function on_recv(self, frame, meta)
       self:cancel(self.rts_timeout_handle)
       self.rts_timeout_handle = nil
     end
+    if self.ack_timeout_handle then
+      self:cancel(self.ack_timeout_handle)
+      self.ack_timeout_handle = nil
+    end
+    self.pending_tx.awaiting_cts = false
+    self.pending_tx.awaiting_ack = false
 
     -- Budget NACK (new reason). The peer is duty-cycle-saturated; mark
     -- them blind for a tier-proportional window so classify_blind
@@ -6102,6 +6155,74 @@ function on_recv(self, frame, meta)
         ctr = self.pending_tx.ctr,
         dst = self.pending_tx.dst,
         next = self.pending_tx.next, ctr_lo = self.pending_tx.ctr_lo,
+      })
+      self.pending_tx = nil
+      become_free(self)
+      return
+    end
+
+    -- Loop-duplicate NACK. A downstream receiver decoded our DATA but had
+    -- already seen the same packet identity via a different previous hop.
+    -- Treat the selected next-hop as a dead branch for this flight and
+    -- cascade locally instead of accepting the hop as complete.
+    if n.reason == NACK_REASON_LOOP_DUP then
+      local prev_next = self.pending_tx.next
+      self.pending_tx.alts_tried[prev_next] = true
+      self:emit("nack_rx", {
+        attempt_seq = self.pending_tx.last_rts_attempt_seq,
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        from = prev_next,
+        ctr_lo = n.ctr_lo,
+        reason = "loop_duplicate",
+        prior_from = n.prior_from,
+      })
+      local next_hop = pick_next_cascade_hop(self, self.pending_tx)
+      if next_hop ~= nil then
+        self:emit("path_cascade", {
+          origin = self.pending_tx.origin,
+          payload = self.pending_tx.user_text,
+          ctr = self.pending_tx.ctr,
+          dst = self.pending_tx.dst,
+          ctr_lo = self.pending_tx.ctr_lo,
+          from_next = prev_next,
+          to_next = next_hop,
+          attempt = set_size(self.pending_tx.alts_tried),
+          trigger = "loop_duplicate",
+        })
+        self:emit("tx_loop_alt", {
+          origin = self.pending_tx.origin,
+          payload = self.pending_tx.user_text,
+          ctr = self.pending_tx.ctr,
+          ctr_lo = self.pending_tx.ctr_lo,
+          dst = self.pending_tx.dst,
+          from_next = prev_next,
+          to_next = next_hop,
+        })
+        self:log(string.format("tx_loop_alt msg=%d %s -> %s",
+          self.pending_tx.ctr_lo, name_of(self, prev_next), name_of(self, next_hop)))
+        self.pending_tx.next = next_hop
+        self.pending_tx.retries_left = effective_rts_max_retries(self, self.pending_tx.requeue_count)
+        tx_rts_retry(self, "loop_duplicate")
+        return
+      end
+
+      self:emit("path_cascade_exhausted", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        dst = self.pending_tx.dst,
+        ctr_lo = self.pending_tx.ctr_lo,
+        tried = {}, trigger = "loop_duplicate",
+      })
+      self:emit("rts_giveup", {
+        origin = self.pending_tx.origin,
+        payload = self.pending_tx.user_text,
+        ctr = self.pending_tx.ctr,
+        dst = self.pending_tx.dst,
+        next = prev_next,
+        ctr_lo = self.pending_tx.ctr_lo,
       })
       self.pending_tx = nil
       become_free(self)
@@ -6324,8 +6445,9 @@ function on_recv(self, frame, meta)
       -- Record (origin, dst, ctr) in seen_origins so any later duplicate
       -- arriving at us short-circuits via dup_drop. We DID receive the
       -- frame; we just can't carry it further.
-      self.seen_origins[seen_origin_key(d.origin, d.dst, d.ctr)] =
-        self:now() + self.seen_origin_ttl_ms
+      local seen_key = seen_origin_key(d.origin, d.dst, d.ctr)
+      self.seen_origins[seen_key] = self:now() + self.seen_origin_ttl_ms
+      self.seen_origin_from[seen_key] = rx_from
       -- NACK back to the upstream so it learns rt[dst] was under-estimating.
       -- Use tx_with_retry (RESPONSE class, same priority as ACK would have
       -- been) so the NACK reaches upstream within its ACK-await window.
@@ -6351,6 +6473,82 @@ function on_recv(self, frame, meta)
       return
     end
 
+    -- Origin-level dedup. Duplicates from the same previous hop are normal
+    -- lost-ACK recovery and get ACK-only. Duplicates from a different
+    -- previous hop mean the packet looped back through the mesh; send a
+    -- loop-duplicate NACK so upstream tries a different branch instead of
+    -- treating this hop as successful.
+    do
+      local seen_key = seen_origin_key(d.origin, d.dst, d.ctr)
+      local now_ms = self:now()
+      local exp = self.seen_origins[seen_key]
+      if exp and exp > now_ms then
+        local prior_from = self.seen_origin_from[seen_key]
+        if prior_from ~= nil and prior_from ~= rx_from then
+          local nack = pack_nack(d.ctr_lo, NACK_REASON_LOOP_DUP, prior_from, rx_from)
+          self:emit("nack_tx", {
+            origin = d.origin, payload = user_text, ctr = d.ctr,
+            dst = d.dst, to = rx_from, ctr_lo = d.ctr_lo,
+            reason = "loop_duplicate", prior_from = prior_from,
+          })
+          self:emit("dup_drop", {
+            origin = d.origin, payload = user_text, ctr = d.ctr,
+            dst = d.dst, from = rx_from, prior_from = prior_from,
+            ctr_lo = d.ctr_lo, reason = "loop_duplicate",
+          })
+          self:log(string.format(
+            "dup_drop <- %s (origin=%s ctr=%d, prior=%s — NACK loop_duplicate)",
+            name_of(self, rx_from), name_of(self, d.origin), d.ctr,
+            name_of(self, prior_from)))
+          tx_with_retry(self, nack, {
+            sf    = self.routing_sf,
+            label = "NACK",
+            info  = string.format("to=%s reason=loop_duplicate prior=%s",
+              name_of(self, rx_from), name_of(self, prior_from)),
+          })
+          self:after(self.ack_air_ms + 1, function()
+            become_free(self)
+          end)
+          return
+        end
+        local my_budget_tier = compute_budget_tier(self)
+        local ack_budget_hint = my_budget_tier
+        if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
+        local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint, rx_from)
+        self:emit("ack_tx", {
+          origin = d.origin, payload = user_text, ctr = d.ctr,
+          to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
+          budget_tier = my_budget_tier,
+          budget_hint = ack_budget_hint,
+          duplicate = true,
+        })
+        self:log(string.format("ack_tx -> %s ctr_lo=%d budget_hint=%d duplicate (on routing SF%d)",
+          name_of(self, rx_from), d.ctr_lo, ack_budget_hint, self.routing_sf))
+        tx_with_retry(self, ack, {
+          sf    = self.routing_sf,
+          label = "ACK",
+          info  = string.format("to=%s msg=%d duplicate", name_of(self, rx_from), d.ctr_lo),
+        })
+        self:emit("dup_drop", {
+          origin = d.origin, payload = user_text, ctr = d.ctr,
+          dst = d.dst, from = rx_from, ctr_lo = d.ctr_lo,
+        })
+        self:log(string.format(
+          "dup_drop <- %s (origin=%s ctr=%d, already seen — ACK only)",
+          name_of(self, rx_from), name_of(self, d.origin), d.ctr))
+        return
+      end
+      -- Opportunistic prune of expired entries (cheap; bounded set).
+      for k, e in pairs(self.seen_origins) do
+        if e <= now_ms then
+          self.seen_origins[k] = nil
+          self.seen_origin_from[k] = nil
+        end
+      end
+      self.seen_origins[seen_key] = now_ms + self.seen_origin_ttl_ms
+      self.seen_origin_from[seen_key] = rx_from
+    end
+
     -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
     -- bucket. Sender uses it to maintain its outbound link-quality EWMA
     -- to us (which we can't see because we're at the receiving end);
@@ -6373,31 +6571,6 @@ function on_recv(self, frame, meta)
       label = "ACK",
       info  = string.format("to=%s msg=%d", name_of(self, rx_from), d.ctr_lo),
     })
-
-    -- Origin-level dedup. Now that the ACK is on its way (the
-    -- previous hop will clear pending_tx whether or not we forward),
-    -- check whether we've already seen this (origin, dst, ctr). ctr is
-    -- per-(origin,dst), so dst is part of the replay key.
-    do
-      local seen_key = seen_origin_key(d.origin, d.dst, d.ctr)
-      local now_ms = self:now()
-      local exp = self.seen_origins[seen_key]
-      if exp and exp > now_ms then
-        self:emit("dup_drop", {
-          origin = d.origin, payload = user_text, ctr = d.ctr,
-          dst = d.dst, from = rx_from, ctr_lo = d.ctr_lo,
-        })
-        self:log(string.format(
-          "dup_drop <- %s (origin=%s ctr=%d, already seen — ACK only)",
-          name_of(self, rx_from), name_of(self, d.origin), d.ctr))
-        return
-      end
-      -- Opportunistic prune of expired entries (cheap; bounded set).
-      for k, e in pairs(self.seen_origins) do
-        if e <= now_ms then self.seen_origins[k] = nil end
-      end
-      self.seen_origins[seen_key] = now_ms + self.seen_origin_ttl_ms
-    end
 
     -- Capture the data we need for the post-ack action; the next-step
     -- callback runs after the ACK has cleared the radio so two TXes from

@@ -38,6 +38,8 @@
 #include "core/radio/SimRadio.h"
 #include "core/topology/JsonConfig.h"
 
+#include "json/json.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -48,6 +50,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -121,6 +124,53 @@ static bool isMobileNode(const SimConfig::NodeDef& node) {
 
 static bool isRtsLabel(const std::string& label) {
     return label == "RTS" || label == "RTS-fwd" || label == "RTS-rty";
+}
+
+struct NeighborSnr {
+    int idx = -1;
+    float snr = 0.0f;
+    float rssi = 0.0f;
+};
+
+static void keepTopNeighbor(std::vector<NeighborSnr>& top, NeighborSnr value, size_t max_count) {
+    top.push_back(value);
+    std::sort(top.begin(), top.end(), [](const NeighborSnr& a, const NeighborSnr& b) {
+        return a.snr > b.snr;
+    });
+    if (top.size() > max_count) top.resize(max_count);
+}
+
+static std::vector<int> visibilitySfsForNode(const SimConfig::NodeDef& node) {
+    std::vector<int> sfs;
+    auto add_sf = [&](int sf) {
+        if (sf >= 5 && sf <= 12 && std::find(sfs.begin(), sfs.end(), sf) == sfs.end()) {
+            sfs.push_back(sf);
+        }
+    };
+
+    add_sf(node.sf);
+    if (node.config.is_object()) {
+        if (node.config.contains("routing_sf") && node.config["routing_sf"].is_number_integer()) {
+            add_sf(node.config["routing_sf"].get<int>());
+        }
+        if (node.config.contains("allowed_data_sfs") && node.config["allowed_data_sfs"].is_array()) {
+            for (const auto& v : node.config["allowed_data_sfs"]) {
+                if (v.is_number_integer()) add_sf(v.get<int>());
+            }
+        }
+    }
+    std::sort(sfs.begin(), sfs.end());
+    return sfs;
+}
+
+static int routingSfForNode(const SimConfig::NodeDef& node) {
+    if (node.config.is_object() &&
+        node.config.contains("routing_sf") &&
+        node.config["routing_sf"].is_number_integer()) {
+        int sf = node.config["routing_sf"].get<int>();
+        if (sf >= 5 && sf <= 12) return sf;
+    }
+    return node.sf;
 }
 
 static bool infoNamesNextHop(const std::string& info, const std::string& node_name) {
@@ -236,6 +286,11 @@ void SimController::initialize() {
             for (int j = 0; j < n; ++j) {
                 if (i == j) continue;
                 if (!_cfg.nodes[j].has_location) continue;
+                if (_cfg.simulation.path_loss.mobile_only &&
+                    !isMobileNode(_cfg.nodes[i]) &&
+                    !isMobileNode(_cfg.nodes[j])) {
+                    continue;
+                }
                 const double d = lus::haversineDistanceMeters(
                     _node_lat[(size_t)i], _node_lon[(size_t)i],
                     _node_lat[(size_t)j], _node_lon[(size_t)j]);
@@ -1403,6 +1458,11 @@ void SimController::rebuildLinksFromPathLoss() {
         for (int j = 0; j < n; ++j) {
             if (i == j) continue;
             if (!_cfg.nodes[j].has_location) continue;
+            if (_cfg.simulation.path_loss.mobile_only &&
+                !isMobileNode(_cfg.nodes[i]) &&
+                !isMobileNode(_cfg.nodes[j])) {
+                continue;
+            }
             const double d = lus::haversineDistanceMeters(
                 _node_lat[(size_t)i], _node_lon[(size_t)i],
                 _node_lat[(size_t)j], _node_lon[(size_t)j]);
@@ -1429,6 +1489,82 @@ void SimController::rebuildLinksFromPathLoss() {
             _links->setLink(tit->second, fit->second,
                             l.snr, l.rssi, l.snr_std_dev, l.loss);
         }
+    }
+
+    constexpr size_t kTopNeighbors = 8;
+    for (int i = 0; i < n; ++i) {
+        if (!isMobileNode(_cfg.nodes[i])) continue;
+        if (i >= static_cast<int>(_node_alive.size()) || !_node_alive[(size_t)i]) continue;
+
+        const std::vector<int> visibility_sfs = visibilitySfsForNode(_cfg.nodes[i]);
+        const int routing_sf = routingSfForNode(_cfg.nodes[i]);
+        nlohmann::json counts = nlohmann::json::object();
+        nlohmann::json thresholds = nlohmann::json::object();
+        for (int sf : visibility_sfs) {
+            counts["out_sf" + std::to_string(sf)] = 0;
+            counts["in_sf" + std::to_string(sf)] = 0;
+            thresholds["sf" + std::to_string(sf)] = SimRadio::getSnrThreshold(sf);
+        }
+
+        std::vector<NeighborSnr> top_out;
+        std::vector<NeighborSnr> top_in;
+        for (int j = 0; j < n; ++j) {
+            if (i == j) continue;
+            if (j < static_cast<int>(_node_alive.size()) && !_node_alive[(size_t)j]) continue;
+
+            LinkParams lp_out;
+            if (_links->getLink(i, j, lp_out)) {
+                keepTopNeighbor(top_out, NeighborSnr{j, lp_out.snr, lp_out.rssi}, kTopNeighbors);
+                for (int sf : visibility_sfs) {
+                    if (lp_out.snr >= SimRadio::getSnrThreshold(sf)) {
+                        counts["out_sf" + std::to_string(sf)] =
+                            counts["out_sf" + std::to_string(sf)].get<int>() + 1;
+                    }
+                }
+            }
+
+            LinkParams lp_in;
+            if (_links->getLink(j, i, lp_in)) {
+                keepTopNeighbor(top_in, NeighborSnr{j, lp_in.snr, lp_in.rssi}, kTopNeighbors);
+                for (int sf : visibility_sfs) {
+                    if (lp_in.snr >= SimRadio::getSnrThreshold(sf)) {
+                        counts["in_sf" + std::to_string(sf)] =
+                            counts["in_sf" + std::to_string(sf)].get<int>() + 1;
+                    }
+                }
+            }
+        }
+
+        auto encode_neighbors = [&](const std::vector<NeighborSnr>& neighbors) {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& nb : neighbors) {
+                nlohmann::json item = {
+                    {"node", _cfg.nodes[nb.idx].name},
+                    {"snr", nb.snr},
+                    {"rssi", nb.rssi}
+                };
+                for (int sf : visibility_sfs) {
+                    item["sf" + std::to_string(sf)] =
+                        nb.snr >= SimRadio::getSnrThreshold(sf);
+                }
+                arr.push_back(std::move(item));
+            }
+            return arr;
+        };
+
+        nlohmann::json payload = {
+            {"lat", _node_lat[(size_t)i]},
+            {"lon", _node_lon[(size_t)i]},
+            {"velocity_mps", _cfg.nodes[i].velocity_mps},
+            {"direction_deg", _cfg.nodes[i].direction_deg},
+            {"routing_sf", routing_sf},
+            {"sfs", visibility_sfs},
+            {"thresholds", thresholds},
+            {"counts", counts},
+            {"top_out", encode_neighbors(top_out)},
+            {"top_in", encode_neighbors(top_in)}
+        };
+        EventLog::logScriptEmit(i, _now_ms, "mobile_visibility", payload.dump());
     }
 }
 

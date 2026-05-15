@@ -454,7 +454,12 @@ byte:  0   1                       2                   3
     `tier` 0..15 (current tiers: NORMAL=0, STRAINED=1, CRITICAL=2,
     EXHAUSTED=3); `headroom_buckets` 0..15 → 0–100% remaining budget
     (value/15 × 100%). Pass 0 for headroom when unknown.
-  - 2..15 reserved.
+  - **2 = `HOP_BUDGET`** — DATA flight exceeded its hop budget before
+    reaching destination. Payload byte = `committed_hops(4 hi) | reserved`.
+  - **3 = `LOOP_DUP`** — DATA decoded, but receiver has already seen the
+    same `(origin,dst,ctr)` from a different previous hop. Payload byte =
+    prior previous-hop id, or 255 if unknown.
+  - 4..15 reserved.
 - `to` (8 bits): intended requester/upstream id. Other nodes ignore it.
 
 **Payload decoding summary:**
@@ -463,8 +468,10 @@ byte:  0   1                       2                   3
 |--------|-----------------|----------------|
 | BUSY_RX (0) | `busy_for_ms / 16` (uint8, ceiling) | `busy_for_ms = byte2 × 16` |
 | BUDGET  (1) | `tier[7:4] \| headroom[3:0]`  | `budget_tier`, `budget_headroom_buckets` |
+| HOP_BUDGET (2) | `committed_hops[7:4] \| reserved[3:0]` | `committed_hops` |
+| LOOP_DUP (3) | prior previous-hop id, or 255 | `prior_from` |
 
-NACK rides on `routing_sf` for both reason variants. The originator's
+NACK rides on `routing_sf` for all reason variants. The originator's
 RX is already retuned to `data_sf` after its RTS-tx, but NACK is
 distinguished from CTS by its tag byte ('N' vs 'C'), so the originator
 hears it regardless of which SF it is listening on at that moment.
@@ -1450,10 +1457,13 @@ Receiving a DATA frame:
 ```
 on_recv 'D' (matches pending_rx):
   d = parse_data(frame)    -- yields flags, ctr, origin, body, e2e_ack_req, e2e_is_ack
-  ack the frame regardless (sender clears pending_tx)
   if (d.origin, d.dst, d.ctr) in seen_origins:
-    emit dup_drop
+    if previous_hop is the same as first-seen previous_hop:
+      ACK-only and emit dup_drop       -- lost-ACK recovery
+    else:
+      NACK LOOP_DUP and emit dup_drop  -- routing loop returned via another branch
     return  (don't deliver-twice or forward-twice)
+  ACK the frame (sender clears pending_tx)
   record (d.origin, d.dst, d.ctr) in seen_origins with TTL
   if dst == self.id:
     if d.e2e_is_ack:
@@ -1471,8 +1481,10 @@ Default TTL: `seen_origin_ttl_ms = 30 s`. Catches:
 - Legitimate same-payload retries via different paths (originator's
   retry queued through different next-hop).
 
-The dedup acts BEFORE delivery / forwarding but AFTER the ACK is sent,
-so the previous hop always clears its pending_tx.
+Same-previous-hop dedup acts before delivery / forwarding but still sends
+ACK, so the previous hop clears its pending_tx. Different-previous-hop dedup
+sends `NACK LOOP_DUP`; the upstream marks that next-hop branch tried and
+cascades to another local candidate if one exists.
 
 ---
 

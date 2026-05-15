@@ -1,12 +1,12 @@
 {
-  "_name": "s06_seattle_bcn_lifecycle_mid",
-  "_desc": "Seattle lifecycle cold-start baseline generated from s03. No warmup/hot-start. 25 initial nodes boot over 45s, 8 nodes join from 15m, and 5 initial nodes die from 35m. Purpose: observe fresh network formation, early message delivery, new-node registration, and stale-route behavior after node departure.",
+  "_name": "s07_seattle_mobile_realistic",
+  "_desc": "Seattle realistic mobile-endpoint scenario derived from s06_seattle_bcn_lifecycle_mid.json. Cold-start static lifecycle remains enabled. Adds walking, bike/cross-town, and late-start courier mobile endpoints. Mobiles discover with Q/REQ_SYNC, do not emit normal periodic BCN, and must not be used as mesh transit nodes. Static-static links stay from the explicit topology; links touching mobile nodes use path loss.",
   "simulation": {
     "duration_ms": 3600000,
     "step_ms": 1,
     "warmup_ms": 0,
     "beacon_period_ms": 900000,
-    "seed": 88,
+    "seed": 107,
     "node_startup_jitter_ms": 0,
     "radio": {
       "sf": 8,
@@ -15,6 +15,19 @@
       "max_packet_bytes": 255,
       "snr_coherence_ms": 0,
       "duty_cycle": 0.01
+    },
+    "path_loss": {
+      "model": "log_distance",
+      "mobile_only": true,
+      "alpha": 3.0,
+      "sigma_db": 1.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 14.0,
+      "node_tx_offset_sigma_db": 1.0,
+      "node_rx_offset_sigma_db": 1.0,
+      "asymmetry_coherence_ms": 60000
     }
   },
   "commands": [
@@ -119,6 +132,16 @@
       "command": "send_e2e University_District c1 bob->University_District"
     },
     {
+      "at_ms": 600000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e Capitol_Hill_Prime m1 mobile_walk_central->Capitol_Hill_Prime"
+    },
+    {
+      "at_ms": 612000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e Central_District m3 mobile_bike_west_east->Central_District"
+    },
+    {
       "at_ms": 622715,
       "node": "RavennaEckstein_CC",
       "command": "send_e2e Wedgwood_Solar c2 RavennaEckstein_CC->Wedgwood_Solar"
@@ -137,6 +160,16 @@
       "at_ms": 675406,
       "node": "devhackchat",
       "command": "send Central_District c1 devhackchat->Central_District"
+    },
+    {
+      "at_ms": 690000,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e mobile_walk_central m2 Capitol_Hill_Prime->mobile_walk_central"
+    },
+    {
+      "at_ms": 702000,
+      "node": "Central_District",
+      "command": "send_e2e mobile_bike_west_east m4 Central_District->mobile_bike_west_east"
     },
     {
       "at_ms": 717387,
@@ -184,6 +217,16 @@
       "command": "send_e2e Fremont01_KF7EGZ_Sol c3 bob->Fremont01_KF7EGZ_Sol"
     },
     {
+      "at_ms": 900000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e CrossNet_Room m5 mobile_walk_central->CrossNet_Room"
+    },
+    {
+      "at_ms": 912000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol m7 mobile_bike_west_east->Fremont01_KF7EGZ_Sol"
+    },
+    {
       "at_ms": 940024,
       "node": "WedgBreadMesh",
       "command": "send dmatestbednode0 c1 WedgBreadMesh->dmatestbednode0"
@@ -204,6 +247,11 @@
       "command": "send_e2e SEA_Bryant_KM7ECH c2 The_Winchester_Repea->SEA_Bryant_KM7ECH"
     },
     {
+      "at_ms": 990000,
+      "node": "CrossNet_Room",
+      "command": "send_e2e mobile_walk_central m6 CrossNet_Room->mobile_walk_central"
+    },
+    {
       "at_ms": 990767,
       "node": "DMASpaceMesh",
       "command": "send_e2e Take_His_Face_Off c1 DMASpaceMesh->Take_His_Face_Off"
@@ -212,6 +260,11 @@
       "at_ms": 995767,
       "node": "Wedgwood_Solar",
       "command": "send_e2e N7GRN5_Portage_Bay_r c2 Wedgwood_Solar->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 1002000,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e mobile_bike_west_east m8 Fremont01_KF7EGZ_Sol->mobile_bike_west_east"
     },
     {
       "at_ms": 1005500,
@@ -284,9 +337,24 @@
       "command": "send_e2e RavennaPark c1 Central_District->RavennaPark"
     },
     {
+      "at_ms": 1200000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e devhackchat m9 mobile_walk_central->devhackchat"
+    },
+    {
       "at_ms": 1211917,
       "node": "Maple_Leaf_Manor",
       "command": "send_e2e CrossNet_RPT1 j4 Maple_Leaf_Manor->CrossNet_RPT1"
+    },
+    {
+      "at_ms": 1212000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e RavennaEckstein_CC m11 mobile_bike_west_east->RavennaEckstein_CC"
+    },
+    {
+      "at_ms": 1224000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e dave m13 mobile_courier_south_north->dave"
     },
     {
       "at_ms": 1244735,
@@ -319,6 +387,11 @@
       "command": "send_e2e Cafe j4 DMASpaceMesh->Cafe"
     },
     {
+      "at_ms": 1290000,
+      "node": "devhackchat",
+      "command": "send_e2e mobile_walk_central m10 devhackchat->mobile_walk_central"
+    },
+    {
       "at_ms": 1291277,
       "node": "Portage_Bay_G2_2",
       "command": "send_e2e RavennaEckstein_CC j4 Portage_Bay_G2_2->RavennaEckstein_CC"
@@ -327,6 +400,16 @@
       "at_ms": 1299047,
       "node": "Martin_Room",
       "command": "send_e2e dmatestbednode0 j7 Martin_Room->dmatestbednode0"
+    },
+    {
+      "at_ms": 1302000,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e mobile_bike_west_east m12 RavennaEckstein_CC->mobile_bike_west_east"
+    },
+    {
+      "at_ms": 1314000,
+      "node": "dave",
+      "command": "send_e2e mobile_courier_south_north m14 dave->mobile_courier_south_north"
     },
     {
       "at_ms": 1337402,
@@ -379,14 +462,49 @@
       "command": "send_e2e University_District j3 repeather->University_District"
     },
     {
+      "at_ms": 1500000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e Central_District m15 mobile_walk_central->Central_District"
+    },
+    {
+      "at_ms": 1500000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e mobile_bike_west_east m57 mobile_walk_central->mobile_bike_west_east"
+    },
+    {
       "at_ms": 1500486,
       "node": "Capitol_Hill_Prime",
       "command": "send_e2e CrossNet_Room c2 Capitol_Hill_Prime->CrossNet_Room"
     },
     {
+      "at_ms": 1512000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e N7GRN5_Portage_Bay_r m17 mobile_bike_west_east->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 1524000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e dmatestbednode0 m19 mobile_courier_south_north->dmatestbednode0"
+    },
+    {
       "at_ms": 1531277,
       "node": "Portage_Bay_G2_2",
       "command": "send_e2e Central_District j5 Portage_Bay_G2_2->Central_District"
+    },
+    {
+      "at_ms": 1590000,
+      "node": "Central_District",
+      "command": "send_e2e mobile_walk_central m16 Central_District->mobile_walk_central"
+    },
+    {
+      "at_ms": 1602000,
+      "node": "N7GRN5_Portage_Bay_r",
+      "command": "send_e2e mobile_bike_west_east m18 N7GRN5_Portage_Bay_r->mobile_bike_west_east"
+    },
+    {
+      "at_ms": 1614000,
+      "node": "dmatestbednode0",
+      "command": "send_e2e mobile_courier_south_north m20 dmatestbednode0->mobile_courier_south_north"
     },
     {
       "at_ms": 1634455,
@@ -419,6 +537,21 @@
       "command": "send_e2e Martin_Room c4 Licton_Springs_Chat->Martin_Room"
     },
     {
+      "at_ms": 1800000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol m21 mobile_walk_central->Fremont01_KF7EGZ_Sol"
+    },
+    {
+      "at_ms": 1812000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e bob m23 mobile_bike_west_east->bob"
+    },
+    {
+      "at_ms": 1824000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e University_District m25 mobile_courier_south_north->University_District"
+    },
+    {
       "at_ms": 1838802,
       "node": "dave",
       "command": "send_e2e DMASpaceMesh c2 dave->DMASpaceMesh"
@@ -434,9 +567,24 @@
       "command": "send_e2e Maple_Leaf_Manor c4 usa_narrow_bridge->Maple_Leaf_Manor"
     },
     {
+      "at_ms": 1890000,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e mobile_walk_central m22 Fremont01_KF7EGZ_Sol->mobile_walk_central"
+    },
+    {
       "at_ms": 1901494,
       "node": "2CBA_Repeater_v4",
       "command": "send_e2e devhackchat c1 2CBA_Repeater_v4->devhackchat"
+    },
+    {
+      "at_ms": 1902000,
+      "node": "bob",
+      "command": "send_e2e mobile_bike_west_east m24 bob->mobile_bike_west_east"
+    },
+    {
+      "at_ms": 1914000,
+      "node": "University_District",
+      "command": "send_e2e mobile_courier_south_north m26 University_District->mobile_courier_south_north"
     },
     {
       "at_ms": 1946256,
@@ -479,9 +627,24 @@
       "command": "send 2CBA_Repeater_v4 c1 Take_His_Face_Off->2CBA_Repeater_v4"
     },
     {
+      "at_ms": 2100000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e mobile_courier_south_north m58 mobile_bike_west_east->mobile_courier_south_north"
+    },
+    {
+      "at_ms": 2100000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e RavennaEckstein_CC m27 mobile_walk_central->RavennaEckstein_CC"
+    },
+    {
       "at_ms": 2110900,
       "node": "2CBA_Repeater_v4",
       "command": "send_e2e Portage_Bay_G2_2 c4 2CBA_Repeater_v4->Portage_Bay_G2_2"
+    },
+    {
+      "at_ms": 2112000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e dave m29 mobile_bike_west_east->dave"
     },
     {
       "at_ms": 2115900,
@@ -489,9 +652,29 @@
       "command": "send_e2e dave c1 Portage_Bay_G2_2->dave"
     },
     {
+      "at_ms": 2124000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e Capitol_Hill_Prime m31 mobile_courier_south_north->Capitol_Hill_Prime"
+    },
+    {
       "at_ms": 2188707,
       "node": "Fremont01_Greenwood3",
       "command": "send_e2e WedgBreadMesh c2 Fremont01_Greenwood3->WedgBreadMesh"
+    },
+    {
+      "at_ms": 2190000,
+      "node": "RavennaEckstein_CC",
+      "command": "send_e2e mobile_walk_central m28 RavennaEckstein_CC->mobile_walk_central"
+    },
+    {
+      "at_ms": 2202000,
+      "node": "dave",
+      "command": "send_e2e mobile_bike_west_east m30 dave->mobile_bike_west_east"
+    },
+    {
+      "at_ms": 2214000,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e mobile_courier_south_north m32 Capitol_Hill_Prime->mobile_courier_south_north"
     },
     {
       "at_ms": 2223683,
@@ -534,6 +717,11 @@
       "command": "send WedgBreadMesh c1 Hankest_Extendus->WedgBreadMesh"
     },
     {
+      "at_ms": 2400000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e N7GRN5_Portage_Bay_r m33 mobile_walk_central->N7GRN5_Portage_Bay_r"
+    },
+    {
       "at_ms": 2403988,
       "node": "University_District",
       "command": "send_e2e Capitol_Hill_Prime c3 University_District->Capitol_Hill_Prime"
@@ -544,9 +732,19 @@
       "command": "send_e2e Washington_Park d6 University_District->Washington_Park"
     },
     {
+      "at_ms": 2412000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e dmatestbednode0 m35 mobile_bike_west_east->dmatestbednode0"
+    },
+    {
       "at_ms": 2420741,
       "node": "devhackchat",
       "command": "send dave c4 devhackchat->dave"
+    },
+    {
+      "at_ms": 2424000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e CrossNet_Room m37 mobile_courier_south_north->CrossNet_Room"
     },
     {
       "at_ms": 2449456,
@@ -562,6 +760,21 @@
       "at_ms": 2472115,
       "node": "KG6GXY_Greenwood",
       "command": "send Crow_Repeater c1 KG6GXY_Greenwood->Crow_Repeater"
+    },
+    {
+      "at_ms": 2490000,
+      "node": "N7GRN5_Portage_Bay_r",
+      "command": "send_e2e mobile_walk_central m34 N7GRN5_Portage_Bay_r->mobile_walk_central"
+    },
+    {
+      "at_ms": 2502000,
+      "node": "dmatestbednode0",
+      "command": "send_e2e mobile_bike_west_east m36 dmatestbednode0->mobile_bike_west_east"
+    },
+    {
+      "at_ms": 2514000,
+      "node": "CrossNet_Room",
+      "command": "send_e2e mobile_courier_south_north m38 CrossNet_Room->mobile_courier_south_north"
     },
     {
       "at_ms": 2522182,
@@ -614,9 +827,34 @@
       "command": "send_e2e Crow_Repeater c4 Fremont01_KF7EGZ_Sol->Crow_Repeater"
     },
     {
+      "at_ms": 2700000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e mobile_walk_central m59 mobile_courier_south_north->mobile_walk_central"
+    },
+    {
+      "at_ms": 2700000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e bob m39 mobile_walk_central->bob"
+    },
+    {
+      "at_ms": 2712000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e University_District m41 mobile_bike_west_east->University_District"
+    },
+    {
+      "at_ms": 2724000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e devhackchat m43 mobile_courier_south_north->devhackchat"
+    },
+    {
       "at_ms": 2732733,
       "node": "dmatestbednode0",
       "command": "send Martin_Room c4 dmatestbednode0->Martin_Room"
+    },
+    {
+      "at_ms": 2790000,
+      "node": "bob",
+      "command": "send_e2e mobile_walk_central m40 bob->mobile_walk_central"
     },
     {
       "at_ms": 2801943,
@@ -624,9 +862,19 @@
       "command": "send_e2e repeather c2 DMASpaceMesh->repeather"
     },
     {
+      "at_ms": 2802000,
+      "node": "University_District",
+      "command": "send_e2e mobile_bike_west_east m42 University_District->mobile_bike_west_east"
+    },
+    {
       "at_ms": 2809843,
       "node": "KG6GXY_Greenwood",
       "command": "send_e2e N7GRN5_Portage_Bay_r c2 KG6GXY_Greenwood->N7GRN5_Portage_Bay_r"
+    },
+    {
+      "at_ms": 2814000,
+      "node": "devhackchat",
+      "command": "send_e2e mobile_courier_south_north m44 devhackchat->mobile_courier_south_north"
     },
     {
       "at_ms": 2905670,
@@ -639,9 +887,24 @@
       "command": "send_e2e University_District c4 dave->University_District"
     },
     {
+      "at_ms": 3000000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e dave m45 mobile_walk_central->dave"
+    },
+    {
+      "at_ms": 3012000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e Capitol_Hill_Prime m47 mobile_bike_west_east->Capitol_Hill_Prime"
+    },
+    {
       "at_ms": 3018007,
       "node": "Portage_Bay_G2_2",
       "command": "send_e2e Stevens c2 Portage_Bay_G2_2->Stevens"
+    },
+    {
+      "at_ms": 3024000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e Central_District m49 mobile_courier_south_north->Central_District"
     },
     {
       "at_ms": 3041756,
@@ -652,6 +915,21 @@
       "at_ms": 3081116,
       "node": "KG6GXY_Greenwood",
       "command": "send Licton_Springs_Chat c3 KG6GXY_Greenwood->Licton_Springs_Chat"
+    },
+    {
+      "at_ms": 3090000,
+      "node": "dave",
+      "command": "send_e2e mobile_walk_central m46 dave->mobile_walk_central"
+    },
+    {
+      "at_ms": 3102000,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e mobile_bike_west_east m48 Capitol_Hill_Prime->mobile_bike_west_east"
+    },
+    {
+      "at_ms": 3114000,
+      "node": "Central_District",
+      "command": "send_e2e mobile_courier_south_north m50 Central_District->mobile_courier_south_north"
     },
     {
       "at_ms": 3118000,
@@ -694,9 +972,24 @@
       "command": "send_e2e N7GRN5_Portage_Bay_r c7 RavennaEckstein_CC->N7GRN5_Portage_Bay_r"
     },
     {
+      "at_ms": 3300000,
+      "node": "mobile_walk_central",
+      "command": "send_e2e dmatestbednode0 m51 mobile_walk_central->dmatestbednode0"
+    },
+    {
       "at_ms": 3302858,
       "node": "Cafe",
       "command": "send bob c2 Cafe->bob"
+    },
+    {
+      "at_ms": 3312000,
+      "node": "mobile_bike_west_east",
+      "command": "send_e2e CrossNet_Room m53 mobile_bike_west_east->CrossNet_Room"
+    },
+    {
+      "at_ms": 3324000,
+      "node": "mobile_courier_south_north",
+      "command": "send_e2e Fremont01_KF7EGZ_Sol m55 mobile_courier_south_north->Fremont01_KF7EGZ_Sol"
     },
     {
       "at_ms": 3326728,
@@ -714,9 +1007,19 @@
       "command": "send_e2e RavennaPark c5 dave->RavennaPark"
     },
     {
+      "at_ms": 3390000,
+      "node": "dmatestbednode0",
+      "command": "send_e2e mobile_walk_central m52 dmatestbednode0->mobile_walk_central"
+    },
+    {
       "at_ms": 3400704,
       "node": "dmatestbednode0",
       "command": "send_e2e Wedgwood_Solar c5 dmatestbednode0->Wedgwood_Solar"
+    },
+    {
+      "at_ms": 3402000,
+      "node": "CrossNet_Room",
+      "command": "send_e2e mobile_bike_west_east m54 CrossNet_Room->mobile_bike_west_east"
     },
     {
       "at_ms": 3405704,
@@ -727,6 +1030,11 @@
       "at_ms": 3413818,
       "node": "2CBA_Repeater_v4",
       "command": "send_e2e CrossNet_RPT1 c6 2CBA_Repeater_v4->CrossNet_RPT1"
+    },
+    {
+      "at_ms": 3414000,
+      "node": "Fremont01_KF7EGZ_Sol",
+      "command": "send_e2e mobile_courier_south_north m56 Fremont01_KF7EGZ_Sol->mobile_courier_south_north"
     },
     {
       "at_ms": 3429073,
@@ -765,7 +1073,12 @@
       "name": "Fremont01_KF7EGZ_Sol",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.555214,
       "lon": -122.253456,
@@ -775,7 +1088,12 @@
       "name": "dmatestbednode0",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.620513,
       "lon": -122.216034,
@@ -785,7 +1103,12 @@
       "name": "The_Winchester_Repea",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.606163,
       "lon": -122.286072,
@@ -796,7 +1119,12 @@
       "name": "Central_District",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.577221,
       "lon": -122.28693,
@@ -806,7 +1134,12 @@
       "name": "KG6GXY_Greenwood",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.725699,
       "lon": -122.318859,
@@ -816,7 +1149,12 @@
       "name": "Hankest_Extendus",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6905,
       "lon": -122.28,
@@ -826,7 +1164,12 @@
       "name": "University_District",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6603,
       "lon": -122.273026,
@@ -836,7 +1179,12 @@
       "name": "2CBA_Repeater_v4",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6663,
       "lon": -122.301,
@@ -846,7 +1194,12 @@
       "name": "Wedgwood_Solar",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6879,
       "lon": -122.284,
@@ -856,7 +1209,12 @@
       "name": "usa_narrow_bridge",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.622595,
       "lon": -122.229252,
@@ -867,7 +1225,12 @@
       "name": "Capitol_Hill_Prime",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.59181,
       "lon": -122.225647,
@@ -877,7 +1240,12 @@
       "name": "RavennaPark",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6737,
       "lon": -122.308,
@@ -887,7 +1255,12 @@
       "name": "Licton_Springs_Chat",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.743479,
       "lon": -122.305298,
@@ -897,7 +1270,12 @@
       "name": "CrossNet_Room",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.635437,
       "lon": -122.228394,
@@ -907,7 +1285,12 @@
       "name": "Crow_Repeater",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.519056,
       "lon": -122.337227,
@@ -917,7 +1300,12 @@
       "name": "Portage_Bay_G2_2",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6559,
       "lon": -122.321,
@@ -927,7 +1315,12 @@
       "name": "devhackchat",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.636015,
       "lon": -122.283669,
@@ -937,7 +1330,12 @@
       "name": "Maple_Leaf_Manor",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6924,
       "lon": -122.313,
@@ -947,7 +1345,12 @@
       "name": "DMASpaceMesh",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.616926,
       "lon": -122.289162,
@@ -957,7 +1360,12 @@
       "name": "WedgBreadMesh",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6797,
       "lon": -122.291,
@@ -968,7 +1376,12 @@
       "name": "N7GRN5_Portage_Bay_r",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6465,
       "lon": -122.319,
@@ -978,7 +1391,12 @@
       "name": "Washington_Park",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6282,
       "lon": -122.296,
@@ -989,7 +1407,12 @@
       "name": "Stevens",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6286,
       "lon": -122.302,
@@ -999,7 +1422,12 @@
       "name": "Martin_Room",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6957,
       "lon": -122.293,
@@ -1009,7 +1437,12 @@
       "name": "Cafe",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.712303,
       "lon": -122.300148,
@@ -1019,7 +1452,12 @@
       "name": "SEA_Bryant_KM7ECH",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.680876,
       "lon": -122.208996,
@@ -1030,7 +1468,12 @@
       "name": "repeather",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6629,
       "lon": -122.315,
@@ -1040,7 +1483,12 @@
       "name": "Fremont01_Greenwood3",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.544091,
       "lon": -122.216721,
@@ -1050,7 +1498,12 @@
       "name": "RavennaEckstein_CC",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.6765,
       "lon": -122.304,
@@ -1060,7 +1513,12 @@
       "name": "CrossNet_RPT1",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.653825,
       "lon": -122.199211,
@@ -1070,7 +1528,12 @@
       "name": "Take_His_Face_Off",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.734821,
       "lon": -122.252941,
@@ -1080,7 +1543,12 @@
       "name": "bob",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.715999,
       "lon": -122.244873,
@@ -1090,11 +1558,80 @@
       "name": "dave",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
-        "routing_sf": 8,"allowed_data_sfs": [7,9,10]
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ]
       },
       "lat": 47.578726,
       "lon": -122.23835,
       "start_at_ms": 9626
+    },
+    {
+      "name": "mobile_walk_central",
+      "script": "scenarios/dv_dual_sf.lua",
+      "lat": 47.59,
+      "lon": -122.302,
+      "config": {
+        "beacon_period_ms": 900000,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "is_mobile": true,
+        "discovery_min_routes": 2,
+        "req_sync_min_routes": 2,
+        "sync_response_requester_mobile_penalty_ms": 2500
+      },
+      "velocity_mps": 1.35,
+      "direction_deg": 35.0
+    },
+    {
+      "name": "mobile_bike_west_east",
+      "script": "scenarios/dv_dual_sf.lua",
+      "lat": 47.631,
+      "lon": -122.337,
+      "config": {
+        "beacon_period_ms": 900000,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "is_mobile": true,
+        "discovery_min_routes": 2,
+        "req_sync_min_routes": 2,
+        "sync_response_requester_mobile_penalty_ms": 2500
+      },
+      "velocity_mps": 3.4,
+      "direction_deg": 90.0
+    },
+    {
+      "name": "mobile_courier_south_north",
+      "script": "scenarios/dv_dual_sf.lua",
+      "lat": 47.519,
+      "lon": -122.268,
+      "config": {
+        "beacon_period_ms": 900000,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "is_mobile": true,
+        "discovery_min_routes": 2,
+        "req_sync_min_routes": 2,
+        "sync_response_requester_mobile_penalty_ms": 2500
+      },
+      "start_at_ms": 900000,
+      "velocity_mps": 5.0,
+      "direction_deg": 0.0
     }
   ],
   "topology": {

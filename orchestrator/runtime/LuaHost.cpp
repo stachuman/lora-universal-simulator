@@ -197,6 +197,12 @@ void LuaHost::bindSimGlobals(SimController& ctrl) {
                 entry["id"]     = static_cast<int>(i);
                 entry["name"]   = nodes[i].name;
                 entry["script"] = nodes[i].script_path;
+                entry["is_mobile"] =
+                    (nodes[i].velocity_mps > 0.0f) ||
+                    (nodes[i].config.is_object() &&
+                     nodes[i].config.contains("is_mobile") &&
+                     nodes[i].config["is_mobile"].is_boolean() &&
+                     nodes[i].config["is_mobile"].get<bool>());
                 out[i + 1] = entry;
             }
             return out;

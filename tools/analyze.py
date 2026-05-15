@@ -3376,7 +3376,12 @@ def section_non_delivered_classifier(events_path: str, cfg: dict,
     unresolved_rts_rank = Counter()
     unresolved_rts_dead_next = Counter()
     unresolved_rts_route_ages: list[int] = []
-    unresolved_samples: list[tuple[tuple, dict, tuple[int, str, dict, str | None] | None]] = []
+    unresolved_samples: list[tuple[
+        tuple,
+        dict,
+        str,
+        tuple[int, str, dict, str | None] | None,
+    ]] = []
 
     terminal_events = {
         "path_cascade_exhausted",
@@ -3512,7 +3517,7 @@ def section_non_delivered_classifier(events_path: str, cfg: dict,
                 else:
                     unresolved_dead_dst["died_after_enqueue"] += 1
         if not cls.startswith("delivered") and len(unresolved_samples) < 10:
-            unresolved_samples.append((k, msg, last_state.get(k)))
+            unresolved_samples.append((k, msg, cls, last_state.get(k)))
 
     return {
         "total": len(messages),
@@ -3536,6 +3541,14 @@ def section_non_delivered_classifier(events_path: str, cfg: dict,
 
 
 def print_section_27_non_delivered(r: dict) -> None:
+    def fmt_mmss(ms: int | float | None) -> str:
+        if ms is None:
+            return "?:??.?"
+        total = max(0.0, float(ms) / 1000.0)
+        minutes = int(total // 60)
+        seconds = total - minutes * 60
+        return f"{minutes}:{seconds:04.1f}"
+
     print("\n=== (27) non-delivered message classifier ===")
     total = r["total"]
     delivered = r["delivered"]
@@ -3594,22 +3607,194 @@ def print_section_27_non_delivered(r: dict) -> None:
     if r["samples"]:
         print("\n  sample not-delivered messages:")
         names = r["names"]
-        for k, msg, st in r["samples"][:6]:
+        for k, msg, cls, st in r["samples"][:8]:
             origin, dst, ctr, payload = k
+            enq_t = msg.get("time_ms")
+            enq_node = msg.get("node")
+            origin_name = names.get(origin, origin)
+            dst_name = names.get(dst, dst)
+            enq_node_name = names.get(enq_node, enq_node)
             if st:
                 t, et, d, node = st
-                last = f"{et} at {t/60000:.1f}m on {node}"
+                event_node_name = names.get(node, node)
+                last = f"last={et} t={fmt_mmss(t)} event_node={event_node_name}"
                 if d.get("reason"):
                     last += f" reason={d.get('reason')}"
                 if d.get("trigger"):
                     last += f" trigger={d.get('trigger')}"
+                if d.get("next") is not None:
+                    last += f" next={names.get(d.get('next'), d.get('next'))}"
+                if d.get("previous_hop") is not None:
+                    last += f" prev={names.get(d.get('previous_hop'), d.get('previous_hop'))}"
+                if d.get("candidate_rank") is not None:
+                    last += f" rank={d.get('candidate_rank')}/{d.get('candidate_count', '?')}"
             else:
                 last = "no state"
-            print(f"    {names.get(origin, origin)} -> {names.get(dst, dst)} "
-                  f"ctr={ctr} payload={payload!r}: {last}")
+            print(f"    t0={fmt_mmss(enq_t)} view={origin_name} -> {dst_name} "
+                  f"originator={origin_name} dest={dst_name} enqueue_node={enq_node_name} "
+                  f"ctr={ctr} class={cls} payload={payload!r}: {last}")
 
 
-# ---- Section 28: inter-layer gateway efficiency (§7.3 — stub for now) -----
+# ---- Section 28: mobile-node RF visibility -------------------------------
+
+def section_mobile_visibility(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    names = {i: n.get("name", str(i)) for i, n in enumerate(cfg.get("nodes", []))}
+    duration = int(cfg.get("simulation", {}).get("duration_ms", 0) or 0)
+    end_ms = max(duration, since_ms)
+    window_count = 6
+    window_ms = max(1, (end_ms - since_ms + window_count - 1) // window_count)
+
+    by_node: dict[int, dict] = {}
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit" or e.get("emit_type") != "mobile_visibility":
+            continue
+        node = int(e.get("node", -1))
+        d = e.get("data") or {}
+        counts = d.get("counts") or {}
+        t = int(e.get("time_ms", 0) or 0)
+        win = max(0, min(window_count - 1, (t - since_ms) // window_ms))
+        rec = {
+            "time_ms": t,
+            "lat": d.get("lat"),
+            "lon": d.get("lon"),
+            "routing_sf": d.get("routing_sf"),
+            "sfs": d.get("sfs") or [],
+            "counts": counts,
+            "top_in": d.get("top_in") or [],
+            "top_out": d.get("top_out") or [],
+        }
+        state = by_node.setdefault(node, {
+            "name": names.get(node, str(node)),
+            "samples": [],
+            "routing_sf": d.get("routing_sf"),
+            "windows": defaultdict(list),
+            "top_in_seen": Counter(),
+            "top_out_seen": Counter(),
+            "best_in": {},
+            "best_out": {},
+        })
+        state["samples"].append(rec)
+        state["windows"][win].append(rec)
+        for direction in ("in", "out"):
+            for nb in rec[f"top_{direction}"]:
+                name = nb.get("node", "?")
+                routing_sf = d.get("routing_sf")
+                flag = f"sf{routing_sf}" if isinstance(routing_sf, int) else "sf8"
+                if nb.get(flag):
+                    state[f"top_{direction}_seen"][name] += 1
+                best = state[f"best_{direction}"].get(name)
+                snr = nb.get("snr")
+                if isinstance(snr, (int, float)) and (best is None or snr > best):
+                    state[f"best_{direction}"][name] = float(snr)
+
+    return {
+        "duration_ms": duration,
+        "since_ms": since_ms,
+        "window_ms": window_ms,
+        "window_count": window_count,
+        "nodes": by_node,
+    }
+
+
+def print_section_28_mobile_visibility(r: dict) -> None:
+    print("\n=== (28) mobile-node RF visibility ===")
+    if not r["nodes"]:
+        print("  (no mobile_visibility events observed; run a mobile scenario with updated orchestrator)")
+        return
+
+    def avg(vals: list[float]) -> float:
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def metric(samples: list[dict], key: str) -> list[int]:
+        return [int((s.get("counts") or {}).get(key, 0) or 0) for s in samples]
+
+    def sample_sfs(samples: list[dict]) -> list[int]:
+        sfs = set()
+        for s in samples:
+            for sf in s.get("sfs") or []:
+                if isinstance(sf, int):
+                    sfs.add(sf)
+            for key in (s.get("counts") or {}).keys():
+                m = re.match(r"^(?:in|out)_sf(\d+)$", key)
+                if m:
+                    sfs.add(int(m.group(1)))
+        return sorted(sfs)
+
+    for node_id, state in sorted(r["nodes"].items(), key=lambda kv: kv[1]["name"]):
+        samples = state["samples"]
+        print(f"  {state['name']} (node {node_id}): samples={len(samples)}")
+        if samples:
+            sfs = sample_sfs(samples)
+            control_sf = state.get("routing_sf")
+            if not isinstance(control_sf, int):
+                control_sf = sfs[0] if sfs else None
+            first = samples[0]
+            last = samples[-1]
+            print("    path observed: "
+                  f"{first.get('lat', 0):.5f},{first.get('lon', 0):.5f} -> "
+                  f"{last.get('lat', 0):.5f},{last.get('lon', 0):.5f}")
+            if sfs:
+                print("    SFs analyzed: " + ", ".join(f"SF{sf}" for sf in sfs))
+            if control_sf is not None:
+                print(f"    routing/control SF: SF{control_sf}")
+
+            avg_parts = []
+            for sf in sfs:
+                inv = metric(samples, f"in_sf{sf}")
+                outv = metric(samples, f"out_sf{sf}")
+                avg_parts.append(f"SF{sf} in/out={avg(inv):.1f}/{avg(outv):.1f}")
+            if avg_parts:
+                print("    whole-run avg reachable nodes: " + ", ".join(avg_parts))
+            if control_sf is not None:
+                inc = metric(samples, f"in_sf{control_sf}")
+                outc = metric(samples, f"out_sf{control_sf}")
+                isolated = sum(1 for a, b in zip(inc, outc) if a == 0 or b == 0)
+                print(f"    SF{control_sf} isolated samples: {isolated}/{len(samples)} "
+                      f"({100.0 * isolated / len(samples):.1f}%)")
+
+        print("    windows:")
+        sfs = sample_sfs(samples)
+        control_sf = state.get("routing_sf")
+        if not isinstance(control_sf, int):
+            control_sf = sfs[0] if sfs else None
+        for win in range(r["window_count"]):
+            ws = state["windows"].get(win, [])
+            start = (r["since_ms"] + win * r["window_ms"]) / 60000.0
+            end = (r["since_ms"] + min((win + 1) * r["window_ms"], r["duration_ms"] - r["since_ms"])) / 60000.0
+            if not ws:
+                print(f"      {start:5.1f}-{end:5.1f}m  no samples")
+                continue
+            parts = [f"      {start:5.1f}-{end:5.1f}m", f" n={len(ws):2d}"]
+            if control_sf is not None:
+                inc = metric(ws, f"in_sf{control_sf}")
+                outc = metric(ws, f"out_sf{control_sf}")
+                weak = sum(1 for a, b in zip(inc, outc) if a == 0 or b == 0)
+                parts.append(
+                    f" SF{control_sf} in/out avg={avg(inc):4.1f}/{avg(outc):4.1f}"
+                    f" min={min(inc):2d}/{min(outc):2d}"
+                    f" iso={weak:2d}")
+            for sf in sfs:
+                if sf == control_sf:
+                    continue
+                inv = metric(ws, f"in_sf{sf}")
+                outv = metric(ws, f"out_sf{sf}")
+                parts.append(f" SF{sf} avg={avg(inv):4.1f}/{avg(outv):4.1f}")
+            print(" ".join(parts))
+
+        for direction in ("out", "in"):
+            seen = state[f"top_{direction}_seen"]
+            best = state[f"best_{direction}"]
+            if not seen:
+                continue
+            label_sf = control_sf if control_sf is not None else "?"
+            print(f"    recurring top-{direction} SF{label_sf} neighbors:")
+            for name, count in seen.most_common(6):
+                best_snr = best.get(name)
+                snr_txt = f" best={best_snr:.1f}dB" if best_snr is not None else ""
+                print(f"      {name:<24} {count:>3}/{len(samples)} samples{snr_txt}")
+
+
+# ---- Section 29: inter-layer gateway efficiency (§7.3 — stub for now) -----
 
 def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
     """Inter-layer gateway TDM scheduling (roadmap §7.3, NOT YET IMPLEMENTED
@@ -3665,7 +3850,7 @@ def section_inter_layer(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
 
 
 def print_section_27_inter_layer(r: dict) -> None:
-    print("\n=== (28) inter-layer gateway efficiency (§7.3) ===")
+    print("\n=== (29) inter-layer gateway efficiency (§7.3) ===")
     total = (r["sweep_start"] + r["cross_layer_handoffs"] +
              r["gateway_schedule_announced"] + len(r["is_gateway_count"]))
     if total == 0:
@@ -4105,6 +4290,9 @@ def main() -> None:
 
     print_section_27_non_delivered(
         section_non_delivered_classifier(args.events, cfg, warmup_end_ms))
+
+    print_section_28_mobile_visibility(
+        section_mobile_visibility(args.events, cfg, warmup_end_ms))
 
     print_section_27_inter_layer(section_inter_layer(args.events, cfg, warmup_end_ms))
 

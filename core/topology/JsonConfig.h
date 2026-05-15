@@ -124,6 +124,10 @@ struct SimConfig {
         double      ref_loss_db    = 40.0;
         double      noise_floor_db = -120.0;
         double      tx_power_dbm   = 20.0;
+        // When true, path-loss is used only for links where at least one
+        // endpoint is mobile. Static-static links remain governed by the
+        // explicit topology.links matrix.
+        bool        mobile_only    = false;
 
         // Asymmetry / shadowing model. Real LoRa links routinely show
         // SNR(A→B) ≠ SNR(B→A) — TX-power variability across hardware,

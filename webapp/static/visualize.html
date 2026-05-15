@@ -29,6 +29,30 @@ body { font-family: 'SF Mono', 'Consolas', 'Menlo', monospace; font-size: 12px; 
 #sidebar .field .val { color: #2a2a3e; }
 #sidebar .pkt-link { color: #2563eb; cursor: pointer; text-decoration: underline; }
 #sidebar .pkt-link:hover { color: #1d4ed8; }
+#sidebar .json-block {
+    margin: 4px 0 8px;
+    padding: 6px 8px;
+    background: #f8fafc;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    color: #111827;
+    font-size: 11px;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+#sidebar .action-row { margin: 8px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+#sidebar .action-row button {
+    background: #e5e7eb;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+}
+#sidebar .action-row button:hover { background: #d1d5db; }
 #sidebar table { border-collapse: collapse; width: 100%; margin: 4px 0; }
 #sidebar td, #sidebar th { padding: 2px 6px; text-align: left; font-size: 11px; }
 #sidebar th { color: #6b7280; border-bottom: 1px solid #d1d5db; }
@@ -1738,6 +1762,13 @@ canvas.addEventListener('click', async (e) => {
 
     const hit = findEventAt(e.offsetX, e.offsetY);
     if (hit) {
+        if (hit.type === 'script_emit') {
+            showEventDetail(hit);
+            const focusNode = hit.node || hit.from || hit.to;
+            if (focusNode) emitFocusNode(focusNode);
+            return;
+        }
+
         // Prefer flight trace when the event carries a (origin, payload)
         // tuple — that's the script-emit-side flight identifier we added
         // for end-to-end visualisation. Falls through to pkt trace for
@@ -2048,9 +2079,7 @@ async function traceFlight(origin, payload) {
 }
 
 function showFlightDetail(origin, payload, emits, pkts) {
-    const sidebar = document.getElementById('sidebar');
-    if (!sidebar) return;
-    sidebar.style.width = '320px';
+    openSidebar();
     const originName = (origin >= 0 && origin < S.nodes.length)
         ? S.nodes[origin].name : ('#' + origin);
     let html = `<div class="event-detail">`;
@@ -2060,7 +2089,7 @@ function showFlightDetail(origin, payload, emits, pkts) {
     html += `<div class="field"><span class="key">events: </span>${emits.length} script_emit, ${pkts.size} on-air pkt(s)</div>`;
     html += `<button onclick="clearTrace()" style="margin-top:8px;">Clear flight trace</button>`;
     html += `</div>`;
-    sidebar.innerHTML = html;
+    sidebarContent.innerHTML = html;
 }
 
 function clearTrace() {
@@ -2191,6 +2220,12 @@ function showEventDetail(ev) {
                          'emit_type', 'msg', 'data'];
     let html = `<h3>${ev.type}</h3>`;
     html += `<div class="field"><span class="key">time: </span><span class="val">${formatTime(ev.time_ms)}</span></div>`;
+    if (ev.type === 'script_emit' && ev.data) {
+        const d = ev.data || {};
+        if (d.origin !== undefined && d.payload !== undefined) {
+            html += `<div class="action-row"><button id="trace-flight-from-event">Trace flight</button></div>`;
+        }
+    }
 
     const shown = new Set(['type', 'time_ms']);
     for (const k of FIELD_ORDER) {
@@ -2198,10 +2233,14 @@ function showEventDetail(ev) {
         if (!(k in ev)) continue;
         shown.add(k);
         const v = ev[k];
-        let val = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : String(v);
         if (k === 'pkt') {
+            const val = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : String(v);
             html += `<div class="field"><span class="key">${k}: </span><span class="pkt-link" onclick="tracePkt('${escHtml(v)}')">${escHtml(val)}</span></div>`;
+        } else if (k === 'data' && v && typeof v === 'object') {
+            html += `<div class="field"><span class="key">data:</span></div>`;
+            html += `<pre class="json-block">${escHtml(JSON.stringify(v, null, 2))}</pre>`;
         } else {
+            let val = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : String(v);
             if (val.length > 100) val = val.slice(0, 100) + '\u2026';
             html += `<div class="field"><span class="key">${k}: </span><span class="val">${escHtml(val)}</span></div>`;
         }
@@ -2241,6 +2280,18 @@ function showEventDetail(ev) {
     }
 
     sidebarContent.innerHTML = html;
+    const traceBtn = document.getElementById('trace-flight-from-event');
+    if (traceBtn && ev.data) {
+        traceBtn.addEventListener('click', async () => {
+            const d = ev.data || {};
+            if (d.origin === undefined || d.payload === undefined) return;
+            if (!S.traceMode) {
+                S.traceMode = true;
+                document.getElementById('btn-trace-mode').classList.add('active');
+            }
+            await traceFlight(d.origin, d.payload);
+        });
+    }
 }
 
 function showTraceDetail(pkt, events) {
@@ -2351,7 +2402,7 @@ function showNodeDetail(name) {
 }
 
 function escHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // ── Controls ───────────────────────────────────────────────────

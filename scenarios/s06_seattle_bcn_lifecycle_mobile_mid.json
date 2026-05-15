@@ -1,6 +1,6 @@
 {
-  "_name": "s06_seattle_bcn_lifecycle_mid",
-  "_desc": "Seattle lifecycle cold-start baseline generated from s03. No warmup/hot-start. 25 initial nodes boot over 45s, 8 nodes join from 15m, and 5 initial nodes die from 35m. Purpose: observe fresh network formation, early message delivery, new-node registration, and stale-route behavior after node departure.",
+  "_name": "s06_seattle_bcn_lifecycle_mobile_mid",
+  "_desc": "Seattle lifecycle cold-start mobile variant generated from s06_seattle_bcn_lifecycle_mid. Adds two mobile nodes crossing the map on different axes for the full 1h run. Static links remain from the explicit topology matrix; links touching mobile nodes are path-loss-derived.",
   "simulation": {
     "duration_ms": 3600000,
     "step_ms": 1,
@@ -15,6 +15,19 @@
       "max_packet_bytes": 255,
       "snr_coherence_ms": 0,
       "duty_cycle": 0.01
+    },
+    "path_loss": {
+      "model": "log_distance",
+      "mobile_only": true,
+      "alpha": 3.0,
+      "sigma_db": 1.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 14.0,
+      "node_tx_offset_sigma_db": 1.0,
+      "node_rx_offset_sigma_db": 1.0,
+      "asymmetry_coherence_ms": 60000
     }
   },
   "commands": [
@@ -757,6 +770,36 @@
       "at_ms": 3505011,
       "node": "Stevens",
       "command": "send_e2e Portage_Bay_G2_2 c6 Stevens->Portage_Bay_G2_2"
+    },
+    {
+      "at_ms": 600000,
+      "node": "mobile_west_east",
+      "command": "send_e2e dmatestbednode0 m1 mobile_west_east->dmatestbednode0"
+    },
+    {
+      "at_ms": 900000,
+      "node": "Capitol_Hill_Prime",
+      "command": "send_e2e mobile_west_east m1 Capitol_Hill_Prime->mobile_west_east"
+    },
+    {
+      "at_ms": 1500000,
+      "node": "mobile_south_north",
+      "command": "send_e2e University_District m1 mobile_south_north->University_District"
+    },
+    {
+      "at_ms": 2100000,
+      "node": "CrossNet_Room",
+      "command": "send_e2e mobile_south_north m1 CrossNet_Room->mobile_south_north"
+    },
+    {
+      "at_ms": 2700000,
+      "node": "mobile_west_east",
+      "command": "send_e2e mobile_south_north m2 mobile_west_east->mobile_south_north"
+    },
+    {
+      "at_ms": 3300000,
+      "node": "mobile_south_north",
+      "command": "send_e2e mobile_west_east m2 mobile_south_north->mobile_west_east"
     }
   ],
   "expect": [],
@@ -1095,6 +1138,30 @@
       "lat": 47.578726,
       "lon": -122.23835,
       "start_at_ms": 9626
+    },
+    {
+      "name": "mobile_west_east",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10],
+        "is_mobile": true
+      },
+      "lat": 47.631268,
+      "lon": -122.337227,
+      "velocity_mps": 2.88,
+      "direction_deg": 90
+    },
+    {
+      "name": "mobile_south_north",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,"allowed_data_sfs": [7,9,10],
+        "is_mobile": true
+      },
+      "lat": 47.519056,
+      "lon": -122.268219,
+      "velocity_mps": 6.95,
+      "direction_deg": 0
     }
   ],
   "topology": {
