@@ -573,11 +573,25 @@ DROP_TYPES = {
 
 
 def section_drops(events_path: str, since_ms: int = 0) -> Counter:
+    pkt_labels: dict[str, str] = {}
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "tx":
+            continue
+        pkt = e.get("pkt")
+        if pkt:
+            pkt_labels[pkt] = e.get("label", "?")
+
     counts: Counter = Counter()
+    expected_data_sf_mismatch = 0
     for e in iter_events(events_path, since_ms):
         t = e.get("type", "")
         if t in DROP_TYPES:
+            if t == "drop_sf_mismatch" and pkt_labels.get(e.get("pkt")) == "DATA":
+                expected_data_sf_mismatch += 1
+                continue
             counts[t] += 1
+    if expected_data_sf_mismatch:
+        counts["__expected_data_sf_mismatch"] = expected_data_sf_mismatch
     return counts
 
 
@@ -586,10 +600,17 @@ def print_section_7(r: Counter) -> None:
     if not r:
         print("  (no drop or collision events observed)")
         return
-    total = sum(r.values())
+    expected_data_sf_mismatch = r.get("__expected_data_sf_mismatch", 0)
+    visible_items = [(k, v) for k, v in r.items() if not k.startswith("__")]
+    total = sum(v for _, v in visible_items)
     for t, n in sorted(r.items(), key=lambda kv: -kv[1]):
-        print(f"  {t:<22} {n:>6}  ({100*n/total:.1f}%)")
+        if t.startswith("__"):
+            continue
+        pct = 100*n/total if total else 0.0
+        print(f"  {t:<22} {n:>6}  ({pct:.1f}%)")
     print(f"  {'TOTAL':<22} {total:>6}")
+    if expected_data_sf_mismatch:
+        print(f"  {'DATA sf-mismatch (expected)':<22} {expected_data_sf_mismatch:>6}  (excluded)")
 
 
 # ---- Section 8: delivery-failure breakdown -------------------------------

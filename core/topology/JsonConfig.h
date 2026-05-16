@@ -207,6 +207,17 @@ struct SimConfig {
 
     struct NodeDef {
         std::string name;
+        // Protocol-visible short address. When unset (-1), legacy scenarios
+        // use the node's array index as the protocol id. Future firmware-mode
+        // join scenarios can leave this unset until the join state machine
+        // assigns a layer-local lease.
+        int node_id = -1;
+        // Simulated permanent identity. public_key is a human/test fixture
+        // string for now; key_hash32 is the compact protocol identity marker
+        // exposed to Lua. If absent in JSON, JsonConfig derives a stable
+        // deterministic hash from the node name.
+        std::string public_key;
+        uint32_t key_hash32 = 0;
 
         // New: script + config (replace firmware/role from MeshCore).
         std::string    script_path;

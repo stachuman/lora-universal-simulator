@@ -1468,6 +1468,137 @@ local function parse_q(frame)
   }
 end
 
+local J_OP_DISCOVER = 0
+local J_OP_CLAIM    = 1
+local J_OP_DENY     = 2
+local J_OP_OFFER    = 3
+
+local J_FLAG_MOBILE          = 0x04
+local J_FLAG_GATEWAY_CAPABLE = 0x08
+
+local J_DENY_REASON_CONFLICT = 1
+
+local function pack_u16_le(v)
+  v = math.floor(v or 0) & 0xffff
+  return string.char(v & 0xff, (v >> 8) & 0xff)
+end
+
+local function parse_u16_le(frame, off)
+  return frame:byte(off) | (frame:byte(off + 1) << 8)
+end
+
+local function pack_u32_le(v)
+  v = math.floor(v or 0) & 0xffffffff
+  return string.char(v & 0xff,
+                     (v >> 8) & 0xff,
+                     (v >> 16) & 0xff,
+                     (v >> 24) & 0xff)
+end
+
+local function parse_u32_le(frame, off)
+  return (frame:byte(off)
+          | (frame:byte(off + 1) << 8)
+          | (frame:byte(off + 2) << 16)
+          | (frame:byte(off + 3) << 24)) & 0xffffffff
+end
+
+local function pack_j_header(leaf_id, opcode, requester_is_mobile, gateway_capable)
+  local flags = (opcode or J_OP_DISCOVER) & 0x03
+  if requester_is_mobile then flags = flags | J_FLAG_MOBILE end
+  if gateway_capable then flags = flags | J_FLAG_GATEWAY_CAPABLE end
+  return ((leaf_id & 0x0f) << 4) | (flags & 0x0f)
+end
+
+-- J — join/lease control frame:
+--   DISCOVER: 'J', [leaf_id|flags], key_hash32(LE)
+--   OFFER:    'J', [leaf_id|flags], responder_node_id, responder_key_hash32(LE),
+--             data_sf_bitmap
+--   CLAIM:    'J', [leaf_id|flags], key_hash32(LE), proposed_node_id,
+--             lease_age_seconds(LE), claim_epoch, nonce
+--   DENY:     'J', [leaf_id|flags], denied_node_id, owner_key_hash32(LE),
+--             claimant_key_hash32(LE), owner_lease_age_seconds(LE),
+--             owner_claim_epoch, reason
+local function pack_j_discover(leaf_id, key_hash32, requester_is_mobile, gateway_capable)
+  return "J" .. string.char(pack_j_header(leaf_id, J_OP_DISCOVER,
+                                          requester_is_mobile, gateway_capable))
+             .. pack_u32_le(key_hash32)
+end
+
+local function pack_j_offer(leaf_id, responder_node_id, responder_key_hash32,
+                            data_sf_bitmap, requester_is_mobile, gateway_capable)
+  return "J" .. string.char(pack_j_header(leaf_id, J_OP_OFFER,
+                                          requester_is_mobile, gateway_capable))
+             .. string.char(responder_node_id & 0xff)
+             .. pack_u32_le(responder_key_hash32)
+             .. string.char(data_sf_bitmap & 0xff)
+end
+
+local function pack_j_claim(leaf_id, key_hash32, proposed_node_id,
+                            lease_age_seconds, claim_epoch, nonce,
+                            requester_is_mobile, gateway_capable)
+  return "J" .. string.char(pack_j_header(leaf_id, J_OP_CLAIM,
+                                          requester_is_mobile, gateway_capable))
+             .. pack_u32_le(key_hash32)
+             .. string.char(proposed_node_id & 0xff)
+             .. pack_u16_le(lease_age_seconds)
+             .. string.char((claim_epoch or 0) & 0xff, (nonce or 0) & 0xff)
+end
+
+local function pack_j_deny(leaf_id, denied_node_id, owner_key_hash32,
+                           claimant_key_hash32, owner_lease_age_seconds,
+                           owner_claim_epoch, reason,
+                           requester_is_mobile, gateway_capable)
+  return "J" .. string.char(pack_j_header(leaf_id, J_OP_DENY,
+                                          requester_is_mobile, gateway_capable))
+             .. string.char(denied_node_id & 0xff)
+             .. pack_u32_le(owner_key_hash32)
+             .. pack_u32_le(claimant_key_hash32)
+             .. pack_u16_le(owner_lease_age_seconds)
+             .. string.char((owner_claim_epoch or 0) & 0xff,
+                            (reason or J_DENY_REASON_CONFLICT) & 0xff)
+end
+
+local function parse_j(frame)
+  if #frame < 6 or frame:sub(1,1) ~= "J" then return nil end
+  local h = frame:byte(2)
+  local flags = h & 0x0f
+  local out = {
+    leaf_id             = (h >> 4) & 0x0f,
+    opcode              = flags & 0x03,
+    requester_is_mobile = (flags & J_FLAG_MOBILE) ~= 0,
+    gateway_capable     = (flags & J_FLAG_GATEWAY_CAPABLE) ~= 0,
+  }
+  if out.opcode == J_OP_DISCOVER then
+    if #frame ~= 6 then return nil end
+    out.key_hash32 = parse_u32_le(frame, 3)
+    return out
+  elseif out.opcode == J_OP_OFFER then
+    if #frame ~= 8 then return nil end
+    out.responder_node_id = frame:byte(3)
+    out.responder_key_hash32 = parse_u32_le(frame, 4)
+    out.data_sf_bitmap = frame:byte(8)
+    return out
+  elseif out.opcode == J_OP_CLAIM then
+    if #frame ~= 11 then return nil end
+    out.key_hash32 = parse_u32_le(frame, 3)
+    out.proposed_node_id = frame:byte(7)
+    out.lease_age_seconds = parse_u16_le(frame, 8)
+    out.claim_epoch = frame:byte(10)
+    out.nonce = frame:byte(11)
+    return out
+  elseif out.opcode == J_OP_DENY then
+    if #frame ~= 15 then return nil end
+    out.denied_node_id = frame:byte(3)
+    out.owner_key_hash32 = parse_u32_le(frame, 4)
+    out.claimant_key_hash32 = parse_u32_le(frame, 8)
+    out.owner_lease_age_seconds = parse_u16_le(frame, 12)
+    out.owner_claim_epoch = frame:byte(14)
+    out.reason = frame:byte(15)
+    return out
+  end
+  return nil
+end
+
 -- DATA — 12 + n bytes (in-leaf, addr_len=0); §7.6 hop-budget + rt-learning:
 --   byte 0   : tag 'D'
 --   byte 1   : addr_len(3 hi) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
@@ -1621,6 +1752,14 @@ end
 local function sf_in_bitmap(bm, sf)
   if sf < 5 or sf > 12 then return false end
   return ((bm >> (sf - 5)) & 1) == 1
+end
+
+local function sf_bitmap_to_set(bm)
+  local out = {}
+  for sf = 5, 12 do
+    if sf_in_bitmap(bm or 0, sf) then table.insert(out, sf) end
+  end
+  return out
 end
 
 -- Choose the fastest (lowest) SF in the bitmap whose demod threshold leaves
@@ -2117,7 +2256,7 @@ end
 local TIER_SCORE_PENALTY_BY_ALTS_DB = {
   [0] = { [0] = 0.0, [1] = 0.0,  [2] = 0.0  },
   [1] = { [0] = 1.0, [1] = 4.0,  [2] = 7.0  },
-  [2] = { [0] = 5.0, [1] = 10.0, [2] = 15.0 },
+  [2] = { [0] = 7.0, [1] = 14.0, [2] = 21.0 },
   [3] = { [0] = 8.0, [1] = 15.0, [2] = 25.0 },
 }
 
@@ -2203,6 +2342,19 @@ is_next_hop_fresh = function(self, node_id)
   return age_ms <= (self.next_hop_live_ttl_ms or 1200000), age_ms
 end
 
+local function route_mobile_touched(self, dest_id, c)
+  return self.is_mobile == true
+     or is_mobile_peer(self, dest_id)
+     or (c ~= nil and is_mobile_peer(self, c.next_hop))
+end
+
+local function route_ttl_for_candidate(self, c)
+  if c and c.hops and c.hops <= 1 then
+    return self.rt_aging_ttl_neighbor_ms
+  end
+  return self.rt_aging_ttl_remote_ms
+end
+
 local function emit_stale_next_skip(self, dst_id, next_hop, source)
   local _, age_ms = is_next_hop_fresh(self, next_hop)
   self:emit("rt_skip_stale_next", {
@@ -2270,6 +2422,8 @@ local function route_candidate_context(self, dst_id, next_hop)
     next_seen_age_ms = nil,
     next_seen_fresh = false,
     viable_alts = 0,
+    mobile_touched = false,
+    route_ttl_ms = nil,
   }
   local next_seen_fresh, next_seen_age_ms = is_next_hop_fresh(self, next_hop)
   out.next_seen_fresh = next_seen_fresh
@@ -2295,10 +2449,91 @@ local function route_candidate_context(self, dst_id, next_hop)
       out.route_score_eff = effective_score(self, c, entry.candidates, self.routing_snr_floor_db)
       out.route_hops = c.hops
       out.route_age_ms = c.last_seen_ms and (now - c.last_seen_ms) or nil
+      local ttl = route_ttl_for_candidate(self, c)
+      out.route_ttl_ms = ttl
+      out.mobile_touched = route_mobile_touched(self, dst_id, c)
       break
     end
   end
   return out
+end
+
+local function route_candidate_eligible_for_metrics(self, dst_id, c, previous_hop, alts_tried)
+  if c == nil or c.next_hop == nil then return false end
+  if previous_hop ~= nil and c.next_hop == previous_hop then return false end
+  if alts_tried and alts_tried[c.next_hop] then return false end
+  if route_uses_mobile_as_transit(self, dst_id, c.next_hop) then return false end
+  if get_peer_suspect_level(self, c.next_hop) >= PEER_LEVEL_SILENT then return false end
+  local fresh = is_next_hop_fresh(self, c.next_hop)
+  if not fresh then return false end
+  if is_blind(self, c.next_hop) then return false end
+  return true
+end
+
+local function emit_route_decision(self, reason, px, ctx)
+  local function cand_hops(c)
+    return (c and c.hops) or 1
+  end
+  local entry = self.rt[px.dst]
+  local best_hops = nil
+  local best_next = nil
+  local best_tier = nil
+  local better_hop_available = 0
+  local better_budget_available = 0
+  local chosen_blind = ctx.next_blind and 1 or 0
+  local chosen_hops = ctx.route_hops or 999
+  local chosen_tier = ctx.next_tier or 0
+  if entry and entry.candidates then
+    for _, c in ipairs(entry.candidates) do
+      if route_candidate_eligible_for_metrics(self, px.dst, c, px.previous_hop, px.alts_tried) then
+        local tier = get_neighbor_tier(self, c.next_hop)
+        local hops = cand_hops(c)
+        if best_hops == nil
+           or hops < best_hops
+           or (hops == best_hops and tier < (best_tier or 99)) then
+          best_hops = hops
+          best_next = c.next_hop
+          best_tier = tier
+        end
+        if c.next_hop ~= px.next and hops < chosen_hops then
+          better_hop_available = 1
+        end
+        if c.next_hop ~= px.next and tier < chosen_tier then
+          better_budget_available = 1
+        end
+      end
+    end
+  end
+  local delta = (best_hops ~= nil and ctx.route_hops ~= nil)
+              and (ctx.route_hops - best_hops) or 0
+  local payload = {
+    reason = reason or "?",
+    origin = px.origin,
+    payload = px.user_text,
+    ctr = px.ctr,
+    ctr_lo = px.ctr_lo,
+    dst = px.dst,
+    chosen_next = px.next,
+    chosen_rank = ctx.candidate_rank,
+    candidate_count = ctx.candidate_count,
+    chosen_hops = ctx.route_hops,
+    best_next = best_next,
+    best_hops = best_hops or -1,
+    chosen_minus_best_hops = delta,
+    better_hop_available = better_hop_available,
+    better_budget_available = better_budget_available,
+    chosen_tier = chosen_tier,
+    chosen_blind = chosen_blind,
+    mobile_touched = ctx.mobile_touched and 1 or 0,
+    route_age_ms = ctx.route_age_ms,
+    route_ttl_ms = ctx.route_ttl_ms,
+  }
+  self:emit("route_decision", payload)
+  if better_hop_available ~= 0 or better_budget_available ~= 0
+     or delta >= 2 or chosen_tier >= BUDGET_TIER_CRITICAL
+     or chosen_blind ~= 0 or ctx.mobile_touched then
+    self:emit("route_decision_detail", payload)
+  end
 end
 
 local function emit_rts_attempt_detail(self, kind, px)
@@ -2331,8 +2566,11 @@ local function emit_rts_attempt_detail(self, kind, px)
     next_seen_age_ms = ctx.next_seen_age_ms,
     next_blind = ctx.next_blind,
     next_blind_ms = ctx.next_blind_ms,
+    mobile_touched = ctx.mobile_touched,
+    route_ttl_ms = ctx.route_ttl_ms,
     previous_hop = px.previous_hop,
   })
+  emit_route_decision(self, px.retry_reason or kind, px, ctx)
   return px.last_rts_attempt_seq
 end
 
@@ -2675,6 +2913,53 @@ local function name_of(self, id)
   return self.id_to_name[id] or ("#" .. tostring(id))
 end
 
+local function id_bind_set(self, node_id, key_hash32, source, confidence)
+  if node_id == nil or key_hash32 == nil then return false end
+  local now = self:now()
+  self.id_bind = self.id_bind or {}
+  local prev = self.id_bind[node_id]
+  if prev and prev.key_hash32 ~= key_hash32 then
+    prev.conflict_hash32 = key_hash32
+    prev.last_seen_ms = now
+    self:emit("addr_conflict_observed", {
+      node = node_id,
+      known_key_hash32 = prev.key_hash32,
+      observed_key_hash32 = key_hash32,
+      source = source or "unknown",
+    })
+    return false
+  end
+  local is_new = prev == nil
+  local rec = prev or {
+    key_hash32 = key_hash32,
+    first_seen_ms = now,
+  }
+  rec.key_hash32 = key_hash32
+  rec.last_seen_ms = now
+  rec.last_key_seen_ms = now
+  rec.source = source or rec.source or "unknown"
+  rec.confidence = confidence or rec.confidence or "weak"
+  self.id_bind[node_id] = rec
+  if is_new then
+    self:emit("id_bind_set", {
+      node = node_id,
+      key_hash32 = key_hash32,
+      source = rec.source,
+      confidence = rec.confidence,
+    })
+  end
+  return true
+end
+
+local function id_bind_refresh_plain(self, node_id, source)
+  if node_id == nil then return false end
+  local rec = self.id_bind and self.id_bind[node_id]
+  if not rec then return false end
+  rec.last_seen_ms = self:now()
+  rec.last_source = source or "plain"
+  return true
+end
+
 -- 3-cycle prune: when a beacon entry says (D, next=self.id), the sender N
 -- claims to route D through me. If any of my own rt[D] candidates stores
 -- n2_hop == N, that slot is part of a 3-cycle me→X→N→me — invalidate it.
@@ -2757,7 +3042,8 @@ local function age_out_stale_routes(self)
       local kept = {}
       local primary_evicted = false
       for i, c in ipairs(entry.candidates) do
-        local ttl = (c.hops and c.hops <= 1) and ttl_n or ttl_r
+        local ttl = route_ttl_for_candidate(self, c)
+        local mobile_touched = route_mobile_touched(self, dest_id, c)
         local age = now - c.last_seen_ms
         if ttl <= 0 or age < ttl then
           -- TTL ≤ 0 disables aging for this hop class; keep the entry.
@@ -2768,6 +3054,7 @@ local function age_out_stale_routes(self)
             dest = dest_id, slot = (i == 1) and "primary" or "alt",
             next_hop = c.next_hop, hops = c.hops,
             age_ms = age, ttl_ms = ttl,
+            mobile_touched = mobile_touched,
           })
           self:log(string.format(
             "rt_aged dst=%s %s via %s hops=%d (age %dms > ttl %dms)",
@@ -2785,6 +3072,57 @@ local function age_out_stale_routes(self)
     end
   end
   if any_evicted then schedule_triggered_beacon(self) end
+end
+
+local function emit_rt_quality_snapshots(self)
+  local function cand_hops(c)
+    return (c and c.hops) or 1
+  end
+  local now = self:now()
+  for dest_id, entry in pairs(self.rt) do
+    if entry and entry.candidates and entry.candidates[1] then
+      local primary = entry.candidates[1]
+      local primary_ttl = route_ttl_for_candidate(self, primary)
+      local mobile_touched = route_mobile_touched(self, dest_id, primary)
+      local primary_age = primary.last_seen_ms and (now - primary.last_seen_ms) or 0
+      local primary_tier = get_neighbor_tier(self, primary.next_hop)
+      local best = primary
+      for _, c in ipairs(entry.candidates) do
+        if route_candidate_eligible_for_metrics(self, dest_id, c, nil, nil) then
+          if cand_hops(c) < cand_hops(best) then
+            best = c
+          end
+        end
+      end
+      local delta = cand_hops(primary) - cand_hops(best)
+      local reason = nil
+      if primary_ttl > 0 and primary_age >= math.floor(primary_ttl * 0.8) then
+        reason = "primary_stale"
+      elseif primary_tier >= BUDGET_TIER_CRITICAL then
+        reason = "primary_budget_tier"
+      elseif delta >= 2 then
+        reason = "primary_worse_than_alt"
+      elseif (primary.hops or 0) >= 8 then
+        reason = "primary_long"
+      end
+      if reason ~= nil then
+        self:emit("rt_quality_snapshot", {
+          reason = reason,
+          dst = dest_id,
+          primary_next = primary.next_hop,
+          primary_hops = cand_hops(primary),
+          primary_age_ms = primary_age,
+          primary_ttl_ms = primary_ttl,
+          primary_tier = primary_tier,
+          best_next = best.next_hop,
+          best_hops = cand_hops(best),
+          primary_minus_best_hops = delta,
+          candidate_count = #entry.candidates,
+          mobile_touched = mobile_touched and 1 or 0,
+        })
+      end
+    end
+  end
 end
 
 -- Forward decls so the timeout-fire callbacks can refer to peers in the
@@ -2889,6 +3227,7 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
     previous_hop = previous_hop,
     queued_at_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
     reason       = reason,
+    e2e_registered = origin == self.id and ((flags or 0) & DATA_FLAG_E2E_ACK_REQ) ~= 0,
   }
   table.insert(self.deferred_sends, deferred)
   self:emit("send_deferred", {
@@ -3688,6 +4027,23 @@ try_drain_deferred = function(self)
       d.enqueue_time_ms = d.queued_at_ms
       d.requeue_count   = 0
       d.next_attempt_ms = next_attempt_ms
+      if d.origin == self.id
+         and ((d.flags or 0) & DATA_FLAG_E2E_ACK_REQ) ~= 0
+         and not d.e2e_registered then
+        local e2e_key = pending_e2e_key(d.dst_id, d.ctr)
+        self.pending_e2e[e2e_key] = {
+          sent_at_ms = self:now(),
+          ctr        = d.ctr,
+          dst_id     = d.dst_id,
+          dst_name   = d.dst_name,
+          user_text  = d.user_text,
+        }
+        d.e2e_registered = true
+        self:emit("e2e_ack_pending", {
+          origin = self.id, ctr = d.ctr, dst = d.dst_id,
+          ttl_ms = self.e2e_ack_ttl_ms,
+        })
+      end
       table.insert(self.tx_queue, 1, d)
     end
     become_free(self)
@@ -4696,7 +5052,6 @@ function on_init(self, config)
   self.originator_airtime_share     = config.originator_airtime_share     or 0.25     -- backstop
   self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5    -- emit self-warning at half threshold
   self.originator_retry_dedup_ms    = config.originator_retry_dedup_ms    or 10000    -- 10s — longer than typical RTS-rty cycle so retries dedup; <<window so ctr_lo wrap counts as fresh
-
   -- Proactive tier-aware routing: route_strictly_better applies a
   -- dynamic score penalty on top of raw SNR margin. The penalty scales
   -- with the peer's known budget tier and with how many viable
@@ -5033,10 +5388,20 @@ function on_init(self, config)
   self.name_to_id = {}
   self.id_to_name = {}
   self.mobile_peers = {}
+  self.id_bind = {}
+  self.key_hash32 = self.key_hash32 or config.key_hash32
+  if self.key_hash32 ~= nil then
+    id_bind_set(self, self.id, self.key_hash32, "self", "authenticated")
+  end
   local nodes = sim:nodes()
   for _, n in ipairs(nodes) do
     self.name_to_id[n.name] = n.id
     self.id_to_name[n.id]   = n.name
+    if n.key_hash32 ~= nil then
+      id_bind_set(self, n.id, n.key_hash32,
+                  (n.id == self.id) and "self" or "sim_nodes",
+                  (n.id == self.id) and "authenticated" or "claimed")
+    end
     if n.is_mobile then
       self.mobile_peers[n.id] = true
     end
@@ -5159,6 +5524,7 @@ function on_init(self, config)
         budget_tier         = compute_budget_tier(self),
         pct_used            = pct_used,
       })
+      emit_rt_quality_snapshots(self)
       self:after(self.state_snapshot_period_ms, snapshot_loop)
     end
     self:after(self.state_snapshot_period_ms, snapshot_loop)
@@ -5194,10 +5560,96 @@ function on_recv(self, frame, meta)
                           or pre_action == "alt_install")
   end
   if meta.src ~= nil then
+    id_bind_refresh_plain(self, meta.src, "rx_frame")
     mark_dest_seen(self, meta.src, "direct")
     clear_peer_suspect(self, meta.src, "rx_frame")
   end
   local tag = frame:sub(1, 1)
+
+  if tag == "J" then
+    local j = parse_j(frame)
+    if not j then return end
+    if j.leaf_id ~= self.leaf_id then return end
+
+    if j.opcode == J_OP_DISCOVER then
+      self:emit("join_discover_received", {
+        from = meta.src,
+        key_hash32 = j.key_hash32,
+        requester_mobile = j.requester_is_mobile == true,
+        gateway_capable = j.gateway_capable == true,
+      })
+      if meta.src ~= self.id and self.key_hash32 ~= nil then
+        local offer = pack_j_offer(self.leaf_id, self.id, self.key_hash32,
+                                   self.allowed_sf_bitmap or 0,
+                                   self.is_mobile == true,
+                                   self.self_gateway == true)
+        self:emit("join_offer_sent", {
+          to = meta.src,
+          responder_node_id = self.id,
+          responder_key_hash32 = self.key_hash32,
+          data_sf_bitmap = self.allowed_sf_bitmap or 0,
+          requester_mobile = self.is_mobile == true,
+          gateway_capable = self.self_gateway == true,
+        })
+        tx_initiating(self, offer, {
+          sf = self.routing_sf,
+          label = "J",
+          info = string.format("op=offer to=%s data_sf_bitmap=0x%02x",
+                               tostring(meta.src), self.allowed_sf_bitmap or 0),
+        })
+      end
+      return
+    elseif j.opcode == J_OP_OFFER then
+      self:emit("join_offer_received", {
+        from = meta.src,
+        responder_node_id = j.responder_node_id,
+        responder_key_hash32 = j.responder_key_hash32,
+        data_sf_bitmap = j.data_sf_bitmap,
+        requester_mobile = j.requester_is_mobile == true,
+        gateway_capable = j.gateway_capable == true,
+      })
+      id_bind_set(self, j.responder_node_id, j.responder_key_hash32,
+                  "j_offer", "claimed")
+      if j.data_sf_bitmap ~= nil and j.data_sf_bitmap ~= 0 then
+        self.allowed_sf_bitmap = j.data_sf_bitmap
+        self.allowed_data_sfs = sf_bitmap_to_set(j.data_sf_bitmap)
+        self:emit("join_data_sfs_adopted", {
+          from = meta.src,
+          data_sf_bitmap = self.allowed_sf_bitmap,
+          count = #self.allowed_data_sfs,
+        })
+      end
+      return
+    elseif j.opcode == J_OP_CLAIM then
+      self:emit("join_claim_received", {
+        from = meta.src,
+        proposed_node_id = j.proposed_node_id,
+        key_hash32 = j.key_hash32,
+        lease_age_seconds = j.lease_age_seconds,
+        claim_epoch = j.claim_epoch,
+        nonce = j.nonce,
+        requester_mobile = j.requester_is_mobile == true,
+        gateway_capable = j.gateway_capable == true,
+      })
+      id_bind_set(self, j.proposed_node_id, j.key_hash32, "j_claim", "claimed")
+      return
+    elseif j.opcode == J_OP_DENY then
+      self:emit("join_deny_received", {
+        from = meta.src,
+        denied_node_id = j.denied_node_id,
+        owner_key_hash32 = j.owner_key_hash32,
+        claimant_key_hash32 = j.claimant_key_hash32,
+        owner_lease_age_seconds = j.owner_lease_age_seconds,
+        owner_claim_epoch = j.owner_claim_epoch,
+        reason = j.reason,
+        requester_mobile = j.requester_is_mobile == true,
+        gateway_capable = j.gateway_capable == true,
+      })
+      id_bind_set(self, j.denied_node_id, j.owner_key_hash32, "j_deny", "claimed")
+      return
+    end
+    return
+  end
 
   if tag == "B" then
     local b = parse_beacon(frame)
@@ -6836,6 +7288,74 @@ end
 -- mid-TX, or queued forwards ahead), the queue ensures the message will fire
 -- as soon as we're free — no more "ERROR: busy" rejection.
 function on_command(self, cmd_str)
+  local j_kind, j_arg1, j_arg2 = cmd_str:match("^join_test%s+(%S+)%s*(%S*)%s*(%S*)$")
+  if j_kind then
+    local key_hash32 = self.key_hash32 or 0
+    local is_mobile = self.is_mobile == true
+    local is_gateway = self.self_gateway == true
+    local frame = nil
+    local info = nil
+
+    if j_kind == "discover" then
+      frame = pack_j_discover(self.leaf_id, key_hash32, is_mobile, is_gateway)
+      self:emit("join_discover_sent", {
+        key_hash32 = key_hash32,
+        requester_mobile = is_mobile,
+        gateway_capable = is_gateway,
+      })
+      info = "op=discover"
+    elseif j_kind == "claim" then
+      local proposed = tonumber(j_arg1 or "")
+      if proposed == nil or proposed < 0 or proposed > 254 then
+        return "ERROR: usage: join_test claim <node_id>"
+      end
+      self.join_claim_epoch = (self.join_claim_epoch or 0) & 0xff
+      local nonce = self:rand(0, 256)
+      frame = pack_j_claim(self.leaf_id, key_hash32, proposed, 0,
+                           self.join_claim_epoch, nonce, is_mobile, is_gateway)
+      self:emit("join_claim_sent", {
+        proposed_node_id = proposed,
+        key_hash32 = key_hash32,
+        lease_age_seconds = 0,
+        claim_epoch = self.join_claim_epoch,
+        nonce = nonce,
+        requester_mobile = is_mobile,
+        gateway_capable = is_gateway,
+      })
+      info = string.format("op=claim node=%d", proposed)
+    elseif j_kind == "deny" then
+      local denied = tonumber(j_arg1 or "")
+      local claimant_hash = tonumber(j_arg2 or "")
+      if denied == nil or denied < 0 or denied > 254 or claimant_hash == nil then
+        return "ERROR: usage: join_test deny <denied_node_id> <claimant_key_hash32>"
+      end
+      self.join_claim_epoch = (self.join_claim_epoch or 0) & 0xff
+      frame = pack_j_deny(self.leaf_id, denied, key_hash32, claimant_hash,
+                          0, self.join_claim_epoch, J_DENY_REASON_CONFLICT,
+                          is_mobile, is_gateway)
+      self:emit("join_deny_sent", {
+        denied_node_id = denied,
+        owner_key_hash32 = key_hash32,
+        claimant_key_hash32 = claimant_hash,
+        owner_lease_age_seconds = 0,
+        owner_claim_epoch = self.join_claim_epoch,
+        reason = J_DENY_REASON_CONFLICT,
+        requester_mobile = is_mobile,
+        gateway_capable = is_gateway,
+      })
+      info = string.format("op=deny node=%d", denied)
+    else
+      return "ERROR: usage: join_test discover|claim|deny"
+    end
+
+    tx_initiating(self, frame, {
+      sf = self.routing_sf,
+      label = "J",
+      info = info,
+    })
+    return "OK: join_test " .. j_kind
+  end
+
   -- Two send variants:
   --   send     <dst> <text>   — best-effort, no end-to-end confirmation
   --   send_e2e <dst> <text>   — request end-to-end ACK from destination;

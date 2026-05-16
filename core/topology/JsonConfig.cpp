@@ -26,9 +26,11 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <cstdint>
 #include <vector>
 
 using json = nlohmann::json;
@@ -51,6 +53,54 @@ static T require_field(const json& j, const char* field, const std::string& ctx)
             "config error at " + ctx + ": field \"" + field
             + "\" has wrong type (" + e.what() + ")");
     }
+}
+
+static uint32_t fnv1a32(const std::string& s) {
+    uint32_t h = 2166136261u;
+    for (unsigned char c : s) {
+        h ^= static_cast<uint32_t>(c);
+        h *= 16777619u;
+    }
+    return h == 0 ? 1u : h;
+}
+
+static uint32_t parseKeyHash32(const json& value, const std::string& ctx) {
+    if (value.is_number_unsigned() || value.is_number_integer()) {
+        long long v = value.get<long long>();
+        if (v < 0 || v > 0xffffffffLL) {
+            throw std::runtime_error(
+                "config error at " + ctx
+                + ": field \"key_hash32\" must fit uint32");
+        }
+        return static_cast<uint32_t>(v);
+    }
+    if (value.is_string()) {
+        std::string s = value.get<std::string>();
+        if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0) {
+            s = s.substr(2);
+        }
+        if (s.empty() || s.size() > 8) {
+            throw std::runtime_error(
+                "config error at " + ctx
+                + ": field \"key_hash32\" hex string must be 1..8 digits");
+        }
+        uint32_t out = 0;
+        for (char c : s) {
+            out <<= 4;
+            if (c >= '0' && c <= '9') out |= static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') out |= static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') out |= static_cast<uint32_t>(c - 'A' + 10);
+            else {
+                throw std::runtime_error(
+                    "config error at " + ctx
+                    + ": field \"key_hash32\" must be hex or integer");
+            }
+        }
+        return out == 0 ? 1u : out;
+    }
+    throw std::runtime_error(
+        "config error at " + ctx
+        + ": field \"key_hash32\" must be an integer or hex string");
 }
 
 // --- main parse -----------------------------------------------------------
@@ -133,6 +183,37 @@ static SimConfig parseJson(const json& j) {
             const std::string ctx = "nodes[" + std::to_string(node_idx++) + "]";
             SimConfig::NodeDef def;
             def.name = require_field<std::string>(nd, "name", ctx);
+            if (nd.contains("node_id")) {
+                if (nd["node_id"].is_null()) {
+                    def.node_id = -1;
+                } else if (nd["node_id"].is_number_integer()) {
+                    def.node_id = nd["node_id"].get<int>();
+                    if (def.node_id < 0 || def.node_id > 254) {
+                        throw std::runtime_error(
+                            "config error at " + ctx
+                            + ": field \"node_id\" must be an integer in [0, 254] or null");
+                    }
+                } else {
+                    throw std::runtime_error(
+                        "config error at " + ctx
+                        + ": field \"node_id\" must be an integer or null");
+                }
+            }
+            if (nd.contains("public_key")) {
+                if (!nd["public_key"].is_string()) {
+                    throw std::runtime_error(
+                        "config error at " + ctx
+                        + ": field \"public_key\" must be a string");
+                }
+                def.public_key = nd["public_key"].get<std::string>();
+            } else {
+                def.public_key = "sim:" + def.name;
+            }
+            if (nd.contains("key_hash32")) {
+                def.key_hash32 = parseKeyHash32(nd["key_hash32"], ctx);
+            } else {
+                def.key_hash32 = fnv1a32(def.public_key);
+            }
 
             // New universal fields: script + config.
             if (nd.contains("script"))
@@ -384,8 +465,18 @@ static void validateConfig(const SimConfig& cfg) {
     // start < die when both are set.
     {
         size_t i = 0;
+        std::map<int, std::string> effective_node_ids;
         for (const auto& nd : cfg.nodes) {
             const std::string ctx = "nodes[" + std::to_string(i++) + "]";
+            const int effective_node_id = nd.node_id >= 0
+                ? nd.node_id
+                : static_cast<int>(i - 1);
+            auto [it, inserted] = effective_node_ids.emplace(effective_node_id, nd.name);
+            if (!inserted) {
+                errors.push_back(ctx + ".node_id/effective id ("
+                    + std::to_string(effective_node_id)
+                    + ") duplicates node \"" + it->second + "\"");
+            }
             if (nd.start_at_ms > 0
                 && nd.start_at_ms >= cfg.simulation.duration_ms) {
                 errors.push_back(ctx + ".start_at_ms ("

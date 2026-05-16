@@ -167,104 +167,507 @@ per-origin to per-sender behaviorally classified).
 
 ---
 
-## 2. Mobile nodes (two-tier — intra-leaf refresh + cross-leaf re-association)
+## 2. Mobile nodes (layered endpoint model)
 
-**Problem.** Mobile nodes (handhelds moving between coverage zones) cause routing-table thrash on two timescales:
-1. **Intra-leaf** — user walks around within their leaf network; direct neighbours shift; routes aging in and out.
-2. **Inter-leaf** — user physically moves between leaf networks (cross-city travel, relocation); their entire address context changes.
+**Problem.** Mobile nodes (handhelds moving between coverage zones) cause
+routing-table churn because their direct neighbours change faster than static
+routes age. Treating them as ordinary relays makes the static mesh route
+through moving endpoints and wastes RTS attempts when the device leaves.
 
-Routing-table thrash compounded by mobility is the worst failure mode observed on s04 (60 min, 138 nodes). The mobile design has to handle the common case (intra-leaf walking) WITHOUT breaking the rare case (cross-leaf travel).
+Routing-table churn compounded by mobility is one of the worst failure modes
+observed in the mobile scenarios. The design goal is to model real firmware:
+mobiles are endpoints in a radio layer with their own control/data SF policy,
+not a special simulator-only mode.
 
-**Design principle.** Most user mobility is intra-leaf and frequent. Cross-leaf is rare (vacation, relocation). The protocol covers intra-leaf as a first-class concern; cross-leaf is handled with a lightweight app-layer notification pattern that requires no new protocol primitives beyond the existing §7.1 DATA frame.
+**Architecture.**
+- Every node has a `layer_id` in config. The on-wire `leaf_id` is derived as
+  `layer_id & 0x0f`; it is the compact layer nibble carried in BCN/RTS.
+- A layer owns normal radio policy: `routing_sf`, `allowed_data_sfs`, beacon
+  period, and route aging. There is no `mobile_control_sf` shortcut.
+- `is_mobile` is orthogonal to layer. It describes endpoint behavior:
+  mobile nodes do not forward third-party traffic and should be penalized as
+  transit next-hops, but their SFs come from their layer config.
+- Mobile fleets can therefore live in layer 2 while the city/static mesh lives
+  in layer 1. Layer 2 may also contain stationary nodes when useful, for
+  example a fixed layer-2 access point.
+- Gateways are the bridge between layers. A gateway has a primary layer and
+  optional secondary layers; it retunes between them using the §7.3 schedule
+  mechanism and shares one physical duty-cycle budget across all layers.
 
-**Mobile and gateway are mutually exclusive.** Gateways (§7.2 / §7.3) require stable network membership for TDM scheduling and cross-layer rt[] maintenance. Mobile by definition lacks stable membership. Enforced at on_init: `is_mobile=1` AND `is_gateway=1` is a config error.
+Example mobile endpoint:
 
-### Tier 1 — Intra-leaf mobility
+```json
+{
+  "id": "mobile_bike_west_east",
+  "config": {
+    "layer_id": 2,
+    "routing_sf": 9,
+    "allowed_data_sfs": [8, 9, 10],
+    "is_mobile": true
+  }
+}
+```
 
-The user moves within their leaf's coverage area. Their `(leaf_id, leaf-local node_id)` stays the same; only their physical position and direct-neighbour set shift.
+Example static layer bridge:
+
+```json
+{
+  "id": "Capitol_Hill_Prime",
+  "config": {
+    "layer_id": 1,
+    "routing_sf": 8,
+    "allowed_data_sfs": [7, 9, 10],
+    "is_gateway": true,
+    "gateway_layers": [
+      {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [8, 9, 10],
+        "period_ms": 300000,
+        "duration_ms": 20000
+      }
+    ]
+  }
+}
+```
+
+**Mobile and gateway are mutually exclusive by design.** `is_mobile=1` and
+`is_gateway=1` cannot both be set on the same node. Gateway schedules and
+cross-layer route maintenance require stable radio presence and stable BCN
+neighbour sets; a moving bridge would force schedule re-anchoring at every
+peer on every motion event, plus the per-layer `rt[]` would churn with the
+gateway's own movement. This is a deliberate v1+ design constraint, not a
+temporary limitation — vehicle-mounted nodes that need both roles must use
+two separate radios with two distinct node IDs. Stationary layer-2 nodes
+(e.g., a fixed layer-2 access point serving a mobile fleet) are allowed
+and expected.
+
+### Tier 1 — Intra-layer mobility
+
+The user moves within one configured layer. Their `(layer_id, node_id)` stays
+the same; only physical position and direct-neighbour set shift.
 
 **Mechanism.**
 - Per-node `is_mobile` config flag (default false).
-- BCN gains `is_mobile` bit (in the reserved nibble of byte 2, alongside `self_gateway_flag` from §7.2).
-- Mobile nodes SILENTLY DROP inbound RTS where `dst != self.id` AND `origin != self.id` (= forwarding request from someone else for a third party). Same silent-drop pattern as `rts_drop_pending_tx`. Diagnostic emit: `rts_drop_mobile_no_forward`.
-- `route_strictly_better`: candidates whose `next_hop` is mobile AND whose route's `dest != next_hop` get a heavy score penalty (`mobile_route_penalty_db`, default 20). Effectively excludes mobiles from being selected as relay hops for third-party traffic. (Mobiles are still picked as next-hop when they ARE the destination — degenerate case.)
-- Mobile node detects its own neighbour-set shift: when 1-hop direct entries in its rt[] age out OR new direct neighbours appear within `mobile_change_window_ms`, schedule a triggered BCN (existing `beacon_trigger_jitter` machinery). Throttled by `mobile_neighbor_change_threshold` to avoid storms.
-- Reduced direct-neighbour TTL on mobile nodes: `mobile_rt_aging_neighbor_ms` (default 5 min, vs 30 min for static nodes). Stale routes through mobiles age out faster.
+- BCN carries the `is_mobile` bit alongside `self_gateway_flag` from §7.2.
+- Mobile nodes silently drop inbound RTS where `dst != self.id` AND
+  `origin != self.id` (= forwarding request from someone else for a third
+  party). Diagnostic emit: `rts_drop_mobile_no_forward`.
+- `route_strictly_better`: candidates whose `next_hop` is mobile AND whose
+  route's `dest != next_hop` get a heavy score penalty
+  (`mobile_route_penalty_db`, default 20). Effectively excludes mobiles from
+  being selected as relay hops for third-party traffic.
+- `route_strictly_better` (gateway variant): candidates whose `next_hop` is a
+  gateway AND whose route's `dest != next_hop` get a milder score penalty
+  (`gateway_transit_penalty_db`, default 8). Gateways stay selectable when
+  they're the only path, but in-leaf traffic prefers non-gateway routes —
+  protecting the gateway's shared duty-cycle budget for actual cross-layer
+  forwarding. Smaller than the mobile penalty because gateways are stable
+  and may legitimately sit at topology choke points.
+- Mobile node detects its own neighbour-set shift: when 1-hop direct entries
+  in its rt[] age out OR new direct neighbours appear within
+  `mobile_change_window_ms`, schedule a triggered BCN. Throttled by
+  `mobile_neighbor_change_threshold` to avoid storms.
+- Route entries where the destination or next hop is mobile may use shorter
+  aging than static routes, but this should be tuned per scenario. Earlier
+  experiments with overly aggressive mobile TTLs caused `send_no_route`
+  churn, so the default stays conservative until the layer/gateway model is
+  implemented and measured.
 
-**Composes with §1 anti-spam** without changes: per-1st-hop counters reset naturally as alice's set of direct neighbours shifts; each new neighbour starts fresh observation counts.
+**Composes with §1 anti-spam** without changes: per-1st-hop counters reset
+naturally as a mobile's set of direct neighbours shifts; each new neighbour
+starts fresh observation counts.
 
-### Tier 2 — Cross-leaf mobility (rare; app-layer assisted)
+### Tier 2 — Cross-layer reachability through gateways
 
-When alice's mobile leaves Gdansk leaf and joins Kraków leaf:
+When a static layer-1 node wants to reach a mobile in layer 2:
 
-1. **Departure detection.** Alice's device notices the radio environment changed dramatically: `>= mobile_leaf_change_threshold` (default 50%) of recent direct neighbours aged out within `mobile_leaf_change_window_ms` (default 60 s) AND new neighbours started appearing with foreign-leaf BCNs. Heuristic; not authoritative.
+1. The origin routes normally inside layer 1 toward a gateway candidate.
+2. The gateway retunes to layer 2 during its advertised schedule window.
+3. The gateway forwards the DATA into layer 2 using the layer-2 route table.
+4. The mobile receives as an endpoint. It is not advertised as a third-party
+   relay for layer-1 traffic.
 
-2. **New-leaf address allocation (collision-detected random pick).**
-   - Alice listens for `mobile_join_listen_ms` (default 30 s) in the new leaf's BCN traffic. Records all `src` IDs heard.
-   - Picks a random leaf-local node_id from the unused range (1..255 minus the heard set).
-   - TXes her own BCN with the chosen ID + `is_mobile=1`.
-   - If a leaf-local peer responds within `mobile_join_collision_window_ms` (default 5 s) with "collision: I'm already at that ID", alice picks another and retries.
-   - After successful join: alice updates her own `(leaf_id, node_id)` config to the new values.
+This is intentionally the same mechanism needed for future multi-layer
+networks. Mobiles do not get a special transport; they are the first practical
+test case for §7.3.
 
-3. **App-layer "I moved" notification to contacts.** Alice's app sends an encrypted DATA message to each contact in her address book:
-   ```
-   { type: "address_update", new_leaf_id: 27, new_node_id: 87 }
-   ```
-   Reuses §7.1 DATA mechanics; encrypted under the existing per-pair `session_key` (which is identity-derived and survives the move). The notification is itself a normal DATA frame — if alice's contacts are in another leaf, the notification crosses hierarchies via gateways, same machinery as any other cross-leaf send.
-
-4. **Contacts update address books.** Bob receives "alice moved to (27, 87)" → his app updates the entry. Future sends to alice use the new address.
-
-5. **Stale-address sends in transit.**
-   - Bob's send dispatched BEFORE he received the address-update notification: routes to old address `(33, 12)`, alice not there, cascade-exhaustion at the old leaf, drop. Bob's app surfaces the failure (or auto-retries with the new address if still pending).
-   - Bob's send AFTER receiving the notification: uses new address; succeeds.
-
-**No new protocol primitives needed.** The "I moved" notification is a normal §7.1 DATA frame. Cross-leaf address allocation is local heuristic + BCN observation. Failure recovery is app-layer.
+For implementation, do this in phases:
+1. Add `layer_id` to JSON config and derive `leaf_id = layer_id & 0x0f`.
+2. Allow layer-specific `routing_sf` and `allowed_data_sfs` in scenarios.
+3. Add gateway config for secondary layers, schedule emission, and analyzer
+   telemetry (`layer_sweep_start`, `layer_sweep_end`,
+   `gateway_schedule_announced`, `gateway_schedule_received`).
+4. Add cross-layer DATA handoff once the gateway can maintain route state in
+   more than one layer.
 
 ### Composition with other roadmap items
 
 | Subsystem | Mobility impact | Action needed |
 |---|---|---|
-| **§7.1 hierarchical DATA** | alice's `(leaf_id, leaf-local)` is volatile across moves | Address-update notification mechanism (app-layer, uses §7.1 DATA) |
-| **§7.2 BCN** | `is_mobile` bit consumes 1 reserved bit in BCN header byte 2 | +0 wire bytes (uses existing reserved space alongside `self_gateway_flag`) |
-| **§7.3 inter-layer TDM** | mobile cannot be gateway; no TDM scheduling | Enforce `is_mobile && is_gateway` is a config error at on_init |
-| **§1 anti-spam** | per-1st-hop counters reset naturally as alice's neighbour set shifts | No protocol change — works as-is |
-| **§5 E2E ACK** | reverse-path soft state at forwarders breaks if originator moves during ACK round-trip | Default 60 s `e2e_ack_ttl_ms` covers most move-windows; if alice moves mid-flight, ACK lost, originator times out → `e2e_ack_timeout` event surfaces to app |
-| **§8.1 crypto** | `session_key` is identity-derived; `ctr` per-pair persisted in NV | **Crypto survives moves with zero ceremony** — only routing has to find alice |
+| **§7.1 hierarchical DATA** | cross-layer reachability needs a layer path | Use existing `addr_len + dst` model once gateway handoff lands |
+| **§7.2 BCN** | `is_mobile` bit marks endpoint behavior; `leaf_id` is `layer_id & 0x0f` | +0 wire bytes; update semantics only |
+| **§7.3 inter-layer TDM** | mobiles in layer 2 become the first gateway use case | Implement gateway layer schedule and layer-local route tables |
+| **§1 anti-spam** | per-1st-hop counters reset naturally as neighbour sets shift | No protocol change; works as-is |
+| **§5 E2E ACK** | reverse path may fail while a mobile moves | ACK timeout surfaces to app; no special soft state |
+| **§8.1 crypto** | `session_key` is identity-derived; `ctr` per-pair persisted in NV | Crypto survives moves; routing has to find the endpoint |
 
 ### What this design deliberately doesn't solve
 
-- **Discovery of moved contacts WITHOUT alice's "I moved" notification.** If alice moves and can't reach her contacts immediately (battery, connectivity), they keep stale addresses until alice reaches out. Acceptable for rare-cross-leaf.
-- **Seamless mid-conversation move.** A real-time exchange interrupted by alice's leaf change WILL drop messages between her departure and the address-update propagation. Acceptable for non-realtime LoRa mesh use.
-- **Group/channel membership when mobile.** Group chats (§6) where members move are an open question; deferred to §6 design.
-- **HLR-style permanent home address.** Cellular-network-style "always reachable at your home address" is NOT in this design. Senders need updated addresses; old addresses fail.
-- **Auto-detection of mobile vs static.** Explicit `is_mobile` config flag only. No "frequent neighbour changes → auto-flag as mobile" inference (would require statistical thresholds and could misclassify; explicit is simpler).
+- **Global identity/address book movement.** A long-term user identity that
+  roams between unrelated administrative deployments remains an app-layer
+  problem.
+- **Seamless mid-flight handoff.** A DATA flight already in progress may fail
+  if the mobile leaves layer coverage. Normal retry/discovery handles later
+  sends.
+- **Group/channel membership when mobile.** Group chats (§6) where members move
+  are an open question; deferred to §6 design.
+- **HLR-style permanent home address.** Cellular-network-style "always
+  reachable at your home address" is NOT in this design.
+- **Auto-detection of mobile vs static.** Explicit `is_mobile` config flag
+  only.
 
 ### Tunables
 
 | Key | Default | Purpose |
 |---|---|---|
-| `is_mobile` | false | Per-node config flag; mutually exclusive with `is_gateway` |
+| `layer_id` | 1 | Logical radio/routing layer; on-wire `leaf_id = layer_id & 0x0f` |
+| `is_mobile` | false | Per-node endpoint flag; mutually exclusive with `is_gateway` |
 | `mobile_neighbor_change_threshold` | 0.5 | Fraction of recent direct neighbours that must shift to fire a triggered BCN |
-| `mobile_change_window_ms` | 60000 | Window over which intra-leaf neighbour shifts are evaluated |
-| `mobile_rt_aging_neighbor_ms` | 300000 (5 min) | Reduced direct-neighbour TTL when emitter is `is_mobile=1` (vs static node's 30 min) |
-| `mobile_route_penalty_db` | 20 | Score penalty applied in `route_strictly_better` when a candidate's next_hop is mobile AND not the destination |
-| `mobile_leaf_change_threshold` | 0.5 | Fraction of recent neighbours that must shift to infer leaf change |
-| `mobile_leaf_change_window_ms` | 60000 | Window over which leaf-change inference is evaluated |
-| `mobile_join_listen_ms` | 30000 | Listen window after entering a new leaf, gathering occupied IDs |
-| `mobile_join_collision_window_ms` | 5000 | Wait time for collision NACK after announcing chosen ID |
+| `mobile_change_window_ms` | 60000 | Window over which intra-layer neighbour shifts are evaluated |
+| `mobile_route_penalty_db` | 20 | Score penalty when a candidate's next_hop is mobile AND not the destination |
+| `gateway_transit_penalty_db` | 8 | Score penalty when candidate's next_hop is a gateway AND not the destination; reserves gateway airtime budget for cross-layer forwarding |
 
 ### Implementation cost estimate
 
-- `is_mobile` config + BCN bit-pack: ~20 lines
-- Forwarding refusal at mobile (silent-drop on RTS-rx): ~15 lines
-- `route_strictly_better` mobile-penalty: ~10 lines
-- Triggered BCN on neighbour-set shift: ~40 lines
-- Reduced rt_aging TTL for mobile-neighbour entries: ~10 lines
-- Cross-leaf join state machine (listen + pick + collision-retry): ~80 lines
-- App-layer "I moved" message scaffolding (mostly app-layer, but needs DATA-payload type discrimination): ~30 lines
-- Tests: intra-leaf mobile-doesn't-forward, mobile-route-penalty, mobile-trigger-BCN, cross-leaf join + collision detection, address-update notification: ~150 lines
+- `layer_id` config + `leaf_id` derivation/backward compatibility: ~30 lines
+- Mobile forwarding refusal + mobile transit penalty: already live / small
+- Gateway transit penalty in `route_strictly_better`: ~10 lines
+- Layer-specific scenario defaults for routing/data SFs: ~30 lines
+- Gateway secondary-layer config parser: ~50 lines
+- Gateway layer schedule state machine + telemetry: ~150 lines
+- Hold-at-gateway-neighbor in forwarder TX path (schedule cache lookup +
+  outbound-queue defer when `next` gateway is in upper-layer window): ~50 lines
+- Cross-layer route table context + DATA handoff: ~150-250 lines
+- Tests: layer filter, layer-2 mobile visibility, gateway schedule, static→mobile
+  cross-layer DATA, mobile-not-forwarding, gateway-transit penalty prefers
+  non-gateway path when available, hold-at-gateway-neighbor defers correctly
+  during upper-layer window: ~260 lines
 
-**Cross-references.** §7.1 (cross-leaf address-update uses normal DATA), §7.2 (`is_mobile` bit packs into BCN's reserved nibble alongside `self_gateway_flag`), §7.3 (mobile excludes gateway), §1 (anti-spam unaffected), §5 (E2E ACK during move can time out), §8.1 (crypto identity is mobility-stable).
+**Cross-references.** §7.1 (hierarchical DATA carries cross-layer path),
+§7.2 (`is_mobile`, `self_gateway`, and schedule bits live in BCN), §7.3
+(gateway TDM is the mobility access mechanism), §1 (anti-spam unaffected),
+§5 (E2E ACK during movement can time out), §8.1 (crypto identity is
+mobility-stable).
+
+---
+
+## 2a. Lightweight node join and short-address leasing
+
+**Problem.** Scenario JSON currently gives each node its 8-bit mesh address.
+That is useful for simulation control, but unrealistic for firmware. Real
+devices have a long-term cryptographic identity and must acquire a compact
+layer-local routing address after boot.
+
+**Design principle.** The 8-bit `node_id` is a lease, not identity. The real
+identity is the node's crypto public key from §8.1. Control-plane frames should
+not carry key hashes on every packet; the hash appears only during join,
+discovery, conflict handling, or explicit identity request.
+
+### Identity model
+
+- **Permanent identity:** node public key from §8.1. This is the stable device
+  identity and later proves ownership of encrypted DATA/session keys.
+- **Compact identity marker:** `key_hash32` or `key_hash64`, derived from the
+  public key. This is enough for join conflict detection and local binding
+  tables. Full public key exchange stays pull-based via the identity-card
+  mechanism from §8.1.
+- **Layer-local address:** `node_id` in range `1..254`, unique only inside one
+  `layer_id`. `0xff` remains broadcast/special.
+- **Human name:** app-layer metadata. A node may answer a DATA/name query, but
+  names are not part of routing, join, or BCN control.
+
+Simulator schema should separate these concerns:
+
+```json
+{
+  "name": "Capitol_Hill_Prime",
+  "public_key": "sim-generated-or-fixed",
+  "node_id": null,
+  "config": {
+    "layer_id": 1,
+    "join_required": true
+  }
+}
+```
+
+For deterministic tests, scenarios may still pin `node_id`, but firmware-mode
+scenarios should start with `node_id = null` and force join.
+
+### Local binding table
+
+Every node keeps a small observation table:
+
+```text
+id_bind[node_id] = {
+  key_hash,
+  first_seen_ms,
+  last_seen_ms,
+  last_key_seen_ms,
+  source,       -- j_claim, j_deny, bcn_ext, identity_reply, data_auth, self
+  confidence,   -- weak, claimed, authenticated
+  conflict_hash -- optional last different hash seen for same node_id
+}
+```
+
+Rules:
+- Same `node_id`, same `key_hash`: refresh `last_seen_ms`.
+- Same `node_id`, different `key_hash`: mark conflict and emit
+  `addr_conflict_observed`.
+- Plain BCN/traffic with `src=node_id` and no key hash refreshes
+  `last_seen_ms` if the binding exists. It does not create a binding and does
+  not upgrade confidence. This keeps quiet-but-beaconing nodes leased without
+  paying the key-hash cost on every BCN. An impersonator can keep a stale weak
+  binding alive, but cannot upgrade it or decrypt authenticated DATA.
+- Frames that carry a matching key hash refresh both `last_seen_ms` and
+  `last_key_seen_ms`.
+- Authenticated DATA or identity-card proof upgrades confidence to
+  `authenticated`.
+- Bindings expire after a long absent timeout; exact value is deployment
+  policy, not the route-aging TTL.
+
+The binding table is not part of route selection. Routing still uses compact
+8-bit IDs. The binding table answers "is this still the same device?".
+
+### Join frame family
+
+`Q` is intentionally not reused for first join because Q already has an 8-bit
+`src`, and an unjoined device does not own one yet. Add a compact `J` control
+frame family on the control SF:
+
+```text
+J_DISCOVER:
+  tag='J'
+  op=discover
+  leaf_id
+  key_hash32
+  flags: mobile, stationary, gateway-capable
+
+J_OFFER:
+  tag='J'
+  op=offer
+  leaf_id
+  responder_node_id
+  responder_key_hash32
+  data_sf_bitmap
+  flags
+
+J_CLAIM:
+  tag='J'
+  op=claim
+  leaf_id
+  proposed_node_id
+  key_hash32
+  lease_age_seconds
+  claim_epoch
+  nonce
+  flags
+
+J_DENY:
+  tag='J'
+  op=deny
+  leaf_id
+  denied_node_id
+  owner_key_hash32
+  claimant_key_hash32
+  owner_lease_age_seconds
+  owner_claim_epoch
+  reason
+```
+
+`key_hash32` is the first version because it is cheap. If false conflicts show
+up in larger tests, move to `key_hash64` or make `J_DENY` request the full
+identity card before forcing a rejoin.
+
+`lease_age_seconds` is saturating and local-clock relative. It is not used for
+absolute ordering across independent clocks; it only says "this binding has
+been continuously held for roughly this long". `claim_epoch` is a small
+monotonic-per-boot counter incremented on every new claim attempt. Together
+they make conflicts observable on wire, but the final deterministic fallback is
+still key-hash ordering because partitions have no shared clock.
+
+### Join state machine
+
+1. **LISTEN.** Node starts without `node_id`. It listens on its layer control
+   SF for `join_listen_ms`, collecting BCN `src`, destination-seen bitmaps,
+   optional identity extensions, overheard traffic IDs, and existing `J`
+   claims/denies.
+2. **DISCOVER.** If passive knowledge is weak or the channel is quiet, the
+   node waits an additional randomized `join_discover_jitter_ms` and then emits
+   `J_DISCOVER`. The extra jitter is required for power-outage cold starts,
+   where many nodes finish LISTEN at the same time and there may be no BCN to
+   anchor on. Neighbours answer with `J_OFFER`, carrying the layer DATA SF
+   bitmap, and may also schedule existing full/sync BCN responses with jitter,
+   reusing the REQ_SYNC collision-avoidance pattern.
+3. **CLAIM.** Node chooses an apparently free `node_id` and emits
+   `J_CLAIM(proposed_node_id, key_hash, nonce)`.
+4. **GUARD.** Node waits `join_claim_guard_ms`. This is deliberately seconds
+   to tens of seconds, not an RTS/CTS-scale timeout, because LoRa duty cycle
+   and jitter can delay objections.
+5. **ADOPT.** If no `J_DENY` arrives, node adopts the ID, creates
+   `id_bind[self.id]`, emits a full/sync BCN, then runs normal `Q:REQ_SYNC`.
+6. **BACKOFF.** If `J_DENY` arrives, node clears the candidate, waits
+   randomized `join_retry_backoff_ms`, and chooses a different ID.
+
+### Claim-and-defend behavior
+
+Existing nodes defend only IDs they believe are owned:
+- If `id_bind[proposed_node_id]` exists with a different key hash and has not
+  expired, emit `J_DENY`.
+- If the node itself owns `proposed_node_id`, emit `J_DENY`.
+- If two unjoined nodes claim the same ID, deterministic tie-break by
+  `key_hash` avoids endless oscillation. Loser backs off.
+
+This protocol does not require perfect first-try consensus. Lost DENY frames
+or partition merges can create temporary duplicates; the binding table and
+later conflict handling converge them.
+
+### Conflict handling after adoption
+
+If a node later observes the same `node_id` with a different `key_hash`:
+
+1. Emit `addr_conflict_observed`.
+2. Send `J_DENY` / `J_CONFLICT` toward the observed claimant if possible.
+3. If the conflict involves `self.id`, apply deterministic tie-break:
+   authenticated binding beats claimed binding; larger advertised lease age
+   beats a fresh claim when confidence is equal and the difference is above a
+   configured hysteresis; final tie-break by `key_hash`.
+4. Loser re-enters JOIN and claims a new ID.
+
+Partition merge is handled by the same mechanism. The design intentionally
+keeps this local and slow; forcing immediate global agreement would cost too
+much airtime.
+
+There is no assumption that both sides agree who is "older" by wall clock.
+Lease age is advisory and saturating; if ages are close or untrusted, the hash
+tie-break gives every observer the same answer.
+
+### Gateway and multi-layer leases
+
+A gateway owns a separate short address lease in each layer where it
+participates. The primary layer lease is acquired at boot. Secondary-layer
+leases are acquired during the first scheduled sweep for that layer, before the
+gateway advertises itself as reachable there.
+
+State shape:
+
+```text
+layer_state[layer_id] = {
+  node_id,
+  join_state,
+  id_bind,
+  rt,
+  routing_sf,
+  allowed_data_sfs
+}
+```
+
+Gateway schedule records should not be advertised for a secondary layer until
+that layer has either a pinned `node_id` or an adopted lease. A failed
+secondary-layer join does not invalidate the primary-layer lease; it only means
+the gateway is not yet usable as a bridge to that layer.
+
+Future cross-layer mobile re-association follows the same model: the mobile
+claims a separate short ID in the new layer, then app/identity state maps the
+same public key to the new layer-local address.
+
+### BCN and identity hash policy
+
+Do not add `key_hash` to every BCN by default. It is too expensive in dense
+networks.
+
+Allowed low-cost uses:
+- `J_DISCOVER` / `J_CLAIM` / `J_DENY` always carry hash.
+- A node may include its own `key_hash32` in a short BCN extension only during
+  DISCOVERY or shortly after join.
+- A node should include its own `key_hash32` in a periodic identity-refresh BCN
+  extension at a very low cadence, e.g. every `identity_bcn_interval` normal
+  BCNs. This renews `last_key_seen_ms` without putting identity hash in every
+  beacon.
+- A node may request identity on demand via the §8.1 identity-card pull path.
+- Authenticated DATA can refresh or upgrade `id_bind` without changing routing
+  frames.
+
+### Tunables
+
+| Key | Default | Purpose |
+|---|---|---|
+| `join_required` | false in legacy scenarios, true in firmware-mode scenarios | Boot without a short node_id and run join |
+| `join_listen_ms` | 30000 | Passive listen before discovery/claim |
+| `join_discover_jitter_ms` | 5000..30000 randomized | Spread cold-start `J_DISCOVER` bursts |
+| `join_discover_wait_ms` | 10000 | Wait after `J_DISCOVER` for sync BCN responses |
+| `join_claim_guard_ms` | 30000 | Objection window after `J_CLAIM` |
+| `join_retry_backoff_ms` | 10000..60000 randomized | Delay before retrying after conflict |
+| `id_bind_ttl_ms` | deployment policy, hours/days | Recycle absent short IDs |
+| `identity_bcn_interval` | 100 | Include key_hash BCN extension every N beacons |
+| `join_hash_bits` | 32 | Compact key hash size used in first implementation |
+| `join_j_rate_limit_window_ms` | 300000 | Per-key-hash J-frame rate-limit window |
+| `join_j_max_per_window` | 6 | Max accepted J frames per key hash per observer window |
+
+### Join anti-spam
+
+Unjoined nodes do not yet have a trusted 8-bit `src`, so normal §1 anti-spam
+does not apply. Observers therefore rate-limit `J` frames by `key_hash32`:
+
+```text
+join_j_seen[key_hash32] = sliding window of J_DISCOVER/J_CLAIM/J_DENY
+if count > join_j_max_per_window:
+  ignore J frame and emit join_j_rate_limited
+```
+
+This is not cryptographic security: an attacker can rotate hashes. It is still
+useful against buggy firmware and naive spam, and it keeps legitimate join
+traffic rare. A later authenticated join can MAC/sign the J nonce under the
+device key or install PSK.
+
+### Telemetry
+
+The analyzer should be able to distinguish "join is slow but converging" from
+"join is thrashing". The implementation should emit:
+
+- `join_listen_start`
+- `join_listen_end`
+- `join_discover_sent`
+- `join_claim_sent`
+- `join_deny_sent`
+- `join_deny_received`
+- `join_adopted`
+- `addr_conflict_observed`
+- `partition_merge_resolved`
+- `join_j_rate_limited`
+
+Each event should include `layer_id`, `leaf_id`, candidate/adopted `node_id`
+when known, `key_hash32`, and reason.
+
+### Implementation phases
+
+1. Split simulator `name` from protocol `node_id`; allow `node_id = null`.
+2. Add `public_key`/`key_hash` simulation identity generation.
+3. Add unjoined node state: listen-only except `J` frames.
+4. Implement `J_DISCOVER`, `J_CLAIM`, `J_DENY` encode/decode, including
+   discover jitter, lease age, claim epoch, and J-frame rate limiting.
+5. Implement `id_bind`, plain-BCN refresh policy, identity-refresh BCN
+   extension, and conflict detection.
+6. Add gateway per-layer join state, but keep cross-layer DATA handoff disabled
+   until secondary-layer leases are stable.
+7. Add small join visual scenario: quiet network, dense network, duplicate
+   claim, late partition merge.
+8. Only after join is stable, connect it to layer-2 mobile/gateway scenarios.
+
+**Cross-references.** §2 uses `layer_id` and mobile endpoint behavior; §7.3
+uses the same layer model for gateways; §8.1 provides the cryptographic
+identity and identity-card request path; PROTOCOL §11a already provides the
+REQ_SYNC/sync-BCN pattern reused by `J_DISCOVER`.
 
 ---
 
@@ -627,26 +1030,48 @@ See §3 for the full unified design. Specific concerns originally raised here ar
 
 ## 7. Multi-network communication
 
-**Problem.** `network_id` is a 4-bit field — nodes drop packets with foreign network IDs at the routing layer. There's no way for nodes on network A to communicate with nodes on network B even when they're geographically co-located and within radio range. Each network is an island.
+**Problem.** The on-wire filter is only 4 bits. It is too small to be a
+globally meaningful administrative network identifier, but it is enough to
+separate local radio/routing layers on the same channel.
 
-**What we want.** Inter-network gateway functionality. Selected nodes participate in multiple networks simultaneously and bridge traffic between them when explicitly requested.
+**Current architecture.** `leaf_id` is the lower 4 bits of `layer_id`:
+`leaf_id = layer_id & 0x0f`. JSON keeps the readable `layer_id`; frames carry
+only the compact nibble. A deployment that needs administrative separation
+should add policy/keys/mesh IDs above this layer rather than overloading the
+4-bit field.
+
+**What we want.** Inter-layer gateway functionality. Selected nodes
+participate in multiple layers and bridge traffic between them when explicitly
+configured. The first practical use case is mobile endpoints in a separate
+layer with different control/data SFs; the same mechanism later supports
+larger hierarchy.
 
 **Constraints.**
-- Gateway nodes carry traffic for ≥ 2 networks — their 1% duty cycle is shared across all of them. Need to prevent one network from starving another.
-- Cross-network routing must not flood — no automatic advertisement of network B's nodes inside network A.
-- Security boundary: cross-network bridging needs explicit policy. A node shouldn't accidentally forward sensitive intra-A traffic into B.
+- Gateway nodes carry traffic for >= 2 layers; their 1% duty cycle is shared
+  across all of them. Need to prevent one layer from starving another.
+- Cross-layer routing must not flood; no automatic advertisement of every
+  layer-2/mobile endpoint inside layer 1.
+- Security boundary: bridging needs explicit operator policy. A node should
+  not accidentally forward sensitive layer-1 traffic into layer 2.
 
 **Possible direction (not committed).**
-- Per-node config: `participating_networks = [1, 5, 7]` (list, not single).
-- Frame format gains a `dst_network_id` field (currently we only have implicit "this network" via the nid_byte). Forwarders relay cross-network only if they participate in both src and dst networks.
-- Gateway nodes advertise themselves with a `is_bridge_to = [networks]` field in their beacon. Senders aiming at a cross-network destination route via the nearest known bridge.
-- Network-aware duty cycle: each gateway tracks per-network airtime fraction separately; refuses cross-net forwards when the bridging share exceeds its policy.
+- Per-node config: `layer_id` for ordinary nodes; `gateway_layers` for
+  gateway secondary layers.
+- Frame format keeps the existing `leaf_id` nibble as the active layer filter.
+  Hierarchical DATA (`addr_len + dst`) carries the cross-layer path.
+- Gateway nodes advertise `self_gateway` plus schedule records in BCN. Senders
+  aiming at a cross-layer destination route via the nearest known gateway.
+- Layer-aware duty cycle: each gateway tracks total airtime physically and may
+  additionally enforce per-layer policy shares.
 
 **Open questions.**
-- How does a node in network A *learn* network B exists, and discover the gateway? In-band beacons (gateway advertises in BOTH networks) or external bootstrap?
-- Address spaces: shared 8-bit address space across all participating networks (collisions possible), or per-network address space with translation at gateway?
+- How does a node in layer 1 learn which gateway currently reaches a mobile
+  layer endpoint: gateway BCN summaries, pull-based Q, or explicit app config?
+- Address spaces: shared 8-bit node IDs across layers, or per-layer address
+  spaces with gateway translation?
 - Should the bridging policy be operator-configured (whitelist) or dynamic (route quality)?
-- Compose with §8 cryptography — cross-network traffic probably needs different key material.
+- Compose with §8 cryptography: cross-layer traffic should keep end-to-end
+  confidentiality while gateways see only routing headers.
 
 ### 7.0 Wire-format decisions (LOCKED 2026-05-12)
 
@@ -966,14 +1391,16 @@ Step 7 — Bob receives:
 - **§8.1 crypto** — provides the per-pair session_key + identity card mechanism. `ctr` is the per-pair message counter derived in §8.1.
 - **§9 T2 privacy** — `src` and `orig` both removed from DATA wire; only `next` and `dst` are addressing-related plaintext.
 - **§1 anti-spam** — RTS/CTS observation counts work unchanged because msg_id (= `ctr & 0xF` echo) is still present at the hop-level RTS-CTS handshake.
-- **§7 multi-network** — `addr_len + dst` IS the multi-network addressing. Gateways are nodes whose BCN advertises bridging capability (gateway-discovery design pending in **BCN re-engineering**, separate work item).
+- **§7 multi-layer** — `addr_len + dst` IS the multi-layer addressing.
+  Gateways are nodes whose BCN advertises bridging capability.
 
 **What's NOT yet decided / open work.**
 
-- **BCN re-engineering** is the next major design item. Current BCN advertises self + routes within a single network. With hierarchical routing it needs to:
-  - Advertise bridging capability ("I'm a layer-14 gateway, reachable from this leaf")
+- **BCN re-engineering** is the next major design item. Current BCN advertises self + routes within a single layer. With hierarchical routing it needs to:
+  - Advertise bridging capability ("I'm a layer gateway, reachable from this layer")
   - Cross-layer route advertisement OR pull-based route discovery via `?` queries
-  - Avoid foreign-network pollution (today's `network_id` filter dropped foreign frames; the new model needs cryptographic/structural equivalent)
+  - Avoid foreign-layer pollution (`leaf_id = layer_id & 0x0f` filters the
+    active layer; admin boundaries need policy/keys)
   - Anti-flooding: gateways MUST NOT advertise every foreign destination; only "I can reach layer-N network X"
 - **Gateway policy** — automatic (any node with multi-network PSKs becomes bridge) vs explicit operator config. Deferred to implementation.
 - **Layer naming finalization** — values 0-13 reserved; precise role labels still TBD.
@@ -997,8 +1424,8 @@ design discussion follows for context.
 
 ---
 
-**Problem statement.** Today's BCN advertises `(src, [dest, next, score, hops])` entries — all 1-byte node IDs within a single network. Under §7.1's hierarchical model, BCN needs to:
-1. Indicate which leaf network the emitter belongs to (replacement for today's `network_id` filter role, which was repurposed in DATA as `addr_len`)
+**Problem statement.** Today's BCN advertises `(src, [dest, next, score, hops])` entries — all 1-byte node IDs within a single layer. Under §7.1's hierarchical model, BCN needs to:
+1. Indicate which layer the emitter belongs to (`leaf_id = layer_id & 0x0f`)
 2. Mark which destinations in the BCN are gateways (members of higher layers)
 3. Advertise the emitter's own gateway capability and its per-layer activity schedule (for single-radio TDM, see §7.3)
 4. Stay wire-cost-neutral vs today for non-gateway leaf BCNs
@@ -1035,14 +1462,14 @@ Schedule record (4 bytes — per upper layer this gateway bridges to):
 | `'B'` tag | 8 | unchanged |
 | `has_schedule` | 1 | if 1, schedule records follow byte 3 (gateway emitter with TDM schedule for upper layers) |
 | `n_entries` | 4 | route entry count; sentinel 0xF means "read 1-byte n_extended after schedule (if any)" |
-| `leaf_id` | 4 | emitter's leaf-network ID (replaces today's `network_id` filter role); receivers drop foreign-leaf BCNs |
+| `leaf_id` | 4 | emitter's active layer nibble (`layer_id & 0x0f`); receivers drop foreign-layer BCNs |
 | `self_gateway_flag` | 1 | emitter is a gateway (= member of some upper layer); fast bootstrap before others advertise me |
-| `src` | 8 | emitter's leaf-local node ID (unchanged from today) |
+| `src` | 8 | emitter's layer-local node ID (unchanged from today) |
 | route `dest`, `next` | 8+8 | unchanged from today |
 | route `score_bucket` | 4 | unchanged: SNR bucket, 2 dB resolution |
 | route `hops` | 3 | reduced from 4 bits (protocol caps at 8 hops anyway → 3 bits = 0-7 is fine) |
 | route `is_gateway` | 1 | this destination is a gateway (member of some upper layer); propagates transitively via `rt_merge` |
-| schedule `layer` | 4 | upper layer this record describes (14, 13, 12, etc.) |
+| schedule `layer` | 4 | layer nibble this record describes (`layer_id & 0x0f`) |
 | schedule `sf` | 8 | SF used on that layer (could shrink to 4 bits later) |
 | schedule `duration_100ms` | 8 | how long the gateway is active on this layer per visit (0.1 - 25.5 s) |
 | schedule `offset_from_bcn` | 8 | seconds from THIS BCN's reception to the next layer-window opening (0-255 s); receiver anchors on its local `bcn_rx_time` |
@@ -1088,6 +1515,17 @@ R re-anchors at every BCN reception. Drift between BCNs is bounded by clock-drif
 
 **Problem statement.** A gateway node participates in two or more layers (e.g., leaf SF7 + layer-14 SF11). A single LoRa radio can only be tuned to ONE (SF, frequency) at any instant. To support multi-layer gateway participation on consumer-grade hardware (no dual-radio), the protocol needs a time-division scheme — the gateway alternates between layers on a known schedule, and peers consult that schedule to time their interactions.
 
+**Layer identity.** Config uses full `layer_id`; the wire carries only
+`leaf_id = layer_id & 0x0f` in BCN/RTS. A gateway retune switches the active
+layer context: `leaf_id`, `routing_sf`, `allowed_data_sfs`, route table view,
+and BCN schedule all belong to the currently active layer.
+
+**Mobility use case.** Mobiles are not special-cased in the radio stack. A
+mobile fleet can be assigned to layer 2 with control SF9 while the static city
+mesh remains layer 1 with control SF8. Stationary gateways bridge between the
+two layers; stationary layer-2 nodes are allowed. This lets mobile support test
+the real gateway architecture instead of adding a mobile-only SF override.
+
 **Hybrid scheduling (the chosen mechanism).**
 
 - **Primary layer:** the gateway's default state (typically the leaf layer where most of its traffic lives, e.g., SF7).
@@ -1103,15 +1541,32 @@ The gateway's BCN includes schedule records — one per upper layer it participa
 
 **Listen-on-overlap (intra-upper-layer hops).**
 
-When two gateways G_a and G_b in the same upper layer need to communicate, both must be on that layer simultaneously. Their schedules are independent (each picks its own offset, no coordination).
+When two gateways G_a and G_b in the same upper layer need to communicate, both must be on that layer simultaneously. There is no clock-sync or central coordinator — each gateway picks its own offset — but the offset is NOT static: each gateway continuously adjusts to align with the peers it actually exchanges L14 traffic with (see **Adaptive offset** below).
 
 Mechanism:
 - G_a's BCN announces its layer-14 schedule
 - G_b receives G_a's BCN, computes G_a's L14 window (relative to G_b's local time)
 - G_b similarly knows its own layer-14 schedule
 - For G_b to TX to G_a on layer 14: G_b waits for a time when BOTH are on layer 14 (= intersection of their windows)
-- If windows don't currently overlap: G_b queues the frame; over a few BCN cycles, schedule drift OR adaptive offset shifting (gateway picks offset to align with observed peer schedules) creates overlap
+- If windows don't currently overlap: G_b queues the frame; the adaptive-offset mechanism (next paragraph) causes both gateways to converge their offsets toward overlap within a few BCN periods
 - Cascade-requeue total-wallclock cap applies (§5.6); frames that can't find overlap within ~minutes drop with `cross_layer_giveup`
+
+**Adaptive offset (required mechanism, not an optional optimization).**
+
+Without offset adjustment, two gateways with 20 s windows on a 300 s period have ~6.7 % random overlap per cycle; a 3-hop L14 path drops to ~0.03 % per cycle of synchronous-overlap delivery. Multi-hop L14 routing would be effectively unusable. Adaptive offset converges the gateway-cluster to overlapping windows over a small number of BCN periods, making multi-hop L14 practical.
+
+Algorithm (each gateway runs it independently, on its own BCN emission tick):
+- G maintains `peer_traffic_weight[peer_id]` from observed recent L14 forwarding activity to/from that peer (rolling window, e.g. last 10 min).
+- For each candidate offset Δ in `[0, period - duration]` (search granularity = 1 s is plenty), G computes
+  `score(Δ) = Σ over L14 peers p ( peer_traffic_weight[p] × overlap_seconds(G's window at Δ, p's last-known window) )`.
+- G picks `Δ* = argmax score(Δ)`, subject to a per-period drift cap `max_offset_drift_per_period_s` so the offset moves smoothly instead of jumping (prevents oscillation when peers are also adjusting).
+- A gateway with no L14 peer traffic yet keeps its boot-time offset (e.g. derived from `node_id`); no penalty for being un-aligned with strangers.
+
+Convergence: clusters of gateways that frequently communicate with each other converge to mutually overlapping offsets within ~3-5 BCN cycles (≈15-25 min at default 5 min BCN period). Two clusters that never exchange L14 traffic remain independent — there is no forced global alignment.
+
+Concentration safeguard: full alignment of ALL gateways onto the same window would simultaneously blank all leaf-15 service across the network. Two mitigations:
+- `max_offset_drift_per_period_s` caps step size; cluster formation is favoured over global collapse.
+- A gateway whose top-traffic peer's window is already crowded with other gateways may prefer a bridging offset (partial overlap with two clusters) over full alignment with one — implementation is local, no extra wire.
 
 **Layer-15 peer active avoidance.**
 
@@ -1128,6 +1583,25 @@ if next is a known gateway with schedule AND self.now() is inside gateway's uppe
 ```
 
 This composes with existing LBT defer and duty-cycle pre-check.
+
+**Multi-hop case: hold-at-gateway-neighbor (no schedule propagation needed).**
+
+A node N+ that is 2+ hops from gateway G does NOT need G's schedule. It RTSes
+normally toward G via its next-hop forwarder F. The active-avoidance rule
+applies at F (which IS a direct neighbour of G and therefore receives G's
+BCN): when F has a pending DATA whose `next == G` AND `self.now()` falls
+inside G's upper-layer window, F holds the DATA in its outbound queue until
+G's leaf window resumes (bounded by the schedule's `duration_100ms`).
+
+This pushes the timing logic to where the schedule knowledge naturally lives
+(one hop from G) and keeps wire cost zero — no need to propagate schedules
+transitively through `rt_merge` or BCN aggregation. The route entry's
+`is_gateway` bit is what tells F "this next-hop has a schedule worth
+consulting"; F looks up the cached schedule keyed by `next_hop_id`.
+
+Composes with cascade-requeue (§5.6): the hold counts against the same
+wallclock budget as any other forwarder-queue wait. Frames whose total
+wait would exceed the cascade cap drop with `gateway_window_giveup`.
 
 **Single shared duty-cycle budget.**
 
@@ -1189,18 +1663,18 @@ Acceptable for non-realtime use cases (chat, status, alerts). Not for sub-second
 
 | Concern | Impact | Mitigation |
 |---|---|---|
-| Layer-14 traffic crowds L15 capacity at gateway | Shared duty-cycle budget; heavy cross-layer use reduces local L15 throughput | §11.5 budget tiers signal saturation; senders learn via NACK and re-route |
+| Layer-14 traffic crowds L15 capacity at gateway | Shared duty-cycle budget; heavy cross-layer use reduces local L15 throughput | §11.5 budget tiers signal saturation; senders learn via NACK and re-route. The §2 `gateway_transit_penalty_db` keeps non-cross-layer traffic off gateways, so most of the budget stays available for actual cross-layer forwarding. Shared single-radio budget is intentional — no per-layer fairness virtualization. |
 | L15 peers wait for gateway's L15-active windows | Up to `duration` of dead time per cycle | Active avoidance keeps peers from wasting airtime; queue-and-retry handles the wait |
-| Schedule drift between gateways | Two gateways' schedules drift apart, breaking established overlap | BCN refresh re-anchors on each reception; adaptive offset (gateway shifts to align with observed peer activity) is optional optimization |
+| Schedule drift between gateways | Two gateways' schedules drift apart, breaking established overlap | BCN refresh re-anchors on each reception; adaptive offset (required mechanism — see **Adaptive offset** above) continuously realigns each gateway with the peers it has active L14 traffic with, keeping cluster overlap stable as topology changes |
 | Lost upper-layer BCNs (heard outside our sweep) | Stale upper-layer rt[] | Standard rt_aging applies; gateway's L14 rt[] has slightly higher staleness floor (proportional to sweep gap) |
 | Multi-hop L14 with non-overlapping schedules | Each hop pays its own wait-for-overlap | Cascade-requeue total wallclock cap (§5.6) kills truly impassable paths; works as backpressure |
 
 **Cross-references.** §7.1 (DATA frame consumes hierarchical `dst` that drives this routing), §7.2 (BCN carries schedule records that this protocol consumes), §5.6 cascade-requeue (handles bounded waits for cross-layer overlap), §11.5 budget tiers (gateway's shared duty cycle naturally signals saturation under load).
 
 **Open questions (deferred to implementation).**
-- Adaptive schedule offset: should gateways auto-shift to align with observed peer schedules? Pure local optimization; no protocol-level coordination needed.
 - Layer-14 (and higher) using completely separate frequency sub-bands? Out of scope for the base proposal — we assume shared frequency, different SFs.
 - Dual-radio hardware support: out of scope; future "professional" deployments could parallelise. Protocol design works either way.
+- Tuning of `max_offset_drift_per_period_s` and the per-peer-traffic-weight decay window. Initial defaults are placeholders; measurement under simulated multi-gateway scenarios will tune them.
 
 **Implementation cost estimate.**
 - BCN parse/pack extension for schedule records: ~30 lines
@@ -1208,7 +1682,8 @@ Acceptable for non-realtime use cases (chat, status, alerts). Not for sub-second
 - TDM scheduling state machine at gateway (sweep timer, retune logic, return-to-primary): ~150 lines
 - L15 active-avoidance pre-check in `tx_initiating`: ~30 lines
 - Inter-layer queue + overlap detection: ~100 lines
-- Tests: schedule drift, overlap windows, missed sweep recovery, cross-layer delivery, schedule advertisement: ~150 lines
+- Adaptive offset: peer-traffic-weight tracking + overlap-maximizing offset picker + drift-capped update: ~70 lines
+- Tests: schedule drift, overlap windows, missed sweep recovery, cross-layer delivery, schedule advertisement, adaptive offset convergence on 1-hop and 3-hop L14 paths: ~180 lines
 
 ### 7.4 Control-plane frame updates (RTS / CTS / ACK / NACK)
 
@@ -1246,7 +1721,7 @@ byte:  0   1     2      3                          4..(4+addr_len)         (5+ad
 | `src` (prev-hop) | 1 B | **kept 1 B** | RTS is the FIRST hop-level frame; receiver has no `pending_rx` yet, MUST know who's asking |
 | `dst` | 1 B | **variable, `addr_len + 1` B** | Hierarchical destination per §7.1 |
 | `next` | 1 B | **kept 1 B** | Radio-level addressing (unchanged) |
-| `network_id` (4 bits) | 4 bits | **renamed `leaf_id`, kept 4 bits** | Same role: drop foreign-leaf RTS before CTS work |
+| `network_id` (4 bits) | 4 bits | **renamed `leaf_id`, kept 4 bits** | Active layer nibble; drop foreign-layer RTS before CTS work |
 | `msg_id` (4 bits) | 4 bits | **replaced by `ctr_lo` (4 bits)** | Low nibble of the full 16-bit `ctr` carried in DATA; hop-level match identifier |
 | `sf_bitmap` | 1 B | **kept 1 B** | unchanged |
 | `payload_len` | 1 B | **kept 1 B** | unchanged |
@@ -2085,6 +2560,352 @@ realistic ceiling).**
 **Cross-references.** §1 anti-spam (behavioral fingerprint variant
 preserves rate-limiting under T2), §5 E2E ACK (return-cookie design),
 §8 cryptography (T2 is one layer of §8's confidentiality story).
+
+---
+
+## 10. Wire-format refactor v2 — 4-bit command + flag nibble (proposal)
+
+**Status — proposal.** Supersedes the §7.0 LOCKED 2026-05-12 layout.
+Backwards-incompatible; requires a coordinated v2 protocol bump (no
+mixed-version coexistence is possible — see §10.5 Migration).
+
+**Goal.** Reshape byte 0 of every frame so it always carries
+`cmd(4 hi) | flag_nibble(4 lo)` — uniform across primary AND extended
+commands. When `cmd == 0xF` (extension escape), byte 0's flag nibble
+is still flags (`leaf_id` for J family, per the consistency rule), and
+the 8-bit sub-command code lives in **byte 1**. This:
+
+1. Gives a single byte that tells the receiver frame type **and** the
+   most important flag for that frame (e.g., `leaf_id` for
+   layer-aware frames, `reason` for NACK, `ctr_lo` for matching
+   stateful responses).
+2. Adds 256 extra command codes via the escape (8-bit sub-code in
+   byte 1) for future protocol growth. The §2a `J` join family fits
+   here cleanly without burning a primary command slot, with room
+   for hundreds of future control frames before the second-level
+   escape (`0xFF`) is ever needed.
+3. Tidies per-frame flag layout that today is scattered across
+   bytes 1-3 in inconsistent positions per frame.
+4. Saves 1 byte per RTS (8 → 7 B) — meaningful because RTS is the
+   most-emitted frame in the system. Other frames mostly stay the
+   same size; the saving is in clarity and extension headroom, not
+   raw bytes.
+
+**Consistency rule.** `leaf_id` is always in the **low nibble** of
+whichever byte holds it. Single-byte layer-filter dispatch wherever
+`leaf_id` exists.
+
+### 10.1 Command code allocation
+
+| Code | Tag | Frame | Status |
+|---|---|---|---|
+| `0x0` | B | Beacon | implemented |
+| `0x1` | R | RTS | implemented |
+| `0x2` | C | CTS | implemented |
+| `0x3` | D | DATA | implemented |
+| `0x4` | K | ACK | implemented |
+| `0x5` | N | NACK | implemented |
+| `0x6` | Q | Query | implemented |
+| `0x7` – `0xE` | — | reserved (8 free primary slots) | future |
+| `0xF` | EXT | extended command escape (8-bit sub-code in byte 1; byte 0 low nibble remains a flag nibble) | new |
+
+### 10.2 Extended sub-command allocation (byte 1 when byte 0 high nibble = `0xF`)
+
+When the cmd nibble is `0xF`, the **next byte** (byte 1) carries the
+8-bit sub-command code. Byte 0's low nibble is NOT the sub-code —
+it remains a flag nibble like any primary command, and for layer-aware
+J frames it carries `leaf_id` (low nibble, per the §10 consistency
+rule). This makes the byte-0 layout fully uniform across primary and
+extended commands.
+
+| Sub-code | Name | Status |
+|---|---|---|
+| `0x00` | J_DISCOVER | designed (§2a) |
+| `0x01` | J_CLAIM | designed (§2a) |
+| `0x02` | J_DENY | designed (§2a) |
+| `0x03` | J_OFFER | implemented first slice (§2a) |
+| `0x04` – `0xFE` | reserved (251 slots) | future |
+| `0xFF` | second-level escape | reserved (would enable a 16-bit sub-code space via a third byte if 256 ever runs out) |
+
+**Cost.** Extended commands pay +1 B for the sub-code byte vs a
+primary command. J frames are rare events (one per node-boot/rejoin),
+so the byte is amortized to near-zero per-flight overhead.
+
+### 10.3 Per-frame layouts — old vs new
+
+#### B — Beacon
+
+Old (4 B header):
+```
+byte 0: 'B' (0x42)
+byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
+byte 2: src(8)
+byte 3: seen_bm(1) | has_ext(1) | n_entries(6)
+[has_schedule] layer_count(1) + 4×L schedule records
+n_entries × 3 B route entries
+[seen_bm] 32 B bitmap
+[has_ext] ext_len(1) + TLVs
+```
+
+New (4 B header):
+```
+byte 0: cmd=0x0(4 hi) | leaf_id(4 lo)
+byte 1: src(8)
+byte 2: has_schedule(1) | self_gateway(1) | is_mobile(1)
+        | has_seen_bm(1) | has_ext(1) | rsv(3)
+byte 3: n_entries(7 hi) | rsv(1 lo)
+[has_schedule] layer_count(1) + 4×L schedule records
+n_entries × 3 B route entries
+[has_seen_bm] 32 B bitmap
+[has_ext] ext_len(1) + TLVs
+```
+
+Δ: 0 B header. Layer filter is 1-byte (was 2-byte).
+`n_entries` is 7 bits (0–127) — physical max with 255 B LoRa frame and
+3 B per entry is ~80; 7 bits is comfortable headroom without
+over-allocating. 3 reserved bits in byte 2 + 1 in byte 3 = 4 reserved
+bits for future BCN flags.
+
+#### R — RTS
+
+Old (8 B in-leaf):
+```
+byte 0: 'R' (0x52)
+byte 1: src(8)
+byte 2: next(8)
+byte 3: addr_len(3 hi) | rsv(1) | leaf_id(4 lo)
+byte 4: dst(8)  [longer when addr_len>0]
+byte 5: ctr_lo(4 hi) | rsv(4 lo)
+byte 6: sf_bitmap(8)
+byte 7: payload_len(8)
+```
+
+New (**7 B** in-leaf):
+```
+byte 0: cmd=0x1(4 hi) | leaf_id(4 lo)
+byte 1: src(8)
+byte 2: next(8)
+byte 3: ctr_lo(4 hi) | addr_len(3) | rsv(1 lo)
+byte 4: dst(8)  [longer when addr_len>0]
+byte 5: sf_bitmap(8)
+byte 6: payload_len(8)
+```
+
+Δ: **−1 B**. Layer filter is 1-byte. Each hierarchy level still costs +1 B.
+
+#### C — CTS
+
+Old (3 B):
+```
+byte 0: 'C' (0x43)
+byte 1: ctr_lo(4 hi) | (sf-5)(3) | already_received(1 lo)
+byte 2: to(8)
+```
+
+New (3 B):
+```
+byte 0: cmd=0x2(4 hi) | ctr_lo(4 lo)
+byte 1: (sf-5)(3 hi) | already_received(1) | rsv(4 lo)
+byte 2: to(8)
+```
+
+Δ: 0 B. `ctr_lo` in cmd-byte for fast match against `pending_tx.ctr_lo`.
+Byte 1 has 4 spare bits.
+
+#### D — DATA
+
+Old (12 + n B in-leaf, addr_len=0):
+```
+byte 0: 'D' (0x44)
+byte 1: addr_len(3) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
+byte 2: next(8)
+byte 3: dst(8)  [longer when addr_len>0]
+byte 4: hops_remaining(4) | committed_hops(4)
+byte 5: prev_fwd_rt_hops(8)
+bytes 6-7: ctr(16, LE)
+bytes 8..(7+n): ciphertext(n)
+bytes (8+n)..(11+n): MAC(4)
+```
+
+New (12 + n B in-leaf):
+```
+byte 0: cmd=0x3(4 hi) | addr_len(3) | rsv(1 lo)
+byte 1: E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(5)
+byte 2: next(8)
+byte 3: dst(8)  [longer when addr_len>0]
+byte 4: hops_remaining(4) | committed_hops(4)
+byte 5: prev_fwd_rt_hops(8)
+bytes 6-7: ctr(16, LE)
+bytes 8..(7+n): ciphertext(n)
+bytes (8+n)..(11+n): MAC(4)
+```
+
+Δ: 0 B. `addr_len` moves to cmd-byte flags (parser-dispatch first byte);
+byte 1 still holds the semantic flags with 5 spare bits.
+
+#### K — ACK
+
+Old (3 B):
+```
+byte 0: 'K' (0x4B)
+byte 1: ctr_lo(4 hi) | budget_hint(2) | snr_bucket(2 lo)
+byte 2: to(8)
+```
+
+New (3 B):
+```
+byte 0: cmd=0x4(4 hi) | ctr_lo(4 lo)
+byte 1: budget_hint(2 hi) | snr_bucket(2) | rsv(4 lo)
+byte 2: to(8)
+```
+
+Δ: 0 B. `ctr_lo` in cmd-byte (same reasoning as CTS). 4 reserved bits in byte 1.
+
+#### N — NACK
+
+Old (4 B):
+```
+byte 0: 'N' (0x4E)
+byte 1: reason(4 hi) | ctr_lo(4 lo)
+byte 2: payload(8)
+byte 3: to(8)
+```
+
+New (4 B):
+```
+byte 0: cmd=0x5(4 hi) | reason(4 lo)
+byte 1: ctr_lo(4 hi) | rsv(4 lo)
+byte 2: payload(8)
+byte 3: to(8)
+```
+
+Δ: 0 B. `reason` in cmd-byte enables first-byte reason-dispatch (BUDGET vs
+BUSY_RX vs HOP_BUDGET vs LOOP_DUP branch immediately).
+
+#### Q — Query
+
+Old (4 B):
+```
+byte 0: 'Q' (0x51)
+byte 1: src(8)
+byte 2: dest(8)
+byte 3: leaf_id(4 hi) | opcode(2) | mobile(1) | rsv(1 lo)
+```
+
+New (4 B):
+```
+byte 0: cmd=0x6(4 hi) | leaf_id(4 lo)
+byte 1: src(8)
+byte 2: dest(8)
+byte 3: opcode(2 hi) | mobile(1) | rsv(5 lo)
+```
+
+Δ: 0 B. Layer filter is 1-byte. 5 reserved bits in byte 3.
+
+#### J_DISCOVER (extended, new)
+
+New (7 B):
+```
+byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
+byte 1: sub_code = 0x00 (J_DISCOVER)
+byte 2: mobile(1) | stationary(1) | gw_capable(1) | rsv(5)
+bytes 3-6: key_hash32(32)
+```
+
+#### J_CLAIM (extended, new)
+
+New (10+ B; exact size depends on nonce width chosen at §8.1 lock-in):
+```
+byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
+byte 1: sub_code = 0x01 (J_CLAIM)
+byte 2: mobile(1) | stationary(1) | gw_capable(1) | rsv(5)
+byte 3: proposed_node_id(8)
+bytes 4-7: key_hash32(32)
+byte 8: claim_epoch(8)                              -- §2a-review tie-break
+bytes 9..: nonce (width TBD; ≥1 B)
+```
+
+#### J_DENY (extended, new)
+
+New (12 B):
+```
+byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
+byte 1: sub_code = 0x02 (J_DENY)
+byte 2: reason(4 hi) | rsv(4 lo)
+byte 3: denied_node_id(8)
+bytes 4-7: owner_key_hash32(32)
+bytes 8-11: claimant_key_hash32(32)
+```
+
+#### J_CONFLICT (extended, future)
+
+New (12 B):
+```
+byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
+byte 1: sub_code = 0x03 (J_CONFLICT)
+byte 2: conflicting_node_id(8)
+bytes 3-6: observed_key_hash32(32)
+bytes 7-10: known_key_hash32(32)
+byte 11: claim_epoch(8)
+```
+
+### 10.4 Net wire-cost summary
+
+| Frame | Old size | New size | Δ |
+|---|---|---|---|
+| B header | 4 + var | 4 + var | 0 |
+| R (in-leaf, addr_len=0) | 8 | **7** | **−1** |
+| R (addr_len=1) | 9 | 8 | −1 |
+| C | 3 | 3 | 0 |
+| D (in-leaf) | 12 + n | 12 + n | 0 |
+| K | 3 | 3 | 0 |
+| N | 4 | 4 | 0 |
+| Q | 4 | 4 | 0 |
+| J_DISCOVER | n/a | 7 | new (extended, sub-code in byte 1) |
+| J_CLAIM | n/a | 10+ | new (extended) |
+| J_DENY | n/a | 12 | new (extended) |
+| J_CONFLICT | n/a | 12 | new (extended, future) |
+
+Per-flight typical RTS savings: a 1-RTS clean send saves 1 B; a failed
+3-retry × 3-alt cascade saves up to 9 B of channel air per flight.
+Aggregate at dense-mesh scale where RTSes dominate routing-SF airtime.
+
+### 10.5 Migration
+
+This is a backwards-incompatible wire change — there is no clean
+mixed-version mode. Byte 0 = `0x42` (old `'B'`) parses as v2
+`cmd=0x4` (= K, ACK) with garbage flag bits and a foreign body; every
+old frame would be misparsed as a different frame type.
+
+Three viable paths:
+
+1. **Big-bang flag day.** Coordinate the upgrade across the whole
+   deployment. Easiest in single-operator meshes.
+2. **Skip this refactor entirely.** ASCII-letter tags work today;
+   the 1 B/RTS saving and clean-extension benefits may not justify
+   the disruption. Tracked here as a documented option, not lost.
+3. **Bundle with another major wire bump.** The §2a join landing
+   AND §8.1 crypto integration both already require coordinated
+   upgrades. Bundling the byte-0 refactor with either spreads the
+   coordination cost.
+
+**Recommendation: option 3.** Defer until either §2a or §8.1 is
+ready to land, then refactor in one coordinated bump. Spreading the
+disruption across one v2 break is better than two.
+
+### 10.6 Open questions
+
+- Should the J_CLAIM `nonce` be 8 B (per typical crypto-nonce width)
+  or 4 B (compact)? Decided at §8.1 lock-in.
+- Is it worth allocating one of the 8 reserved primary command codes
+  (`0x7`–`0xE`) to a future *identity card* frame, or should that
+  live behind the EXT escape like J? Identity-card use is rare
+  (during join + on demand); EXT is appropriate.
+- More aggressive optimization for BCN: eliminate `n_entries`
+  entirely by reordering optional sections to come BEFORE route
+  entries, so the entry count is derivable from frame length /
+  3. Would save another 1 B per BCN at the cost of reordering
+  wire fields. Tracked as a follow-up.
 
 ---
 

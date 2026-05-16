@@ -68,6 +68,9 @@ def summarize_events(cfg: dict, events_path: Path) -> dict:
     warmup = analyze.find_warmup_end_ms(str(events_path))
     pkt_label = analyze.build_pkt_label_map(str(events_path))
     non_deliv = analyze.section_non_delivered_classifier(str(events_path), cfg, warmup)
+    delivery = analyze.section_delivery_breakdown(str(events_path), warmup)
+    cold_windows = analyze.section_cold_start(delivery)
+    waste = analyze.section_lifetime_waste(delivery)
     rts_setup = analyze.section_rts_setup_attribution(
         str(events_path), cfg, pkt_label, warmup)
 
@@ -166,6 +169,8 @@ def summarize_events(cfg: dict, events_path: Path) -> dict:
         "rf_drops_by_label": rf_drops_by_label,
         "data_rf_drops": data_rf_drops,
         "state_counts": non_deliv["state_counts"],
+        "cold_windows": cold_windows,
+        "waste": waste,
         "top_unresolved_dst": Counter({
             name: count for name, count, _ in non_deliv["top_unresolved_dst"]
         }),
@@ -236,6 +241,9 @@ def main() -> None:
     total_delivered = 0
     total_airtime = Counter()
     total_label_count = Counter()
+    cold_windows_total: list[Counter] = []
+    waste_delivered_time_s = 0.0
+    waste_exhausted_time_s = 0.0
 
     print(f"# config: {args.config}")
     print(f"# runs:   {args.runs}")
@@ -258,6 +266,16 @@ def main() -> None:
         total_delivered += s["delivered"]
         total_airtime.update(s["label_airtime"])
         total_label_count.update(s["label_count"])
+        for idx, row in enumerate(s.get("cold_windows", [])):
+            while len(cold_windows_total) <= idx:
+                cold_windows_total.append(Counter())
+            cold_windows_total[idx]["start_ms"] += int(row.get("start_ms", 0) or 0)
+            cold_windows_total[idx]["end_ms"] += int(row.get("end_ms", 0) or 0)
+            cold_windows_total[idx]["sent"] += int(row.get("sent", 0) or 0)
+            cold_windows_total[idx]["delivered"] += int(row.get("delivered", 0) or 0)
+        waste = s.get("waste", {})
+        waste_delivered_time_s += float(waste.get("total_deliv_ms", 0.0) or 0.0) / 1000.0
+        waste_exhausted_time_s += float(waste.get("total_exh_ms", 0.0) or 0.0) / 1000.0
         for key in (
             "counts",
             "rf_drops",
@@ -295,6 +313,24 @@ def main() -> None:
           f"{100*total_delivered/total_msgs if total_msgs else 0:.1f}%")
     print(f"payload_eff:   {100*data_air/total_tx_air if total_tx_air else 0:.1f}%")
     print(f"total_airtime: {total_tx_air/1000:.1f}s")
+    if cold_windows_total:
+        print("\ndelivery by enqueue-time window:")
+        print(f"  {'window (s)':<18} {'sent':>6} {'delivered':>10} {'rate':>7}")
+        for row in cold_windows_total:
+            sent = row["sent"]
+            delivered = row["delivered"]
+            n_runs = max(1, args.runs)
+            start_s = (row["start_ms"] / n_runs) / 1000.0
+            end_s = (row["end_ms"] / n_runs) / 1000.0
+            rate = 100.0 * delivered / sent if sent else 0.0
+            print(f"  {start_s:5.0f}-{end_s:<8.0f} {sent:>6} {delivered:>10} {rate:>6.1f}%")
+    if waste_delivered_time_s or waste_exhausted_time_s:
+        ratio = (waste_exhausted_time_s / waste_delivered_time_s
+                 if waste_delivered_time_s else 0.0)
+        print("\nlifetime channel-time waste:")
+        print(f"  delivered_time_s: {waste_delivered_time_s:.0f}")
+        print(f"  exhausted_time_s: {waste_exhausted_time_s:.0f}")
+        print(f"  exhausted/delivered ratio: {ratio:.1f}x")
 
     non_delivered_classes = Counter(agg["state_counts"])
     non_delivered_classes.pop("delivered", None)

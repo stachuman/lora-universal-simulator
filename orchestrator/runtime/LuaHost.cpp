@@ -30,7 +30,8 @@ LuaHost::LuaHost() {
     _node_registry = _lua["_LUS"]["nodes"];
 }
 
-void LuaHost::registerNode(int node_id, ScriptedNode* node) {
+void LuaHost::registerNode(int node_id, ScriptedNode* node, int protocol_node_id,
+                           uint32_t key_hash32) {
     sol::table node_tbl = _lua.create_table();
     node_tbl["self"]   = _lua.create_table();
     node_tbl["script"] = _lua.create_table();
@@ -38,12 +39,14 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node) {
     _node_registry[node_id] = node_tbl;
 
     if (node != nullptr) {
-        // Bind id/name + the runtime-method lambdas onto self. Lambdas capture
+        // Bind protocol id/name + the runtime-method lambdas onto self. Lambdas capture
         // `node` by pointer; the orchestrator owns ScriptedNode lifetime and
         // must keep it alive for as long as the Lua state references self.
         sol::table self = node_tbl["self"];
-        self["id"]   = node->id();
-        self["name"] = node->name();
+        self["id"]         = protocol_node_id;
+        self["runtime_id"] = node->id();
+        self["name"]       = node->name();
+        self["key_hash32"] = key_hash32;
         // NOTE: Each lambda takes a leading sol::object parameter that we
         // discard. Lua's colon syntax (`self:method(...)`) desugars to
         // `method(self, ...)`, so the bound function must accept that first
@@ -186,7 +189,7 @@ void LuaHost::bindSimGlobals(SimController& ctrl) {
             return ctrl.fireCommand(node, text);
         });
 
-    // sim:nodes() -> { {id, name, script}, ... }
+    // sim:nodes() -> { {id, runtime_id, name, script}, ... }
     sim.set_function("nodes",
         [&ctrl](sol::object /*self*/) {
             sol::state_view L(ctrl.luaHost().lua());
@@ -194,9 +197,15 @@ void LuaHost::bindSimGlobals(SimController& ctrl) {
             const auto& nodes = ctrl.config().nodes;
             for (size_t i = 0; i < nodes.size(); ++i) {
                 sol::table entry = L.create_table();
-                entry["id"]     = static_cast<int>(i);
-                entry["name"]   = nodes[i].name;
-                entry["script"] = nodes[i].script_path;
+                const int protocol_id = nodes[i].node_id >= 0
+                    ? nodes[i].node_id
+                    : static_cast<int>(i);
+                entry["id"]         = protocol_id;
+                entry["runtime_id"] = static_cast<int>(i);
+                entry["name"]       = nodes[i].name;
+                entry["script"]     = nodes[i].script_path;
+                entry["key_hash32"] = static_cast<uint32_t>(nodes[i].key_hash32);
+                entry["public_key"] = nodes[i].public_key;
                 entry["is_mobile"] =
                     (nodes[i].velocity_mps > 0.0f) ||
                     (nodes[i].config.is_object() &&

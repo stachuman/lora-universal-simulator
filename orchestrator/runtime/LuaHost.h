@@ -37,7 +37,8 @@ public:
     // Build the per-node registry slot: _LUS.nodes[node_id] = { self, script, timers }.
     // The ScriptedNode pointer is currently unused here; T12 will use it to bind
     // runtime callbacks (tx/after/every/...) onto self before on_init runs.
-    void registerNode(int node_id, ScriptedNode* node);
+    void registerNode(int node_id, ScriptedNode* node, int protocol_node_id,
+                      uint32_t key_hash32);
 
     // Load (or reuse cached) script chunk at `path`, run it in a fresh environment,
     // and copy any of {on_init, on_recv, on_command, on_radio_busy} into the

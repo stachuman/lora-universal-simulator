@@ -410,7 +410,11 @@ void SimController::initialize() {
 
     // Register + load scripts (must precede onInit so `self` is populated).
     for (int i = 0; i < n; ++i) {
-        _host.registerNode(i, _nodes[i].get());
+        const int protocol_node_id = _cfg.nodes[i].node_id >= 0
+            ? _cfg.nodes[i].node_id
+            : i;
+        _host.registerNode(i, _nodes[i].get(), protocol_node_id,
+                           _cfg.nodes[i].key_hash32);
         std::string resolved =
             resolveScriptPath(_cfg.nodes[i].script_path, _cfg.source_path);
         _host.loadScript(i, resolved);
@@ -991,9 +995,12 @@ void SimController::deliverReceptionsForStep() {
             }
 
             // Deliver to the script.
+            const int protocol_sender_id = _cfg.nodes[tx.sender_id].node_id >= 0
+                ? _cfg.nodes[tx.sender_id].node_id
+                : tx.sender_id;
             _nodes[rcv]->onRecv(tx.bytes, snr_at_rcv, lp.rssi,
                                 /*link_id=*/0,
-                                /*src_id=*/tx.sender_id,
+                                /*src_id=*/protocol_sender_id,
                                 /*sim_ms=*/now);
             // Use the PACKET's sf/bw/cr (= the receiver's at demod time,
             // since LoRa requires sf+bw match for successful rx). Don't
@@ -1087,9 +1094,12 @@ void SimController::registerTransmissionsForStep() {
                     if (!_node_alive[r]) continue;
                     LinkParams lp;
                     if (!_links->getLink(i, r, lp)) continue;
+                    const int protocol_sender_id = _cfg.nodes[i].node_id >= 0
+                        ? _cfg.nodes[i].node_id
+                        : i;
                     _nodes[r]->onRecv(p.bytes, lp.snr, lp.rssi,
                                       /*link_id=*/0,
-                                      /*src_id=*/i,
+                                      /*src_id=*/protocol_sender_id,
                                       /*sim_ms=*/now);
                     // Use the packet's sf/bw/cr — see comment on the
                     // matching block in the main rx path. The receiver's
@@ -1396,8 +1406,11 @@ void SimController::registerTransmissionsForStep() {
                     if (sf == just_pushed.sf) { sf_match = true; break; }
                 }
                 if (sf_match) {
+                    const int protocol_sender_id = _cfg.nodes[i].node_id >= 0
+                        ? _cfg.nodes[i].node_id
+                        : i;
                     _nodes[observer]->onPreambleDetected(
-                        just_pushed.start_ms, i, lp.snr);
+                        just_pushed.start_ms, protocol_sender_id, lp.snr);
                 }
             }
         }
