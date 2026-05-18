@@ -58,7 +58,7 @@ note calls it out.
 | 6.2 | Gateway — full layer separation workbench | s10: next-step scenario for route/bind state scoped by `(layer_id,node_id)` |
 | 6.3 | Gateway — three-layer stress | s11: two target layers, same-SF foreign traffic, JOIN learners, gateway-picker and schedule-defer checks |
 | 6.4 | Gateway sweep cycle (mechanism) | offset → activate upper-layer → emit BCN there → return after duration → re-arm |
-| 6.5 | Cross-layer envelope handoff (mechanism) | sender packs envelope → gateway resolves binding → retunes via `tx_layer_id` → forwards in target layer |
+| 6.5 | Cross-layer envelope handoff (mechanism) | sender packs envelope → gateway resolves binding (or defers and emits `Q:HASH_QUERY` if unknown) → retunes via `tx_layer_id` → forwards in target layer |
 | 6.6 | Layer-15 active-avoidance (mechanism) | non-gateway peer defers RTS while a direct gateway is scheduled away |
 
 ---
@@ -1678,32 +1678,34 @@ l4_seed send_layer(layer=5, dst_key_hash32=l5_j1)
 
 The reverse path from `l5_seed` to `l4_j1` proves the symmetric case.
 
-**Known v1 limitation exposed by s09.** Gateway radio context is layer-aware,
-but the main route table is not yet fully layer-scoped. This scenario avoids
-short-id collisions across layers and keeps the topology small enough that
-shared `rt[]` state is not ambiguous.
+**Known v1 limitation exposed by s09.** Gateway radio context and runtime
+route/identity state are layer-aware, but gateways still use their primary
+short ID while sweeping a bridged layer. Scenarios therefore keep gateway
+short IDs distinct in every layer they participate in until per-layer gateway
+leases are implemented.
 
 ## 6.2 Gateway — full layer separation workbench
 
-**Status.** Created as
-`scenarios/s10_two_layer_gateway_separation.json`; currently a copy of s09
-with a new description. This is the scenario to evolve while implementing
-full layer separation.
+**Status.** Implemented in
+`scenarios/s10_two_layer_gateway_separation.json`. It reuses ordinary short
+IDs across layers (`l4_seed` and `l5_seed` both use node ID 1) to prove that
+route and identity state are isolated by layer.
 
-**Desired next state.**
+**Current state.**
 
-- Route state becomes `rt[layer_id][dst_id]` instead of one shared `rt[dst]`.
-- Identity binding becomes layer-scoped:
-  `id_bind[layer_id][node_id]` and hash lookup by `(layer_id,key_hash32)`.
-- Candidate selection only considers routes from the TX/target layer.
+- Runtime state is represented as `layer_state[layer_id]` and the firmware's
+  legacy `self.rt`, `self.id_bind`, and `self.dest_seen_ms` names are active
+  layer pointers.
+- Candidate selection for explicit target-layer sends only considers routes
+  learned in that target layer.
 - Gateway remote binding remains keyed by `target_layer_id + key_hash32`.
 - Events that explain routing decisions include `active_layer_id`,
   `tx_layer_id`, and `dst_layer_id` where relevant.
 
-**Why this matters.** Once two layers can legally reuse the same short IDs,
-shared `rt[]` and shared `id_bind[]` become incorrect. Full separation is the
-step that makes `leaf_id = layer_id & 0x0f` practical beyond the current
-small smoke scenario.
+**Remaining limitation.** Gateway nodes do not yet have independent per-layer
+leases. A gateway still uses its primary short ID while sweeping a bridged
+layer, so two gateways that participate in the same layer must not share that
+short ID.
 
 ## 6.3 Gateway — three-layer stress
 
@@ -1913,13 +1915,86 @@ magic (routing misconvergence), it drops with
 `gateway_envelope_at_non_gateway` rather than delivering the binary
 prefix as user text.
 
+**Envelope replay protection.** Envelopes ride on standard DATA. The
+existing `seen_origins[(d.origin, d.dst, d.ctr)]` dedup runs **before** the
+gateway-envelope branch in `on_recv "D"`, so a replayed envelope (same
+prev-hop, same origin/dst/ctr) is dup-dropped at the standard-DATA layer
+and the handoff code never re-executes.
+
+**Deferred-handoff branch (gateway lacks binding for the target key).**
+When the gateway resolves the envelope but `gateway_remote_bind_find`
+returns `nil` (or `"ambiguous"`), the gateway does NOT drop. Instead it
+parks the envelope in `gateway_deferred_handoffs` and emits a
+`Q:HASH_QUERY` on the target layer to ask upper-layer peers to advertise
+the binding. The deferred entry drains when the binding appears, or is
+given up after `gateway_handoff_defer_ttl_ms`.
+
+```
+Gateway G (envelope target unknown)        Upper-layer peers
+                                                                  state
+G: on_recv "D", dst==self.id, gw_env != nil
+   gateway_binding_for_env(self, gw_env):
+     gateway_remote_bind_find(target_layer, key_hash) returns
+       nil OR (nil, "ambiguous")
+   defer_gateway_handoff(self, gw_env, d_origin, reason="not_found"):
+     insert into gateway_deferred_handoffs {
+       gw_env, origin=d_origin, queued_at_ms=now,
+       q_sent_at_ms, reason
+     }
+     emit_hash_route_query(target_layer_id, dst_key_hash32, reason):
+       activate_gateway_layer(rec, "q_hash")    ← retune to upper layer
+       pack_q(opcode=Q_OP_HASH_QUERY, dest=255,
+              key_hash32=dst_key_hash32)
+       tx_initiating 'Q' on target layer routing_sf
+     → emit gateway_handoff_deferred
+        {origin, via_gateway=self.id, target_layer_id, dst_key_hash32,
+         payload, reason, q_sent, ttl_ms, depth}
+
+                          ─Q(HASH_QUERY, key_hash32, leaf=L_target)──>
+                                                  some peer P with binding
+                                                  for (L_target, key_hash):
+                                                    pack_q(opcode=HASH_QUERY,
+                                                           dest=resolved_node_id,
+                                                           key_hash32=...)
+                                                    → emit q_hash_binding_tx
+                                                      {to, node, key_hash32,
+                                                       tx_layer_id, tx_leaf_id,
+                                                       tx_routing_sf}
+                                                    tx_initiating 'Q' response
+                          <─Q(HASH_QUERY response, dest=resolved_id)──
+G: on_recv "Q" opcode=HASH_QUERY, dest != 255:
+   gateway_note_remote_binding(L_target, resolved_id, key_hash32,
+                               source="q_hash_response")
+     → emit gateway_remote_bind_set {layer, node, key_hash32, source}
+   
+   try_drain_gateway_handoffs (periodic / on binding update):
+     for each deferred d:
+       binding = gateway_binding_for_env(d.gw_env)
+       if binding != nil and gateway_layer_enabled(layer):
+         enqueue_gateway_handoff(d.gw_env, d.origin, binding):
+           queue new flight with tx_layer_id = target_layer
+         → emit gateway_handoff_drained
+            {origin, via_gateway, target_layer_id, dst_key_hash32,
+             waited_ms, dst=binding.node_id, binding_source}
+       elif (now - d.queued_at_ms) >= gateway_handoff_defer_ttl_ms:
+         → emit gateway_handoff_giveup
+            {origin, via_gateway, target_layer_id, dst_key_hash32,
+             payload, waited_ms, reason}
+         drop deferred entry
+
+   ... once drained, the normal §6.5 handoff continues — gateway
+   activates target layer via tx_layer_id and emits the in-target-layer
+   DATA flight that reaches the destination.
+```
+
 **Pending refinements (see §6.2 workbench).**
 - Original origin is not propagated through the handoff — destination's
-  `delivered.origin` shows the gateway.
-- No envelope-level dedup at the gateway; a replayed envelope generates
-  two separate handoffs (different ctrs).
-- No retry across alternate gateways when `gateway_no_binding` fires;
-  the envelope drops at the first failed lookup.
+  `delivered.origin` shows the gateway, not the original sender. Needs
+  either an inner-payload convention or +5 B envelope extension.
+- The Q HASH_QUERY storm question — there's per-key dedup via
+  `q_queried[(layer,key)]` (TTL ≈ 5 s) but no aggregate rate cap. An
+  adversary could force HASH_QUERY-spam by sending envelopes to many
+  fictitious keys. Defense-in-depth; not a current correctness issue.
 
 ## 6.6 Layer-15 active-avoidance (mechanism)
 
@@ -1977,12 +2052,11 @@ queue_wakeup → become_free → pop item → issue_send again
 - `gateway_schedule_guard_ms` (default 100 ms): extra margin added to the
   defer so we don't race the gateway's `activate_primary_layer` event.
 
-**Open gap.** Currently consulted only from `issue_send` (first attempt).
-Retry paths (`tx_rts_retry`, `rts_timeout_fire`) don't re-check the
-gateway's schedule before re-emitting an RTS — if the original RTS was
-sent just before the sweep started, the retry will land inside the
-sweep window and waste airtime. Wiring `gateway_schedule_defer_ms`
-into the retry pre-check would close the loop.
+**Retry paths.** `gateway_schedule_defer_ms` is consulted from both
+`issue_send` and `tx_rts_retry`; `rts_timeout_fire` reaches the check
+transitively because it dispatches every retry through `tx_rts_retry`.
+A retry that would land inside the sweep window gets deferred with
+`source="tx_rts_retry"` instead of wasting an RTS attempt.
 
 ---
 
@@ -2028,11 +2102,13 @@ Cross-reference of mechanisms each scenario depends on:
 | Direct peer defer while gateway is scheduled away | Implemented | 6.1, 6.6 |
 | Gateway picker filters by observed bridged-layer set | Implemented | 6.3, 6.5 |
 | Non-gateway envelope-at-delivery drop (`gateway_envelope_at_non_gateway`) | Implemented | 6.5 |
-| Schedule-defer consulted on retry paths (not only initial RTS) | **Not implemented** | 6.6 open gap |
-| Full layer-scoped `rt[layer_id][node_id]` | **Not implemented** | 6.2 |
-| Full layer-scoped `id_bind[layer_id][node_id]` | **Not implemented** | 6.2 |
+| Schedule-defer consulted on retry paths (not only initial RTS) | Implemented | 6.6 |
+| Q HASH_QUERY + deferred gateway handoff with TTL (`gateway_handoff_deferred`/`drained`/`giveup`) | Implemented | 6.5 |
+| Full layer-scoped route state (`layer_state[layer_id].rt`) | Implemented | 6.2 |
+| Full layer-scoped identity binding (`layer_state[layer_id].id_bind`) | Implemented | 6.2 |
+| Independent per-layer gateway leases | **Not implemented** | 6.2 |
 | Original-origin propagation through gateway handoff | **Not implemented** | 6.5 |
-| Envelope dedup at gateway (replay protection) | **Not implemented** | 6.5 |
+| Envelope dedup at gateway (replay protection) | Implemented via standard DATA dedup before envelope handling | 6.5 |
 | Retry across alternate gateways on `gateway_no_binding` | **Not implemented** | 6.3, 6.5 |
 
 # Pointers

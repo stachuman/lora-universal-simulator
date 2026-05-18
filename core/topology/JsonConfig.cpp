@@ -468,17 +468,27 @@ static void validateConfig(const SimConfig& cfg) {
     // start < die when both are set.
     {
         size_t i = 0;
-        std::map<int, std::string> effective_node_ids;
+        std::map<std::pair<int, int>, std::string> effective_node_ids;
         for (const auto& nd : cfg.nodes) {
             const std::string ctx = "nodes[" + std::to_string(i++) + "]";
             const int effective_node_id = nd.node_id >= 0
                 ? nd.node_id
                 : static_cast<int>(i - 1);
-            auto [it, inserted] = effective_node_ids.emplace(effective_node_id, nd.name);
+            int layer_id = 0;
+            if (nd.config.is_object()) {
+                if (nd.config.contains("layer_id") && nd.config["layer_id"].is_number_integer()) {
+                    layer_id = nd.config["layer_id"].get<int>();
+                } else if (nd.config.contains("leaf_id") && nd.config["leaf_id"].is_number_integer()) {
+                    layer_id = nd.config["leaf_id"].get<int>();
+                }
+            }
+            auto [it, inserted] = effective_node_ids.emplace(
+                std::make_pair(layer_id, effective_node_id), nd.name);
             if (!inserted) {
                 errors.push_back(ctx + ".node_id/effective id ("
                     + std::to_string(effective_node_id)
-                    + ") duplicates node \"" + it->second + "\"");
+                    + ") in layer " + std::to_string(layer_id)
+                    + " duplicates node \"" + it->second + "\"");
             }
             if (nd.start_at_ms > 0
                 && nd.start_at_ms >= cfg.simulation.duration_ms) {

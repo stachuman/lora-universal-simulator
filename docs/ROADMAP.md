@@ -300,9 +300,11 @@ Current implementation state:
 3. Gateway secondary-layer config, BCN schedule emission, and schedule telemetry are implemented:
    `gateway_schedule_change`, `gateway_schedule_observed`, and `tx_gateway_schedule_defer`.
 4. Single-gateway cross-layer DATA handoff is implemented for known
-   `target_layer_id + dst_key_hash32` bindings.
-5. Remaining work: full layer-scoped route/identity state, multi-gateway overlap
-   search, and adaptive schedule-offset tuning.
+   `target_layer_id + dst_key_hash32` bindings; unknown bindings are resolved
+   lazily with target-layer `Q:HASH_QUERY`.
+5. Runtime route/identity state is layer-scoped via `layer_state[layer_id]`.
+6. Remaining work: per-layer gateway leases, multi-gateway reachability policy,
+   multi-gateway overlap search, and adaptive schedule-offset tuning.
 
 ### Composition with other roadmap items
 
@@ -1675,10 +1677,19 @@ Implemented first-slice gateway v1:
 - Gateways emit BCN schedule records (`has_schedule=1`) and
   `gateway_schedule_change` telemetry when the active radio context changes.
 - Direct peers cache gateway schedules from BCN and defer RTS while a gateway
-  is scheduled away from their layer.
+  is scheduled away from their layer. The defer pre-check fires from both
+  `issue_send` and `tx_rts_retry`, so retry paths after `rts_timeout_fire`
+  also avoid re-emitting RTS into a gateway's sweep window.
 - `send_layer` gateway selection filters candidates by observed bridged-layer
   set from gateway BCN schedule records; gateways that do not advertise the
   target layer are not eligible.
+- Gateway-side lazy binding resolution: when a gateway consumes a cross-layer
+  envelope but lacks `gateway_remote_bind[(layer,key_hash32)]`, it emits a
+  `Q:HASH_QUERY` on the target layer and parks the envelope in
+  `gateway_deferred_handoffs`. The deferred entry drains when the binding
+  appears (via Q response, BCN, or J observation) or gives up after
+  `gateway_handoff_defer_ttl_ms`. Events: `gateway_handoff_deferred`,
+  `gateway_handoff_drained`, `gateway_handoff_giveup`, `q_hash_binding_tx`.
 - JOIN uses the active layer context: a new node only needs frequency/control
   SF out of band and learns DATA SF policy from `J_OFFER`.
 - Cross-layer `send_layer` queues a gateway envelope addressed by
@@ -1687,27 +1698,28 @@ Implemented first-slice gateway v1:
   (`gateway_remote_bind_set`), not by walking simulator node lists.
 - Gateway handoff restores the correct target/primary layer control SF and
   DATA-SF bitmap before forwarding.
+- Route/identity runtime state is layer-scoped by `layer_state[layer_id]`;
+  `rt[]`, `id_bind[]`, `dest_seen_ms`, and beacon paging are active-layer
+  views. Direct route learning is gated behind per-frame leaf validation.
+- JSON validation now treats `node_id` uniqueness as per-layer, not global.
 - Passing acceptance scenario: `scenarios/s09_two_layer_gateway_debug.json`.
   It uses layer 4 control SF7/DATA SF10 and layer 5 control SF8/DATA SF11,
   with six join-required nodes learning DATA SFs from JOIN offers.
+- Passing separation scenario: `scenarios/s10_two_layer_gateway_separation.json`.
+  It reuses ordinary short IDs across layers to catch route/id-bind pollution.
 
 Not yet implemented:
 
-- Full layer-scoped route state: current `rt[]` is still mostly keyed by
-  short node id, not `(layer_id,node_id)`.
-- Full layer-scoped identity binding: current `id_bind[]` is not yet cleanly
-  partitioned by layer.
-- Safe short-id reuse across layers where the same node id appears in both
-  layers.
+- Independent per-layer gateway leases: a gateway still uses its primary
+  short ID when sweeping a bridged layer. Therefore two gateway nodes that
+  bridge into the same layer must not share the same short ID in that layer.
+  Proper per-layer gateway JOIN/lease assignment remains open.
 - Adaptive schedule-offset convergence between multiple gateways.
 - Multi-hop upper-layer gateway paths with overlap search.
 - Remote destination reachability across multiple eligible gateways:
   partially addressed by gateway-local `Q:HASH_QUERY` when a selected gateway
   lacks a binding. Broader reachable-node advertisement and retry across
   alternate gateways are still parked for measurement/design.
-- Schedule-defer pre-check on retry paths (`tx_rts_retry`, `rts_timeout_fire`):
-  currently only `issue_send` consults `gateway_schedule_defer_ms`, so a
-  retry initiated just before a gateway's sweep can still waste airtime.
 - Original-origin propagation through cross-layer envelope handoff: today
   the destination's `delivered` event carries the gateway as origin, not
   the original sender.
@@ -1727,7 +1739,7 @@ Workbench scenarios:
 `leaf_id = layer_id & 0x0f` in BCN/RTS. A gateway retune switches the active
 layer context: `leaf_id`, `routing_sf`, `allowed_data_sfs`, and BCN schedule
 belong to the currently active layer. Route-table and identity-binding views
-are intended to become layer-scoped, but that part remains the next step.
+are implemented as layer-scoped active-state pointers.
 
 **Mobility use case.** Mobiles are not special-cased in the radio stack. A
 mobile fleet can be assigned to layer 2 with control SF9 while the static city
@@ -1899,14 +1911,15 @@ Done in v1:
 - Smoke scenario with assertions: `s09_two_layer_gateway_debug.json`.
 
 Remaining:
-- Full layer-scoped route and identity state: primary next step.
+- Independent per-layer gateway leases: gateways still use their primary short
+  ID when sweeping a bridged layer.
 - Remote-node reachability policy for multi-gateway deployments: parked.
 - Overlap detection for gateway-to-gateway paths.
 - Adaptive offset: peer-traffic-weight tracking + overlap-maximizing offset
   picker + drift-capped update.
-- Tests: short-id collision across layers, route candidate isolation,
-  binding isolation, schedule drift, overlap windows, missed sweep recovery,
-  adaptive offset convergence on 1-hop and 3-hop upper-layer paths.
+- Tests still needed: per-layer gateway lease collision, schedule drift, overlap
+  windows, missed sweep recovery, adaptive offset convergence on 1-hop and
+  3-hop upper-layer paths.
 
 ### 7.4 Control-plane frame updates (RTS / CTS / ACK / NACK)
 

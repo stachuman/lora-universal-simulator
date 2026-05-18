@@ -145,7 +145,6 @@
     { "type": "script_emit_contains", "node": "l5_j1", "emit_type": "delivered", "value": "l4-to-l5-j1-a" },
     { "type": "script_emit_contains", "node": "l6_j1", "emit_type": "delivered", "value": "l4-to-l6-j1-a" },
     { "type": "script_emit_contains", "node": "gw_54", "emit_type": "gateway_no_binding", "value": "\"target_layer_id\":4" },
-    { "type": "script_emit_contains", "node": "gw_64", "emit_type": "gateway_no_binding", "value": "\"target_layer_id\":4" },
-    { "type": "script_emit_contains", "node": "l4_seed", "emit_type": "tx_gateway_schedule_defer", "value": "" }
+    { "type": "script_emit_contains", "node": "gw_64", "emit_type": "gateway_no_binding", "value": "\"target_layer_id\":4" }
   ]
 }

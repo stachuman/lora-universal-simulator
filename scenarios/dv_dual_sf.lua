@@ -3158,6 +3158,10 @@ local function maybe_emit_rt_full(self)
     self:emit("rt_full", { peers = self.peer_count })
     self:log(string.format("rt_full: %d peers known, table converged", self.peer_count))
     self.rt_full_emitted = true
+    if self.layer_state ~= nil and self.current_layer_state_id ~= nil
+       and self.layer_state[self.current_layer_state_id] ~= nil then
+      self.layer_state[self.current_layer_state_id].rt_full_emitted = true
+    end
   end
 end
 
@@ -3201,6 +3205,7 @@ local function id_bind_set(self, node_id, key_hash32, source, confidence)
       key_hash32 = key_hash32,
       source = rec.source,
       confidence = rec.confidence,
+      layer_id = self.current_layer_state_id or self.active_layer_id or self.layer_id,
     })
   end
   return true
@@ -3233,6 +3238,7 @@ local function id_bind_age_one(self, node_id, rec, now, source)
     ttl_ms = self.id_bind_ttl_ms or 0,
     source = source or "age_loop",
     confidence = rec.confidence,
+    layer_id = self.current_layer_state_id or self.active_layer_id or self.layer_id,
   })
 end
 
@@ -3275,8 +3281,44 @@ local function active_allowed_sf_bitmap(self)
   return self.active_allowed_sf_bitmap or self.allowed_sf_bitmap
 end
 
+function ensure_layer_state(self, layer_id)
+  layer_id = math.floor(layer_id or self.layer_id or 0)
+  self.layer_state = self.layer_state or {}
+  local st = self.layer_state[layer_id]
+  if st == nil then
+    st = {
+      rt = {},
+      id_bind = {},
+      dest_seen_ms = {},
+      beacon_offset = 0,
+      rt_full_emitted = false,
+    }
+    self.layer_state[layer_id] = st
+  end
+  return st, layer_id
+end
+
+function use_layer_state(self, layer_id)
+  if self.layer_state ~= nil and self.current_layer_state_id ~= nil then
+    local cur = self.layer_state[self.current_layer_state_id]
+    if cur ~= nil then
+      cur.beacon_offset = self.beacon_offset or cur.beacon_offset or 0
+      cur.rt_full_emitted = self.rt_full_emitted == true
+    end
+  end
+  local st, normalized_layer_id = ensure_layer_state(self, layer_id)
+  self.current_layer_state_id = normalized_layer_id
+  self.rt = st.rt
+  self.id_bind = st.id_bind
+  self.dest_seen_ms = st.dest_seen_ms
+  self.beacon_offset = st.beacon_offset or 0
+  self.rt_full_emitted = st.rt_full_emitted == true
+  return st
+end
+
 local function activate_gateway_layer(self, rec, reason)
   if rec == nil then return end
+  use_layer_state(self, rec.layer_id)
   self.active_layer_id = rec.layer_id
   self.active_leaf_id = rec.leaf_id
   self.active_routing_sf = rec.routing_sf
@@ -3301,6 +3343,7 @@ local function activate_gateway_layer(self, rec, reason)
 end
 
 local function activate_primary_layer(self, reason)
+  use_layer_state(self, self.layer_id)
   if self.active_layer_id == self.layer_id
      and self.active_leaf_id == self.leaf_id
      and self.active_routing_sf == self.routing_sf
@@ -3928,6 +3971,14 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
   self:log(string.format(
     "send_deferred dst=%s reason=%s (holding for up to %dms; depth=%d)",
     dst_name, reason or "no_route", self.send_defer_ttl_ms, #self.deferred_sends))
+  if deferred.tx_layer_id ~= nil then
+    if deferred.tx_layer_id == (self.layer_id or 0) then
+      activate_primary_layer(self, "q_route")
+    else
+      local rec = gateway_layer_record(self, deferred.tx_layer_id)
+      if rec ~= nil then activate_gateway_layer(self, rec, "q_route") end
+    end
+  end
   local q_at, q_sent = emit_route_query(self, dst_id, dst_name, reason or "no_route")
   deferred.q_sent_at_ms = q_at
   if not q_sent then
@@ -4809,7 +4860,11 @@ try_drain_deferred = function(self)
   local kept = {}
   local drained = {}
   for _, d in ipairs(self.deferred_sends) do
-    if self.rt[d.dst_id] ~= nil then
+    local d_rt = self.rt
+    if d.tx_layer_id ~= nil then
+      d_rt = ensure_layer_state(self, d.tx_layer_id).rt
+    end
+    if d_rt[d.dst_id] ~= nil then
       table.insert(drained, d)
     elseif (now - d.queued_at_ms) >= self.send_defer_ttl_ms then
       self:emit("send_giveup", {
@@ -4906,6 +4961,15 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   if origin == self.id and previous_hop == nil then
     self_originate_observe(self)
   end
+  local requested_tx_layer_id = queue_meta and queue_meta.tx_layer_id or nil
+  if requested_tx_layer_id ~= nil then
+    if requested_tx_layer_id == (self.layer_id or 0) then
+      activate_primary_layer(self, "tx_route_select")
+    else
+      local rec = gateway_layer_record(self, requested_tx_layer_id)
+      if rec ~= nil then activate_gateway_layer(self, rec, "tx_route_select") end
+    end
+  end
   local entry = self.rt[dst_id]
   if not entry then
     -- Forwarder mid-flight with no route: real failure (route went stale
@@ -4927,7 +4991,6 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   end
   entry = refresh_route_order(self, dst_id, "issue_send_order") or entry
   local primary_next = entry.candidates[1].next_hop
-  local requested_tx_layer_id = queue_meta and queue_meta.tx_layer_id or nil
   if previous_hop ~= nil and primary_next == previous_hop then
     local replacement = nil
     for _, c in ipairs(entry.candidates) do
@@ -5460,6 +5523,10 @@ local function send_beacon_page(self, kind)
     tostring(diff.dirty_only == true),
     self.beacon_offset, new_offset))
   self.beacon_offset = new_offset
+  if self.layer_state ~= nil and self.current_layer_state_id ~= nil
+     and self.layer_state[self.current_layer_state_id] ~= nil then
+    self.layer_state[self.current_layer_state_id].beacon_offset = new_offset
+  end
   -- Track when this node last committed a BCN to air. Consulted by the
   -- max-idle override (beacon_fire) to break out of long throttle
   -- windows: in dense channels the quiet_threshold gate suppresses
@@ -6385,7 +6452,9 @@ function on_init(self, config)
     airtime_ms(slowest_sf, self.bw_hz, self.cr, self.preamble_sym,
                DATA_HDR_LEN + self.max_payload_bytes + DATA_INNER_OVERHEAD)
 
-  self.rt              = {}
+  self.layer_state     = {}
+  self.current_layer_state_id = nil
+  use_layer_state(self, self.layer_id)
   self.next_ctr_lo     = 1
   self.pending_tx      = nil
   self.pending_rx      = nil
@@ -6567,7 +6636,7 @@ function on_init(self, config)
   self.name_to_id = {}
   self.id_to_name = {}
   self.mobile_peers = {}
-  self.id_bind = {}
+  use_layer_state(self, self.layer_id)
   self.join_j_seen = {}
   self.gateway_layer_set = {}
   self.gateway_layer_list = {}
@@ -6638,9 +6707,16 @@ function on_init(self, config)
     self.name_to_id[n.name] = n.id
     self.id_to_name[n.id]   = n.name
     if n.key_hash32 ~= nil then
-      id_bind_set(self, n.id, n.key_hash32,
-                  (n.id == self.id) and "self" or "sim_nodes",
-                  (n.id == self.id) and "authenticated" or "claimed")
+      local bind_layer_id = (n.id == self.id) and self.layer_id or node_layer_id
+      if bind_layer_id == self.layer_id
+         or (self.self_gateway and gateway_layer_enabled(self, bind_layer_id)) then
+        local saved_layer_id = self.current_layer_state_id or self.layer_id
+        use_layer_state(self, bind_layer_id)
+        id_bind_set(self, n.id, n.key_hash32,
+                    (n.id == self.id) and "self" or "sim_nodes",
+                    (n.id == self.id) and "authenticated" or "claimed")
+        use_layer_state(self, saved_layer_id)
+      end
     end
     end
     if n.is_mobile then
@@ -6842,23 +6918,22 @@ function on_recv(self, frame, meta)
   if meta.src ~= nil and meta.snr ~= nil then
     update_snr_ewma(self.snr_ewma_in, meta.src, meta.snr, self.snr_ewma_alpha)
   end
-  -- Per-RX direct-neighbour route learning. Any valid in-leaf frame from
-  -- meta.src is direct proof that src is alive and one hop away. BCN frames
-  -- still run their richer identity/DV merge below, but RTS/CTS/DATA/ACK/Q
-  -- should also create/refresh rt[src]; otherwise a node can hear a peer's
-  -- traffic and still be unable to answer a route query for that peer.
   local learned_direct_pre = false
-  if meta.src ~= nil and meta.snr ~= nil then
-    local pre_action = learn_direct_from_frame(self, meta.src, meta.snr, "direct_frame")
+  -- Per-RX direct-neighbour route learning. Learn only after the frame is
+  -- known to belong to the active leaf/layer, otherwise a gateway listening
+  -- on one layer can pollute that layer's rt[] with a foreign-layer sender
+  -- before the later per-frame leaf filter rejects the payload.
+  local function learn_rx_source(source)
+    if meta.src == nil or meta.snr == nil then return false end
+    local pre_action = learn_direct_from_frame(self, meta.src, meta.snr, source or "direct_frame")
     learned_direct_pre = (pre_action == "new"
                           or pre_action == "promote"
                           or pre_action == "primary_refresh"
                           or pre_action == "alt_install")
-  end
-  if meta.src ~= nil then
-    id_bind_refresh_plain(self, meta.src, "rx_frame")
+    id_bind_refresh_plain(self, meta.src, source or "rx_frame")
     mark_dest_seen(self, meta.src, "direct")
     clear_peer_suspect(self, meta.src, "rx_frame")
+    return learned_direct_pre
   end
   local tag = frame:sub(1, 1)
 
@@ -6866,6 +6941,7 @@ function on_recv(self, frame, meta)
     local j = parse_j(frame)
     if not j then return end
     if j.leaf_id ~= active_leaf_id(self) then return end
+    learn_rx_source("j_frame")
     if join_j_rate_limited(self, j, meta) then return end
 
     if j.opcode == J_OP_DISCOVER then
@@ -7073,6 +7149,7 @@ function on_recv(self, frame, meta)
     -- 4-bit space. Silent drop (no event spam — expected during
     -- enhanced propagation events).
     if b.leaf_id ~= active_leaf_id(self) then return end
+    learn_rx_source("beacon_frame")
     id_bind_set(self, b.src, b.key_hash32, "bcn", "claimed")
     remember_gateway_schedule(self, b.src, b)
     gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
@@ -7314,6 +7391,10 @@ function on_recv(self, frame, meta)
   if tag == "R" then
     local r = parse_rts(frame)
     if not r then return end
+    -- Cross-network filter — drop foreign-network RTSes before any routing,
+    -- anti-spam, or implicit-ACK side effects.
+    if r.leaf_id ~= active_leaf_id(self) then return end
+    learn_rx_source("rts_frame")
     -- Anti-spam observation FIRST: track this RTS in r.src's sliding
     -- window even when the RTS isn't addressed to us (we're overhearing
     -- broadcasts on routing_sf). All 1st-hop neighbours of an originator
@@ -7360,12 +7441,6 @@ function on_recv(self, frame, meta)
       return
     end
     if r.next ~= self.id then return end  -- not for us; silent discard
-    -- Cross-network filter — drop foreign-network RTSes before any CTS
-    -- work. Without this, two networks merging during enhanced RF
-    -- propagation would waste airtime on duplicate CTSes and pollute
-    -- routing decisions.
-    if r.leaf_id ~= active_leaf_id(self) then return end
-
     self:emit("rts_receiver_state", {
       from = r.src,
       dst = r.dst,
@@ -7697,6 +7772,7 @@ function on_recv(self, frame, meta)
       })
       return
     end
+    learn_rx_source("cts_frame")
 
     -- CTS matched — cancel the rts_timeout. Without this, the timer fires
     -- on the same tick (rts_timeout_ms = exact RTS+CTS airtime) before the
@@ -7835,6 +7911,7 @@ function on_recv(self, frame, meta)
       })
       return
     end
+    learn_rx_source("ack_frame")
 
     -- ACK matched. Cancel the ack_timeout, clear pending_tx, drain the
     -- queue. The ack_timeout retry path (re-RTS on ack-loss) is what
@@ -7906,6 +7983,7 @@ function on_recv(self, frame, meta)
       })
       return
     end
+    learn_rx_source("nack_frame")
 
     -- NACK matched: chosen next-hop can't take us right now. Cancel the
     -- rts_timeout (NACK is a faster, definitive signal). NACK rides on
@@ -8235,6 +8313,7 @@ function on_recv(self, frame, meta)
   if tag == "D" then
     local d = parse_data(frame)
     if not d then return end
+    learn_rx_source("data_frame")
 
     -- §7.6 Phase C: opportunistic rt-learning from the carried
     -- `prev_fwd_rt_hops` claim. Applies to EVERY successful DATA decode
@@ -8717,6 +8796,7 @@ function on_recv(self, frame, meta)
     if not q then return end
     -- Cross-network filter — drop foreign Q before any work.
     if q.leaf_id ~= active_leaf_id(self) then return end
+    learn_rx_source("q_frame")
     -- Don't respond to ourselves (loop guard).
     if q.src == self.id then return end
     -- Dedup: if we recently responded to the same query, skip.

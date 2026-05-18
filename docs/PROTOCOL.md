@@ -1598,10 +1598,14 @@ cross-layer envelope and forwards into its own primary layer, it explicitly
 restores the primary context before RTS/DATA so the forwarded leg uses that
 layer's control SF and DATA-SF bitmap.
 
-Current limitation: the radio context and gateway binding are layer-aware, but
-the main `rt[]` and much of `id_bind[]` are still keyed by short node id rather
-than `(layer_id, node_id)`. Full layer separation is the next roadmap step and
-is tracked by `scenarios/s10_two_layer_gateway_separation.json`.
+Runtime route and identity state is layer-scoped. Firmware keeps
+`layer_state[layer_id] = { rt, id_bind, dest_seen_ms, beacon_offset }`; the
+legacy `self.rt`, `self.id_bind`, and `self.dest_seen_ms` names are active-layer
+pointers swapped whenever a gateway retunes. This permits the same short
+`node_id` to exist in two different layers without corrupting route selection or
+identity binding. Direct route learning is applied only after a frame is known
+to belong to the active leaf/layer. The `s10_two_layer_gateway_separation`
+scenario exercises this by reusing short IDs across layers.
 
 ---
 
@@ -2270,7 +2274,7 @@ expectations) subscribe by event_type.
 | `node_layer_info` | Startup layer/gateway identity marker (§11.6) | `node_id`, `name`, `layer_id`, `leaf_id`, `key_hash32`, `is_gateway`, `gateway_layers`, `is_mobile`, `joined`, `routing_sf`, `allowed_sf_bitmap` |
 | `node_state_snapshot` | Periodic accumulator-diagnostics dump (§11.6); debug-window gated when configured | `node_id`, `layer_id`, `leaf_id`, `is_gateway`, `gateway_layers`, `is_mobile`, `tx_queue_depth`, `deferred_sends_depth`, `pending_tx`, `pending_rx`, `rt_size`, `budget_tier`, `pct_used`, plus throughput counters |
 | `rt_debug_snapshot` | Debug-window route table mutation dump for one destination | `reason`, `node_id`, `layer_id`, `active_layer_id`, `dst`, `dirty`, `deleted`, `candidate_count`, `candidates[]` with `slot`, `next_hop`, `n2_hop`, `hops`, `score`, `score_eff`, `age_ms`, `ttl_ms`, `expires_in_ms`, `is_gateway`, `mobile_touched`, `next_tier`, `next_blind`, `suspect_level` |
-| `gateway_layer_active` | Gateway successfully retuned to (or returned to) a layer's radio context — fires from `activate_gateway_layer` and `activate_primary_layer` | `layer_id`, `leaf_id`, `routing_sf`, `duration_ms` (when entering a sweep), `reason` (`init`, `schedule`, `schedule_return`, `tx`, `primary`) |
+| `gateway_layer_active` | Gateway successfully retuned to (or returned to) a layer's radio context — fires from `activate_gateway_layer` and `activate_primary_layer` | `layer_id`, `leaf_id`, `routing_sf`, `duration_ms` (when entering a sweep), `reason` (`init`, `schedule`, `schedule_return`, `tx`, `tx_retry`, `q_hash`, `primary`) |
 | `gateway_layer_window_deferred` | Scheduled sweep fire was deferred because `pending_tx`/`pending_rx` was active (half-duplex skip) | `layer_id`, `leaf_id`, `routing_sf`, `active_layer_id`, `active_leaf_id`, `listen_sf`, `retry_ms` |
 | `gateway_schedule_change` | Gateway radio context changed because of init, schedule window, schedule return, or target-layer TX | `active_layer_id`, `active_leaf_id`, `listen_sf`, `data_sf_bitmap`, `duration_ms`, `reason` |
 | `gateway_schedule_observed` | Node decoded gateway BCN schedule records | `gateway`, `primary_leaf_id`, `records`, `schedule[]` entries with `layer_id`, `leaf_id`, `routing_sf`, `duration_ms`, `offset_ms`, `period_ms`, `period_unit_ms` |
