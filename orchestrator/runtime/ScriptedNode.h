@@ -103,6 +103,7 @@ public:
     void     api_log(sol::variadic_args args);
     void     api_emit(std::string type, sol::optional<sol::table> data);
     sol::table api_peers();
+    void     api_set_protocol_id(int protocol_id);
     void     api_set_rx_sf(int sf);                      // single-SF retune
     void     api_set_rx_sf_set(sol::table sf_set);       // multi-SF retune (opt-in)
     uint64_t api_channel_busy_until() const;             // LBT busy_until or 0
@@ -128,6 +129,8 @@ public:
     uint64_t oldestTxEndMs() const;
 
     int                id()   const { return _id; }
+    int                protocolId() const { return _protocol_id; }
+    void               setProtocolId(int protocol_id) { _protocol_id = protocol_id; }
     const std::string& name() const { return _name; }
 
     // Set by SimController after onInit returns (whether at t=0 or via
@@ -178,6 +181,7 @@ public:
 private:
     void armSfSwitchBlindWindow();
     int               _id;
+    int               _protocol_id = -1;
     std::string       _name;
     LuaHost&          _host;
     SimRadio&         _radio;

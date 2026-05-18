@@ -199,6 +199,13 @@ float SimController::linkSnrDb(int from, int to) const {
     return lp.snr;
 }
 
+int SimController::protocolNodeId(size_t runtime_id) const {
+    if (runtime_id >= _nodes.size() || !_nodes[runtime_id]) {
+        return static_cast<int>(runtime_id);
+    }
+    return _nodes[runtime_id]->protocolId();
+}
+
 void SimController::initialize() {
     if (_initialized) return;
 
@@ -413,6 +420,7 @@ void SimController::initialize() {
         const int protocol_node_id = _cfg.nodes[i].node_id >= 0
             ? _cfg.nodes[i].node_id
             : i;
+        _nodes[i]->setProtocolId(protocol_node_id);
         _host.registerNode(i, _nodes[i].get(), protocol_node_id,
                            _cfg.nodes[i].key_hash32);
         std::string resolved =
@@ -495,9 +503,12 @@ void SimController::initialize() {
         // _sim_warmup_ms to switch between fast learning-phase beacons
         // and slow operational beacons). Underscore prefix marks these
         // as runtime-injected, not user-configured.
-        nlohmann::json cfg = _cfg.nodes[i].config.is_object()
-                              ? _cfg.nodes[i].config
+        nlohmann::json cfg = _cfg.config.is_object()
+                              ? _cfg.config
                               : nlohmann::json::object();
+        if (_cfg.nodes[i].config.is_object()) {
+            cfg.update(_cfg.nodes[i].config);
+        }
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
         cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw * 1000;  // bw is kHz in JSON
         cfg["_sim_cr"]        = _cfg.nodes[i].cr;
@@ -628,9 +639,12 @@ void SimController::processStartupAtStep() {
         // Same _sim_* injection as the synchronous-init path above —
         // keep both paths in sync so jitter-staged nodes see the same
         // simulation-level fields.
-        nlohmann::json cfg = _cfg.nodes[i].config.is_object()
-                              ? _cfg.nodes[i].config
+        nlohmann::json cfg = _cfg.config.is_object()
+                              ? _cfg.config
                               : nlohmann::json::object();
+        if (_cfg.nodes[i].config.is_object()) {
+            cfg.update(_cfg.nodes[i].config);
+        }
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
         cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw * 1000;  // bw is kHz in JSON
         cfg["_sim_cr"]        = _cfg.nodes[i].cr;
@@ -995,9 +1009,7 @@ void SimController::deliverReceptionsForStep() {
             }
 
             // Deliver to the script.
-            const int protocol_sender_id = _cfg.nodes[tx.sender_id].node_id >= 0
-                ? _cfg.nodes[tx.sender_id].node_id
-                : tx.sender_id;
+            const int protocol_sender_id = _nodes[tx.sender_id]->protocolId();
             _nodes[rcv]->onRecv(tx.bytes, snr_at_rcv, lp.rssi,
                                 /*link_id=*/0,
                                 /*src_id=*/protocol_sender_id,
@@ -1094,9 +1106,7 @@ void SimController::registerTransmissionsForStep() {
                     if (!_node_alive[r]) continue;
                     LinkParams lp;
                     if (!_links->getLink(i, r, lp)) continue;
-                    const int protocol_sender_id = _cfg.nodes[i].node_id >= 0
-                        ? _cfg.nodes[i].node_id
-                        : i;
+                    const int protocol_sender_id = _nodes[i]->protocolId();
                     _nodes[r]->onRecv(p.bytes, lp.snr, lp.rssi,
                                       /*link_id=*/0,
                                       /*src_id=*/protocol_sender_id,
@@ -1406,9 +1416,7 @@ void SimController::registerTransmissionsForStep() {
                     if (sf == just_pushed.sf) { sf_match = true; break; }
                 }
                 if (sf_match) {
-                    const int protocol_sender_id = _cfg.nodes[i].node_id >= 0
-                        ? _cfg.nodes[i].node_id
-                        : i;
+                    const int protocol_sender_id = _nodes[i]->protocolId();
                     _nodes[observer]->onPreambleDetected(
                         just_pushed.start_ms, protocol_sender_id, lp.snr);
                 }

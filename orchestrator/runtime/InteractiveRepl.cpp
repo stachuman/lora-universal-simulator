@@ -142,9 +142,7 @@ bool InteractiveRepl::handleMeta(const std::string& line) {
     if (cmd == ":nodes") {
         const auto& nodes = _ctrl.config().nodes;
         for (size_t i = 0; i < nodes.size(); ++i) {
-            const int protocol_id = nodes[i].node_id >= 0
-                ? nodes[i].node_id
-                : static_cast<int>(i);
+            const int protocol_id = _ctrl.protocolNodeId(i);
             std::printf("  %zu  proto=%-3d  %-16s  %s\n", i, protocol_id,
                         nodes[i].name.c_str(),
                         nodes[i].script_path.c_str());

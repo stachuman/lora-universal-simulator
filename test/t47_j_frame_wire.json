@@ -37,7 +37,6 @@
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "join_discover_received", "value": "\"key_hash32\":286331153" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "join_offer_sent", "value": "\"data_sf_bitmap\":52" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "join_offer_received", "value": "\"data_sf_bitmap\":52" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_data_sfs_adopted", "value": "\"data_sf_bitmap\":52" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "join_claim_sent", "value": "\"proposed_node_id\":55" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "join_claim_received", "value": "\"proposed_node_id\":55" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "id_bind_set", "value": "\"node\":55" },

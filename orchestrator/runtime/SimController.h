@@ -84,6 +84,7 @@ public:
 
     LuaHost&         luaHost()        { return _host; }
     const SimConfig& config() const   { return _cfg; }
+    int              protocolNodeId(size_t runtime_id) const;
 
     // Current link SNR (dB) between two node ids. Returns NaN when no link
     // is configured (sender == receiver, or path-loss/topology produced no

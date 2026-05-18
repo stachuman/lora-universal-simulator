@@ -1,0 +1,50 @@
+{
+  "_name": "t48_join_autonomous_fourth_node",
+  "_desc": "Three pinned nodes form a stable network; a fourth node starts without a short ID, discovers DATA SF policy, claims a free ID, and adopts it.",
+  "simulation": {
+    "duration_ms": 45000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 48,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance",
+      "alpha": 2.4,
+      "sigma_db": 0.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 14.0
+    }
+  },
+  "nodes": [
+    { "name": "alpha", "node_id": 10, "key_hash32": "0x10101010", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "allowed_data_sfs": [7, 9], "beacon_period_ms": 60000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 100, "join_offer_backoff_max_ms": 300 },
+      "lat": 41.3900, "lon": 2.1600 },
+    { "name": "bravo", "node_id": 11, "key_hash32": "0x11111111", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "allowed_data_sfs": [7, 9], "beacon_period_ms": 60000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 500, "join_offer_backoff_max_ms": 700 },
+      "lat": 41.3903, "lon": 2.1600 },
+    { "name": "charlie", "node_id": 12, "key_hash32": "0x12121212", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "routing_sf": 7, "allowed_data_sfs": [7, 9], "beacon_period_ms": 60000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 900, "join_offer_backoff_max_ms": 1100 },
+      "lat": 41.3906, "lon": 2.1600 },
+    { "name": "delta", "node_id": null, "key_hash32": "0x44444444", "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 15000,
+      "config": { "join_required": true, "routing_sf": 7, "allowed_data_sfs": [12], "beacon_period_ms": 60000, "quiet_threshold_ms": 0, "join_listen_ms": 2000, "join_discover_jitter_ms": 0, "join_claim_guard_ms": 3000 },
+      "lat": 41.3902, "lon": 2.1601 }
+  ],
+  "topology": { "links": [] },
+  "expect": [
+    { "type": "script_emit_contains", "node": "delta", "emit_type": "join_listen_start", "value": "\"key_hash32\":1145324612" },
+    { "type": "script_emit_contains", "node": "delta", "emit_type": "join_discover_sent", "value": "\"reason\":\"listen_done\"" },
+    { "type": "script_emit_contains", "node": "alpha", "emit_type": "join_discover_received", "value": "\"key_hash32\":1145324612" },
+    { "type": "script_emit_contains", "node": "alpha", "emit_type": "join_offer_sent", "value": "\"data_sf_bitmap\":20" },
+    { "type": "script_emit_contains", "node": "delta", "emit_type": "join_offer_received", "value": "\"data_sf_bitmap\":20" },
+    { "type": "script_emit_contains", "node": "delta", "emit_type": "join_data_sfs_adopted", "value": "\"data_sf_bitmap\":20" },
+    { "type": "script_emit_contains", "node": "delta", "emit_type": "join_claim_sent", "value": "\"proposed_node_id\":143" },
+    { "type": "script_emit_contains", "node": "alpha", "emit_type": "join_claim_received", "value": "\"proposed_node_id\":143" },
+    { "type": "script_emit_contains", "node": "alpha", "emit_type": "id_bind_set", "value": "\"node\":143" },
+    { "type": "script_emit_contains", "node": "delta", "emit_type": "join_adopted", "value": "\"node\":143" },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "delta", "min": 0, "max": 0 }
+  ]
+}

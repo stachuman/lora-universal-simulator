@@ -39,6 +39,11 @@ struct SimConfig {
     // underscore-prefixed top-level keys are intentionally ignored.
     std::string name;
 
+    // Optional scenario-wide script config defaults. These are merged into
+    // every node's on_init config before nodes[i].config, so per-node config
+    // can still override a global default.
+    nlohmann::json config = nlohmann::json::object();
+
     struct RadioConfig {
         // Global LoRa defaults. Per-node overrides merge in below.
         int sf = 8;

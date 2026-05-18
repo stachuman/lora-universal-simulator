@@ -164,6 +164,7 @@ const S = {
     events: [],
     nodes: [],           // ordered node list for display
     nodeIndex: {},       // name -> index in nodes[]
+    idToName: {},        // runtime registration id -> canonical name
     nodeFilter: new Set(),
     // Event-type filter parsed from the toolbar's #type-filter input.
     // Empty input = no filter (show all). Comma-separated list:
@@ -178,8 +179,8 @@ const S = {
     viewTo: 10000,
 
     // Canvas layout
-    laneH: 22,
-    labelW: 160,
+    laneH: 24,
+    labelW: 220,
     headerH: 30,
 
     // Vertical scroll (node lanes)
@@ -289,6 +290,7 @@ async function init() {
     loading.textContent = 'Loading sim metadata…';
     loading.style.display = '';
     S.meta = await fetchJSON(`${API_PREFIX}/meta`);
+    S.idToName = S.meta.id_to_name || {};
     document.getElementById('info-text').textContent =
         `${S.meta.nodes.length} nodes, ${S.meta.event_count} events, ` +
         `${((S.meta.time_max - S.meta.time_min) / 1000).toFixed(1)}s`;
@@ -353,6 +355,7 @@ function startInteractivePoll() {
             if (m.time_max > S.meta.time_max || m.event_count > S.meta.event_count) {
                 const oldNodes = S.meta.nodes;
                 S.meta = m;
+                S.idToName = S.meta.id_to_name || {};
                 // If new nodes appeared, rebuild node list
                 if (m.nodes.length !== oldNodes.length) {
                     S.nodes = [...m.nodes];
@@ -622,14 +625,11 @@ function subRowFor(ev) {
 function nodeToY(name, ev) {
     // tx/rx events use the canonical string name ("alice"); script_log /
     // script_emit / cmd_reply use the integer registration id (lus assigns
-    // 0..N-1 in JSON-config order, which matches S.nodes[i] order). Accept
-    // both shapes here so script_emit diamonds render on the right lane.
-    let idx;
-    if (typeof name === 'number') {
-        idx = (name >= 0 && name < S.nodes.length) ? name : undefined;
-    } else {
-        idx = S.nodeIndex[name];
-    }
+    // 0..N-1 in JSON-config order). Resolve through metadata first because
+    // S.nodes is user-sortable and no longer necessarily matches runtime id
+    // order.
+    const nodeName = nodeIdToName(name);
+    const idx = nodeName != null ? S.nodeIndex[nodeName] : undefined;
     if (idx === undefined) return null;
     const subRowCount = Math.max(1, S.subRows.length);
     const nodeLaneH = S.laneH * subRowCount;
@@ -642,10 +642,69 @@ function nodeToY(name, ev) {
 // be tied back to S.nodes[laneIdx].name.
 function nodeIdToName(nodeRef) {
     if (typeof nodeRef === 'number') {
-        if (nodeRef >= 0 && nodeRef < S.nodes.length) return S.nodes[nodeRef].name;
+        const mapped = S.idToName && S.idToName[String(nodeRef)];
+        if (mapped) return mapped;
+        if (nodeRef >= 0 && nodeRef < (S.meta?.nodes?.length || 0)) {
+            return S.meta.nodes[nodeRef].name;
+        }
         return null;
     }
     return nodeRef;
+}
+
+function runtimeIdForName(name) {
+    if (!S.idToName) return null;
+    for (const [id, nodeName] of Object.entries(S.idToName)) {
+        if (nodeName === name) return id;
+    }
+    return null;
+}
+
+function hex32(v) {
+    if (v === undefined || v === null) return '';
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return '0x' + (n >>> 0).toString(16).padStart(8, '0');
+}
+
+function shortHex32(v) {
+    const h = hex32(v);
+    return h ? h.slice(0, 6) + '\u2026' + h.slice(-4) : '';
+}
+
+function nodeIdentityLine(node) {
+    const parts = [];
+    if (node.node_id !== undefined && node.node_id !== null) parts.push(`id=${node.node_id}`);
+    if (node.layer_id !== undefined && node.layer_id !== null) parts.push(`L${node.layer_id}`);
+    if (node.leaf_id !== undefined && node.leaf_id !== null) parts.push(`leaf=${node.leaf_id}`);
+    if (node.key_hash32 !== undefined && node.key_hash32 !== null) parts.push(shortHex32(node.key_hash32));
+    return parts.join(' ');
+}
+
+function addField(html, key, value) {
+    if (value === undefined || value === null || value === '') return html;
+    return html + `<div class="field"><span class="key">${escHtml(key)}: </span><span class="val">${escHtml(String(value))}</span></div>`;
+}
+
+function isHashField(key) {
+    return /(^|_)hash32$/.test(String(key)) || /key_hash/i.test(String(key));
+}
+
+function displayValueForKey(key, value) {
+    if (isHashField(key) && typeof value === 'number') return hex32(value);
+    if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
+    return String(value);
+}
+
+function normalizeDisplayJson(value, key = '') {
+    if (Array.isArray(value)) return value.map(v => normalizeDisplayJson(v));
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) out[k] = normalizeDisplayJson(v, k);
+        return out;
+    }
+    if (isHashField(key) && typeof value === 'number') return hex32(value);
+    return value;
 }
 
 function updateMaxScrollY() {
@@ -725,19 +784,25 @@ function render() {
         const node = S.nodes[i];
         const isCompanion = node.role === 'companion';
 
-        // Node name: centered vertically across the whole node group.
-        // Truncate when sub-rows are present so the name doesn't overlap
-        // the per-sub-row labels at x=64 (12px bold mono ≈ 7px/char →
-        // 7 chars fits comfortably before the labels start).
+        // Node identity: name plus protocol id/layer/hash. Keep this in
+        // the lane itself so gateway/debug traces are understandable without
+        // opening another tool.
         ctx.fillStyle = isCompanion ? '#2563eb' : '#6b7280';
         ctx.font = 'bold 12px monospace';
         ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        const maxNameChars = (S.subRows.length > 0) ? 7 : 20;
+        ctx.textBaseline = 'alphabetic';
+        const maxNameChars = (S.subRows.length > 0) ? 16 : 28;
         const displayName = node.name.length > maxNameChars
             ? node.name.slice(0, maxNameChars - 1) + '…'
             : node.name;
-        ctx.fillText(displayName, 8, y + nodeLaneH / 2);
+        const cy = y + nodeLaneH / 2;
+        ctx.fillText(displayName, 8, cy - 2);
+        const ident = nodeIdentityLine(node);
+        if (ident) {
+            ctx.font = '9px monospace';
+            ctx.fillStyle = '#9ca3af';
+            ctx.fillText(ident, 8, cy + 10);
+        }
 
         // Sub-row labels (one per (sf, bw_hz) tuple)
         ctx.font = '9px monospace';
@@ -748,7 +813,7 @@ function render() {
             if (!sub) continue;  // single-row fallback, no label
             const subY = y + s * S.laneH + S.laneH / 2;
             const label = 'SF' + sub.sf + '/' + Math.round(sub.bw_hz / 1000) + 'k';
-            ctx.fillText(label, 64, subY);
+            ctx.fillText(label, 150, subY);
         }
     }
     ctx.restore();
@@ -1760,7 +1825,14 @@ canvas.addEventListener('click', async (e) => {
         return;
     }
 
-    const hit = findEventAt(e.offsetX, e.offsetY);
+    const hits = findEventsAt(e.offsetX, e.offsetY);
+    if (hits.length > 1) {
+        showEventChooser(hits);
+        const focusNode = hits[0].node || hits[0].from || hits[0].to;
+        if (focusNode) emitFocusNode(focusNode);
+        return;
+    }
+    const hit = hits.length ? hits[0] : null;
     if (hit) {
         if (hit.type === 'script_emit') {
             showEventDetail(hit);
@@ -1834,9 +1906,9 @@ window.addEventListener('message', (e) => {
     }
 });
 
-function findEventAt(mx, my) {
-    if (S.densityCache) return null;
-    if (my < S.headerH) return null;
+function findEventsAt(mx, my) {
+    if (S.densityCache) return [];
+    if (my < S.headerH) return [];
 
     // Use rendered viewport state so hit-testing matches what's actually drawn
     const vFrom = S.renderedViewFrom;
@@ -1846,7 +1918,7 @@ function findEventAt(mx, my) {
     const subRowCount = Math.max(1, S.subRows.length);
     const nodeLaneH = S.laneH * subRowCount;
     const laneIdx = Math.floor((my - S.headerH + sY) / nodeLaneH);
-    if (laneIdx < 0 || laneIdx >= S.nodes.length) return null;
+    if (laneIdx < 0 || laneIdx >= S.nodes.length) return [];
     const targetNode = S.nodes[laneIdx].name;
 
     // Determine sub-row and whether click is in upper half (TX) or lower half (RX)
@@ -1855,8 +1927,7 @@ function findEventAt(mx, my) {
     const inUpperHalf = (localY - subRowIdx * S.laneH) < S.laneH / 2;
 
     // Search nearby events — TX bars match over their full airtime width
-    let best = null;
-    let bestDist = Infinity;
+    const hits = [];
     const span = vTo - vFrom;
     const tolerance = span * 0.008; // 0.8% of viewport for point events
 
@@ -1896,12 +1967,15 @@ function findEventAt(mx, my) {
         // Penalize events in wrong lane half so correct-half events win
         if (halfMismatch) dist += tolerance * 2;
 
-        if (dist < bestDist) {
-            bestDist = dist;
-            best = ev;
-        }
+        hits.push({ ev, dist });
     }
-    return best;
+    hits.sort((a, b) => a.dist - b.dist || (a.ev.time_ms || 0) - (b.ev.time_ms || 0));
+    return hits.map(h => h.ev);
+}
+
+function findEventAt(mx, my) {
+    const hits = findEventsAt(mx, my);
+    return hits.length ? hits[0] : null;
 }
 
 function updateHover(mx, my) {
@@ -2080,8 +2154,7 @@ async function traceFlight(origin, payload) {
 
 function showFlightDetail(origin, payload, emits, pkts) {
     openSidebar();
-    const originName = (origin >= 0 && origin < S.nodes.length)
-        ? S.nodes[origin].name : ('#' + origin);
+    const originName = nodeIdToName(origin) || ('#' + origin);
     let html = `<div class="event-detail">`;
     html += `<h3>Flight</h3>`;
     html += `<div class="field"><span class="key">origin: </span>${escHtml(originName)} (id ${origin})</div>`;
@@ -2238,9 +2311,9 @@ function showEventDetail(ev) {
             html += `<div class="field"><span class="key">${k}: </span><span class="pkt-link" onclick="tracePkt('${escHtml(v)}')">${escHtml(val)}</span></div>`;
         } else if (k === 'data' && v && typeof v === 'object') {
             html += `<div class="field"><span class="key">data:</span></div>`;
-            html += `<pre class="json-block">${escHtml(JSON.stringify(v, null, 2))}</pre>`;
+            html += `<pre class="json-block">${escHtml(JSON.stringify(normalizeDisplayJson(v), null, 2))}</pre>`;
         } else {
-            let val = typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : String(v);
+            let val = displayValueForKey(k, v);
             if (val.length > 100) val = val.slice(0, 100) + '\u2026';
             html += `<div class="field"><span class="key">${k}: </span><span class="val">${escHtml(val)}</span></div>`;
         }
@@ -2265,7 +2338,7 @@ function showEventDetail(ev) {
     if (rest.length > 0) {
         html += `<h3>Raw</h3>`;
         for (const [k, v] of rest) {
-            let val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+            let val = typeof v === 'object' ? JSON.stringify(normalizeDisplayJson(v, k)) : displayValueForKey(k, v);
             if (val.length > 200) val = val.slice(0, 200) + '\u2026';
             html += `<div class="field"><span class="key">${escHtml(k)}: </span><span class="val">${escHtml(val)}</span></div>`;
         }
@@ -2290,6 +2363,51 @@ function showEventDetail(ev) {
                 document.getElementById('btn-trace-mode').classList.add('active');
             }
             await traceFlight(d.origin, d.payload);
+        });
+    }
+}
+
+function eventSummary(ev) {
+    const parts = [ev.type];
+    if (ev.emit_type) parts.push(ev.emit_type);
+    if (ev.label) parts.push(ev.label);
+    if (ev.from || ev.to) parts.push(`${ev.from || '?'}\u2192${ev.to || '?'}`);
+    const d = ev.data || {};
+    if (d.reason) parts.push(`reason=${d.reason}`);
+    if (d.payload) parts.push(String(d.payload));
+    return parts.join(' ');
+}
+
+function showEventChooser(events) {
+    openSidebar();
+    const sorted = [...events].sort((a, b) => {
+        const ta = a.time_ms || 0;
+        const tb = b.time_ms || 0;
+        if (ta !== tb) return ta - tb;
+        const aa = `${a.type || ''}:${a.emit_type || ''}:${a.label || ''}`;
+        const bb = `${b.type || ''}:${b.emit_type || ''}:${b.label || ''}`;
+        return aa.localeCompare(bb);
+    });
+    let html = `<h3>Events at marker</h3>`;
+    html += `<div class="field"><span class="key">count: </span><span class="val">${sorted.length}</span></div>`;
+    html += '<table><tr><th>Time</th><th>Type</th><th>Node</th><th>Detail</th></tr>';
+    sorted.forEach((ev, idx) => {
+        const node = nodeIdToName(ev.node || ev.to || ev.from || '');
+        const color = COLORS[ev.type] || '#6b7280';
+        html += `<tr class="event-choice" data-event-choice="${idx}" style="color:${color};cursor:pointer">`;
+        html += `<td>${formatTime(ev.time_ms)}</td>`;
+        html += `<td>${escHtml(ev.emit_type || ev.label || ev.type)}</td>`;
+        html += `<td>${escHtml(node || '')}</td>`;
+        html += `<td>${escHtml(eventSummary(ev))}</td>`;
+        html += `</tr>`;
+    });
+    html += '</table>';
+    html += '<div class="field"><span class="key">hint: </span><span class="val">Click a row to inspect that exact event.</span></div>';
+    sidebarContent.innerHTML = html;
+    for (const row of sidebarContent.querySelectorAll('[data-event-choice]')) {
+        row.addEventListener('click', () => {
+            const idx = Number(row.getAttribute('data-event-choice'));
+            if (Number.isFinite(idx) && sorted[idx]) showEventDetail(sorted[idx]);
         });
     }
 }
@@ -2345,6 +2463,25 @@ function showNodeDetail(name) {
     const stats = (S.meta.stats || []).find(s => s.node === name);
 
     let html = `<h3>${escHtml(name)}</h3>`;
+    if (meta) {
+        html += '<h3>Identity</h3>';
+        html = addField(html, 'runtime id', runtimeIdForName(name));
+        html = addField(html, 'node id', meta.node_id);
+        html = addField(html, 'key hash32', hex32(meta.key_hash32));
+        html = addField(html, 'layer', meta.layer_id);
+        html = addField(html, 'leaf', meta.leaf_id);
+        html = addField(html, 'joined', meta.joined);
+        html = addField(html, 'routing SF', meta.routing_sf);
+        html = addField(html, 'allowed SF bitmap', meta.allowed_sf_bitmap);
+        html = addField(html, 'mobile', meta.is_mobile);
+        html = addField(html, 'gateway', meta.is_gateway);
+        if (meta.gateway_layers !== undefined && meta.gateway_layers !== null) {
+            const layers = Array.isArray(meta.gateway_layers)
+                ? meta.gateway_layers.join(', ')
+                : JSON.stringify(meta.gateway_layers);
+            html = addField(html, 'gateway layers', layers);
+        }
+    }
     if (meta && meta.lat) {
         html += `<div class="field"><span class="key">location: </span><span class="val">${meta.lat.toFixed(5)}, ${meta.lon.toFixed(5)}</span></div>`;
     }

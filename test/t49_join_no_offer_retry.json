@@ -1,0 +1,45 @@
+{
+  "_name": "t49_join_no_offer_retry",
+  "_desc": "An unjoined node with no neighbours retries J_DISCOVER instead of waiting forever, then emits exhaustion when capped.",
+  "simulation": {
+    "duration_ms": 12000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 49,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance",
+      "alpha": 3.0,
+      "sigma_db": 0.0,
+      "ref_distance_m": 1.0,
+      "ref_loss_db": 40.0,
+      "noise_floor_db": -120.0,
+      "tx_power_dbm": 14.0
+    }
+  },
+  "nodes": [
+    { "name": "solo_joiner", "node_id": null, "key_hash32": "0x49494949", "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "join_required": true,
+        "routing_sf": 7,
+        "allowed_data_sfs": [7],
+        "beacon_period_ms": 60000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1000,
+        "join_discover_jitter_ms": 0,
+        "join_discover_wait_ms": 1000,
+        "join_discover_max_attempts": 2,
+        "join_retry_backoff_ms": 1000
+      },
+      "lat": 41.3900, "lon": 2.1600 }
+  ],
+  "topology": { "links": [] },
+  "expect": [
+    { "type": "script_emit_contains", "node": "solo_joiner", "emit_type": "join_discover_sent", "value": "\"attempt\":1" },
+    { "type": "script_emit_contains", "node": "solo_joiner", "emit_type": "join_discover_retry_scheduled", "value": "\"attempts\":1" },
+    { "type": "script_emit_contains", "node": "solo_joiner", "emit_type": "join_discover_sent", "value": "\"attempt\":2" },
+    { "type": "script_emit_contains", "node": "solo_joiner", "emit_type": "join_discover_exhausted", "value": "\"attempts\":2" },
+    { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "solo_joiner", "min": 0, "max": 0 }
+  ]
+}

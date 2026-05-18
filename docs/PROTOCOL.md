@@ -114,29 +114,29 @@ All frames begin with a 1-byte ASCII tag for cheap dispatch. Bit fields
 within bytes are MSB-first within each byte. Multi-byte numeric fields
 are little-endian (lo byte first) where applicable.
 
-### 3.1 Beacon (`'B'`) — 4 + [1+4L]? + 3n + [32]? + [1+ext]? bytes
+### 3.1 Beacon (`'B'`) — 8 + [1+4L]? + 3n + [32]? + [1+ext]? bytes
 
 Wire format (see ROADMAP §7.0.2 for the full bit-assignment rationale):
 
 ```
-byte:  0      1                                        2     3
-       ┌───┬──────────────────────────────────────────┬─────┬──────────────┐
-       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │S│E│n_entries │
-       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ │ (6b)     │
-       └───┴──────────────────────────────────────────┴─────┴──────────────┘
+byte:  0      1                                        2     3        4..7
+       ┌───┬──────────────────────────────────────────┬─────┬────────┬────────────┐
+       │'B'│ leaf_id(4) │ has_schedule(1) │           │ src │S│E│n  │ key_hash32 │
+       │   │ self_gateway(1) │ is_mobile(1) │ rsv(1)  │     │ │ │6b │    (LE)    │
+       └───┴──────────────────────────────────────────┴─────┴────────┴────────────┘
 
 if has_schedule == 1 (optional schedule block):
-  byte 4:       layer_count(8)
-  bytes 5..(4 + 4×layer_count):
-                schedule records (4 B each — parser SKIPS; no node sets
-                has_schedule=1 yet; reserved for future §7.3 TDM)
+  byte 8:       layer_count(8)
+  bytes 9..(8 + 4×layer_count):
+                schedule records (4 B each)
 
   schedule record (4 bytes):
        ┌─────────────────────────────┬──────────────────┬──────────────────┬──────────┐
-       │ layer(4) │ (sf-5)(3) │ rsv(1)│ duration_100ms(8)│ offset_from_bcn(8)│ rsv(8) │
+       │ layer(4) │ (sf-5)(3) │ P5(1) │ duration_100ms(8)│ offset_100ms(8) │ period_units(8) │
        └─────────────────────────────┴──────────────────┴──────────────────┴──────────┘
 
-route entries × n_entries (3 bytes each, start after optional schedule block):
+route entries × n_entries (3 bytes each, start after fixed key_hash32 and
+optional schedule block):
        ┌──────┬──────┬────────────────────────────────────────┐
        │ dest │ next │ score_bucket(4) │ (hops-1)(3) │ is_gw(1) │
        └──────┴──────┴────────────────────────────────────────┘
@@ -163,7 +163,8 @@ if E == 1:
   `layer_id & 0x0f`. Receivers reject foreign-layer beacons before any
   rt_merge work.
 - `has_schedule` (1 bit, 3): when 1, a schedule block follows immediately
-  after `n_entries`. Currently always 0; reserved for §7.3 inter-layer TDM.
+  after `key_hash32`. Implemented for single-radio gateways; the block
+  advertises when the gateway listens on secondary layers.
 - `self_gateway` (1 bit, 2): sender is an internet/backbone gateway.
 - `is_mobile` (1 bit, 1): sender is a mobile node.
 - `rsv` (1 bit, 0): reserved, must be zero.
@@ -175,7 +176,37 @@ if E == 1:
 - `E` (1 bit, bit 6 of byte 3): a compact extension block follows after the
   route-entry block and optional bitmap.
 - `n_entries` (6 bits, bits 5:0): route-entry count in this page (capped by
-  `beacon_max_entries`, default 49 for a 151-byte frame).
+  `beacon_max_entries`; a 151-byte frame cap fits 47 current 3-byte entries
+  after the fixed 8-byte BCN header).
+- `key_hash32` (32 bits, little-endian): compact hash of the sender's
+  permanent public key. This makes every BCN assertion `src=X` checkable
+  against `id_bind[X]`.
+
+**BCN identity binding:** on every decoded BCN, receivers update
+`id_bind[src]` from `key_hash32`. If no binding exists, create one with
+`source="bcn"` and `confidence="claimed"`. If the existing binding has the
+same hash, refresh `last_seen_ms` and `last_key_seen_ms`. If the existing
+binding has a different hash, emit `addr_conflict_observed`; this is hard
+evidence of duplicate/recycled short-id use. The first implementation should
+record and expose the conflict before automatically evicting routes or forcing
+rejoin.
+
+**Mobile identity beacons:** mobile nodes emit BCN with `is_mobile=1`,
+`key_hash32`, and `n_entries=0`. They omit route entries, destination-seen
+bitmap, and liveness extensions. This keeps mobile endpoints visible and
+identity-checkable without advertising them as transit routers.
+
+**Gateway schedule records:** gateways with `gateway_layers` set emit
+`has_schedule=1` and append one 4-byte schedule record per secondary layer.
+The record's layer field is the on-wire layer nibble (`layer_id & 0x0f`),
+not the full administrative layer id. `P5=0` means byte 3 is seconds;
+`P5=1` means byte 3 is 5-second units, so v1 can encode periods up to
+1275 s while keeping duration/offset at 100 ms resolution. Receivers cache
+schedules by direct gateway neighbour and layer nibble, anchored to the BCN
+receive time. If a sender wants to RTS to a direct gateway while that gateway
+is scheduled away from the sender's layer, it defers until the advertised
+foreign-layer window closes plus a small guard. Gateways also emit
+`gateway_schedule_change` when their own radio context switches.
 
 **Destination-seen bitmap:** Set bits mean "the beacon sender has recently
 observed this node id." The bitmap is a freshness hint, not a route
@@ -219,9 +250,11 @@ budget tier is below CRITICAL.
   among candidates by score, and the chosen candidate's `is_gateway` is
   authoritative.
 
-**Frame size:** default route-entry page is 151 bytes = 4-byte header +
-49 × 3-byte entries (no schedule block). If `S=1`, add 32 bytes after the
-route-entry block. A gateway BCN with L upper layers adds 1 + 4L bytes.
+**Frame size:** default route-entry page should budget an 8-byte fixed header:
+`'B' + flags + src + n/flags + key_hash32`. To preserve the old 151-byte
+default airtime cap, `beacon_max_entries` drops from 49 to 47 entries
+(`8 + 47 × 3 = 149`). If `S=1`, add 32 bytes after the route-entry block. A
+gateway BCN with L upper layers adds 1 + 4L bytes.
 
 **Pre-bit-pack history:** before Phase 1-2 entries were 4 bytes
 (`dest + next + score_i8(8) + hops(8)`) and the default was 200 bytes.
@@ -385,7 +418,7 @@ the packet unless it had decoded the sender's DATA, so the sender cancels its
 ACK/RTS retry timers and marks the hop complete. Any already-scheduled
 LBT-deferred RTS retry for that stale `pending_tx` is cancelled before TX.
 
-### 3.7 Q (`'Q'`) — 4 bytes (query/control)
+### 3.7 Q (`'Q'`) — query/control
 
 ```
 byte:  0   1     2      3
@@ -393,14 +426,17 @@ byte:  0   1     2      3
        │'Q'│ src │ dest │ leaf_id (4 hi)                    │
        │   │     │      │ opcode/mobile flags (4 lo)        │
        └───┴─────┴──────┴───────────────────────────────────┘
+       bytes 4..7: key_hash32, LE, only for HASH_QUERY
 ```
 
 - `src` (8 bits): the requester's node id.
-- `dest` (8 bits): destination for `ROUTE_QUERY`; `0xff` for `REQ_SYNC`.
+- `dest` (8 bits): destination for `ROUTE_QUERY`; `0xff` for `REQ_SYNC`
+  and `HASH_QUERY`.
 - `leaf_id` (4 bits): active layer nibble, derived from `layer_id & 0x0f`.
   Receivers reject foreign-layer Q frames.
 - low nibble:
-  - bits 0-1: opcode (`0=ROUTE_QUERY`, `1=REQ_SYNC`)
+  - bits 0-1: opcode (`0=ROUTE_QUERY`, `1=REQ_SYNC`, `2=HASH_QUERY`,
+    `3=reserved for future full-public-key query`)
   - bit 2: requester is mobile
   - bit 3: reserved
 
@@ -424,6 +460,18 @@ Special cases:
 - `q.dest == self.id`: someone's asking for ME; schedule triggered
   beacon (receivers learn us via the BCN src field, not entries).
 
+**HASH_QUERY behaviour:** when a node knows a stable identity hash but not
+the current layer-local short ID, it sends `Q{opcode=HASH_QUERY,dest=0xff,
+key_hash32=...}` on the target layer's control SF. This is primarily used by
+gateways: if a gateway receives a cross-layer envelope but lacks
+`(target_layer_id,key_hash32)->node_id`, it defers the handoff, emits
+`HASH_QUERY`, and retries the handoff when the binding appears. A receiver
+whose own `key_hash32` matches, or whose local `id_bind` contains the hash,
+answers with `Q{opcode=HASH_QUERY,dest=<resolved_node_id>,key_hash32=...}`.
+Observers treat that response as a weak/claimed identity binding for the active
+layer. The full-public-key query variant is reserved but not implemented in
+this wire slice.
+
 **REQ_SYNC behaviour:** during node-local DISCOVERY, a node whose route
 table is still poor may send `Q{opcode=REQ_SYNC,dest=0xff}` after a
 listen window. The request carries whether the requester is mobile.
@@ -433,96 +481,20 @@ responder suppresses its pending sync response if it hears another
 useful BCN before its timer fires. This lets one good neighbour satisfy
 a joiner without all nearby nodes transmitting full BCNs at once.
 
-**Swimlane (Q frame — both opcodes use BCN as the response).**
-
-```
-Requester (alice)                          Responder (neighbour N)
-                                                                  SF
-Case A — ROUTE_QUERY (alice missing rt[bob]):
-
-issue_send → rt[bob] is nil:
-  defer_send_for_route() — push send to defer queue
-  if q_queried[bob.id] is absent or expired (5 s TTL):
-    pack_q(leaf_id, src=self.id, dest=bob.id,
-           opcode = Q_OP_ROUTE_QUERY,
-           requester_is_mobile = self.is_mobile)
-    q_queried[bob.id] = now + 5 s
-    tx_initiating 'Q' on routing_sf       routing_sf
-                          ─Q──>
-                                on_recv "Q", leaf_id == self.leaf_id
-                                ↓
-                                if q.src == self.id: drop (loop guard)
-                                elif q.dest == self.id:
-                                  schedule_triggered_beacon()
-                                  (someone is asking for ME;
-                                   next BCN announces self via src)
-                                  return
-                                elif q.opcode == Q_OP_ROUTE_QUERY:
-                                  key = ("ROUTE_QUERY", q.src, q.dest)
-                                  if q_responded_to[key] not expired:
-                                    drop (per-key dedup, 10 s TTL)
-                                  elif rt[q.dest] does not exist:
-                                    drop silently (let other neighbour
-                                    answer; suppresses Q-storm)
-                                  else:
-                                    q_responded_to[key] = now + 10 s
-                                    schedule_triggered_beacon()
-                                    (jitter 50-500 ms; the BCN
-                                     IS the response — it contains
-                                     the rt[bob] entry alice needs)
-                                                     ... after jitter ...
-                                tx_flood 'B' on routing_sf
-                                  (§6.4 differential: bob is dirty
-                                   if newly-merged here, else rotates
-                                   into a stable page)
-                          <─B──                                  routing_sf
-on_recv "B": rt_merge inserts/updates rt[bob].
-The deferred send for bob now finds rt[bob].primary
-and proceeds via §7.1 swimlane.
-
-──────────────────────────────────────────────────────────────────
-
-Case B — REQ_SYNC (joiner with poor rt[] in DISCOVERY):
-
-after node-local listen window, alice still lacks neighbours:
-  pack_q(leaf_id, src=self.id, dest=0xff,
-         opcode = Q_OP_REQ_SYNC,
-         requester_is_mobile = self.is_mobile)
-  tx_initiating 'Q' on routing_sf       routing_sf
-                          ─Q──>
-                                on_recv "Q", leaf_id == self.leaf_id
-                                ↓ q.opcode == Q_OP_REQ_SYNC, q.dest == 0xff
-                                if eligible (rt[] non-empty):
-                                  base = rand(req_sync_backoff_min,
-                                              req_sync_backoff_max)
-                                  if q.requester_is_mobile: base += extra
-                                  if self.is_mobile:        base += extra
-                                  schedule pending_sync_bcn at
-                                    now + base
-                                  pending_sync_bcn.kind = "sync"
-
-                                (Suppression rule: if N hears ANY
-                                 useful BCN before its timer fires,
-                                 N cancels its own pending sync BCN
-                                 — one good neighbour's answer is
-                                 enough; avoids all-respond storm.)
-                                                     ... at fire ...
-                                send_beacon_page("sync")
-                                  (full rt[] dump in one BCN, kind=sync)
-                          <─B──                                  routing_sf
-on_recv "B" (sync): rt_merge picks up many entries at once;
-alice's rt[] passes its discovery threshold and DISCOVERY ends.
-
-(Q frames are one-hop only — receivers do NOT forward them.)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §4.1 (Q ROUTE_QUERY / REQ_SYNC — BCN as response).
 
 ### 3.8 J (`'J'`) — join/lease control
 
 `J` is the first short-address join family. It is used before a node has a
 trusted layer-local `node_id`, so the stable identity field is `key_hash32`,
 a compact hash of the node's long public key. The full public key is fetched
-later by identity-card request; it is not carried in BCN or normal data-plane
-frames.
+later by identity-card request. BCN carries only `key_hash32`; normal
+data-plane frames do not expose the long-term identity in clear.
+
+Current implementation note: a `join_required` node starts as temporary
+protocol id `255`, which is reserved for unjoined/broadcast-special use. After
+`J_CLAIM` survives the guard window, Lua calls the runtime `set_protocol_id`
+hook and subsequent RF metadata uses the adopted short id.
 
 Common byte 1:
 
@@ -561,7 +533,11 @@ frequency and control SF out-of-band; after it sends `J_DISCOVER`, any
 joined neighbour may answer with the active layer's DATA SF bitmap. The
 joiner adopts that bitmap before sending DATA or advertising RTS bitmaps.
 The bitmap uses the RTS convention: bit `(sf - 5)` means DATA SF `sf` is
-allowed by the layer.
+allowed by the layer. Already-joined nodes may observe `J_OFFER` but do not
+change their DATA SF policy from it. An unjoined node adopts the first valid
+non-zero DATA SF bitmap it receives and ignores later offers until it rejoins;
+this avoids nondeterministic "last offer wins" configuration when several
+neighbours answer one discovery.
 
 `J_CLAIM`:
 
@@ -581,9 +557,18 @@ byte:  0   1        2          3..6             7..10              11..12     13
        └───┴────────┴──────────┴────────────────┴──────────────────┴──────────┴──────┴────────┘
 ```
 
+Current denial reasons:
+
+- `1 = conflict`: sender owns or has an adopted/bound owner for `denied_id`.
+- `2 = pending_claim`: sender is still inside its own claim guard window but
+  wins the deterministic `(key_hash32, nonce)` tie-break against the received
+  competing claim. Observers should treat this as lower confidence than an
+  adopted-owner denial until a later `join_adopted`/BCN confirms the binding.
+
 All multi-byte integer fields are little-endian. `lease_age` is saturating,
 local-clock-relative seconds; it is only a deterministic tie-break input
-during partition merge or simultaneous claims, not an absolute timestamp.
+during partition merge or simultaneous claims, not an absolute timestamp. In
+the current first slice it is encoded but transmitted as `0`.
 
 ### 3.6 NACK (`'N'`) — 4 bytes
 
@@ -635,7 +620,7 @@ hears it regardless of which SF it is listening on at that moment.
 
 | Frame | Bytes | Notes |
 |---|---|---|
-| BCN | 4 + 3n (plain leaf); 4 + [1 + 4L] + 3n (gateway w/ L upper-layer schedule records) | n entries (3 B each, bit-packed); default cap 49 → max ~151 B for plain leaf |
+| BCN | 8 + 3n (plain leaf); 8 + [1 + 4L] + 3n (gateway w/ L upper-layer schedule records) | n entries (3 B each, bit-packed) plus fixed `key_hash32`; default 151 B cap fits 47 entries |
 | Q   | 4      | RREQ-route (one-hop) |
 | J_DISCOVER | 6 | join discovery; carries `key_hash32` |
 | J_OFFER | 8 | join bootstrap response; carries DATA SF bitmap |
@@ -857,83 +842,7 @@ format.
 | `cascade_requeue_total_max_ms` | **60000** | Total wallclock cap; older items drop. (Was 120000 pre-D3 — tightened after measuring s04 successful-delivery max ~115s; 60s keeps most legitimate slow paths alive while killing 3-13 minute zombie cascades.) |
 | `cascade_requeue_load_threshold` | 0 | Local tx_queue depth above which the effective requeue budget starts shrinking (Phase D3) |
 
-**Swimlane (cascade-requeue lifecycle — no wire exchange of its own; orchestrates §7.1 + §8.5 flights).**
-
-```
-Originator (alice) — flight to bob via stuck routes
-                                                                  SF
-enqueue {origin=alice, dst=bob, payload="hello"}
-  enqueue_time_ms  = T_0
-  requeue_count    = 0
-  next_attempt_ms  = T_0
-become_free → pop earliest-ready item → issue_send
-
-╔═══════════════════════════════════════════════════════════════╗
-║ Attempt cycle 0  (requeue_count=0,                            ║
-║   effective_rts_max_retries = rts_max_retries - 0 = 3)        ║
-╠═══════════════════════════════════════════════════════════════╣
-║ K=3 alt walk through rt[bob].candidates:                      ║
-║   alt 0: tx_initiating 'R' → rts/ack timeouts → exhaust       ║
-║   alt 1: switch + reset retries → tx 'R' → exhaust            ║
-║   alt 2: switch + reset retries → tx 'R' → exhaust            ║
-║   no more alts → emit "path_cascade_exhausted"                ║
-╚═══════════════════════════════════════════════════════════════╝
-                                ↓
-try_cascade_requeue("path_cascade_exhausted"):
-  next_count   = 0 + 1 = 1
-  total_age_ms = now - T_0
-  if next_count > cascade_requeue_max (3):         drop
-  if total_age_ms >= cascade_requeue_total_max_ms: drop
-  (Phase D3 load-adaptive) if tx_queue depth >
-    cascade_requeue_load_threshold, subtract excess from
-    effective budget; if budget <= 0 → emit
-    "cascade_load_skip"; drop
-  else:
-    backoff_ms = min(5000 × 2^0, 30000) = 5000
-    push back to tx_queue:
-      next_attempt_ms = now + 5000
-      requeue_count   = 1
-      enqueue_time_ms = T_0  (preserved across requeues)
-    emit "cascade_requeue" {requeue_count=1, backoff_ms,
-                            total_age_ms, trigger}
-  pending_tx = nil; become_free
-  (other queued items can dispatch during the 5 s backoff)
-
-... 5 s later ...
-queue_wakeup_handle fires → become_free → pop earliest-ready:
-  PRIORITY: smallest requeue_count first
-            (tie-break: smallest next_attempt_ms, then FIFO)
-  So fresh sends (requeue_count=0) jump ahead of zombies —
-  fresh sends have the best chance of clean delivery.
-
-╔═══════════════════════════════════════════════════════════════╗
-║ Attempt cycle 1  (requeue_count=1,                            ║
-║   effective_rts_max_retries = 3 - 1 = 2 — Phase D4)           ║
-╠═══════════════════════════════════════════════════════════════╣
-║ Same K=3 alt walk, but each alt has 2 RTS retries (not 3).    ║
-║ Zombie messages spend less channel time per cycle.            ║
-║ If exhausts → try_cascade_requeue → backoff = 5000 × 2 = 10s  ║
-╚═══════════════════════════════════════════════════════════════╝
-                                ↓
-... 10 s later ... cycle 2 (effective_rts_max_retries = 1)
-... 20 s later ... cycle 3 (effective_rts_max_retries = 0)
-
-After cycle 3 exhausts:
-  next_count = 4 > cascade_requeue_max (3)
-  try_cascade_requeue returns false
-  → flight is DROPPED:
-      emit "rts_giveup"
-      emit "path_cascade_exhausted_final"
-      (originator's app layer must decide whether to re-send
-       fresh or surface "delivery failed" to the user)
-
-Total-wallclock guard applies on EVERY requeue attempt:
-  if (now - enqueue_time_ms) >= 60 s:
-    drop immediately, regardless of remaining requeue budget
-  (Tightened from 120 s after measuring s04 successful-delivery
-   max ~115 s — 60 s preserves most legitimate slow paths while
-   killing 3-13 minute zombie cascades that pollute the channel.)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §4.2 (cascade-requeue lifecycle).
 
 ### 5.7 Tier-aware routing (`route_strictly_better` penalty)
 
@@ -1038,51 +947,7 @@ Defaults: discovery period 5 s, operational period 15 min. Firmware
 behavior does not depend on simulator `warmup_ms`; a node that boots
 late gets the same local discovery window as a node present at t=0.
 
-**Swimlane (periodic emit + receive).**
-
-```
-Emitter (G)                                Listener (H, direct neighbor)
-                                                                  SF
-on_beacon_fire (periodic timer):
-  if pending_tx or pending_rx:
-    emit "beacon_skipped_busy"; skip
-  §6.2 throttle gate (see diagram in §6.2):
-    if since_busy < quiet_threshold_ms:  skip
-    else schedule deferred fire with jitter
-  §6.4 differential emit:
-    pages = build_dirty_pages(rt)  if any dirty
-    else full rt[] dump
-  pack_bcn:
-    byte 0..1: 'B', leaf_id|has_schedule|self_gateway|is_mobile
-    byte 2:    src = G.id
-    byte 3:    n_entries, has_ext, seen_bitmap_present
-    [seen_bitmap(32B)]?  [schedule_records(4×L)]?
-    n × route_entry(3 B) = {dest, next, score|hops|is_gateway}
-    [ext TLVs]?
-  last_beacon_tx_ms = now
-  clear page-dirty flags (differential)
-  tx_flood 'B' on routing_sf            routing_sf
-                          ─B──>
-                                on_recv "B", leaf_id == self.leaf_id
-                                else drop ("bcn_drop_foreign_leaf")
-                                ↓
-                                last_bcn_rx_ms[G] = now
-                                last_rx_routing_sf_ms = now  (§6.2 input)
-                                if seen_bitmap.bit(self.id):
-                                  direct_neighbor[G].confirmed = now
-                                for entry e in B.entries:
-                                  cand = {next=G, score=e.score,
-                                          hops=min(e.hops+1, 8),
-                                          is_gateway=e.is_gateway,
-                                          src_advertiser=G, t=now}
-                                  rt_merge(e.dest, cand)
-                                if B.has_schedule:
-                                  for s in B.schedule_records:
-                                    schedule_cache[(G, s.layer)] = s
-                                emit "bcn_received"
-                                (no reply — BCN is flood-broadcast,
-                                 no per-listener ACK)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §1.1 (BCN periodic emit + receive).
 
 ### 6.2 Adaptive throttle (heard-channel busy)
 
@@ -1114,12 +979,12 @@ jitter (used by unit tests).
 **Max-idle override (`beacon_max_idle_ms`):** in dense meshes (100+
 nodes), the channel never goes quiet for the 30 s threshold —
 periodic beacons are suppressed indefinitely once the network is
-busy. Routes learned during discovery then age out (~10-30 min later)
+busy. Routes learned during discovery then age out later
 with no fresh advertisements arriving, and the network can collapse
 into a stable 0%-delivery state.
 
 The override: if a node hasn't BCN'd in `beacon_max_idle_ms`
-(default **900 s = 15 min**, comfortably below the 30 min default
+(default **900 s = 15 min**, comfortably below the 45 min default
 `rt_aging_ttl_neighbor_ms`), bypass the busy throttle on the next
 periodic timer fire and emit anyway. Both gate-check sites (pre-
 jitter and post-jitter) honour the override. Emit
@@ -1169,50 +1034,7 @@ Real-deployment tuning: keep `beacon_max_idle_ms` <
 before they age out. Multi-hop entries
 (`rt_aging_ttl_remote_ms`) survive longer rotation gaps.
 
-**Swimlane (throttle gate decision + channel inputs).**
-
-```
-Throttle gate at G                         Channel inputs (any peer, any frame)
-                                                                              SF
-                                           on_recv (any frame, routing_sf):
-                                             last_rx_routing_sf_ms = now
-                                           on_preamble_detected (routing_sf):
-                                             last_rx_routing_sf_ms = now
-                                             (SX1262 IRQ equivalent — fires
-                                              even when SNR variance defeats
-                                              full decode)
-                                           on_recv 'B' specifically:
-                                             last_rx_bcn_ms = now
-
-on_beacon_fire (periodic timer):
-  since_busy   = now - last_rx_routing_sf_ms
-  since_bcn_rx = now - last_rx_bcn_ms
-  since_my_bcn = now - last_beacon_tx_ms
-  max_idle_eligible = (since_my_bcn >= beacon_max_idle_ms)
-
-  PRE-JITTER GATE:
-    if max_idle_eligible:
-      if dirty_n == 0 AND
-         since_bcn_rx < (beacon_max_idle_ms / 3):
-        emit "beacon_max_idle_skip_clean"; SKIP
-      else:
-        emit "beacon_max_idle_force"; FIRE
-        → send_beacon_page("periodic")          (continues into §6.1 wire arrow)
-    elif since_busy < quiet_threshold_ms:
-      emit "beacon_skipped_busy"(pre_jitter)
-      SKIP
-    else:
-      delay = rand(0, beacon_silence_jitter_ms)
-      schedule deferred fire at now + delay
-
-at deferred-fire time:
-  POST-JITTER GATE (same composite filter):
-    re-evaluate since_busy, since_bcn_rx, dirty_n,
-    max_idle_eligible against fresh now
-    apply pre-jitter logic again
-    on FIRE → send_beacon_page("periodic")     (→ §6.1 wire arrow)
-    on SKIP → emit "beacon_skipped_busy"(post_jitter)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §1.2 (throttle gate decision + channel inputs).
 
 ### 6.3 Triggered beacon
 
@@ -1241,47 +1063,7 @@ changes coalesces into at most one dirty BCN every
 first `beacon_boot_grace_ms` after boot bypass the minimum interval so
 joiners can converge quickly.
 
-**Swimlane (route-change → triggered BCN → cascade).**
-
-```
-Emitter (G)                                Listener (H, direct neighbor)
-                                                                              SF
-some action mutates rt[]:
-  rt_merge returns action in
-    {"new","promote","primary_refresh"}
-  OR rt_prune_cycle removes primary
-  OR age_out_stale_routes evicts entry
-  → schedule_triggered_beacon()
-
-schedule_triggered_beacon:
-  if triggered_beacon_pending: no-op (coalesced)
-  triggered_beacon_pending = true
-  base_delay = rand(beacon_trigger_jitter_min_ms,
-                    beacon_trigger_jitter_max_ms)   (default 2–10 s)
-  if past discovery+boot_grace AND
-     (since_my_bcn < beacon_trigger_min_interval_ms):
-    base_delay = (trigger_min_interval - since_my_bcn)
-                 + rand(2s, 10s)
-    emit "beacon_trigger_deferred"
-  schedule fire at now + base_delay
-
-at fire-time:
-  triggered_beacon_pending = false
-  if pending_tx or pending_rx: skip (half-duplex)
-  (NO §6.2 throttle gate — triggered BYPASSES throttle)
-  send_beacon_page("triggered")
-  last_beacon_tx_ms = now
-  tx_flood 'B' on routing_sf            routing_sf
-                          ─B──>
-                                on_recv "B": same handling as §6.1 swimlane
-                                ↓
-                                if H's own rt_merge produces
-                                {"new","promote","primary_refresh"}:
-                                  H schedules its OWN triggered BCN
-                                  → cascade propagates the route change
-                                    across the network within a few
-                                    jitter windows
-```
+**Swimlane:** see `docs/SCENARIOS.md` §1.3 (route-change → triggered BCN → cascade).
 
 ### 6.4 Differential beacons (dirty-first emission)
 
@@ -1345,9 +1127,9 @@ A periodic aging loop walks `rt[]` every `rt_aging_check_period_ms`
 **hop-class-specific TTL**:
 
 - `hops == 1` (direct neighbour) → `rt_aging_ttl_neighbor_ms`
-  (default **30 min**)
+  (default **45 min**)
 - `hops >= 2` (remote multi-hop) → `rt_aging_ttl_remote_ms`
-  (default **90 min**)
+  (default **3 h**)
 
 ```
 age_out_stale_routes(self):
@@ -1377,6 +1159,11 @@ rotation gaps without false-eviction (in a 100-node mesh with 49
 entries/page, full rotation is ~3 beacon periods × success rate, easily
 30+ minutes under throttling).
 
+Identity ownership is aged separately from route freshness. `id_bind[]`
+answers "which long-term key owns short id X?" and uses `id_bind_ttl_ms`,
+default 48 h. Expiring a route candidate does not recycle the short ID.
+Only an expired identity binding makes the ID available for future join.
+
 **Direct-neighbour last_seen refresh on ANY RX:** the on_recv top hook
 also refreshes `rt[meta.src].candidates[direct].last_seen_ms` for every
 incoming frame, not just beacons. Prevents direct neighbours from
@@ -1397,68 +1184,15 @@ refreshing). Cascade time across N hops: ~`N × ttl`.
 
 | Key | Default | Description |
 |---|---|---|
-| `rt_aging_ttl_neighbor_ms` | 1800000 (30 min) | Direct-neighbour candidate expires if not refreshed within this window |
-| `rt_aging_ttl_remote_ms` | 5400000 (90 min) | Multi-hop candidate expires if not refreshed within this window |
+| `rt_aging_ttl_neighbor_ms` | 2700000 (45 min) | Direct-neighbour candidate expires if not refreshed within this window |
+| `rt_aging_ttl_remote_ms` | 10800000 (3 h) | Multi-hop candidate expires if not refreshed within this window |
 | `rt_aging_check_period_ms` | 60000 (1 min) | How often the aging scan runs |
+| `id_bind_ttl_ms` | 172800000 (48 h) | Short-ID ownership binding expires if no key-confirming traffic refreshes it |
 
 Set both TTLs to 0 to disable aging (memory leak risk in long-lived
 deployments; useful for tests).
 
-**Swimlane (aging tick + cascade consequence).**
-
-```
-Aging tick on G                            Listener H (sees consequence later)
-                                                                              SF
-on_aging_tick (every rt_aging_check_period_ms, default 60 s):
-  ttl_n = rt_aging_ttl_neighbor_ms        (30 min)
-  ttl_r = rt_aging_ttl_remote_ms          (90 min)
-  any_evicted = false
-  any_primary_evicted = false
-
-  for each rt[dest]:
-    keep = []
-    for each candidate c in rt[dest].candidates:
-      ttl = (c.hops == 1) ? ttl_n : ttl_r
-      if (now - c.last_seen_ms) < ttl:
-        keep.append(c)
-    if #keep == 0:
-      rt[dest] = nil                       (no "delete" wire frame —
-      any_evicted = true                    listener's own aging loop
-                                            evicts via cascade)
-    elif primary slot was evicted:
-      rt[dest].candidates = keep
-      rt[dest].dirty = true                 → next BCN ships new primary
-      any_primary_evicted = true
-      any_evicted = true
-    else:
-      rt[dest].candidates = keep            (alts only — no broadcast)
-
-  if any_evicted:
-    emit "rt_aged"
-    schedule_triggered_beacon()             → see §6.3 swimlane for fire path
-                                              and the cascade behaviour
-                          ─B──>           routing_sf
-                                            on_recv "B": G's table arrives
-                                            WITHOUT the gone destination.
-                                            H's rt_merge does NOT add the
-                                            missing dest. H's own
-                                            last_seen_ms for that dest
-                                            stops being refreshed; H's
-                                            own aging loop evicts it on
-                                            a future tick.
-                                            Cascade time across N hops:
-                                            roughly N × ttl.
-
-Last-seen refresh inputs (prevent eviction):
-  - on_recv "B" containing route (dest, next, ...):
-      refreshes rt[dest].candidates[c where c.next == B.src].last_seen_ms
-  - on_recv ANY frame from neighbour B (RTS/CTS/DATA/ACK/BCN):
-      refreshes rt[B].candidates[direct-1-hop].last_seen_ms only
-      (multi-hop entries still age via beacon advertisements)
-  - seen_bitmap from B containing self.id bit:
-      refreshes rt[dest].candidates[c where c.next == B].last_seen_ms
-      for each dest in B's table
-```
+**Swimlane:** see `docs/SCENARIOS.md` §1.4 (stale-route aging — tick + cascade consequence).
 
 ### 6.6 Bounded beacons (paged emission)
 
@@ -1473,8 +1207,15 @@ pack_beacon(node, max_entries, offset):
   return frame, (offset + n) % total
 ```
 
-`beacon_offset` advances per fire. Default `beacon_max_bytes = 200`
-→ `beacon_max_entries = floor((200 − 4) / 4) = 49`.
+`beacon_offset` advances per fire. Entry capacity is derived from the active
+wire format. With the current fixed 8-byte BCN header and 3-byte entries:
+
+```
+beacon_max_entries = floor((beacon_max_bytes - 8) / 3)
+```
+
+For the default 151-byte airtime cap, this yields 47 entries. If a deployment
+raises `beacon_max_bytes` to 200, the same format can carry 64 entries.
 
 Receivers don't track pages — every entry heard gets merged via
 `rt_merge` as before.
@@ -1487,158 +1228,9 @@ End-to-end flight from originator to destination, no failures.
 
 ### 7.1 Sequence diagram (single-hop unicast)
 
-```
-Originator (alice)              Next-hop (bob)
-                                                                  SF
-on_command "send bob hello"
-  enqueue {origin=alice, dst=bob, payload=hello}
-  become_free →
-  issue_send →
-    pack_rts → pending_tx
-    start_rts_timeout
-    tx_initiating 'R' on routing_sf       routing_sf
-    (sender's RX stays on routing_sf —
-     CTS and ACK and NACK all ride on routing_sf;
-     TX SF varies per frame but does not change
-     the modem's RX SF, see lua:4108, lua:6064)
-                          ─R──>
-                                on_recv "R", leaf_id ok, next == self.id
-                                ↓
-                                pending_rx = {from=alice, ctr_lo,
-                                              chosen_data_sf, ...}
-                                start_pending_rx_expiry
-                                pack_cts(ctr_lo, chosen_data_sf)
-                                tx_with_retry 'C' on routing_sf
-                                (CTS on routing_sf so the sender
-                                 — still on routing_sf — hears it)
-                          <─C──                              routing_sf
-on_recv "C", matches pending_tx.ctr_lo
-  pending_tx.chosen_data_sf = c.chosen_data_sf
-  cancel rts_timeout
-                                set_rx_sf(chosen_data_sf)        data_sf
-                                (receiver retunes RX to data_sf
-                                 to receive DATA on the chosen SF)
-after cts_to_data_gap_ms:
-  pack_data → tx_with_retry 'D' on chosen_data_sf
-  (sender's TX SF override = data_sf for this frame;
-   sender's RX SF unchanged, still routing_sf)
-  start_ack_timeout
-                          ─D──>
-                                on_recv "D" at data_sf,
-                                matches pending_rx.ctr_lo
-                                ↓
-                                cancel pending_rx_expiry
-                                set_rx_sf(routing_sf)           routing_sf
-                                pending_rx = nil
-                                last_acked_from[alice] = {ctr_lo, t_ms}
-                                pack_ack(ctr_lo, meta.snr,
-                                         budget_hint)
-                                tx_with_retry 'K' on routing_sf
-                          <─K──                             routing_sf
-on_recv "K", matches pending_tx.ctr_lo
-cancel ack_timeout
-update snr_ewma_out[bob] from k.snr_db
-pending_tx = nil; become_free
-                                if dst == self.id:
-                                  emit "delivered"
-                                else (forwarder):
-                                  after ack_air_ms+1: enqueue forward
-                                  become_free
-```
+**Swimlane:** see `docs/SCENARIOS.md` §2.1 (RTS-CTS-DATA-ACK single hop).
 
-**Swimlane (multi-hop forward: alice → F → bob).**
-
-```
-Originator (alice)         Forwarder (F)              Destination (bob)
-                                                                       SF
-on_command send bob hello:
-  next_hop = rt[bob].primary.next  (= F)
-  pack_rts(dst=bob, next=F,
-           ctr_lo = ctr & 0xF)
-  pending_tx; start rts_timeout
-  tx_initiating 'R' on routing_sf       routing_sf
-                          ─R──>
-                            on_recv "R", next == self.id,
-                            dst != self.id  (forward request)
-                            ↓
-                            pending_rx = {from=alice,
-                                          dst=bob, ctr_lo,
-                                          chosen_data_sf}
-                            pack_cts(ctr_lo, chosen_data_sf)
-                            tx_with_retry 'C' on routing_sf
-                          <─C──                       routing_sf
-on_recv "C", matches pending_tx.ctr_lo
-cancel rts_timeout
-                            set_rx_sf(chosen_data_sf)   data_sf
-                            (F retunes RX to receive DATA)
-after cts_to_data_gap_ms:
-  pack_data(origin=alice, dst=bob,
-            ctr, payload)
-  tx_with_retry 'D' on chosen_data_sf
-  (TX SF only; alice's RX stays on routing_sf)
-                          ─D──>
-                            on_recv "D" at data_sf,
-                            matches pending_rx
-                            ↓
-                            cancel pending_rx_expiry
-                            set_rx_sf(routing_sf)      routing_sf
-                            last_acked_from[alice] = {ctr_lo, now}
-                            pack_ack(ctr_lo, meta.snr,
-                                     budget_hint)
-                            tx_with_retry 'K' on routing_sf
-                          <─K──                        routing_sf
-on_recv "K"
-pending_tx = nil; become_free
-                            dst != self.id → forwarder branch:
-                            after ack_air_ms + 1 ms:
-                              enqueue {origin=alice, dst=bob,
-                                       ctr, payload}
-                              become_free → issue_send
-
-                            issue_send (forward leg):
-                              next_hop = rt[bob].primary.next (= bob)
-                              pack_rts(dst=bob, next=bob,
-                                       ctr_lo = ctr & 0xF)
-                              (ctr_lo = ORIGIN's ctr nibble,
-                               same value as the inbound DATA;
-                               end-to-end identification of the flight)
-                              pending_tx; tx_initiating 'R'
-                                          on routing_sf       routing_sf
-                                                          ─R──>
-                                                            on_recv "R",
-                                                            next == self.id,
-                                                            dst == self.id
-                                                            ↓ (local deliver)
-                                                            pending_rx = {...,
-                                                              chosen_data_sf}
-                                                            pack_cts
-                                                            tx 'C' on routing_sf
-                                                          <─C──            routing_sf
-                            on_recv "C", matches pending_tx.ctr_lo
-                                                            set_rx_sf(chosen_data_sf)
-                                                                              data_sf
-                            after cts_to_data_gap_ms:
-                              tx 'D' on chosen_data_sf
-                                                          ─D──>
-                                                            on_recv "D" at data_sf,
-                                                            matches pending_rx
-                                                            ↓
-                                                            set_rx_sf(routing_sf)
-                                                                              routing_sf
-                                                            dst == self.id:
-                                                              emit "delivered"
-                                                              payload → app
-                                                            pack_ack →
-                                                            tx 'K' on routing_sf
-                                                          <─K──            routing_sf
-                            on_recv "K"
-                            pending_tx = nil; become_free
-
-(Alice's hop-level K-ack only confirmed F received the DATA.
- If F dropped the message after the K-ack — disk full, app crash,
- route change — alice has no way to know. See §7.4 for opt-in
- E2E ACK when end-to-end confirmation is required.)
-```
+**Multi-hop swimlane:** see `docs/SCENARIOS.md` §2.2 (multi-hop forward: alice → F → bob).
 
 ### 7.2 SF retune timeline
 
@@ -1772,78 +1364,7 @@ consumed per message.
 `pending_e2e` entries live before timeout. Sized for typical 3-5 hop
 round-trip with retries; longer for known-deep meshes.
 
-**Swimlane (E2E ACK round-trip: alice → bob → alice).**
-
-```
-Originator (alice)                         Destination (bob)
-                                                                  SF
-send_e2e bob "hello":
-  ctr = self:next_ctr(bob.id)
-  pending_e2e[(bob.id, ctr)] = {sent_at=now, text="hello"}
-  emit "e2e_ack_pending"
-  enqueue {flags = DATA_FLAG_E2E_ACK_REQ,
-           ctr, dst=bob, payload="hello"}
-
-  → normal data-plane flight (may be multi-hop; see §7.1 swimlane
-    per hop). Wire byte 1 bit 3 carries E2E_ACK_REQ end-to-end;
-    forwarders pass it through without acting on it.
-
-  ─R/C/D/K─ ... ─R/C/D/K─→
-                                on_recv "D" at final hop, dst == self.id
-                                ↓ (delivery branch)
-                                parse_data sets:
-                                  d.e2e_ack_req = true
-                                  d.ctr         = alice's ctr (LE)
-                                  d.origin      = alice.id
-                                  d.body        = "hello"
-                                emit "delivered" payload="hello"
-                                  (user app sees the message)
-
-                                if d.e2e_ack_req:
-                                  return_ctr = self:next_ctr(alice.id)
-                                  return_body = [d.ctr & 0xff,
-                                                 (d.ctr >> 8) & 0xff]
-                                  inner       = src_addr_len(0)
-                                                | src_addr(bob.id)
-                                                | return_body
-                                  enqueue {flags = DATA_FLAG_E2E_IS_ACK,
-                                           ctr   = return_ctr,
-                                           dst   = alice.id,
-                                           payload = inner}
-                                  emit "e2e_ack_tx_enqueued"
-                                  (return frame does NOT set
-                                   E2E_ACK_REQ — no recursion)
-
-                                  → normal data-plane flight back
-                                    (forwarders see ordinary DATA;
-                                     E2E_IS_ACK flag is opaque to them)
-
-                          <─R/C/D/K─ ... ─R/C/D/K─
-
-on_recv "D" at alice (final hop of the return flight):
-  parse_data sets:
-    d.e2e_is_ack = true
-    d.origin     = bob.id
-    d.body       = [acked_ctr_lo, acked_ctr_hi]
-  acked_ctr = d.body:byte(1) | (d.body:byte(2) << 8)
-
-  if pending_e2e[(bob.id, acked_ctr)] exists:
-    emit "delivered_confirmed" payload = stored .text
-    clear pending_e2e[(bob.id, acked_ctr)]
-  else:
-    emit "e2e_ack_unmatched"  (duplicate or already timed out)
-
-  DO NOT emit a normal "delivered" — this IS the ACK, not user content
-  DO NOT enqueue another E2E ACK — E2E_IS_ACK on inbound prevents it
-
-(Meanwhile, the 1 s drain loop sweeps pending_e2e:)
-  for each pending_e2e[(dst, ctr)]:
-    if (now - sent_at) > e2e_ack_ttl_ms (default 60 s):
-      emit "e2e_ack_timeout" {dst, ctr}
-      clear entry
-      (app layer decides whether to retry or surface
-       "no answer received" to the user)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §2.3 (E2E ACK round-trip: alice → bob → alice).
 
 ---
 
@@ -1891,50 +1412,7 @@ busy signal; the receiver freeing up is the natural event to wait
 for. Path-switching on busy NACK is harmful when next == dst (the
 busy node is the originator's only target).
 
-**Swimlane (RTS hits busy receiver → NACK BUSY_RX).**
-
-```
-Originator (alice)              Receiver (R, busy with pending_rx for other sender X)
-                                                                  SF
-issue_send → tx RTS to R:
-  pack_rts(dst, next=R, ctr_lo,
-           sf_bitmap, payload_len)
-  pending_tx; tx_initiating 'R'
-              on routing_sf       routing_sf
-                          ─R──>
-                                on_recv "R" at R, next == self.id
-                                ↓
-                                pending_rx ~= nil AND
-                                  (pending_rx.from   != r.src OR
-                                   pending_rx.ctr_lo != r.ctr_lo OR
-                                   pending_rx.payload_len != r.payload_len)
-                                  → R is busy with a DIFFERENT flight (from X)
-                                busy_for     = pending_rx_expires_in_ms
-                                busy_payload = ceil(busy_for / 16)
-                                               (max 255 → 4080 ms ceiling)
-                                emit "nack_tx" {reason=pending_rx}
-                                pack_nack(ctr_lo = r.ctr_lo,
-                                          reason  = NACK_REASON_BUSY_RX,
-                                          payload = busy_payload)
-                                tx_initiating 'N' on routing_sf
-                          <─N──                              routing_sf
-on_recv "N", matches pending_tx.ctr_lo
-  busy_for_ms = nack.payload × 16
-  cancel rts_timeout
-  blind_until[R] = now + busy_for_ms
-
-  if busy_for_ms <= NACK_WAIT_THRESHOLD_MS (2 s):
-    schedule tx_rts_retry("nack_wait") at
-      now + busy_for_ms + 1 + rand(0, retry_jitter_ms)
-    (SAME next-hop — we never path-switch on NACK)
-  else:
-    push pending_tx back into tx_queue
-    pending_tx = nil
-    become_free
-    (DV may converge while we wait; other queued
-     work may surface first; eventual re-issue uses
-     fresh routing decisions)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §3.1 (RTS hits busy receiver → NACK BUSY_RX).
 
 (Note: the `pending_tx`-busy case at R is a silent drop with
 `rts_drop_pending_tx`, no NACK — the busy_for_ms estimate from a node
@@ -1962,50 +1440,7 @@ sender can have different in-flight or recent packets with the same low
 counter. The 10s TTL bounds wraparound exposure; the wider key prevents
 cross-packet false positives during normal retry traffic.
 
-**Swimlane (RTS retry after lost ACK → CTS `already_received=1`).**
-
-```
-Originator (alice)              Receiver (R, already delivered/forwarded earlier)
-                                                                  SF
-(Earlier flight (alice → R, ctr_lo=N, payload_len=L)
- completed at R: R sent K-ack, but K-ack was lost.
- alice's ack_timeout fired; the work item is still
- in alice's queue. tx_rts_retry now retries:)
-
-tx_rts_retry("ack_timeout"):
-  pack_rts(dst, next=R, ctr_lo=N,
-           sf_bitmap, payload_len=L)
-  pending_tx; tx_initiating 'R'
-              on routing_sf       routing_sf
-                          ─R──>
-                                on_recv "R" at R, next == self.id
-                                ↓
-                                ack_key = (r.src, r.dst,
-                                           r.ctr_lo, r.payload_len)
-                                if last_acked_from[ack_key] exists
-                                AND (now - last_acked_from[ack_key].t_ms)
-                                    < last_acked_ttl_ms (10 s):
-                                  emit "rts_already_acked"
-                                  pack_cts(r.ctr_lo,
-                                           chosen_data_sf,
-                                           already_received=1)
-                                  tx_with_retry 'C' on routing_sf
-                                  return
-                                  (no pending_rx created,
-                                   no DATA processing repeats,
-                                   no forwarding duplicated)
-                          <─C── (already_received=1)        routing_sf
-on_recv "C", c.already_received == true
-matches pending_tx.ctr_lo:
-  cancel rts_timeout
-  emit "cts_already_received_rx"
-  treat as success — no DATA-tx, no ACK expected:
-    if origin == self.id:
-      clear app-pending entry (delivered confirmation)
-    if forwarder:
-      skip DATA-tx and DATA forwarding (peer already has it)
-  pending_tx = nil; become_free
-```
+**Swimlane:** see `docs/SCENARIOS.md` §3.2 (RTS retry after lost ACK → CTS `already_received=1`).
 
 ### 8.3 Duplicate RTS while we're mid-flight as receiver
 
@@ -2024,48 +1459,7 @@ on_recv 'R' with pending_rx ~= nil AND
 Sender's previous CTS was lost. They retried RTS. We re-send CTS
 with the same chosen_data_sf so they can re-attempt DATA.
 
-**Swimlane (duplicate RTS while R is mid-flight → re-emit CTS).**
-
-```
-Originator (alice)              Receiver (R, mid-flight RX for alice's current flight)
-                                                                  SF
-(R received an earlier RTS from alice with ctr_lo=N,
- sent CTS — but CTS was lost. R set pending_rx and
- retuned to data_sf to await DATA. R's pending_rx_expiry
- hasn't fired yet. alice's rts_timeout fires; tx_rts_retry:)
-
-tx_rts_retry("cts_timeout"):
-  pack_rts(dst, next=R, ctr_lo=N,
-           sf_bitmap, payload_len=L)
-  pending_tx; tx_initiating 'R'
-              on routing_sf       routing_sf
-                          ─R──>
-                                on_recv "R" at R, next == self.id
-                                (R is on routing_sf only between
-                                 pending_rx_expiry windows — see §7.2)
-                                ↓
-                                pending_rx ~= nil AND
-                                  pending_rx.from        == r.src AND
-                                  pending_rx.dst         == r.dst AND
-                                  pending_rx.ctr_lo      == r.ctr_lo AND
-                                  pending_rx.payload_len == r.payload_len
-                                  → SAME flight; previous CTS lost
-                                emit "rts_rx_dup"
-                                pack_cts(r.ctr_lo,
-                                         pending_rx.chosen_data_sf,
-                                         already_received=0)
-                                tx_with_retry 'C' on routing_sf
-                                  (label = "CTS-dup")
-                                restart pending_rx_expiry
-                                set_rx_sf(chosen_data_sf)   data_sf
-                                (R re-arms for the upcoming DATA)
-                          <─C──                              routing_sf
-on_recv "C" matches pending_tx.ctr_lo:
-  pending_tx.chosen_data_sf = c.chosen_data_sf
-  cancel rts_timeout
-  → resume normal DATA-tx flow per §7.1 (cts_to_data_gap
-    then tx 'D' on chosen_data_sf, etc.)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §3.3 (duplicate RTS while R is mid-flight → re-emit CTS).
 
 ### 8.4 F1 mitigation — passive CTS overhearing
 
@@ -2113,65 +1507,7 @@ at `RTS_TIMEOUT_BACKOFF_CAP = 4`) so the existing retry budget covers
 a full receiver blind window even when the CTS itself was lost in
 flight (overhearing mechanism never fired).
 
-**Swimlane (passive CTS overhearing populates blind_until at peers).**
-
-```
-Peer N (overhearer)             Forwarder R (just sent CTS, entering blind window)
-                                                                  SF
-                                ... R completed RX of RTS from some sender S ...
-                                ... R built pending_rx and packed CTS ...
-                                tx_with_retry 'C' on routing_sf       routing_sf
-                                set_rx_sf(chosen_data_sf)             data_sf
-                                  (R is now deaf on routing_sf for
-                                   cts_to_data_gap_ms +
-                                   airtime(chosen_data_sf, max DATA)
-                                   — concurrent RTSes to R on routing_sf
-                                   land at the runtime as drop_sf_mismatch,
-                                   silently; no NACK)
-
-(N is on routing_sf for its own reasons — beacon listening,
- awaiting its own CTS for an unrelated flight, idle RX, etc.
- The CTS R just sent reaches every node within R's routing_sf
- decode range, regardless of c.to_id.)
-
-on_recv "C", any source, any to_id, at routing_sf:
-  cts_sender = meta.src                  (= R)
-  blind_window = cts_to_data_gap_ms +
-                 airtime(c.chosen_data_sf,
-                         bw_hz, cr,
-                         RTS_LEN + max_payload_len)
-  blind_until[cts_sender] = max(blind_until[cts_sender],
-                                now + blind_window)
-  (N stores R's blind window even though the CTS
-   wasn't addressed to N — that's the whole point)
-
-(Later, when N tries to RTS some destination via next_hop == R:)
-
-issue_send / tx_rts_retry / rts_timeout_fire — pre-check:
-  classify_blind(self, dst, current_next_hop = R, alts_tried, prev_hop):
-    if R is in blind_until and now < blind_until[R]:
-      walk rt[dst].candidates:
-        first non-tried, non-blind, non-previous_hop alt
-          → return ("alt", alt_next)
-      no qualifying alt → return ("defer", remaining_blind_ms)
-    else:
-      return "ok"
-
-  case ("alt", alt):
-    emit "tx_blind_alt"
-    switch next_hop = alt; reset retries
-    tx_rts_retry("blind_alt")
-  case ("defer", delay):
-    emit "tx_blind_defer"
-    self:after(delay, function() tx_rts_retry(self, reason) end)
-  case "ok":
-    proceed with tx_initiating 'R'
-
-(Fallback when the CTS itself was lost at N — overhearing never
- fired, blind_until[R] not set — exponential backoff on rts_timeout_ms
- (×2 per attempt, capped at RTS_TIMEOUT_BACKOFF_CAP = 4) ensures
- the retry budget still covers a full receiver blind window.)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §3.4 (passive CTS overhearing populates blind_until at peers).
 
 ### 8.5 RTS-timeout (CTS lost)
 
@@ -2189,63 +1525,7 @@ rts_timeout_fire:
     if none: emit rts_giveup + path_cascade_exhausted; clear pending_tx
 ```
 
-**Swimlane (no CTS arrives → exponential backoff → K=3 alt cascade).**
-
-```
-Originator (alice)              Next-hop (silent — RTS lost, or CTS lost, or R blind)
-                                                                  SF
-tx_initiating 'R' on routing_sf       routing_sf
-start_rts_timeout
-  (timeout = rts_timeout_ms × 2^min(attempts, BACKOFF_CAP))
-                          ─R──>
-                                          (no CTS arrives — possible reasons:
-                                           - next-hop never received RTS
-                                             (collision, weak SNR)
-                                           - next-hop received but CTS was lost
-                                             (collision on the return path)
-                                           - next-hop is on data_sf in another
-                                             flight's blind window
-                                             — see §8.4)
-
-at rts_timeout_fire:
-  if pending_rx ~= nil:
-    (we became RX-busy for some other flight between
-     our RTS-tx and now; can't TX yet)
-    self:after(rts_busy_retry_ms, fn) → re-fire this timeout
-    return
-
-  elif retries_left > 0:
-    classify_blind(self, dst, current_next, alts_tried, prev_hop):
-      case ("alt", new_next):
-        emit "tx_blind_alt"
-        switch next_hop = new_next; reset retries; rts_timeout_ms /= backoff
-        tx_rts_retry("cts_timeout")
-      case ("defer", delay):
-        emit "tx_blind_defer"
-        self:after(delay, fn) → recheck
-      case "ok":
-        retries_left -= 1
-        rts_timeout_ms = min(rts_timeout_ms × 2,
-                             base × RTS_TIMEOUT_BACKOFF_CAP)
-        self:after(rand(0, retry_jitter_ms), fn):
-          tx_rts_retry("cts_timeout")  → same next-hop, larger window
-
-  else (retries_left == 0):
-    K=3 cascade — try the next non-tried alt in rt[dst].candidates:
-      if next-best alt exists AND not blind AND not previous_hop:
-        emit "tx_silent_alt" or "cascade_rts" depending on path
-        switch next_hop = alt; reset retries
-        tx_rts_retry("cascade_rts")
-      else:
-        emit "rts_giveup"
-        emit "path_cascade_exhausted"
-        pending_tx = nil
-        become_free
-        (originator's queue keeps the item only if §5.6
-         cascade-requeue is enabled — otherwise the flight
-         is dropped and the originator's app layer must
-         decide whether to re-send)
-```
+**Swimlane:** see `docs/SCENARIOS.md` §3.5 (no CTS arrives → exponential backoff → K=3 alt cascade).
 
 ### 8.6 ACK-timeout (DATA lost or ACK lost)
 
@@ -2309,6 +1589,19 @@ by operator policy and cryptographic keys, not by this nibble.
 CTS/DATA/ACK/NACK don't carry `leaf_id` because they're matched
 against `pending_tx`/`pending_rx` state set by an already-validated
 RTS — the check is implicit.
+
+Gateway v1 extends this with an **active layer context**. A scheduled gateway
+switches `active_layer_id`, `active_leaf_id`, control SF, and DATA-SF bitmap
+while it listens on a secondary layer. JOIN offers, BCN, RTS, CTS, NACK and
+DATA selection use the active/target layer context. When a gateway receives a
+cross-layer envelope and forwards into its own primary layer, it explicitly
+restores the primary context before RTS/DATA so the forwarded leg uses that
+layer's control SF and DATA-SF bitmap.
+
+Current limitation: the radio context and gateway binding are layer-aware, but
+the main `rt[]` and much of `id_bind[]` are still keyed by short node id rather
+than `(layer_id, node_id)`. Full layer separation is the next roadmap step and
+is tracked by `scenarios/s10_two_layer_gateway_separation.json`.
 
 ---
 
@@ -2575,7 +1868,15 @@ For accumulator diagnostics (analyze.py + visualize), each node
 periodically emits a `node_state_snapshot` event capturing
 quasi-static counters: tx_queue depth, deferred_sends depth,
 in-flight pending counts, current budget tier, current rt size,
-plus throughput counters since last snapshot.
+the node's layer/leaf identity, gateway flags, plus throughput
+counters since last snapshot.
+
+At startup each node also emits one `node_layer_info` event. This is
+intended for debug tooling and visualization: it records `node_id`,
+`name`, `layer_id`, `leaf_id`, `key_hash32`, `is_gateway`,
+`gateway_layers`, `is_mobile`, `joined`, `routing_sf`, and the encoded
+allowed DATA-SF bitmap. The event is not a wire packet; it is simulator
+telemetry only.
 
 ```
 state_snapshot_period_ms (default 60000 = 1 min)
@@ -2584,6 +1885,32 @@ state_snapshot_period_ms (default 60000 = 1 min)
 
 Set `state_snapshot_period_ms = 0` to disable.
 
+Focused routing debug can be enabled per node with:
+
+```text
+debug_start / debug_end        -- ms window, aliases: debug_start_ms/debug_end_ms
+```
+
+In scenario JSON these are normally set once in the top-level `config` object,
+which the runtime merges into every node's Lua config before node-specific
+overrides. A node may still override the global window in its own
+`nodes[i].config`.
+
+If no debug window is configured, existing diagnostic telemetry keeps its
+normal behavior. If either `debug_start` or `debug_end` is configured, noisy
+diagnostic emits are suppressed outside the window. This gate applies to
+`node_state_snapshot`, `rt_quality_snapshot`, `rts_attempt_detail`,
+`route_decision_detail`, and `rt_debug_snapshot`. Core protocol events
+(`rts_tx`, `cts_rx`, `data_tx`, `ack_rx`, `route_decision`, etc.) remain
+always-on so the analyzer can still reconstruct normal traffic.
+
+Inside the window, route-table mutations emit `rt_debug_snapshot` for the
+affected destination only. This is event-driven, not periodic: it fires on new
+route install, primary promotion, primary refresh, alternate install, 3-cycle
+prune, or route aging. The payload contains the full candidate list for that
+destination, including next hop, second hop, hops, raw/effective score,
+age/TTL, gateway flag, budget tier, blind state, and suspect level.
+
 ---
 
 ## 11a. Bootstrap UX (cold-start joiners)
@@ -2591,6 +1918,16 @@ Set `state_snapshot_period_ms = 0` to disable.
 The "new user installs the app, opens it, immediately taps send" case
 needs explicit handling — without it, the user sees a silent drop and
 abandons the app. Two mechanisms:
+
+For firmware-mode scenarios where `config.join_required=true`, the node first
+runs short-address join. It starts with temporary protocol id `255`, listens,
+sends `J_DISCOVER`, adopts DATA SF policy from `J_OFFER`, sends `J_CLAIM`, and
+only after `join_adopted` participates as a normal node. While unjoined it does
+not emit normal DV beacons.
+
+Current focused test: `test/t48_join_autonomous_fourth_node.json` has three
+pinned nodes and a fourth `node_id:null` joiner. The expected path is
+`J_DISCOVER -> J_OFFER -> J_CLAIM -> join_adopted`.
 
 ### 11a.1 Node-local discovery
 
@@ -2793,7 +2130,7 @@ expectations) subscribe by event_type.
 | Event | Trigger | Key data |
 |---|---|---|
 | `beacon_tx` | Emitted right before sending a beacon page | `n_entries`, `rt_total`, `offset`, `next_offset`, `kind`, `seen_bits`, `suspect_nodes`, `ext_len`, `dirty_only` |
-| `beacon_rx` | Beacon decoded | `src`, `n_entries`, `seen_bits`, `suspect_nodes` |
+| `beacon_rx` | Beacon decoded | `src`, `key_hash32`, `n_entries`, `seen_bits`, `suspect_nodes` |
 | `seen_bitmap_tx` / `seen_bitmap_rx` | Destination-seen bitmap emitted/decoded | `bits_set`, `ttl_ms` / `from`, `bits_set`, `applied`, `refreshed` |
 | `peer_suspect_mark` | RTS silence or BCN suspect TLV applied a temporary peer penalty | `node`, `level`, `previous_level`, `source`, `remote_src`, `rts_timeouts`, `reranked` |
 | `peer_suspect_clear` | A valid frame from a suspected peer cleared local suspicion | `node`, `source`, `reranked` |
@@ -2831,7 +2168,7 @@ expectations) subscribe by event_type.
 | `send_giveup` | Defer TTL elapsed without route appearing | `origin`, `dst`, `waited_ms`, `reason` |
 | `rts_tx` | RTS emitted | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `sf_bitmap` |
 | `rts_retry` | tx_rts_retry fired | `attempt_seq`, `reason`, `attempt` |
-| `rts_attempt_detail` | Sender-side focused RTS attempt telemetry | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `candidate_rank`, `candidate_count`, `route_score`, `route_score_eff`, `budget_penalty_db`, `suspect_penalty_db`, `viable_alts`, `route_hops`, `route_age_ms`, `next_tier`, `next_suspect_level`, `next_seen_fresh`, `next_seen_age_ms`, `next_blind` |
+| `rts_attempt_detail` | Sender-side focused RTS attempt telemetry; debug-window gated when configured | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `candidate_rank`, `candidate_count`, `route_score`, `route_score_eff`, `budget_penalty_db`, `suspect_penalty_db`, `viable_alts`, `route_hops`, `route_age_ms`, `next_tier`, `next_suspect_level`, `next_seen_fresh`, `next_seen_age_ms`, `next_blind` |
 | `rts_attempt_timeout` | Sender-side RTS attempt reached CTS timeout | `attempt_seq`, `origin`, `dst`, `next`, `ctr_lo`, `reason` |
 | `rts_tx_blocked` | Runtime LBT/half-duplex blocked an RTS-class TX after the sender entered pending state; CTS for this attempt is ignored until retry | `attempt_seq`, `origin`, `dst`, `next`, `ctr`, `ctr_lo`, `payload`, `label`, `reason`, `busy_until_ms` |
 | `rts_receiver_state` | Intended receiver state immediately after RTS decode | `from`, `dst`, `ctr_lo`, `rx_snr`, `ewma_snr`, `has_pending_tx`, `has_pending_rx`, `budget_tier` |
@@ -2873,7 +2210,29 @@ expectations) subscribe by event_type.
 | `e2e_ack_unmatched` | E2E ACK arrived but no matching `pending_e2e` entry (§7.4) | `from`, `acked_ctr`, `reason` (`duplicate` / `already_timed_out`) |
 | `e2e_ack_timeout` | Pending E2E ACK exceeded `e2e_ack_ttl_ms` (§7.4) | `dst`, `ctr`, `waited_ms` |
 
-### 13.3 Failure / cascade
+### 13.3 Join plane
+
+| Event | Trigger | Key data |
+|---|---|---|
+| `join_listen_start` / `join_listen_end` | `join_required` node starts/ends passive listen | `key_hash32`, `listen_ms`, `known_bindings` |
+| `join_discover_sent` / `join_discover_received` | `J_DISCOVER` emitted/decoded | `key_hash32`, `from`, `requester_mobile`, `gateway_capable`, `reason` |
+| `join_discover_retry_scheduled` | No `J_OFFER` arrived before the discover wait timer | `key_hash32`, `attempts`, `backoff_ms` |
+| `join_discover_exhausted` | Optional max discover attempt cap reached | `key_hash32`, `attempts`, `wait_ms` |
+| `join_offer_sent` / `join_offer_received` | Joined neighbour answers discovery with DATA SF policy | `responder_node_id`, `responder_key_hash32`, `data_sf_bitmap`, `to`, `from`, `delay_ms` |
+| `join_data_sfs_adopted` | Unjoined node adopts its first valid DATA SF bitmap from offer | `from`, `data_sf_bitmap`, `count` |
+| `join_data_sfs_offer_ignored` | Unjoined node ignored a later non-zero DATA SF offer because a previous offer already locked the policy | `from`, `data_sf_bitmap`, `adopted_data_sf_bitmap`, `reason` |
+| `join_j_rate_limited` | Observer dropped an excessive untrusted joiner J frame in the per-key/opcode sliding window | `from`, `key_hash32`, `opcode`, `count`, `window_ms`, `max_per_window` |
+| `join_claim_sent` / `join_claim_received` | `J_CLAIM` emitted/decoded | `proposed_node_id`, `key_hash32`, `lease_age_seconds`, `claim_epoch`, `nonce` |
+| `join_deny_sent` / `join_deny_received` | `J_DENY` emitted/decoded | `denied_node_id`, `owner_key_hash32`, `claimant_key_hash32`, `reason` |
+| `join_claim_denied` | Joiner received DENY for its pending claim | `denied_node_id`, `owner_key_hash32`, `reason` |
+| `join_adopted` | Claim guard elapsed without denial; node adopted short ID | `node`, `key_hash32`, `claim_epoch`, `nonce` |
+| `join_prefer_previous_id` | Joiner found an unexpired local binding for its own key and claims that ID first | `node`, `key_hash32` |
+| `id_bind_set` | New local id-to-key binding created | `node`, `key_hash32`, `source`, `confidence` |
+| `id_bind_aged` | Identity binding expired and the short ID became recyclable | `node`, `key_hash32`, `age_ms`, `ttl_ms`, `source`, `confidence` |
+| `id_bind_reused` | Join candidate picker selected an ID whose expired binding was just recycled | `node`, `key_hash32` |
+| `addr_conflict_observed` | Existing binding saw different key hash for same short id | `node`, `known_key_hash32`, `observed_key_hash32`, `source` |
+
+### 13.4 Failure / cascade
 
 | Event | Trigger | Key data |
 |---|---|---|
@@ -2884,7 +2243,7 @@ expectations) subscribe by event_type.
 | `cascade_requeue` | All K alts tried; pushed back to tx_queue with backoff (§5.6) | `dst`, `ctr_lo`, `requeue_count`, `backoff_ms`, `total_age_ms`, `trigger` |
 | `cascade_load_skip` | Cascade-requeue dropped early due to local load (§5.6 Phase D3) | `dst`, `ctr_lo`, `queue_depth`, `load_threshold`, `effective_max` |
 
-### 13.4 F1 blind-window mitigation
+### 13.5 F1 blind-window mitigation
 
 | Event | Trigger | Key data |
 |---|---|---|
@@ -2892,14 +2251,14 @@ expectations) subscribe by event_type.
 | `tx_blind_defer` | Deferring TX because next-hop is blind | `dst`, `next_hop`, `delay_ms`, `source` |
 | `tx_blind_alt` | Switching to alt because primary is blind | `dst`, `from_next`, `to_next` |
 
-### 13.4a Anti-spam (1st-hop rate-limit, §10a)
+### 13.5a Anti-spam (1st-hop rate-limit, §10a)
 
 | Event | Trigger | Key data |
 |---|---|---|
 | `rts_drop_originator_throttle` | RTS silently dropped because direct sender exceeded fair-share quota | `from`, `ctr_lo`, `apparent_origination`, `airtime_share` |
 | `originator_self_over_budget` | On terminal failure, originator's own send count is over half-threshold OR own duty tier ≥ STRAINED — UX hint emitted | `origin_count`, `threshold`, `tier`, `hint` |
 
-### 13.5 LBT / duty cycle / runtime
+### 13.6 LBT / duty cycle / runtime
 
 | Event | Trigger | Key data |
 |---|---|---|
@@ -2908,7 +2267,26 @@ expectations) subscribe by event_type.
 | `duty_cycle_blocked` | Pre-check denied a TX | `label`, `airtime_ms`, `used_ms`, `wait_ms` |
 | `radio_busy` | Runtime fired on_radio_busy | `reason`, `label`, `busy_until_ms` |
 | `tx_giveup` | tx_stash retries exhausted | `label`, `reason` |
-| `node_state_snapshot` | Periodic accumulator-diagnostics dump (§11.6) | `tx_queue_depth`, `deferred_sends_depth`, `pending_tx`, `pending_rx`, `rt_size`, `budget_tier`, `pct_used`, plus throughput counters |
+| `node_layer_info` | Startup layer/gateway identity marker (§11.6) | `node_id`, `name`, `layer_id`, `leaf_id`, `key_hash32`, `is_gateway`, `gateway_layers`, `is_mobile`, `joined`, `routing_sf`, `allowed_sf_bitmap` |
+| `node_state_snapshot` | Periodic accumulator-diagnostics dump (§11.6); debug-window gated when configured | `node_id`, `layer_id`, `leaf_id`, `is_gateway`, `gateway_layers`, `is_mobile`, `tx_queue_depth`, `deferred_sends_depth`, `pending_tx`, `pending_rx`, `rt_size`, `budget_tier`, `pct_used`, plus throughput counters |
+| `rt_debug_snapshot` | Debug-window route table mutation dump for one destination | `reason`, `node_id`, `layer_id`, `active_layer_id`, `dst`, `dirty`, `deleted`, `candidate_count`, `candidates[]` with `slot`, `next_hop`, `n2_hop`, `hops`, `score`, `score_eff`, `age_ms`, `ttl_ms`, `expires_in_ms`, `is_gateway`, `mobile_touched`, `next_tier`, `next_blind`, `suspect_level` |
+| `gateway_layer_active` | Gateway successfully retuned to (or returned to) a layer's radio context — fires from `activate_gateway_layer` and `activate_primary_layer` | `layer_id`, `leaf_id`, `routing_sf`, `duration_ms` (when entering a sweep), `reason` (`init`, `schedule`, `schedule_return`, `tx`, `primary`) |
+| `gateway_layer_window_deferred` | Scheduled sweep fire was deferred because `pending_tx`/`pending_rx` was active (half-duplex skip) | `layer_id`, `leaf_id`, `routing_sf`, `active_layer_id`, `active_leaf_id`, `listen_sf`, `retry_ms` |
+| `gateway_schedule_change` | Gateway radio context changed because of init, schedule window, schedule return, or target-layer TX | `active_layer_id`, `active_leaf_id`, `listen_sf`, `data_sf_bitmap`, `duration_ms`, `reason` |
+| `gateway_schedule_observed` | Node decoded gateway BCN schedule records | `gateway`, `primary_leaf_id`, `records`, `schedule[]` entries with `layer_id`, `leaf_id`, `routing_sf`, `duration_ms`, `offset_ms`, `period_ms`, `period_unit_ms` |
+| `tx_gateway_schedule_defer` | Sender deferred initial or retry RTS to a direct gateway because the gateway is scheduled away | `origin`, `dst`, `next_hop`, `active_leaf_id`, `delay_ms`, `payload`, optional `ctr`, `ctr_lo`, `source`, `reason` |
+| `gateway_envelope_enqueued` | `send_layer` queued a cross-layer envelope toward a gateway | `origin`, `gateway`, `target_layer_id`, `dst_key_hash32`, `payload` |
+| `gateway_handoff_enqueued` | Gateway consumed a cross-layer envelope and queued an in-target-layer DATA send | `origin`, `via_gateway`, `target_layer_id`, `dst`, `dst_key_hash32`, `binding_source`, `payload` |
+| `gateway_handoff_deferred` | Gateway consumed a cross-layer envelope but does not yet know the target hash binding; it held the handoff and optionally emitted `Q:HASH_QUERY` on the target layer | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason`, `q_sent`, `ttl_ms`, `depth` |
+| `gateway_handoff_drained` | A deferred gateway handoff found a binding and was requeued for in-target-layer DATA send | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `dst`, `binding_source`, `waited_ms` |
+| `gateway_handoff_giveup` | A deferred gateway handoff exceeded its discovery TTL without resolving the target binding | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason`, `waited_ms` |
+| `gateway_remote_bind_set` | Gateway learned `(layer_id,key_hash32) -> node_id` for a remote layer from BCN/JOIN traffic | `key_hash32`, `layer_id`, `node`, `source` |
+| `gateway_remote_bind_conflict` | Gateway observed the same `(layer_id,key_hash32)` bound to a different remote node; binding is marked ambiguous and handoff refuses it | `key_hash32`, `layer_id`, `existing_node`, `conflicting_node`, `source` |
+| `gateway_remote_bind_aged` | Gateway evicted a remote-layer binding after `gateway_remote_bind_ttl_ms` of silence | `key_hash32`, `layer_id`, `node`, `age_ms`, `ttl_ms`, `source`, `ambiguous` |
+| `gateway_no_binding` | Gateway received an envelope but cannot resolve the target hash in that layer | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason` (`not_found` / `ambiguous`) |
+| `gateway_envelope_at_non_gateway` | Non-gateway received gateway envelope DATA; this is treated as routing/gateway misconvergence and dropped | `origin`, `dst`, `target_layer_id`, `dst_key_hash32`, `payload` |
+| `q_hash_binding_tx` | Node answered `Q:HASH_QUERY` with a resolved `(node_id,key_hash32)` binding | `to`, `node`, `key_hash32`, `tx_layer_id`, `tx_leaf_id`, `tx_routing_sf` |
+| `q_hash_binding_rx` | Node received a `Q:HASH_QUERY` binding response and updated `id_bind`; gateways also update `gateway_remote_bind` | `from`, `node`, `key_hash32`, `layer_id` |
 
 ---
 
@@ -2939,7 +2317,7 @@ the JSON scenario). Defaults shown.
 | `beacon_boot_grace_ms` | 120000 | After boot, allow fast triggered BCNs despite the steady-state minimum interval |
 | `discovery_min_bcn_rx` | 3 | Exit discovery after this many BCN receptions |
 | `discovery_min_routes` | 8 | Exit discovery after this many route-table destinations |
-| `beacon_max_bytes` | 151 | Max beacon frame size — 4-byte header + 49 × 3-byte entries (post-bit-pack default; was 200 with 4-byte entries) |
+| `beacon_max_bytes` | 151 | Max beacon frame size — 8-byte header including `key_hash32` + 47 × 3-byte entries at default cap |
 | `beacon_trigger_jitter_min_ms` | 2000 | Triggered beacon coalescing delay min |
 | `beacon_trigger_jitter_max_ms` | 10000 | Triggered beacon coalescing delay max |
 | `beacon_trigger_min_interval_ms` | 120000 | Steady-state minimum interval between this node's successful BCN TX and a triggered BCN |
@@ -2948,7 +2326,23 @@ the JSON scenario). Defaults shown.
 | `beacon_max_idle_ms` | 900000 (15 min) | Max idle before busy throttle is bypassed (§6.2). Set to 0 to disable. |
 | `peer_suspect_bcn_max` | 8 | Max suspected node ids carried in one BCN extension TLV. Wire TLV caps this at 15. |
 
-### 14.3 Data plane
+### 14.3 Join
+
+| Key | Default | Description |
+|---|---|---|
+| `join_required` | `false` | Start without a valid short ID, use temporary id `255`, and run J-frame join |
+| `join_listen_ms` | 3000 | Passive listen before sending `J_DISCOVER` |
+| `join_discover_jitter_ms` | 3000 | Random delay after listen before `J_DISCOVER` |
+| `join_discover_wait_ms` | 10000 | Wait after `J_DISCOVER` for at least one `J_OFFER` before retrying |
+| `join_discover_max_attempts` | 0 | Max discover attempts before `join_discover_exhausted`; `0` means unlimited retry |
+| `join_offer_backoff_min_ms` | 100 | Minimum responder jitter before `J_OFFER` |
+| `join_offer_backoff_max_ms` | 1000 | Maximum responder jitter before `J_OFFER` |
+| `join_claim_guard_ms` | 3000 | Time to wait after `J_CLAIM` before adopting if no `J_DENY` arrives |
+| `join_retry_backoff_ms` | 10000 | Retry delay after claim denial |
+| `join_j_rate_limit_window_ms` | 300000 | Per-observer sliding window for untrusted `J_DISCOVER` / `J_CLAIM` frames keyed by `(opcode,key_hash32)`; 0 disables |
+| `join_j_max_per_window` | 6 | Max accepted untrusted joiner J frames per `(opcode,key_hash32)` window; 0 disables |
+
+### 14.4 Data plane
 
 | Key | Default | Description |
 |---|---|---|
@@ -2976,6 +2370,7 @@ the JSON scenario). Defaults shown.
 | `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (opcode,src,dest) (§3.7) |
 | `q_response_settle_ms` | trigger jitter max + max BCN airtime + LBT backoff | Hold first RTS after `Q:ROUTE_QUERY` until most response BCNs finish (§11a.2) |
 | `q_response_settle_jitter_ms` | `lbt_backoff_ms` | Extra random spread for Q-drained sends |
+| `gateway_handoff_defer_ttl_ms` | `send_defer_ttl_ms` | How long a gateway holds a cross-layer envelope while `Q:HASH_QUERY` tries to discover the target-layer binding |
 | `req_sync_on_boot` | true | During DISCOVERY, send `Q:REQ_SYNC` if route table remains poor |
 | `req_sync_listen_ms` | 8000 | Listen before first boot-time `REQ_SYNC` |
 | `req_sync_retry_ms` | 30000 | Retry interval for boot-time `REQ_SYNC` while still in DISCOVERY |
@@ -2987,18 +2382,22 @@ the JSON scenario). Defaults shown.
 | `sync_response_mobile_penalty_ms` | 8000 | Extra delay when responder is mobile |
 | `sync_response_requester_mobile_penalty_ms` | 2000 | Extra delay when requester is mobile |
 | `sync_response_suppress_window_ms` | 12000 | Suppress pending response after hearing another useful BCN |
-| `rt_aging_ttl_neighbor_ms` | 1800000 (30 min) | Direct-neighbour candidate TTL — see §6.5 |
-| `rt_aging_ttl_remote_ms` | 5400000 (90 min) | Multi-hop candidate TTL — see §6.5 |
+| `rt_aging_ttl_neighbor_ms` | 2700000 (45 min) | Direct-neighbour candidate TTL — see §6.5 |
+| `rt_aging_ttl_remote_ms` | 10800000 (3 h) | Multi-hop candidate TTL — see §6.5 |
 | `rt_aging_check_period_ms` | 60000 | Aging-scan period — see §6.5 |
+| `id_bind_ttl_ms` | 172800000 (48 h) | Identity binding TTL; route aging does not recycle node IDs |
+| `gateway_remote_bind_ttl_ms` | `id_bind_ttl_ms` | Gateway remote binding TTL for `(layer_id,key_hash32)->node_id`; 0 disables remote binding aging |
 | `cascade_requeue_max` | 3 | Phase C — max cascade-exhaust requeues before drop (§5.6) |
 | `cascade_requeue_base_ms` | 5000 | Phase C — base backoff (exponential: base × 2^(count-1)) |
 | `cascade_requeue_backoff_cap_ms` | 30000 | Phase C — backoff caps at this value |
 | `cascade_requeue_total_max_ms` | 60000 | Phase C — total wallclock cap; older items drop (was 120000 pre-D3) |
 | `cascade_requeue_load_threshold` | 0 | Phase D3 — local tx_queue depth above which the effective requeue budget shrinks (§5.6) |
 | `state_snapshot_period_ms` | 60000 | Period for `node_state_snapshot` event (§11.6); 0 = disable |
+| `debug_start` / `debug_start_ms` | unset | Start of debug emit window in simulation ms; when set, noisy diagnostics are suppressed before this time |
+| `debug_end` / `debug_end_ms` | unset | End of debug emit window in simulation ms; when set, noisy diagnostics are suppressed after this time |
 | `e2e_ack_ttl_ms` | 60000 | E2E delivery ACK pending-entry TTL at originator (§7.4) — after this, emit `e2e_ack_timeout` |
 
-### 14.4 Channel access
+### 14.5 Channel access
 
 | Key | Default | Description |
 |---|---|---|
@@ -3016,7 +2415,7 @@ the JSON scenario). Defaults shown.
 | `budget_blind_exhausted_ms` | 300000 (5 min) | Same, for EXHAUSTED |
 | `neighbor_budget_tier_ttl_ms` | 300000 (5 min) | Tier-aware routing — last-known peer tier expires after this; saturated peers return to primary pool when no fresh NACK |
 
-### 14.4a Anti-spam (1st-hop rate-limit)
+### 14.5a Anti-spam (1st-hop rate-limit)
 
 Reactive count-based originator throttle at every 1st-hop neighbour.
 Works under §9 T2 privacy (observes physical-layer `meta.src`, not the
@@ -3030,14 +2429,20 @@ wire `origin`).
 | `originator_retry_dedup_ms` | 10000 | Same-ctr_lo retries within this window count as ONE origination (don't inflate `R[X]` with retries) |
 | `originator_self_warn_fraction` | 0.5 | Originator's self-monitor threshold = this × `originator_max_per_window`; on terminal failure, emit `originator_self_over_budget` |
 
-### 14.5 Layer / mesh
+### 14.6 Layer / mesh
 
 | Key | Default | Description |
 |---|---|---|
 | `layer_id` | 0 | Logical radio/routing layer; preferred config key |
 | `leaf_id` | 0 | Legacy shorthand and on-wire 4-bit layer nibble (`layer_id & 0x0f`); receivers reject foreign layers |
+| `is_gateway` | false | Node advertises gateway capability and may participate in `gateway_layers` |
+| `gateway_layers` | `{}` | Secondary layer records. Each record may set `layer_id`, `routing_sf`/`sf`, `allowed_data_sfs`, `period_ms`, `duration_ms`, `offset_ms`, and optional `leaf_id` override for tests |
+| `gateway_layer_period_ms` | 30000 | Default period for secondary-layer gateway windows |
+| `gateway_layer_duration_ms` | 5000 | Default duration for secondary-layer gateway windows |
+| `gateway_layer_offset_ms` | 5000 | Default first offset for secondary-layer gateway windows |
+| `gateway_schedule_guard_ms` | 100 | Extra delay after a gateway foreign-layer window before peers retry local-layer RTS |
 
-### 14.6 Runtime-injected (don't override unless you know why)
+### 14.7 Runtime-injected (don't override unless you know why)
 
 | Key | Source | Description |
 |---|---|---|
@@ -3096,8 +2501,8 @@ sender. No cap today; acceptable in trusted-network settings.
 
 **Resolved.** §6.5 stale-route aging now evicts candidates whose
 `last_seen_ms` exceeds a hop-class-specific TTL: direct neighbours
-use `rt_aging_ttl_neighbor_ms` (default 30 min), multi-hop entries
-use `rt_aging_ttl_remote_ms` (default 90 min). Direct-neighbour
+use `rt_aging_ttl_neighbor_ms` (default 45 min), multi-hop entries
+use `rt_aging_ttl_remote_ms` (default 3 h). Direct-neighbour
 last_seen also refreshes on every on_recv (not just beacons) so
 heavy-traffic-throttled scenarios don't false-evict alive nodes.
 
@@ -3116,12 +2521,14 @@ in this regime are conservative (5 dB margin), causing observed SF
 tax. Real fix is adaptive margin based on retry history — see
 `memory/project_sf_tax_regression_after_bcn_throttle.md`.
 
-### 15.7 BCN doesn't yet bit-pack entries
+### 15.7 BCN compression is still deferred
 
-BCN entries are 4 bytes each (dest + next + score_i8 + hops). At ~10
-neighbors per node, this is ~40 bytes of advertised routing per
-beacon. Bit-packing entries (e.g., dest 8 + next 8 + score 6 + hops
-4 = 26 bits = 3.25 bytes) saves ~25% per beacon. Not done; deferred.
+BCN route entries are already bit-packed to 3 bytes each
+(`dest + next + score_bucket + hops`). The current remaining fixed cost is the
+8-byte header, including `key_hash32`, plus optional bitmap/extension blocks.
+Further compression, such as grouping entries by `next_hop`, remains deferred
+until measurements show BCN airtime is still the limiting factor after join and
+duplicate-ID handling are stable.
 
 ---
 

@@ -5,7 +5,7 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|has_ext(1)|n_entries(6)](1), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}, seen_bitmap(32B)?, ext_len(1)+TLVs?  →  4 + [1+4L]? + 3n + [32]? + [1+ext]? B |
+-- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|has_ext(1)|n_entries(6)](1), key_hash32(4), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}, seen_bitmap(32B)?, ext_len(1)+TLVs?  →  8 + [1+4L]? + 3n + [32]? + [1+ext]? B |
 -- | `'R'` | RTS    | `R`, src(1), next(1), [addr_len(3)|rsv(1)|leaf_id(4)](1), dst(1 when addr_len=0), [ctr_lo(4)|rsv(4)](1), sf_bitmap(1), payload_len(1)  →  8 B (in-leaf) |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|already_received(1)](1)  →  2 B                      |
 -- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
@@ -118,8 +118,8 @@
 --   stale-route aging: every rt_aging_check_period_ms (default 60s),
 --     walk rt[]; evict candidates whose last_seen_ms exceeded a
 --     hop-class-specific TTL:
---       hops == 1  → rt_aging_ttl_neighbor_ms  (default 30 min)
---       hops >= 2  → rt_aging_ttl_remote_ms    (default 90 min)
+--       hops == 1  → rt_aging_ttl_neighbor_ms  (default 45 min)
+--       hops >= 2  → rt_aging_ttl_remote_ms    (default 3 h)
 --     Two-tier rationale: direct neighbour entries refresh on every
 --     received frame from that neighbour (rt_merge top-of-on_recv hook),
 --     so they tolerate a shorter TTL — death detection for moving /
@@ -730,24 +730,30 @@
 -- about which path is "alt" anyway, that's a per-receiver judgement).
 --
 -- The full routing table can blow past LoRa's 255-byte frame limit on
--- networks with > ~63 destinations (3-byte header + 4 bytes per entry).
+-- networks with > ~82 destinations (8-byte header + 3 bytes per entry).
 -- pack_beacon takes a `max_entries` cap and a sliding `offset`: it emits
 -- a contiguous page of up to `max_entries` entries starting at `offset`
 -- in a deterministic ordering of the rt[] table. The caller (beacon_fire)
 -- bumps the offset every fire so successive beacons cycle through the
 -- whole table. Receivers don't need to track pages — every entry they
 -- hear gets merged via rt_merge as before.
--- BCN — 4-byte header + optional schedule block + n × 3-byte entries
+-- BCN — 8-byte header + optional schedule block + n × 3-byte entries
 --       + optional 32-byte destination-seen bitmap:
 --   byte 0 : tag 'B'
 --   byte 1 : leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
 --   byte 2 : src (8)
 --   byte 3 : has_seen_bitmap(1 hi) | has_ext(1) | n_entries(6 lo)
+--   bytes 4..7 : key_hash32 (LE)
 --   if has_schedule == 1:
---     byte 4 : layer_count (8)
---     layer_count × 4-byte schedule records (parser skips today — runtime
---                                            path for inter-layer TDM deferred
---                                            to §7.3)
+--     byte 8 : layer_count (8)
+--     layer_count × 4-byte schedule records:
+--       byte 0: layer_id(4 hi) | (routing_sf - 5)(3) | period_unit_5s(1)
+--       byte 1: duration_100ms
+--       byte 2: offset_100ms
+--       byte 3: period units (seconds if unit=0, 5-second units if unit=1)
+--   Mobile endpoints emit identity-only BCN: n_entries=0, no seen bitmap,
+--   no route entries, no liveness extension. This refreshes id_bind without
+--   advertising a mobile as a transit router.
 --   entries (3 B each):
 --     byte 0 : dest (8)
 --     byte 1 : next (8)
@@ -994,7 +1000,8 @@ local function build_suspect_nodes_ext(node)
 end
 
 local function pack_beacon_byte1(node)
-  local b = (node.leaf_id & 0xf) << 4
+  local leaf_id = node.active_leaf_id or node.leaf_id
+  local b = (leaf_id & 0xf) << 4
   if node.has_schedule  then b = b | 0x08 end
   if node.self_gateway  then b = b | 0x04 end
   if node.is_mobile     then b = b | 0x02 end
@@ -1002,25 +1009,87 @@ local function pack_beacon_byte1(node)
   return b
 end
 
+local function pack_schedule_record(rec)
+  local layer_id = math.floor(rec.layer_id or rec.layer or 0) & 0x0f
+  local sf = math.floor(rec.routing_sf or rec.sf or 7)
+  local duration_100ms = math.floor((rec.duration_ms or 0) / 100)
+  if duration_100ms < 1 then duration_100ms = 1 end
+  if duration_100ms > 255 then duration_100ms = 255 end
+  local offset_100ms = math.floor((rec.offset_ms or 0) / 100)
+  if offset_100ms < 0 then offset_100ms = 0 end
+  if offset_100ms > 255 then offset_100ms = 255 end
+  -- Period uses seconds for short cadences, and the low bit switches byte 3
+  -- to 5-second units for production multi-minute sweeps.
+  local period_ms = math.floor(rec.period_ms or 0)
+  local period_unit_5s = 0
+  local period_units = math.floor((period_ms + 999) / 1000)
+  if period_units > 255 then
+    period_unit_5s = 1
+    period_units = math.floor((period_ms + 4999) / 5000)
+  end
+  if period_units < 1 then period_units = 1 end
+  if period_units > 255 then period_units = 255 end
+  local b0 = ((layer_id & 0x0f) << 4) | (((sf - 5) & 0x07) << 1) | period_unit_5s
+  return string.char(b0, duration_100ms & 0xff, offset_100ms & 0xff, period_units & 0xff)
+end
+
+local function pack_schedule_block(node)
+  if not node.self_gateway or not node.gateway_schedule_records then return "" end
+  local records = {}
+  for _, rec in ipairs(node.gateway_schedule_records) do
+    table.insert(records, pack_schedule_record(rec))
+  end
+  if #records == 0 then return "" end
+  return string.char(#records & 0xff) .. table.concat(records)
+end
+
+local function pack_beacon_u32_le(v)
+  v = math.floor(v or 0) & 0xffffffff
+  return string.char(v & 0xff,
+                     (v >> 8) & 0xff,
+                     (v >> 16) & 0xff,
+                     (v >> 24) & 0xff)
+end
+
+local function parse_beacon_u32_le(frame, off)
+  return (frame:byte(off)
+          | (frame:byte(off + 1) << 8)
+          | (frame:byte(off + 2) << 16)
+          | (frame:byte(off + 3) << 24)) & 0xffffffff
+end
+
 local function pack_beacon(node, max_entries, offset, dirty_only)
   max_entries = math.min(max_entries, BCN_N_ENTRIES_MASK)
   local all_dests = {}
-  for dest_id, _ in pairs(node.rt) do
-    table.insert(all_dests, dest_id)
+  if not node.is_mobile then
+    for dest_id, _ in pairs(node.rt) do
+      table.insert(all_dests, dest_id)
+    end
   end
   table.sort(all_dests)
   local byte1 = pack_beacon_byte1(node)
   local seen_bitmap = nil
   local seen_bits = 0
-  if node.seen_bitmap_enabled then
+  if node.seen_bitmap_enabled and not node.is_mobile then
     seen_bitmap, seen_bits = build_seen_bitmap(node)
   end
-  local ext_payload, suspect_bits = build_suspect_nodes_ext(node)
+  local ext_payload, suspect_bits = nil, 0
+  if not node.is_mobile then
+    ext_payload, suspect_bits = build_suspect_nodes_ext(node)
+  end
+  local header = "B"
+                 .. string.char(byte1)
+                 .. string.char(node.id)
+                 .. string.char(0)
+                 .. pack_beacon_u32_le(node.key_hash32 or 0)
+  local schedule_block = pack_schedule_block(node)
   local total = #all_dests
   if total == 0 then
     local n_byte = seen_bitmap and BCN_N_HAS_SEEN_BITMAP or 0
     if ext_payload then n_byte = n_byte | BCN_N_HAS_EXT end
-    return "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_byte)
+    header = header:sub(1, 3) .. string.char(n_byte) .. header:sub(5)
+    return header
+           .. schedule_block
            .. (seen_bitmap or "")
            .. (ext_payload and (string.char(#ext_payload) .. ext_payload) or ""),
            0,
@@ -1072,6 +1141,8 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   if seen_bitmap then n_byte = n_byte | BCN_N_HAS_SEEN_BITMAP end
   if ext_payload then n_byte = n_byte | BCN_N_HAS_EXT end
   local out = "B" .. string.char(byte1) .. string.char(node.id) .. string.char(n_byte)
+              .. pack_beacon_u32_le(node.key_hash32 or 0)
+              .. schedule_block
   local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
     local b = bucket_of_snr_4b(p.score)               -- 4-bit bucket
@@ -1106,7 +1177,7 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
 end
 
 local function parse_beacon(frame)
-  if #frame < 4 or frame:sub(1,1) ~= "B" then return nil end
+  if #frame < 8 or frame:sub(1,1) ~= "B" then return nil end
   local b1  = frame:byte(2)
   local out = {
     leaf_id      = (b1 >> 4) & 0xf,
@@ -1114,6 +1185,7 @@ local function parse_beacon(frame)
     self_gateway = (b1 & 0x04) ~= 0,
     is_mobile    = (b1 & 0x02) ~= 0,
     src          = frame:byte(3),
+    key_hash32   = parse_beacon_u32_le(frame, 5),
     entries      = {},
   }
   local n_byte = frame:byte(4)
@@ -1122,13 +1194,27 @@ local function parse_beacon(frame)
   local n   = n_byte & BCN_N_ENTRIES_MASK
   out.has_seen_bitmap = has_seen_bitmap
   out.has_ext = has_ext
-  local pos = 5               -- next byte after n_entries
+  local pos = 9               -- next byte after fixed key_hash32
   if out.has_schedule then
     if #frame < pos then return nil end           -- need at least the layer_count byte
     local layer_count = frame:byte(pos)
     pos = pos + 1
-    -- skip layer_count × 4 bytes (schedule records — runtime path not implemented yet)
-    pos = pos + layer_count * 4
+    out.schedule = {}
+    if #frame < pos - 1 + layer_count * 4 then return nil end
+    for _ = 1, layer_count do
+      local b0 = frame:byte(pos)
+      local period_unit_5s = b0 & 0x01
+      local period_unit_ms = (period_unit_5s ~= 0) and 5000 or 1000
+      table.insert(out.schedule, {
+	        layer_id = (b0 >> 4) & 0x0f,
+	        routing_sf = ((b0 >> 1) & 0x07) + 5,
+	        duration_ms = frame:byte(pos + 1) * 100,
+	        offset_ms = frame:byte(pos + 2) * 100,
+	        period_ms = frame:byte(pos + 3) * period_unit_ms,
+	        period_unit_ms = period_unit_ms,
+	      })
+      pos = pos + 4
+    end
   end
   if #frame < pos - 1 + 3*n then return nil end   -- length check (accounts for schedule skip)
   for _ = 1, n do
@@ -1342,6 +1428,7 @@ local DATA_FLAG_E2E_ACK_REQ = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)
 local DATA_FLAG_E2E_IS_ACK  = 0x04   -- bit 2 of byte 1 (E2E_IS_ACK)
 local DATA_FLAG_IS_MCAST    = 0x02   -- bit 1 of byte 1 (IS_MULTICAST, always 0 this phase)
 local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
+local GW_ENV_MAGIC = "\31G1"         -- gateway DATA envelope v1: magic + layer + key_hash32 + body
 
 local function seen_origin_key(origin_id, dst_id, ctr)
   return string.format("%d|%d|%d", origin_id or -1, dst_id or -1, ctr or -1)
@@ -1434,21 +1521,40 @@ end
 
 local Q_OP_ROUTE_QUERY = 0
 local Q_OP_REQ_SYNC    = 1
+Q_OP_HASH_QUERY  = 2
+-- Opcode 3 is reserved for a future full-public-key query; v1 has no
+-- full-key payload yet.
 local Q_FLAG_MOBILE    = 0x04
 
--- Q — query/control, 4 bytes:
+-- Q — query/control:
 --   byte 0 : tag 'Q'
 --   byte 1 : src (8) — the requester
---   byte 2 : dest (8) — route target for ROUTE_QUERY; 0xff for REQ_SYNC
+--   byte 2 : dest (8) — route target for ROUTE_QUERY; 0xff for REQ_SYNC/HASH_QUERY
 --   byte 3 : leaf_id (4 hi) | requester flags (4 lo)
---            low bits 0..1: opcode (0=ROUTE_QUERY, 1=REQ_SYNC)
+--            low bits 0..1: opcode (0=ROUTE_QUERY, 1=REQ_SYNC, 2=HASH_QUERY)
 --            low bit 2: requester is mobile
 --            low bit 3: reserved
+--   bytes 4..7 : key_hash32 (LE), only for HASH_QUERY
 --
 -- ROUTE_QUERY is the legacy one-hop route query. Direct neighbours that
 -- have rt[dest] mark it dirty + schedule a triggered beacon. REQ_SYNC is
 -- a new-node/bootstrap request: eligible neighbours back off, suppress if
--- another useful BCN is heard first, then send a full sync BCN.
+-- another useful BCN is heard first, then send a full sync BCN. HASH_QUERY
+-- asks for the node whose identity hash is known but whose short ID/binding
+-- is not yet known locally (gateway handoff discovery).
+function q_pack_u32_le(v)
+  v = v or 0
+  return string.char(v & 0xff, (v >> 8) & 0xff,
+                     (v >> 16) & 0xff, (v >> 24) & 0xff)
+end
+
+function q_parse_u32_le(frame, off)
+  return (frame:byte(off) or 0)
+       | ((frame:byte(off + 1) or 0) << 8)
+       | ((frame:byte(off + 2) or 0) << 16)
+       | ((frame:byte(off + 3) or 0) << 24)
+end
+
 local function pack_q(leaf_id, src, dest, opcode, requester_is_mobile)
   local flags = (opcode or Q_OP_ROUTE_QUERY) & 0x03
   if requester_is_mobile then flags = flags | Q_FLAG_MOBILE end
@@ -1456,16 +1562,31 @@ local function pack_q(leaf_id, src, dest, opcode, requester_is_mobile)
   return "Q" .. string.char(src) .. string.char(dest) .. string.char(b3)
 end
 
+function pack_q_hash(leaf_id, src, key_hash32, requester_is_mobile)
+  return pack_q(leaf_id, src, 255, Q_OP_HASH_QUERY, requester_is_mobile)
+         .. q_pack_u32_le(key_hash32 or 0)
+end
+
+function pack_q_hash_response(leaf_id, src, resolved_node_id, key_hash32, requester_is_mobile)
+  return pack_q(leaf_id, src, resolved_node_id, Q_OP_HASH_QUERY, requester_is_mobile)
+         .. q_pack_u32_le(key_hash32 or 0)
+end
+
 local function parse_q(frame)
   if #frame < 4 or frame:sub(1,1) ~= "Q" then return nil end
   local flags = frame:byte(4) & 0x0f
-  return {
+  local out = {
     src                 = frame:byte(2),
     dest                = frame:byte(3),
     leaf_id             = (frame:byte(4) >> 4) & 0xf,
     opcode              = flags & 0x03,
     requester_is_mobile = (flags & Q_FLAG_MOBILE) ~= 0,
   }
+  if out.opcode == Q_OP_HASH_QUERY then
+    if #frame < 8 then return nil end
+    out.key_hash32 = q_parse_u32_le(frame, 5)
+  end
+  return out
 end
 
 local J_OP_DISCOVER = 0
@@ -1477,6 +1598,7 @@ local J_FLAG_MOBILE          = 0x04
 local J_FLAG_GATEWAY_CAPABLE = 0x08
 
 local J_DENY_REASON_CONFLICT = 1
+local J_DENY_REASON_PENDING_CLAIM = 2
 
 local function pack_u16_le(v)
   v = math.floor(v or 0) & 0xffff
@@ -1500,6 +1622,23 @@ local function parse_u32_le(frame, off)
           | (frame:byte(off + 1) << 8)
           | (frame:byte(off + 2) << 16)
           | (frame:byte(off + 3) << 24)) & 0xffffffff
+end
+
+local function pack_gateway_envelope(target_layer_id, dst_key_hash32, body)
+  return GW_ENV_MAGIC
+      .. string.char((target_layer_id or 0) & 0xff)
+      .. pack_u32_le(dst_key_hash32 or 0)
+      .. (body or "")
+end
+
+local function parse_gateway_envelope(body)
+  if type(body) ~= "string" or #body < 8 then return nil end
+  if body:sub(1, #GW_ENV_MAGIC) ~= GW_ENV_MAGIC then return nil end
+  return {
+    target_layer_id = body:byte(4),
+    dst_key_hash32 = parse_u32_le(body, 5),
+    body = body:sub(9),
+  }
 end
 
 local function pack_j_header(leaf_id, opcode, requester_is_mobile, gateway_capable)
@@ -1597,6 +1736,55 @@ local function parse_j(frame)
     return out
   end
   return nil
+end
+
+function join_opcode_name(opcode)
+  if opcode == J_OP_DISCOVER then return "discover" end
+  if opcode == J_OP_CLAIM then return "claim" end
+  if opcode == J_OP_DENY then return "deny" end
+  if opcode == J_OP_OFFER then return "offer" end
+  return tostring(opcode or "unknown")
+end
+
+function join_rate_limit_key(j)
+  if j.opcode == J_OP_DISCOVER or j.opcode == J_OP_CLAIM then
+    return j.key_hash32
+  end
+  return nil
+end
+
+function join_j_rate_limited(self, j, meta)
+  local key_hash32 = join_rate_limit_key(j)
+  if key_hash32 == nil then return false end
+  local window_ms = self.join_j_rate_limit_window_ms or 0
+  local max_count = self.join_j_max_per_window or 0
+  if window_ms <= 0 or max_count <= 0 then return false end
+  local now = self:now()
+  local opcode = join_opcode_name(j.opcode)
+  local key = string.format("%s|%u", opcode, key_hash32 & 0xffffffff)
+  self.join_j_seen = self.join_j_seen or {}
+  local seen = self.join_j_seen[key] or {}
+  local kept = {}
+  for _, ts in ipairs(seen) do
+    if now - ts < window_ms then
+      kept[#kept + 1] = ts
+    end
+  end
+  if #kept >= max_count then
+    self.join_j_seen[key] = kept
+    self:emit("join_j_rate_limited", {
+      from = meta and meta.src or nil,
+      key_hash32 = key_hash32,
+      opcode = opcode,
+      count = #kept,
+      window_ms = window_ms,
+      max_per_window = max_count,
+    })
+    return true
+  end
+  kept[#kept + 1] = now
+  self.join_j_seen[key] = kept
+  return false
 end
 
 -- DATA — 12 + n bytes (in-leaf, addr_len=0); §7.6 hop-budget + rt-learning:
@@ -1832,6 +2020,12 @@ local function rts_timeout_for_attempt(base_ms, attempt_idx)
     end
   end
   return base_ms * mult
+end
+
+local function rts_timeout_base_ms(self, routing_sf)
+  local sf = routing_sf or self.routing_sf
+  return airtime_ms(sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN)
+       + airtime_ms(sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN)
 end
 
 -- Per-message retry budget. The effective rts_max_retries for a message
@@ -2074,6 +2268,13 @@ end
 -- distinct-label flights don't overwrite each other.
 local function tx_with_retry(self, bytes, opts)
   local label = opts.label or ""
+  if self.join_required and not self.joined and label ~= "J" then
+    self:emit("tx_unjoined_blocked", {
+      label = label,
+      source = "tx_with_retry",
+    })
+    return false
+  end
   if RETRY_ELIGIBLE[label] then
     self.tx_stash[label] = {
       bytes        = bytes,
@@ -2148,6 +2349,13 @@ end
 -- otherwise the timer can fire mid-defer and burn a retry for nothing.
 local function tx_initiating(self, bytes, opts, after_tx)
   local label = opts.label or ""
+  if self.join_required and not self.joined and label ~= "J" then
+    self:emit("tx_unjoined_blocked", {
+      label = label,
+      source = "tx_initiating",
+    })
+    return
+  end
   local is_rts_label = (label == "RTS" or label == "RTS-fwd" or label == "RTS-rty")
   if is_rts_label and opts.__pending_tx_ref == nil then
     opts.__pending_tx_ref = self.pending_tx
@@ -2184,6 +2392,13 @@ end
 -- flood_lbt_max_defer_ms, drop this page (tx_flood_skipped emit). The
 -- next periodic / triggered fire rotates the offset and re-broadcasts.
 local function tx_flood(self, bytes, opts)
+  if self.join_required and not self.joined then
+    self:emit("tx_unjoined_blocked", {
+      label = opts.label,
+      source = "tx_flood",
+    })
+    return false
+  end
   -- Duty-cycle pre-check. Beacons are FLOOD-class — non-critical; if we'd
   -- breach budget, drop this page and rely on the next periodic /
   -- triggered fire. Matches the existing flood_lbt_max_defer_ms drop
@@ -2340,6 +2555,33 @@ is_next_hop_fresh = function(self, node_id)
   if last_seen == nil then return false, nil end
   local age_ms = self:now() - last_seen
   return age_ms <= (self.next_hop_live_ttl_ms or 1200000), age_ms
+end
+
+function route_candidate_for_next(entry, next_hop)
+  if entry == nil or entry.candidates == nil then return nil end
+  for _, c in ipairs(entry.candidates) do
+    if c.next_hop == next_hop then return c end
+  end
+  return nil
+end
+
+function route_candidate_layer_ok(c, tx_layer_id)
+  if tx_layer_id == nil or c == nil then return true end
+  -- Older route candidates and same-layer non-gateway sends may not carry
+  -- learned_layer_id. Only enforce the guard when the route explicitly says
+  -- it was learned while listening to a different layer.
+  if c.learned_layer_id == nil then return true end
+  return c.learned_layer_id == tx_layer_id
+end
+
+function emit_wrong_layer_next_skip(self, dst_id, next_hop, c, tx_layer_id, source)
+  self:emit("rt_skip_wrong_layer_next", {
+    dest = dst_id,
+    next = next_hop,
+    route_layer_id = c and c.learned_layer_id or nil,
+    tx_layer_id = tx_layer_id,
+    source = source or "route_select",
+  })
 end
 
 local function route_mobile_touched(self, dest_id, c)
@@ -2532,7 +2774,9 @@ local function emit_route_decision(self, reason, px, ctx)
   if better_hop_available ~= 0 or better_budget_available ~= 0
      or delta >= 2 or chosen_tier >= BUDGET_TIER_CRITICAL
      or chosen_blind ~= 0 or ctx.mobile_touched then
-    self:emit("route_decision_detail", payload)
+    if debug_emit_allowed(self) then
+      self:emit("route_decision_detail", payload)
+    end
   end
 end
 
@@ -2540,36 +2784,38 @@ local function emit_rts_attempt_detail(self, kind, px)
   self.rts_attempt_seq = (self.rts_attempt_seq or 0) + 1
   px.last_rts_attempt_seq = self.rts_attempt_seq
   local ctx = route_candidate_context(self, px.dst, px.next)
-  self:emit("rts_attempt_detail", {
-    attempt_seq = px.last_rts_attempt_seq,
-    kind = kind,
-    origin = px.origin,
-    payload = px.user_text,
-    ctr = px.ctr,
-    ctr_lo = px.ctr_lo,
-    dst = px.dst,
-    next = px.next,
-    retries_left = px.retries_left,
-    retry_reason = px.retry_reason,
-    candidate_rank = ctx.candidate_rank,
-    candidate_count = ctx.candidate_count,
-    route_score = ctx.route_score,
-    route_score_eff = ctx.route_score_eff,
-    budget_penalty_db = ctx.budget_penalty_db,
-    suspect_penalty_db = ctx.suspect_penalty_db,
-    viable_alts = ctx.viable_alts,
-    route_hops = ctx.route_hops,
-    route_age_ms = ctx.route_age_ms,
-    next_tier = ctx.next_tier,
-    next_suspect_level = ctx.next_suspect_level,
-    next_seen_fresh = ctx.next_seen_fresh,
-    next_seen_age_ms = ctx.next_seen_age_ms,
-    next_blind = ctx.next_blind,
-    next_blind_ms = ctx.next_blind_ms,
-    mobile_touched = ctx.mobile_touched,
-    route_ttl_ms = ctx.route_ttl_ms,
-    previous_hop = px.previous_hop,
-  })
+  if debug_emit_allowed(self) then
+    self:emit("rts_attempt_detail", {
+      attempt_seq = px.last_rts_attempt_seq,
+      kind = kind,
+      origin = px.origin,
+      payload = px.user_text,
+      ctr = px.ctr,
+      ctr_lo = px.ctr_lo,
+      dst = px.dst,
+      next = px.next,
+      retries_left = px.retries_left,
+      retry_reason = px.retry_reason,
+      candidate_rank = ctx.candidate_rank,
+      candidate_count = ctx.candidate_count,
+      route_score = ctx.route_score,
+      route_score_eff = ctx.route_score_eff,
+      budget_penalty_db = ctx.budget_penalty_db,
+      suspect_penalty_db = ctx.suspect_penalty_db,
+      viable_alts = ctx.viable_alts,
+      route_hops = ctx.route_hops,
+      route_age_ms = ctx.route_age_ms,
+      next_tier = ctx.next_tier,
+      next_suspect_level = ctx.next_suspect_level,
+      next_seen_fresh = ctx.next_seen_fresh,
+      next_seen_age_ms = ctx.next_seen_age_ms,
+      next_blind = ctx.next_blind,
+      next_blind_ms = ctx.next_blind_ms,
+      mobile_touched = ctx.mobile_touched,
+      route_ttl_ms = ctx.route_ttl_ms,
+      previous_hop = px.previous_hop,
+    })
+  end
   emit_route_decision(self, px.retry_reason or kind, px, ctx)
   return px.last_rts_attempt_seq
 end
@@ -2843,6 +3089,7 @@ local function rt_merge(self, rt, dest_id, cand, viab_db)
   local entry = rt[dest_id]
   if entry == nil then
     rt[dest_id] = { candidates = { cand }, dirty = true }   -- new dest
+    if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "new") end
     return "new"
   end
 
@@ -2856,17 +3103,21 @@ local function rt_merge(self, rt, dest_id, cand, viab_db)
         local now_primary = (entry.candidates[1].next_hop == cand.next_hop)
         if now_primary then
           entry.dirty = true                                  -- primary refresh
+          if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "primary_refresh") end
           return "primary_refresh"
         elseif was_primary then
           entry.dirty = true                                  -- another took over
+          if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "promote") end
           return "promote"
         end
+        if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "alt_install") end
         return "alt_install"
       end
       -- Equal/worse but same next_hop: refresh metadata, no order change.
       c.last_seen_ms = cand.last_seen_ms
       c.n2_hop       = cand.n2_hop
       c.is_gateway   = cand.is_gateway      -- identity metadata, not a ranking input
+      c.learned_layer_id = cand.learned_layer_id
       return "no_change"
     end
   end
@@ -2877,8 +3128,10 @@ local function rt_merge(self, rt, dest_id, cand, viab_db)
     sort_route_candidates(self, entry.candidates, viab_db)
     if entry.candidates[1].next_hop == cand.next_hop then
       entry.dirty = true                                      -- new candidate became primary
+      if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "promote") end
       return "promote"
     end
+    if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "alt_install") end
     return "alt_install"
   end
 
@@ -2892,8 +3145,10 @@ local function rt_merge(self, rt, dest_id, cand, viab_db)
   sort_route_candidates(self, entry.candidates, viab_db)
   if entry.candidates[1].next_hop == cand.next_hop then
     entry.dirty = true                                        -- displaced into primary
+    if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "promote") end
     return "promote"
   end
+  if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "alt_install") end
   return "alt_install"
 end
 
@@ -2960,6 +3215,312 @@ local function id_bind_refresh_plain(self, node_id, source)
   return true
 end
 
+local function id_bind_expired(self, node_id, rec, now)
+  local ttl = self.id_bind_ttl_ms or 0
+  if ttl <= 0 or rec == nil then return false end
+  if self.joined and node_id == self.id and rec.key_hash32 == (self.key_hash32 or 0) then
+    return false
+  end
+  return (now - (rec.last_key_seen_ms or rec.last_seen_ms or rec.first_seen_ms or now)) >= ttl
+end
+
+local function id_bind_age_one(self, node_id, rec, now, source)
+  self.id_bind[node_id] = nil
+  self:emit("id_bind_aged", {
+    node = node_id,
+    key_hash32 = rec.key_hash32,
+    age_ms = now - (rec.last_key_seen_ms or rec.last_seen_ms or rec.first_seen_ms or now),
+    ttl_ms = self.id_bind_ttl_ms or 0,
+    source = source or "age_loop",
+    confidence = rec.confidence,
+  })
+end
+
+local function id_bind_find_by_hash(self, key_hash32)
+  if key_hash32 == nil or self.id_bind == nil then return nil end
+  local now = self:now()
+  for node_id, rec in pairs(self.id_bind) do
+    if rec.key_hash32 == key_hash32 and not id_bind_expired(self, node_id, rec, now) then
+      return node_id, rec
+    end
+  end
+  return nil
+end
+
+local function gateway_layer_enabled(self, layer_id)
+  if layer_id == nil then return false end
+  layer_id = math.floor(layer_id)
+  if layer_id == (self.layer_id or self.leaf_id or 0) then return true end
+  return self.gateway_layer_set ~= nil and self.gateway_layer_set[layer_id] == true
+end
+
+local function layer_leaf_id(layer_id)
+  return math.floor(layer_id or 0) & 0x0f
+end
+
+local function gateway_layer_record(self, layer_id)
+  if layer_id == nil or self.gateway_layer_by_id == nil then return nil end
+  return self.gateway_layer_by_id[math.floor(layer_id)]
+end
+
+local function active_leaf_id(self)
+  return self.active_leaf_id or self.leaf_id
+end
+
+local function active_routing_sf(self)
+  return self.active_routing_sf or self.routing_sf
+end
+
+local function active_allowed_sf_bitmap(self)
+  return self.active_allowed_sf_bitmap or self.allowed_sf_bitmap
+end
+
+local function activate_gateway_layer(self, rec, reason)
+  if rec == nil then return end
+  self.active_layer_id = rec.layer_id
+  self.active_leaf_id = rec.leaf_id
+  self.active_routing_sf = rec.routing_sf
+  self.active_allowed_data_sfs = rec.allowed_data_sfs
+  self.active_allowed_sf_bitmap = rec.allowed_sf_bitmap
+  self:set_rx_sf(rec.routing_sf)
+  self:emit("gateway_layer_active", {
+    layer_id = rec.layer_id,
+    leaf_id = rec.leaf_id,
+    routing_sf = rec.routing_sf,
+    duration_ms = rec.duration_ms,
+    reason = reason or "schedule",
+  })
+  self:emit("gateway_schedule_change", {
+    active_layer_id = rec.layer_id,
+    active_leaf_id = rec.leaf_id,
+    listen_sf = rec.routing_sf,
+    data_sf_bitmap = rec.allowed_sf_bitmap,
+    duration_ms = rec.duration_ms,
+    reason = reason or "schedule",
+  })
+end
+
+local function activate_primary_layer(self, reason)
+  if self.active_layer_id == self.layer_id
+     and self.active_leaf_id == self.leaf_id
+     and self.active_routing_sf == self.routing_sf
+     and self.active_allowed_sf_bitmap == self.allowed_sf_bitmap then
+    return
+  end
+  self.active_layer_id = self.layer_id
+  self.active_leaf_id = self.leaf_id
+  self.active_routing_sf = self.routing_sf
+  self.active_allowed_data_sfs = self.allowed_data_sfs
+  self.active_allowed_sf_bitmap = self.allowed_sf_bitmap
+  self:set_rx_sf(self.routing_sf)
+  if self.self_gateway then
+    self:emit("gateway_layer_active", {
+      layer_id = self.layer_id,
+      leaf_id = self.leaf_id,
+      routing_sf = self.routing_sf,
+      reason = reason or "primary",
+    })
+    self:emit("gateway_schedule_change", {
+      active_layer_id = self.layer_id,
+      active_leaf_id = self.leaf_id,
+      listen_sf = self.routing_sf,
+      data_sf_bitmap = self.allowed_sf_bitmap,
+      reason = reason or "primary",
+    })
+  end
+end
+
+local function gateway_remote_bind_find(self, layer_id, key_hash32)
+  if key_hash32 == nil or self.gateway_remote_bind == nil then return nil end
+  local key = string.format("%d|%u", math.floor(layer_id or -1), key_hash32 & 0xffffffff)
+  local rec = self.gateway_remote_bind[key]
+  if rec ~= nil and rec.layer_id == layer_id then
+    if rec.ambiguous then return nil, "ambiguous" end
+    return rec
+  end
+  return nil
+end
+
+local function remember_gateway_schedule(self, gateway_id, b)
+  if gateway_id == nil or not b.self_gateway or not b.schedule or #b.schedule == 0 then return end
+  self.gateway_neighbor_schedules = self.gateway_neighbor_schedules or {}
+  local records = {}
+  for _, rec in ipairs(b.schedule) do
+    if rec.period_ms ~= nil and rec.period_ms > 0
+       and rec.duration_ms ~= nil and rec.duration_ms > 0 then
+      table.insert(records, {
+        layer_id = rec.layer_id,
+        leaf_id = layer_leaf_id(rec.layer_id),
+        routing_sf = rec.routing_sf,
+	        duration_ms = rec.duration_ms,
+	        offset_ms = rec.offset_ms or 0,
+	        period_ms = rec.period_ms,
+	        period_unit_ms = rec.period_unit_ms or 1000,
+	      })
+    end
+  end
+  if #records == 0 then return end
+  local layer_set = {}
+  layer_set[math.floor(self.active_layer_id or self.layer_id or b.leaf_id or 0)] = true
+  for _, rec in ipairs(records) do
+    if rec.layer_id ~= nil then
+      layer_set[math.floor(rec.layer_id)] = true
+    end
+  end
+  local bridged_layers = {}
+  for layer_id, _ in pairs(layer_set) do
+    table.insert(bridged_layers, layer_id)
+  end
+  table.sort(bridged_layers)
+  self.gateway_neighbor_schedules[gateway_id] = {
+    heard_ms = self:now(),
+    primary_leaf_id = b.leaf_id,
+    bridged_layers = layer_set,
+    records = records,
+  }
+	  self:emit("gateway_schedule_observed", {
+	    gateway = gateway_id,
+	    primary_leaf_id = b.leaf_id,
+	    records = #records,
+	    bridged_layers = bridged_layers,
+	    schedule = records,
+	  })
+end
+
+local function gateway_schedule_defer_ms(self, gateway_id)
+  if self.self_gateway or gateway_id == nil or self.gateway_neighbor_schedules == nil then
+    return 0
+  end
+  local sched = self.gateway_neighbor_schedules[gateway_id]
+  if sched == nil or sched.records == nil then return 0 end
+  local now = self:now()
+  local our_leaf = active_leaf_id(self)
+  local best_delay = 0
+  for _, rec in ipairs(sched.records) do
+    if rec.leaf_id ~= our_leaf and rec.period_ms ~= nil and rec.period_ms > 0 then
+      local period = rec.period_ms
+      local offset = rec.offset_ms or 0
+      local duration = rec.duration_ms or 0
+      local phase = (now - offset) % period
+      if phase >= 0 and phase < duration then
+        local delay = duration - phase + (self.gateway_schedule_guard_ms or 100)
+        if delay > best_delay then best_delay = delay end
+      end
+    end
+  end
+  return best_delay
+end
+
+local function gateway_note_remote_binding(self, layer_id, node_id, key_hash32, source)
+  if not self.self_gateway or key_hash32 == nil or node_id == nil then return end
+  layer_id = math.floor(layer_id or (self.active_layer_id or self.layer_id or 0))
+  if layer_id == (self.layer_id or 0) then return end
+  if not gateway_layer_enabled(self, layer_id) then return end
+  local now = self:now()
+  local key = string.format("%d|%u", layer_id, key_hash32 & 0xffffffff)
+  local prev = self.gateway_remote_bind[key]
+  if prev ~= nil and prev.node_id ~= node_id then
+    prev.ambiguous = true
+    prev.last_seen_ms = now
+    prev.conflicting_node = node_id
+    prev.conflicting_source = source or "observed"
+    self:emit("gateway_remote_bind_conflict", {
+      layer_id = layer_id,
+      key_hash32 = key_hash32,
+      existing_node = prev.node_id,
+      conflicting_node = node_id,
+      source = source or "observed",
+    })
+    return
+  end
+  self.gateway_remote_bind[key] = {
+    layer_id = layer_id,
+    node_id = node_id,
+    key_hash32 = key_hash32,
+    source = source or "observed",
+    first_seen_ms = prev and prev.first_seen_ms or now,
+    last_seen_ms = now,
+    ambiguous = false,
+  }
+  self:emit("gateway_remote_bind_set", {
+    layer_id = layer_id,
+    node = node_id,
+    key_hash32 = key_hash32,
+    source = source or "observed",
+  })
+end
+
+local function age_out_gateway_remote_bind(self)
+  if self.gateway_remote_bind == nil or next(self.gateway_remote_bind) == nil then return end
+  local ttl = self.gateway_remote_bind_ttl_ms or self.id_bind_ttl_ms or 0
+  if ttl <= 0 then return end
+  local now = self:now()
+  local keys = {}
+  for key, _ in pairs(self.gateway_remote_bind) do
+    keys[#keys + 1] = key
+  end
+  for _, key in ipairs(keys) do
+    local rec = self.gateway_remote_bind[key]
+    if rec and (now - (rec.last_seen_ms or rec.first_seen_ms or now)) >= ttl then
+      self.gateway_remote_bind[key] = nil
+      self:emit("gateway_remote_bind_aged", {
+        layer_id = rec.layer_id,
+        node = rec.node_id,
+        key_hash32 = rec.key_hash32,
+        age_ms = now - (rec.last_seen_ms or rec.first_seen_ms or now),
+        ttl_ms = ttl,
+        source = rec.source,
+        ambiguous = rec.ambiguous or false,
+      })
+    end
+  end
+end
+
+local function select_gateway_for_layer(self, target_layer_id)
+  target_layer_id = math.floor(target_layer_id or -1)
+  local best_gateway = nil
+  local best_hops = nil
+  local best_score = nil
+  for dest_id, entry in pairs(self.rt or {}) do
+    local c = entry.candidates and entry.candidates[1]
+    if c ~= nil and dest_id ~= self.id then
+      local sched = self.gateway_neighbor_schedules
+                    and self.gateway_neighbor_schedules[dest_id]
+      local bridges_target = sched
+                             and sched.bridged_layers
+                             and sched.bridged_layers[target_layer_id] == true
+      if bridges_target then
+        local hops = c.hops or 99
+        local score = c.score or -999
+        if best_gateway == nil
+           or hops < best_hops
+           or (hops == best_hops and score > best_score) then
+          best_gateway = dest_id
+          best_hops = hops
+          best_score = score
+        end
+      end
+    end
+  end
+  return best_gateway, best_hops, best_score
+end
+
+local function age_out_id_bind(self)
+  if self.id_bind == nil or next(self.id_bind) == nil then return end
+  if (self.id_bind_ttl_ms or 0) <= 0 then return end
+  local now = self:now()
+  local ids = {}
+  for node_id, _ in pairs(self.id_bind) do
+    ids[#ids + 1] = node_id
+  end
+  for _, node_id in ipairs(ids) do
+    local rec = self.id_bind[node_id]
+    if rec and id_bind_expired(self, node_id, rec, now) then
+      id_bind_age_one(self, node_id, rec, now, "age_loop")
+    end
+  end
+end
+
 -- 3-cycle prune: when a beacon entry says (D, next=self.id), the sender N
 -- claims to route D through me. If any of my own rt[D] candidates stores
 -- n2_hop == N, that slot is part of a 3-cycle me→X→N→me — invalidate it.
@@ -2999,6 +3560,7 @@ local function rt_prune_cycle(self, dest_id, sender_id)
       -- advertise — re-mark dirty so the next beacon carries it.
       if primary_pruned then entry.dirty = true end
     end
+    if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "prune_3cycle") end
     schedule_triggered_beacon(self)
   end
 end
@@ -3041,6 +3603,7 @@ local function age_out_stale_routes(self)
     if entry then
       local kept = {}
       local primary_evicted = false
+      local old_count = #(entry.candidates or {})
       for i, c in ipairs(entry.candidates) do
         local ttl = route_ttl_for_candidate(self, c)
         local mobile_touched = route_mobile_touched(self, dest_id, c)
@@ -3069,12 +3632,16 @@ local function age_out_stale_routes(self)
         entry.candidates = kept
         if primary_evicted then entry.dirty = true end
       end
+      if #kept < old_count then
+        if emit_rt_debug_route then emit_rt_debug_route(self, dest_id, "aged") end
+      end
     end
   end
   if any_evicted then schedule_triggered_beacon(self) end
 end
 
 local function emit_rt_quality_snapshots(self)
+  if not debug_emit_allowed(self) then return end
   local function cand_hops(c)
     return (c and c.hops) or 1
   end
@@ -3123,6 +3690,66 @@ local function emit_rt_quality_snapshots(self)
       end
     end
   end
+end
+
+function debug_window_active(self, now)
+  if self.debug_start_ms == nil and self.debug_end_ms == nil then return false end
+  now = now or self:now()
+  if self.debug_start_ms ~= nil and now < self.debug_start_ms then return false end
+  if self.debug_end_ms ~= nil and now > self.debug_end_ms then return false end
+  return true
+end
+
+function debug_window_configured(self)
+  return self.debug_start_ms ~= nil or self.debug_end_ms ~= nil
+end
+
+function debug_emit_allowed(self, now)
+  if not debug_window_configured(self) then return true end
+  return debug_window_active(self, now)
+end
+
+emit_rt_debug_route = function(self, dest_id, reason, detail)
+  local now = self:now()
+  if not debug_window_active(self, now) then return end
+  local entry = self.rt and self.rt[dest_id]
+  local candidates = {}
+  if entry and entry.candidates then
+    for slot, c in ipairs(entry.candidates) do
+      local ttl = route_ttl_for_candidate(self, c)
+      local age = c.last_seen_ms and (now - c.last_seen_ms) or nil
+      candidates[#candidates + 1] = {
+        slot = slot,
+        next_hop = c.next_hop,
+        n2_hop = c.n2_hop,
+        hops = c.hops,
+        score = c.score,
+        score_eff = effective_score(self, c, entry.candidates, self.routing_snr_floor_db),
+        age_ms = age,
+        ttl_ms = ttl,
+        expires_in_ms = (ttl and ttl > 0 and age) and (ttl - age) or nil,
+        is_gateway = c.is_gateway == true,
+        mobile_touched = route_mobile_touched(self, dest_id, c),
+        next_tier = get_neighbor_tier(self, c.next_hop),
+        next_blind = is_blind(self, c.next_hop),
+        suspect_level = get_peer_suspect_level(self, c.next_hop),
+      }
+    end
+  end
+  self:emit("rt_debug_snapshot", {
+    reason = reason or "debug_window",
+    detail = detail,
+    node_id = self.id,
+    layer_id = self.layer_id,
+    active_layer_id = self.active_layer_id or self.layer_id,
+    leaf_id = self.leaf_id,
+    active_leaf_id = active_leaf_id(self),
+    dst = dest_id,
+    dirty = entry and entry.dirty == true or false,
+    deleted = entry == nil,
+    candidate_count = #candidates,
+    candidates = candidates,
+  })
 end
 
 -- Forward decls so the timeout-fire callbacks can refer to peers in the
@@ -3197,6 +3824,8 @@ local function emit_route_query(self, dst_id, dst_name, reason)
   if last_q and (now_q - last_q) < self.q_query_ttl_ms then
     return last_q, false
   end
+  local q_leaf_id = active_leaf_id(self)
+  local q_routing_sf = active_routing_sf(self)
   self.q_queried[dst_id] = now_q
   self:emit("q_tx", {
     opcode = Q_OP_ROUTE_QUERY,
@@ -3204,15 +3833,67 @@ local function emit_route_query(self, dst_id, dst_name, reason)
     dst_name = dst_name,
     requester_mobile = self.is_mobile == true,
     reason = reason or "route_query",
+    tx_layer_id = self.active_layer_id or self.layer_id,
+    tx_leaf_id = q_leaf_id,
+    tx_routing_sf = q_routing_sf,
   })
   self:log(string.format(
     "q_tx -> dst=%s (route query, reason=%s, requester_mobile=%s)",
     dst_name, reason or "route_query", tostring(self.is_mobile == true)))
-  tx_initiating(self, pack_q(self.leaf_id, self.id, dst_id,
+  tx_initiating(self, pack_q(q_leaf_id, self.id, dst_id,
                              Q_OP_ROUTE_QUERY, self.is_mobile == true), {
-    sf    = self.routing_sf,
+    sf    = q_routing_sf,
     label = "Q",
     info  = string.format("dst=%s reason=%s", dst_name, reason or "route_query"),
+  })
+  return now_q, true
+end
+
+function emit_hash_route_query(self, target_layer_id, key_hash32, reason)
+  if key_hash32 == nil then return nil, false end
+  target_layer_id = math.floor(target_layer_id or (self.active_layer_id or self.layer_id or 0))
+  local q_key = string.format("hash:%d:%u", target_layer_id, key_hash32 & 0xffffffff)
+  local now_q = self:now()
+  local last_q = self.q_queried[q_key]
+  if last_q and (now_q - last_q) < self.q_query_ttl_ms then
+    return last_q, false
+  end
+  if not gateway_layer_enabled(self, target_layer_id) then
+    return now_q, false
+  end
+
+  local q_leaf_id = self.leaf_id
+  local q_routing_sf = self.routing_sf
+  if target_layer_id == (self.layer_id or 0) then
+    activate_primary_layer(self, "q_hash")
+  else
+    local rec = gateway_layer_record(self, target_layer_id)
+    if rec == nil then return now_q, false end
+    activate_gateway_layer(self, rec, "q_hash")
+    q_leaf_id = rec.leaf_id
+    q_routing_sf = rec.routing_sf
+  end
+
+  self.q_queried[q_key] = now_q
+  self:emit("q_tx", {
+    opcode = Q_OP_HASH_QUERY,
+    dst = 255,
+    key_hash32 = key_hash32,
+    requester_mobile = self.is_mobile == true,
+    reason = reason or "hash_query",
+    tx_layer_id = target_layer_id,
+    tx_leaf_id = q_leaf_id,
+    tx_routing_sf = q_routing_sf,
+  })
+  self:log(string.format(
+    "q_tx -> key_hash32=%u layer=%d (hash query, reason=%s)",
+    key_hash32, target_layer_id, reason or "hash_query"))
+  tx_initiating(self, pack_q_hash(q_leaf_id, self.id, key_hash32,
+                                  self.is_mobile == true), {
+    sf    = q_routing_sf,
+    label = "Q",
+    info  = string.format("hash32=%u layer=%d reason=%s",
+                          key_hash32, target_layer_id, reason or "hash_query"),
   })
   return now_q, true
 end
@@ -3227,6 +3908,7 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
     previous_hop = previous_hop,
     queued_at_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
     reason       = reason,
+    tx_layer_id  = queue_meta and queue_meta.tx_layer_id or nil,
     e2e_registered = origin == self.id and ((flags or 0) & DATA_FLAG_E2E_ACK_REQ) ~= 0,
   }
   table.insert(self.deferred_sends, deferred)
@@ -3241,6 +3923,7 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
     blocked_candidates = blocked_count,
     route_blocked_kind = blocked_kind,
     candidate_count = candidate_total,
+    tx_layer_id = deferred.tx_layer_id,
   })
   self:log(string.format(
     "send_deferred dst=%s reason=%s (holding for up to %dms; depth=%d)",
@@ -3256,6 +3939,128 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
       last_q_ms = q_at,
     })
   end
+end
+
+function enqueue_gateway_handoff(self, gw_env, d_origin, binding)
+  local target_id = binding.node_id
+  local forward_ctr = self:next_ctr(target_id)
+  local forward_inner = string.char(0) .. string.char(self.id) .. gw_env.body
+  table.insert(self.tx_queue, {
+    origin     = self.id,
+    dst_id     = target_id,
+    dst_name   = name_of(self, target_id),
+    payload    = forward_inner,
+    user_text  = gw_env.body,
+    ctr        = forward_ctr,
+    flags      = 0,
+    enqueue_time_ms = self:now(),
+    requeue_count   = 0,
+    next_attempt_ms = 0,
+    tx_layer_id     = gw_env.target_layer_id,
+  })
+  self:emit("gateway_handoff_enqueued", {
+    origin = d_origin,
+    via_gateway = self.id,
+    target_layer_id = gw_env.target_layer_id,
+    dst = target_id,
+    dst_key_hash32 = gw_env.dst_key_hash32,
+    payload = gw_env.body,
+    ctr = forward_ctr,
+    depth = #self.tx_queue,
+    binding_source = binding.source,
+  })
+  self:log(string.format(
+    "gateway_handoff_enqueued layer=%d key_hash32=%u dst=%s ctr=%d",
+    gw_env.target_layer_id, gw_env.dst_key_hash32,
+    name_of(self, target_id), forward_ctr))
+  -- Wake the shared queue after the current RX/TX callback unwinds. The queued
+  -- item carries tx_layer_id=target_layer_id, so issue_send() will retune to
+  -- the correct gateway layer/window before emitting RTS.
+  self:after(1, function() become_free(self) end)
+end
+
+function gateway_binding_for_env(self, gw_env)
+  if gw_env == nil then return nil, "not_found" end
+  if gw_env.target_layer_id == (self.layer_id or 0) then
+    local node_id = id_bind_find_by_hash(self, gw_env.dst_key_hash32)
+    if node_id ~= nil then
+      return {
+        layer_id = gw_env.target_layer_id,
+        node_id = node_id,
+        key_hash32 = gw_env.dst_key_hash32,
+        source = "local_id_bind",
+      }
+    end
+    return nil, "not_found"
+  end
+  local rec, err = gateway_remote_bind_find(self, gw_env.target_layer_id,
+                                            gw_env.dst_key_hash32)
+  if rec ~= nil then return rec end
+  return nil, err or "not_found"
+end
+
+function defer_gateway_handoff(self, gw_env, d_origin, reason)
+  if self.gateway_deferred_handoffs == nil then self.gateway_deferred_handoffs = {} end
+  local now = self:now()
+  local q_at, q_sent = emit_hash_route_query(self, gw_env.target_layer_id,
+                                             gw_env.dst_key_hash32,
+                                             reason or "gateway_no_binding")
+  table.insert(self.gateway_deferred_handoffs, {
+    origin = d_origin,
+    gw_env = gw_env,
+    queued_at_ms = now,
+    q_sent_at_ms = q_at,
+    reason = reason or "not_found",
+  })
+  self:emit("gateway_handoff_deferred", {
+    origin = d_origin,
+    via_gateway = self.id,
+    target_layer_id = gw_env.target_layer_id,
+    dst_key_hash32 = gw_env.dst_key_hash32,
+    payload = gw_env.body,
+    reason = reason or "not_found",
+    q_sent = q_sent,
+    ttl_ms = self.gateway_handoff_defer_ttl_ms,
+    depth = #self.gateway_deferred_handoffs,
+  })
+end
+
+function try_drain_gateway_handoffs(self)
+  if self.gateway_deferred_handoffs == nil or #self.gateway_deferred_handoffs == 0 then return end
+  local now = self:now()
+  local kept = {}
+  for _, d in ipairs(self.gateway_deferred_handoffs) do
+    local binding, binding_error = gateway_binding_for_env(self, d.gw_env)
+    if binding ~= nil and gateway_layer_enabled(self, d.gw_env.target_layer_id) then
+      enqueue_gateway_handoff(self, d.gw_env, d.origin, binding)
+      self:emit("gateway_handoff_drained", {
+        origin = d.origin,
+        via_gateway = self.id,
+        target_layer_id = d.gw_env.target_layer_id,
+        dst_key_hash32 = d.gw_env.dst_key_hash32,
+        waited_ms = now - d.queued_at_ms,
+        dst = binding.node_id,
+        binding_source = binding.source,
+      })
+    elseif (now - d.queued_at_ms) >= self.gateway_handoff_defer_ttl_ms then
+      self:emit("gateway_handoff_giveup", {
+        origin = d.origin,
+        via_gateway = self.id,
+        target_layer_id = d.gw_env.target_layer_id,
+        dst_key_hash32 = d.gw_env.dst_key_hash32,
+        payload = d.gw_env.body,
+        waited_ms = now - d.queued_at_ms,
+        reason = binding_error or d.reason or "not_found",
+      })
+    else
+      local q_at, q_sent = emit_hash_route_query(self, d.gw_env.target_layer_id,
+                                                 d.gw_env.dst_key_hash32,
+                                                 "gateway_deferred")
+      if q_sent then d.q_sent_at_ms = q_at end
+      table.insert(kept, d)
+    end
+  end
+  self.gateway_deferred_handoffs = kept
 end
 
 -- Re-send the current pending_tx's RTS with the same ctr_lo. Shared by
@@ -3300,6 +4105,7 @@ local function tx_rts_retry(self, reason)
                            {
                              enqueue_time_ms = saved.enqueue_time_ms,
                              requeue_count = saved.requeue_count or 0,
+                             tx_layer_id = saved.tx_layer_id,
                            },
                            nil, nil, "stale_next")
       become_free(self)
@@ -3336,6 +4142,7 @@ local function tx_rts_retry(self, reason)
                            {
                              enqueue_time_ms = saved.enqueue_time_ms,
                              requeue_count = saved.requeue_count or 0,
+                             tx_layer_id = saved.tx_layer_id,
                            },
                            nil, nil, "silent")
       become_free(self)
@@ -3369,10 +4176,34 @@ local function tx_rts_retry(self, reason)
     px.retries_left = effective_rts_max_retries(self, px.requeue_count)
   end
 
+  local gateway_delay_ms = gateway_schedule_defer_ms(self, px.next)
+  if gateway_delay_ms > 0 then
+    self:emit("tx_gateway_schedule_defer", {
+      origin = px.origin,
+      payload = px.user_text,
+      ctr = px.ctr,
+      ctr_lo = px.ctr_lo,
+      dst = px.dst,
+      next_hop = px.next,
+      delay_ms = gateway_delay_ms,
+      active_leaf_id = active_leaf_id(self),
+      source = "tx_rts_retry",
+      reason = reason,
+    })
+    self:log(string.format("tx_gateway_schedule_defer (tx_rts_retry) msg=%d -> %s deferred %dms",
+      px.ctr_lo, name_of(self, px.next), gateway_delay_ms))
+    self:after(gateway_delay_ms, function() tx_rts_retry(self, reason) end)
+    return
+  end
+
   -- payload_len lets the receiver size its pending_rx_expiry to the
   -- actual DATA airtime instead of max_payload_bytes worst-case.
-  local rts = pack_rts(self.leaf_id, self.id, px.dst, px.next, px.ctr_lo,
-                       self.allowed_sf_bitmap, #px.payload + MAC_LEN)
+  if px.tx_layer_id ~= nil and px.tx_layer_id ~= (self.active_layer_id or self.layer_id) then
+    local rec = gateway_layer_record(self, px.tx_layer_id)
+    if rec then activate_gateway_layer(self, rec, "tx_retry") end
+  end
+  local rts = pack_rts(px.tx_leaf_id or active_leaf_id(self), self.id, px.dst, px.next, px.ctr_lo,
+                       px.tx_sf_bitmap or active_allowed_sf_bitmap(self), #px.payload + MAC_LEN)
   px.retry_reason = reason
   local attempt_seq = emit_rts_attempt_detail(self, "retry", px)
   px.retry_reason = nil
@@ -3381,11 +4212,14 @@ local function tx_rts_retry(self, reason)
     origin = px.origin, payload = px.user_text, ctr = px.ctr,
     dst = px.dst, next = px.next,
     ctr_lo = px.ctr_lo, retries_left = px.retries_left, reason = reason,
+    tx_layer_id = px.tx_layer_id,
+    tx_leaf_id = px.tx_leaf_id or active_leaf_id(self),
+    tx_routing_sf = px.tx_routing_sf or active_routing_sf(self),
   })
   self:log(string.format("rts_retry -> %s ctr_lo=%d (retries_left=%d reason=%s)",
     name_of(self, px.next), px.ctr_lo, px.retries_left, reason))
   tx_initiating(self, rts, {
-    sf    = self.routing_sf,
+    sf    = px.tx_routing_sf or active_routing_sf(self),
     label = "RTS-rty",
     info  = string.format("retry next=%s msg=%d retries_left=%d reason=%s attempt_seq=%d",
       name_of(self, px.next), px.ctr_lo, px.retries_left, reason, attempt_seq),
@@ -3521,6 +4355,7 @@ local function try_cascade_requeue(self, trigger)
     enqueue_time_ms = enq,                         -- preserve original
     requeue_count   = next_count,                  -- bump
     next_attempt_ms = now + backoff_ms,            -- exponential delay
+    tx_layer_id     = px.tx_layer_id,
   })
   self:emit("cascade_requeue", {
     origin        = px.origin,
@@ -3653,10 +4488,11 @@ local function rts_timeout_fire(self, captured_ctr_lo)
     defer_send_for_route(self, saved.origin, saved.dst, name_of(self, saved.dst),
                          saved.payload, saved.user_text, saved.ctr,
                          saved.flags or 0, "all_candidates_silent",
-                         saved.previous_hop,
+                           saved.previous_hop,
                            {
                            enqueue_time_ms = saved.enqueue_time_ms,
                            requeue_count = saved.requeue_count or 0,
+                           tx_layer_id = saved.tx_layer_id,
                          },
                          nil, nil, "silent")
     become_free(self)
@@ -3859,7 +4695,9 @@ start_rts_timeout = function(self)
   -- Fresh budget (issue_send / NACK alt / blind alt) → attempt_idx = 0
   -- → base timeout. Each subsequent retry doubles up to RTS_TIMEOUT_BACKOFF_CAP.
   local attempt_idx = self.rts_max_retries - self.pending_tx.retries_left
-  local timeout_ms = rts_timeout_for_attempt(self.rts_timeout_ms, attempt_idx)
+  local base_ms = self.rts_timeout_override_ms
+                  or rts_timeout_base_ms(self, self.pending_tx.tx_routing_sf)
+  local timeout_ms = rts_timeout_for_attempt(base_ms, attempt_idx)
   local captured_ctr_lo = self.pending_tx.ctr_lo
   self.rts_timeout_handle = self:after(timeout_ms, function()
     self.rts_timeout_handle = nil
@@ -3886,7 +4724,9 @@ start_ack_timeout = function(self)
   local data_air = airtime_ms(self.pending_tx.chosen_data_sf, self.bw_hz, self.cr,
                               self.preamble_sym,
                               DATA_HDR_LEN + #self.pending_tx.payload + MAC_LEN)
-  local delay = data_air + self.ack_air_ms
+  local ack_sf = self.pending_tx.tx_routing_sf or self.routing_sf
+  local ack_air = airtime_ms(ack_sf, self.bw_hz, self.cr, self.preamble_sym, ACK_LEN)
+  local delay = data_air + ack_air
   local captured_ctr_lo = self.pending_tx.ctr_lo
   self.ack_timeout_handle = self:after(delay, function()
     self.ack_timeout_handle = nil
@@ -3929,7 +4769,7 @@ start_pending_rx_expiry = function(self)
     self.pending_rx_expiry_handle = nil
   end
   local chosen = self.pending_rx.chosen_data_sf
-  local cts_air = airtime_ms(self.routing_sf, self.bw_hz, self.cr,
+  local cts_air = airtime_ms(active_routing_sf(self), self.bw_hz, self.cr,
                               self.preamble_sym, CTS_LEN)
   -- Use the actual payload_len carried by RTS (set in pending_rx by the
   -- RTS handler). Falls back to max_payload_bytes for older callers /
@@ -4020,6 +4860,7 @@ try_drain_deferred = function(self)
         waited_ms  = now - d.queued_at_ms,
         settle_ms  = settle_ms,
         next_attempt_ms = next_attempt_ms,
+        tx_layer_id = d.tx_layer_id,
       })
       self:log(string.format(
         "send_drained dst=%s waited=%dms settle=%dms (route appeared) → tx_queue",
@@ -4086,11 +4927,13 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   end
   entry = refresh_route_order(self, dst_id, "issue_send_order") or entry
   local primary_next = entry.candidates[1].next_hop
+  local requested_tx_layer_id = queue_meta and queue_meta.tx_layer_id or nil
   if previous_hop ~= nil and primary_next == previous_hop then
     local replacement = nil
     for _, c in ipairs(entry.candidates) do
       if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
                              "issue_send_previous_hop_alt")
+         and route_candidate_layer_ok(c, requested_tx_layer_id)
          and not is_blind(self, c.next_hop) then
         replacement = c.next_hop
         break
@@ -4115,6 +4958,39 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
       return
     end
   end
+  if requested_tx_layer_id ~= nil then
+    local primary_c = route_candidate_for_next(entry, primary_next)
+    if not route_candidate_layer_ok(primary_c, requested_tx_layer_id) then
+      emit_wrong_layer_next_skip(self, dst_id, primary_next, primary_c,
+                                 requested_tx_layer_id, "issue_send_primary")
+      local replacement = nil
+      for _, c in ipairs(entry.candidates) do
+        if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
+                               "issue_send_layer_alt")
+           and route_candidate_layer_ok(c, requested_tx_layer_id)
+           and not is_blind(self, c.next_hop) then
+          replacement = c.next_hop
+          break
+        end
+      end
+      if replacement ~= nil then
+        self:emit("tx_layer_alt", {
+          origin = origin, payload = user_text, ctr = ctr,
+          dst = dst_id, from_next = primary_next, to_next = replacement,
+          tx_layer_id = requested_tx_layer_id,
+        })
+        self:log(string.format("tx_layer_alt (issue_send) dst=%s %s -> %s layer=%s",
+          dst_name, name_of(self, primary_next), name_of(self, replacement),
+          tostring(requested_tx_layer_id)))
+        primary_next = replacement
+      else
+        defer_send_for_route(self, origin, dst_id, dst_name, payload, user_text,
+                             ctr, flags, "all_candidates_wrong_layer", previous_hop,
+                             queue_meta)
+        return
+      end
+    end
+  end
   local primary_fresh = is_next_hop_fresh(self, primary_next)
   if not primary_fresh then
     emit_stale_next_skip(self, dst_id, primary_next, "issue_send_primary")
@@ -4123,6 +4999,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     for _, c in ipairs(entry.candidates) do
       if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
                              "issue_send_stale_alt")
+         and route_candidate_layer_ok(c, requested_tx_layer_id)
          and not is_blind(self, c.next_hop) then
         replacement = c.next_hop
         break
@@ -4150,6 +5027,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     for _, c in ipairs(entry.candidates) do
       if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
                              "issue_send_silent_alt")
+         and route_candidate_layer_ok(c, requested_tx_layer_id)
          and not is_blind(self, c.next_hop) then
         replacement = c.next_hop
         break
@@ -4210,6 +5088,29 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     blind_skipped_primary = primary_next
     primary_next = val_b
   end
+  local gateway_delay_ms = gateway_schedule_defer_ms(self, primary_next)
+  if gateway_delay_ms > 0 then
+    self:emit("tx_gateway_schedule_defer", {
+      origin = origin,
+      payload = user_text,
+      ctr = ctr,
+      dst = dst_id,
+      next_hop = primary_next,
+      delay_ms = gateway_delay_ms,
+      active_leaf_id = active_leaf_id(self),
+    })
+    table.insert(self.tx_queue, 1, {
+      origin = origin, dst_id = dst_id, dst_name = dst_name,
+      payload = payload, user_text = user_text, ctr = ctr, flags = flags,
+      previous_hop = previous_hop,
+      enqueue_time_ms = (queue_meta and queue_meta.enqueue_time_ms) or self:now(),
+      requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
+      next_attempt_ms = self:now() + gateway_delay_ms,
+      tx_layer_id     = queue_meta and queue_meta.tx_layer_id or nil,
+    })
+    self:after(gateway_delay_ms, function() become_free(self) end)
+    return
+  end
   -- hop-level ctr_lo = low nibble of origin-level ctr, so DATA's ctr & 0xf
   -- matches pending_rx.ctr_lo at the receiver without a separate wire field.
   local mid = ctr & 0xf
@@ -4221,6 +5122,26 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   if blind_skipped_primary ~= nil then
     initial_alts_tried[blind_skipped_primary] = true
   end
+  local tx_layer_id = queue_meta and queue_meta.tx_layer_id or nil
+  local tx_layer_rec = tx_layer_id and gateway_layer_record(self, tx_layer_id) or nil
+  local tx_on_primary_layer = tx_layer_id ~= nil and tx_layer_id == (self.layer_id or 0)
+  local tx_leaf_id = nil
+  local tx_routing_sf = nil
+  local tx_sf_bitmap = nil
+  if tx_on_primary_layer then
+    tx_leaf_id = self.leaf_id
+    tx_routing_sf = self.routing_sf
+    tx_sf_bitmap = self.allowed_sf_bitmap
+  else
+    tx_leaf_id = tx_layer_rec and tx_layer_rec.leaf_id or active_leaf_id(self)
+    tx_routing_sf = tx_layer_rec and tx_layer_rec.routing_sf or active_routing_sf(self)
+    tx_sf_bitmap = tx_layer_rec and tx_layer_rec.allowed_sf_bitmap or active_allowed_sf_bitmap(self)
+  end
+  if tx_on_primary_layer then
+    activate_primary_layer(self, "tx")
+  elseif tx_layer_rec then
+    activate_gateway_layer(self, tx_layer_rec, "tx")
+  end
   self.pending_tx = {
     origin       = origin,
     dst          = dst_id,
@@ -4230,6 +5151,10 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     user_text    = user_text,      -- for emit + log clarity
     ctr          = ctr,            -- full 16-bit per-(origin,dst) counter
     flags        = flags,          -- wire-level DATA_FLAG_* bits
+    tx_layer_id  = queue_meta and queue_meta.tx_layer_id or (self.active_layer_id or self.layer_id),
+    tx_leaf_id   = tx_leaf_id,
+    tx_routing_sf = tx_routing_sf,
+    tx_sf_bitmap = tx_sf_bitmap,
     retries_left = effective_rts_max_retries(self,
       (queue_meta and queue_meta.requeue_count) or 0),
     alts_tried   = initial_alts_tried,
@@ -4271,25 +5196,28 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   -- Body size = #payload - 2 (stripping the 2-byte inner header from inner bytes).
   -- Equivalently: #payload + MAC_LEN (since payload already has 2-byte inner hdr).
   local payload_len = #payload + MAC_LEN
-  local rts = pack_rts(self.leaf_id, self.id, dst_id, primary_next, mid,
-                       self.allowed_sf_bitmap, payload_len)
+  local rts = pack_rts(tx_leaf_id, self.id, dst_id, primary_next, mid,
+                       tx_sf_bitmap, payload_len)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   local attempt_seq = emit_rts_attempt_detail(self, "initial", self.pending_tx)
   self:emit("rts_tx", {
     attempt_seq = attempt_seq,
     origin = origin, payload = user_text, ctr = ctr,
     dst = dst_id, next = primary_next, ctr_lo = mid,
-    sf_bitmap = self.allowed_sf_bitmap,
+    sf_bitmap = tx_sf_bitmap,
+    tx_layer_id = self.pending_tx.tx_layer_id,
+    tx_leaf_id = tx_leaf_id,
+    tx_routing_sf = tx_routing_sf,
   })
   self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s ctr=%d (sf_bitmap=0x%02x)",
     name_of(self, primary_next), mid, name_of(self, origin), ctr,
-    self.allowed_sf_bitmap))
+    tx_sf_bitmap))
   tx_initiating(self, rts, {
-    sf    = self.routing_sf,
+    sf    = tx_routing_sf,
     label = label,
     info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x attempt_seq=%d payload=%q",
       name_of(self, origin), dst_name, name_of(self, primary_next),
-      mid, ctr, self.allowed_sf_bitmap, attempt_seq, user_text),
+      mid, ctr, tx_sf_bitmap, attempt_seq, user_text),
   }, function() start_rts_timeout(self) end)
   -- RX stays on routing_sf — CTS and NACK both ride on routing_sf now.
 end
@@ -4375,7 +5303,8 @@ become_free = function(self)
   issue_send(self, item.origin, item.dst_id, item.dst_name,
              item.payload, item.user_text, item.ctr, item.flags or 0, item.previous_hop,
              { enqueue_time_ms = item.enqueue_time_ms,
-               requeue_count   = item.requeue_count },
+               requeue_count   = item.requeue_count,
+               tx_layer_id     = item.tx_layer_id },
              item.forward_hop_budget)
 end
 
@@ -4417,6 +5346,7 @@ local function learn_direct_from_frame(self, src_id, snr_db, source)
     score = route_score,
     hops = 1,
     last_seen_ms = self:now(),
+    learned_layer_id = self.active_layer_id or self.layer_id,
   }
   local action = rt_merge(self, self.rt, src_id, cand, self.routing_snr_floor_db)
   if action == "new" or action == "promote" or action == "primary_refresh" then
@@ -4481,6 +5411,8 @@ local function send_beacon_page(self, kind)
   local page_n = diff.n_entries or ((frame:byte(4) or 0) & BCN_N_ENTRIES_MASK)
   self:emit("beacon_tx", {
     n_entries = page_n, rt_total = total,
+    key_hash32 = self.key_hash32 or 0,
+    identity_only = self.is_mobile == true,
     offset = self.beacon_offset, next_offset = new_offset,
     kind = kind,
     seen_bits = diff.seen_bits or 0,
@@ -4488,6 +5420,11 @@ local function send_beacon_page(self, kind)
     ext_len = diff.ext_len or 0,
     dirty_only = diff.dirty_only == true,
     discovery = in_discovery(self),
+    layer_id = self.active_layer_id or self.layer_id,
+    leaf_id = active_leaf_id(self),
+    routing_sf = active_routing_sf(self),
+    has_schedule = self.has_schedule == true,
+    schedule_count = #(self.gateway_schedule_records or {}),
   })
   -- Differential breakdown: how many of the n_entries were dirty (priority)
   -- vs stable (background rotation), and how many dirty routes overflowed
@@ -4504,6 +5441,11 @@ local function send_beacon_page(self, kind)
     ext_len     = diff.ext_len or 0,
     dirty_only   = diff.dirty_only == true,
     discovery    = in_discovery(self),
+    layer_id     = self.active_layer_id or self.layer_id,
+    leaf_id      = active_leaf_id(self),
+    routing_sf   = active_routing_sf(self),
+    has_schedule = self.has_schedule == true,
+    schedule_count = #(self.gateway_schedule_records or {}),
   })
   if self.seen_bitmap_enabled then
     self:emit("seen_bitmap_tx", {
@@ -4526,7 +5468,7 @@ local function send_beacon_page(self, kind)
   -- channel-busy state once this node has been quiet for too long.
   self.last_beacon_tx_ms = self:now()
   return tx_flood(self, frame, {
-    sf    = self.routing_sf,
+    sf    = active_routing_sf(self),
     label = "BCN",
     info  = string.format("rt=%d/%d off=%d dirty=%d kind=%s",
       page_n, total, self.beacon_offset, diff.dirty_n, kind),
@@ -4545,9 +5487,9 @@ end
 -- deferred fire time. Defends against thundering herd when many nodes
 -- simultaneously detect a busy→quiet transition.
 local function beacon_fire(self)
-  if self.is_mobile then
-    -- Mobile nodes discover with Q/REQ_SYNC and should not publish normal
-    -- periodic DV beacons; their route view goes stale as they move.
+  if self.join_required and not self.joined then
+    -- Unjoined firmware has no valid short address yet, so it must not
+    -- publish normal DV beacons. Joining is driven by J frames on control SF.
   elseif self.pending_tx ~= nil or self.pending_rx ~= nil then
     -- Existing data-exchange skip — preserved verbatim from send_beacon_page's
     -- guard (we still call send_beacon_page below in the unthrottled path
@@ -4723,7 +5665,9 @@ end
 -- triggers are no-ops — the first scheduled fire carries whatever state
 -- has accumulated in the meantime. In steady state, triggered fires are
 -- also rate-limited against the last successful BCN; discovery and boot
--- grace are exempt so joiners can converge quickly.
+-- grace are exempt so joiners can converge quickly. Mobile endpoints are
+-- excluded here: they still emit periodic identity-only BCNs, but route
+-- mutations while moving must not trigger DV advertisements.
 schedule_triggered_beacon = function(self)
   if self.is_mobile then
     return
@@ -4764,6 +5708,8 @@ local function send_req_sync_q(self, reason)
     return
   end
   if rt_count(self.rt) >= (self.req_sync_min_routes or 0) then return end
+  local q_leaf_id = active_leaf_id(self)
+  local q_routing_sf = active_routing_sf(self)
   self.last_req_sync_tx_ms = now
   self:emit("q_tx", {
     opcode = Q_OP_REQ_SYNC,
@@ -4771,13 +5717,16 @@ local function send_req_sync_q(self, reason)
     requester_mobile = self.is_mobile == true,
     reason = reason or "discovery",
     rt_total = rt_count(self.rt),
+    tx_layer_id = self.active_layer_id or self.layer_id,
+    tx_leaf_id = q_leaf_id,
+    tx_routing_sf = q_routing_sf,
   })
   self:log(string.format(
     "q_tx opcode=REQ_SYNC requester_mobile=%s rt_total=%d reason=%s",
     tostring(self.is_mobile == true), rt_count(self.rt), reason or "discovery"))
-  tx_initiating(self, pack_q(self.leaf_id, self.id, 255,
+  tx_initiating(self, pack_q(q_leaf_id, self.id, 255,
                              Q_OP_REQ_SYNC, self.is_mobile == true), {
-    sf    = self.routing_sf,
+    sf    = q_routing_sf,
     label = "Q",
     info  = string.format("op=req_sync mobile=%s", tostring(self.is_mobile == true)),
   })
@@ -4850,15 +5799,244 @@ local function schedule_sync_response(self, q, meta)
   end)
 end
 
+local JOIN_UNJOINED_ID = 255
+
+local function join_choose_candidate_id(self)
+  local previous = id_bind_find_by_hash(self, self.key_hash32)
+  if previous ~= nil
+     and previous >= 0 and previous <= 254
+     and (self.join_denied_ids == nil or self.join_denied_ids[previous] == nil) then
+    self:emit("join_prefer_previous_id", {
+      node = previous,
+      key_hash32 = self.key_hash32 or 0,
+    })
+    return previous
+  end
+
+  local free = {}
+  local expired = {}
+  local now = self:now()
+  for id = 0, 254 do
+    if self.join_denied_ids == nil or self.join_denied_ids[id] == nil then
+      local rec = self.id_bind and self.id_bind[id]
+      if rec and id_bind_expired(self, id, rec, now) then
+        id_bind_age_one(self, id, rec, now, "join_candidate")
+        expired[id] = true
+        rec = nil
+      end
+      if rec == nil then
+        free[#free + 1] = id
+      end
+    end
+  end
+  if #free == 0 then return nil end
+  local chosen = free[self:rand(1, #free + 1)]
+  if expired[chosen] then
+    self:emit("id_bind_reused", {
+      node = chosen,
+      key_hash32 = self.key_hash32 or 0,
+    })
+  end
+  return chosen
+end
+
+local function join_claim_compare(hash_a, nonce_a, hash_b, nonce_b)
+  hash_a = hash_a or 0
+  hash_b = hash_b or 0
+  nonce_a = nonce_a or 0
+  nonce_b = nonce_b or 0
+  if hash_a ~= hash_b then
+    return hash_a < hash_b
+  end
+  return nonce_a < nonce_b
+end
+
+local function join_send_discover(self, reason)
+  if not self.join_required or self.joined then return false end
+  self.join_discover_attempts = (self.join_discover_attempts or 0) + 1
+  local tx_leaf_id = active_leaf_id(self)
+  local tx_routing_sf = active_routing_sf(self)
+  local frame = pack_j_discover(tx_leaf_id, self.key_hash32 or 0,
+                                self.is_mobile == true,
+                                self.self_gateway == true)
+  self:emit("join_discover_sent", {
+    key_hash32 = self.key_hash32 or 0,
+    requester_mobile = self.is_mobile == true,
+    gateway_capable = self.self_gateway == true,
+    reason = reason or "auto",
+    attempt = self.join_discover_attempts,
+    tx_layer_id = self.active_layer_id or self.layer_id,
+    tx_leaf_id = tx_leaf_id,
+    tx_routing_sf = tx_routing_sf,
+  })
+  tx_initiating(self, frame, {
+    sf = tx_routing_sf,
+    label = "J",
+    info = string.format("op=discover reason=%s", reason or "auto"),
+  })
+  local wait_ms = self.join_discover_wait_ms or 10000
+  self:after(wait_ms, function()
+    if self.joined or self.join_claim_pending then return end
+    local max_attempts = self.join_discover_max_attempts or 0
+    if max_attempts > 0 and (self.join_discover_attempts or 0) >= max_attempts then
+      self:emit("join_discover_exhausted", {
+        key_hash32 = self.key_hash32 or 0,
+        attempts = self.join_discover_attempts or 0,
+        wait_ms = wait_ms,
+      })
+      return
+    end
+    local backoff = self:rand(0, (self.join_retry_backoff_ms or 10000) + 1)
+    self:emit("join_discover_retry_scheduled", {
+      key_hash32 = self.key_hash32 or 0,
+      attempts = self.join_discover_attempts or 0,
+      backoff_ms = backoff,
+    })
+    self:after(backoff, function()
+      if not self.joined and not self.join_claim_pending then
+        join_send_discover(self, "offer_timeout")
+      end
+    end)
+  end)
+  return true
+end
+
+local function join_start_claim(self, reason)
+  if not self.join_required or self.joined or self.join_claim_pending then return false end
+  local proposed = join_choose_candidate_id(self)
+  if proposed == nil then
+    self:emit("join_no_candidate", { reason = reason or "no_free_id" })
+    return false
+  end
+  self.join_claim_epoch = ((self.join_claim_epoch or 0) + 1) & 0xff
+  local nonce = self:rand(0, 256)
+  self.join_claim_pending = {
+    proposed_node_id = proposed,
+    key_hash32 = self.key_hash32 or 0,
+    claim_epoch = self.join_claim_epoch,
+    nonce = nonce,
+    started_ms = self:now(),
+  }
+  local tx_leaf_id = active_leaf_id(self)
+  local tx_routing_sf = active_routing_sf(self)
+  local frame = pack_j_claim(tx_leaf_id, self.key_hash32 or 0, proposed, 0,
+                             self.join_claim_epoch, nonce,
+                             self.is_mobile == true,
+                             self.self_gateway == true)
+  self:emit("join_claim_sent", {
+    proposed_node_id = proposed,
+    key_hash32 = self.key_hash32 or 0,
+    lease_age_seconds = 0,
+    claim_epoch = self.join_claim_epoch,
+    nonce = nonce,
+    requester_mobile = self.is_mobile == true,
+    gateway_capable = self.self_gateway == true,
+    reason = reason or "auto",
+    tx_layer_id = self.active_layer_id or self.layer_id,
+    tx_leaf_id = tx_leaf_id,
+    tx_routing_sf = tx_routing_sf,
+  })
+  tx_initiating(self, frame, {
+    sf = tx_routing_sf,
+    label = "J",
+    info = string.format("op=claim node=%d reason=%s", proposed, reason or "auto"),
+  })
+  self:after(self.join_claim_guard_ms or 3000, function()
+    local p = self.join_claim_pending
+    if not p or p.proposed_node_id ~= proposed then return end
+    local existing = self.id_bind and self.id_bind[proposed]
+    if existing and existing.key_hash32 ~= (self.key_hash32 or 0) then
+      self.join_claim_pending = nil
+      self.join_denied_ids[proposed] = true
+      self:emit("join_claim_denied", {
+        denied_node_id = proposed,
+        owner_key_hash32 = existing.key_hash32,
+        claimant_key_hash32 = self.key_hash32 or 0,
+        reason = "claim_guard_conflict",
+      })
+      self:after(self.join_retry_backoff_ms or 10000, function()
+        if not self.joined then join_start_claim(self, "claim_guard_conflict") end
+      end)
+      return
+    end
+    self.join_claim_pending = nil
+    local bound = id_bind_set(self, proposed, self.key_hash32 or 0,
+                              "join_adopted", "authenticated")
+    if not bound then
+      self.join_denied_ids[proposed] = true
+      self:emit("join_claim_denied", {
+        denied_node_id = proposed,
+        claimant_key_hash32 = self.key_hash32 or 0,
+        reason = "self_bind_conflict",
+      })
+      self:after(self.join_retry_backoff_ms or 10000, function()
+        if not self.joined then join_start_claim(self, "self_bind_conflict") end
+      end)
+      return
+    end
+    self.joined = true
+    self.id = proposed
+    self:set_protocol_id(proposed)
+    self.join_discover_attempts = 0
+    self.name_to_id[self.name] = proposed
+    self.id_to_name[proposed] = self.name
+    self:emit("join_adopted", {
+      node = proposed,
+      key_hash32 = self.key_hash32 or 0,
+      claim_epoch = p.claim_epoch,
+      nonce = p.nonce,
+    })
+    send_beacon_page(self, "sync")
+    send_req_sync_q(self, "join_adopted")
+  end)
+  return true
+end
+
+local function schedule_gateway_layer_window(self, rec)
+  if not self.self_gateway or rec == nil then return end
+  local function fire()
+    if self.pending_tx ~= nil or self.pending_rx ~= nil then
+      local retry_ms = self.gateway_layer_busy_retry_ms
+                       or math.max(self.rts_busy_retry_ms or 100, 1000)
+      self:emit("gateway_layer_window_deferred", {
+        layer_id = rec.layer_id,
+        leaf_id = rec.leaf_id,
+        routing_sf = rec.routing_sf,
+        active_layer_id = self.active_layer_id or self.layer_id,
+        active_leaf_id = active_leaf_id(self),
+        listen_sf = active_routing_sf(self),
+        retry_ms = retry_ms,
+      })
+      self:after(retry_ms, fire)
+      return
+    end
+    activate_gateway_layer(self, rec, "schedule")
+    send_beacon_page(self, "gateway_sweep")
+    self:after(rec.duration_ms, function()
+      if self.pending_tx == nil and self.pending_rx == nil then
+        activate_primary_layer(self, "schedule_return")
+      end
+    end)
+    self:after(rec.period_ms, fire)
+  end
+  self:after(rec.offset_ms, fire)
+end
+
 function on_init(self, config)
   -- Node-level identity flags (BCN byte 1 bits 3:1).
   -- Defaults false; no current scenario sets these config keys.
-  -- has_schedule: reserved until §7.3 inter-layer TDM lands.
+  -- has_schedule: gateways advertise their single-radio layer windows.
   -- self_gateway: true if this node bridges to internet/backbone.
   -- is_mobile:    true if this node is mobile (relaxes route aging etc.).
-  self.has_schedule = false
   self.self_gateway = (config.is_gateway == true)
+  self.has_schedule = self.self_gateway and #(config.gateway_layers or {}) > 0
   self.is_mobile    = (config.is_mobile  == true)
+  self.join_required = (config.join_required == true)
+  self.joined = not self.join_required
+  if self.join_required then
+    self.id = JOIN_UNJOINED_ID
+    self:set_protocol_id(JOIN_UNJOINED_ID)
+  end
 
   self.routing_sf       = config.routing_sf      or 7
   -- Per-flight DATA SF is now negotiated via the RTS bitmap → CTS choice.
@@ -4868,6 +6046,7 @@ function on_init(self, config)
   self.allowed_data_sfs = config.allowed_data_sfs or { 12 }
   self.sf_margin_db     = config.sf_margin_db    or 5.0
   self.allowed_sf_bitmap = sf_set_to_bitmap(self.allowed_data_sfs)
+  self.join_data_sfs_locked = not self.join_required
   -- Viability floor for rt entries: a route is "viable" iff its chain-min
   -- SNR clears the routing-plane (RTS/CTS/ACK ride on routing_sf) demod
   -- threshold + sf_margin_db. route_strictly_better treats viable routes
@@ -4981,23 +6160,17 @@ function on_init(self, config)
   self.snr_ewma_alpha = config.snr_ewma_alpha or 0.3
   self.snr_ewma_in    = {}
   self.snr_ewma_out   = {}
-  -- Cap the size of each beacon to fit in a single LoRa frame. Header
-  -- is 3 bytes ('B' + src + n), each entry is 4 bytes — so for the
-  -- 255-byte LoRa max, (255-3)/4 = 63 entries fits theoretically. We
-  -- default to 200 bytes (≈ 49 entries) to leave headroom for any
-  -- future header growth and to stay well under the wire limit. Networks
-  -- with more nodes than max_entries get a rotating page each fire,
-  -- driven by self.beacon_offset; rt_merge at receivers fills in entries
-  -- as it hears them across rounds.
-  -- Default 151 bytes = 4-byte header + 49 × 3-byte entries. Pre-bit-pack
-  -- the default was 200 bytes (49 × 4-byte entries). Keeping the 49-entry
-  -- count parity AND realising the per-entry shrink (4→3 B) means each
-  -- beacon is now ~24.5% smaller airtime. Scenarios that want more
-  -- entries per page can bump beacon_max_bytes (e.g., 200 → 65 entries).
+  -- Cap the size of each beacon to fit in a single LoRa frame. Current BCN
+  -- has an 8-byte fixed header ('B' + flags + src + n/flags + key_hash32)
+  -- and 3-byte route entries, so the default 151-byte cap fits 47 entries.
+  -- Networks with more nodes than max_entries get a rotating page each fire,
+  -- driven by self.beacon_offset; rt_merge at receivers fills in entries as
+  -- it hears them across rounds. Scenarios that want more entries per page
+  -- can bump beacon_max_bytes (e.g., 200 → 64 entries).
   self.beacon_max_bytes   = config.beacon_max_bytes   or 151
   -- Header is 4 bytes ('B' + leaf_id_byte + src + n); entries 3 bytes each.
   self.beacon_max_entries = math.max(1,
-    math.floor((self.beacon_max_bytes - 4) / 3))
+    math.floor((self.beacon_max_bytes - 8) / 3))
   -- Radio params for airtime calculation. The runtime injects per-node
   -- resolved values via `_sim_bw_hz` and `_sim_cr` so the script's
   -- airtime math matches what the radio actually does (otherwise s03's
@@ -5100,12 +6273,9 @@ function on_init(self, config)
   -- simulator's set_rx_sf is instantaneous, but real hardware needs a
   -- handful of µs to settle on the new SF — pad with 5ms by default.
   self.cts_to_data_gap_ms = config.cts_to_data_gap_ms or 5
-  -- RTS retry policy. rts_timeout_ms is the precise minimum for a CTS to
-  -- arrive: airtime(routing_sf, RTS) + airtime(routing_sf, CTS) — both
-  -- frames now ride on routing_sf. Step ordering (deliveries → timers →
-  -- registrations) means a CTS landing on the same tick as the timeout
-  -- still clears pending_tx before the timer fires; no safety margin
-  -- needed. Override via config for stress tests.
+  -- RTS retry policy. The default timeout is computed per flight from the
+  -- transaction's routing SF, so gateway windows using another control SF
+  -- get the correct RTS+CTS airtime. Override via config for stress tests.
   -- rts_busy_retry_ms is used when our retry timer fires while we're mid-RX
   -- of someone else's flight (pending_rx set) — short reschedule rather
   -- than TX over their incoming data plane.
@@ -5114,9 +6284,8 @@ function on_init(self, config)
   -- Previously 8 (×3 alts = 24 retries) which could exceed 2 minutes
   -- wallclock — too slow to free pending_tx when a next-hop is genuinely
   -- stuck in an ACK-loss loop.
-  self.rts_timeout_ms = config.rts_timeout_ms or
-    (airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN)
-     + airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN))
+  self.rts_timeout_override_ms = config.rts_timeout_ms
+  self.rts_timeout_ms = self.rts_timeout_override_ms or rts_timeout_base_ms(self, self.routing_sf)
   self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
   self.rts_max_retries    = config.rts_max_retries    or 3
   -- Cascade-requeue knobs (Phase C): when pending_tx exhausts all K alts
@@ -5239,6 +6408,9 @@ function on_init(self, config)
   -- mid-flight; lost-route mid-flight is a real failure).
   self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, ctr, flags, queued_at_ms}
   self.send_defer_ttl_ms  = config.send_defer_ttl_ms or 30000
+  self.gateway_deferred_handoffs = {}
+  self.gateway_handoff_defer_ttl_ms = config.gateway_handoff_defer_ttl_ms
+                                      or self.send_defer_ttl_ms
   -- Hop-level RTS-retry dedup. {sender_id → {ctr_lo, t_ms}}; lookups
   -- treat entries older than self.last_acked_ttl_ms as missing so the
   -- 4-bit ctr_lo wrap (every 16 sends per sender) doesn't false-pos
@@ -5250,7 +6422,8 @@ function on_init(self, config)
   -- 4-bit network identifier — externally managed (admin sets per node).
   -- Receivers reject foreign-network BCN/RTS at the routing layer
   -- before doing CTS/DATA work. 0 = default mesh; 1..15 = distinct meshes.
-  self.leaf_id        = config.leaf_id or 0
+  self.layer_id       = config.layer_id or config.leaf_id or 0
+  self.leaf_id        = config.leaf_id or (self.layer_id & 0x0f)
   -- Stale-route aging — two-tier TTL by hop class.
   --
   -- Per-candidate last_seen_ms is refreshed by rt_merge whenever a
@@ -5296,17 +6469,21 @@ function on_init(self, config)
   -- │ reactive (Q-frame) lookup instead of proactive flooding.        │
   -- └─────────────────────────────────────────────────────────────────┘
   --
-  -- Simulation defaults (tuned for s04, not production):
+  -- Current firmware-oriented defaults:
+  --   rt_aging_ttl_neighbor_ms = 45 min
+  --   rt_aging_ttl_remote_ms   = 3 hours
+  --
+  -- Older simulation defaults (s04 stress tuning) were 30 min / 90 min.
+  -- Scenario JSON can still shorten these for focused tests.
+  --
+  -- Simulation reference (s04):
   --   beacon_max_idle_ms = 8 min  (set in beacon-throttle block above)
   --   RT_size ≈ 140 (s04), beacon_max_entries ≈ 50 → 3 rotation pages
   --   per_entry_refresh_max_ms = 3 × 8 = 24 min
-  --   rt_aging_ttl_neighbor_ms = 2 × 8 = 16 min  →  rounded to 30 min
-  --                                                  (jitter headroom)
-  --   rt_aging_ttl_remote_ms   = 4 × 24 = 96 min →  rounded to 90 min
-  --                                                  (covers 3.75 cycles
-  --                                                   ≈ 2-3 missed cycles)
-  self.rt_aging_ttl_neighbor_ms = config.rt_aging_ttl_neighbor_ms or 1800000   -- 30 min
-  self.rt_aging_ttl_remote_ms   = config.rt_aging_ttl_remote_ms   or 5400000   -- 90 min
+  --   45 min covers almost 2 full remote-entry rotations for direct peers;
+  --   3 hours covers several missed remote rotations.
+  self.rt_aging_ttl_neighbor_ms = config.rt_aging_ttl_neighbor_ms or 2700000    -- 45 min
+  self.rt_aging_ttl_remote_ms   = config.rt_aging_ttl_remote_ms   or 10800000   -- 3 h
   self.rt_aging_check_period_ms = config.rt_aging_check_period_ms or 60000     -- 1 min
   -- Q dedup tracking. Sender side: don't re-fire route-query Q for the
   -- same dest within q_query_ttl_ms. Responder side: don't respond to the
@@ -5344,6 +6521,8 @@ function on_init(self, config)
   -- analysers can spot late-window failure modes without replaying
   -- every observation event. Default 60 s. Set 0 to disable.
   self.state_snapshot_period_ms = config.state_snapshot_period_ms or 60000
+  self.debug_start_ms = (config.debug_start_ms ~= nil) and config.debug_start_ms or config.debug_start
+  self.debug_end_ms = (config.debug_end_ms ~= nil) and config.debug_end_ms or config.debug_end
   self.beacon_offset     = 0    -- sliding page offset for bounded beacons
   -- Origin-level dedup. Every node that receives DATA records the
   -- (origin_id, dst_id, ctr) tuple and rejects subsequent arrivals of the
@@ -5389,12 +6568,73 @@ function on_init(self, config)
   self.id_to_name = {}
   self.mobile_peers = {}
   self.id_bind = {}
+  self.join_j_seen = {}
+  self.gateway_layer_set = {}
+  self.gateway_layer_list = {}
+  self.gateway_layer_by_id = {}
+  self.gateway_schedule_records = {}
+  self.gateway_neighbor_schedules = {}
+  self.gateway_remote_bind = {}
+  for _, layer in ipairs(config.gateway_layers or {}) do
+    local layer_id = nil
+    local routing_sf = nil
+    local allowed_data_sfs = nil
+    local duration_ms = nil
+    local period_ms = nil
+    local offset_ms = nil
+    local leaf_id = nil
+    if type(layer) == "table" then
+      layer_id = layer.layer_id
+      leaf_id = layer.leaf_id
+      routing_sf = layer.routing_sf or layer.sf
+      allowed_data_sfs = layer.allowed_data_sfs
+      duration_ms = layer.duration_ms
+      period_ms = layer.period_ms
+      offset_ms = layer.offset_ms
+    else
+      layer_id = layer
+    end
+    if layer_id ~= nil then
+      layer_id = math.floor(layer_id)
+      local rec = {
+        layer_id = layer_id,
+        leaf_id = leaf_id or layer_leaf_id(layer_id),
+        routing_sf = routing_sf or self.routing_sf,
+        allowed_data_sfs = allowed_data_sfs or self.allowed_data_sfs,
+        duration_ms = duration_ms or config.gateway_layer_duration_ms or 5000,
+        period_ms = period_ms or config.gateway_layer_period_ms or 30000,
+        offset_ms = offset_ms or config.gateway_layer_offset_ms or 5000,
+      }
+      rec.allowed_sf_bitmap = sf_set_to_bitmap(rec.allowed_data_sfs)
+      self.gateway_layer_set[layer_id] = true
+      table.insert(self.gateway_layer_list, layer_id)
+      self.gateway_layer_by_id[layer_id] = rec
+      table.insert(self.gateway_schedule_records, rec)
+    end
+  end
   self.key_hash32 = self.key_hash32 or config.key_hash32
-  if self.key_hash32 ~= nil then
+  self.id_bind_ttl_ms = config.id_bind_ttl_ms or 172800000  -- 48 h
+  self.gateway_remote_bind_ttl_ms = config.gateway_remote_bind_ttl_ms or self.id_bind_ttl_ms
+  self.join_denied_ids = {}
+  self.join_claim_pending = nil
+  self.join_listen_ms = config.join_listen_ms or 3000
+  self.join_discover_jitter_ms = config.join_discover_jitter_ms or 3000
+  self.join_discover_wait_ms = config.join_discover_wait_ms or 10000
+  self.join_discover_max_attempts = config.join_discover_max_attempts or 0
+  self.join_discover_attempts = 0
+  self.join_offer_backoff_min_ms = config.join_offer_backoff_min_ms or 100
+  self.join_offer_backoff_max_ms = config.join_offer_backoff_max_ms or 1000
+  self.join_claim_guard_ms = config.join_claim_guard_ms or 3000
+  self.join_retry_backoff_ms = config.join_retry_backoff_ms or 10000
+  self.join_j_rate_limit_window_ms = config.join_j_rate_limit_window_ms or 300000
+  self.join_j_max_per_window = config.join_j_max_per_window or 6
+  if self.key_hash32 ~= nil and self.joined then
     id_bind_set(self, self.id, self.key_hash32, "self", "authenticated")
   end
   local nodes = sim:nodes()
   for _, n in ipairs(nodes) do
+    local node_layer_id = n.layer_id or n.leaf_id or 0
+    if not n.join_required then
     self.name_to_id[n.name] = n.id
     self.id_to_name[n.id]   = n.name
     if n.key_hash32 ~= nil then
@@ -5402,8 +6642,19 @@ function on_init(self, config)
                   (n.id == self.id) and "self" or "sim_nodes",
                   (n.id == self.id) and "authenticated" or "claimed")
     end
+    end
     if n.is_mobile then
       self.mobile_peers[n.id] = true
+    end
+  end
+  if self.join_required then
+    self.name_to_id[self.name] = self.id
+    self.id_to_name[self.id] = self.name
+  end
+  activate_primary_layer(self, "init")
+  if self.self_gateway then
+    for _, rec in ipairs(self.gateway_schedule_records or {}) do
+      schedule_gateway_layer_window(self, rec)
     end
   end
   self.peer_count = #nodes - 1
@@ -5421,6 +6672,40 @@ function on_init(self, config)
     airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN),
     self.ack_air_ms, self.routing_sf,
     self.rts_timeout_ms, self.pending_rx_expiry_max_ms))
+
+  self:emit("node_layer_info", {
+    node_id = self.id,
+    name = self.name,
+    layer_id = self.layer_id,
+    leaf_id = self.leaf_id,
+    key_hash32 = self.key_hash32 or 0,
+    is_gateway = self.self_gateway == true,
+    gateway_layers = self.gateway_layer_list,
+    gateway_schedule_count = #(self.gateway_schedule_records or {}),
+    is_mobile = self.is_mobile == true,
+    joined = self.joined == true,
+    routing_sf = self.routing_sf,
+    allowed_sf_bitmap = self.allowed_sf_bitmap,
+  })
+
+  if self.join_required then
+    self:emit("join_listen_start", {
+      key_hash32 = self.key_hash32 or 0,
+      listen_ms = self.join_listen_ms,
+    })
+    self:after(self.join_listen_ms, function()
+      if self.joined then return end
+      self:emit("join_listen_end", {
+        key_hash32 = self.key_hash32 or 0,
+        known_bindings = self.id_bind and rt_count(self.id_bind) or 0,
+      })
+      local jitter = self:rand(0, (self.join_discover_jitter_ms or 0) + 1)
+      self:after(jitter, function()
+        if self.joined then return end
+        join_send_discover(self, "listen_done")
+      end)
+    end)
+  end
 
   -- First-beacon scheduling:
   --   - discovery nodes jitter across the discovery beacon period so mass
@@ -5449,6 +6734,7 @@ function on_init(self, config)
   -- e2e_ack_timeout).
   local function drain_loop()
     try_drain_deferred(self)
+    try_drain_gateway_handoffs(self)
     local now = self:now()
     for key, info in pairs(self.pending_e2e) do
       if now - info.sent_at_ms >= self.e2e_ack_ttl_ms then
@@ -5475,6 +6761,8 @@ function on_init(self, config)
   -- (rt_aging_ttl_neighbor_ms for 1-hop, rt_aging_ttl_remote_ms for
   -- multi-hop). See age_out_stale_routes for the full mechanism.
   local function aging_loop()
+    age_out_id_bind(self)
+    age_out_gateway_remote_bind(self)
     age_out_stale_routes(self)
     self:after(self.rt_aging_check_period_ms, aging_loop)
   end
@@ -5488,43 +6776,51 @@ function on_init(self, config)
   -- monotonically-growing state without per-event reconstruction.
   if self.state_snapshot_period_ms > 0 then
     local function snapshot_loop()
-      local now = self:now()
-      -- Count currently-active blind_until entries (until_ms > now).
-      -- Expired entries are pruned on lookup but may linger in the
-      -- table between is_blind() calls; count only active ones.
-      local blind_n = 0
-      for _, until_ms in pairs(self.blind_until) do
-        if until_ms > now then blind_n = blind_n + 1 end
+      if debug_emit_allowed(self) then
+        local now = self:now()
+        -- Count currently-active blind_until entries (until_ms > now).
+        -- Expired entries are pruned on lookup but may linger in the
+        -- table between is_blind() calls; count only active ones.
+        local blind_n = 0
+        for _, until_ms in pairs(self.blind_until) do
+          if until_ms > now then blind_n = blind_n + 1 end
+        end
+        local rt_n = 0
+        local rt_cands = 0
+        for _, entry in pairs(self.rt) do
+          rt_n = rt_n + 1
+          if entry.candidates then rt_cands = rt_cands + #entry.candidates end
+        end
+        -- Current duty-cycle position: included so analyze.py §21 can
+        -- compute tier residence time via sample-and-hold across snapshots.
+        -- pct_used is the same fraction compute_budget_tier checks against
+        -- budget_strained_pct / budget_critical_pct / budget_exhausted_pct;
+        -- carrying both is cheap and avoids having to reconstruct one from
+        -- the other in the analyzer when thresholds change.
+        local pct_used = 0
+        if self.duty_cycle_budget_ms and self.duty_cycle_budget_ms > 0 then
+          local used = self:airtime_used_ms(self.duty_cycle_window_ms)
+          pct_used = 100.0 * used / self.duty_cycle_budget_ms
+        end
+        self:emit("node_state_snapshot", {
+          node_id             = self.id,
+          layer_id            = self.layer_id,
+          leaf_id             = self.leaf_id,
+          is_gateway          = self.self_gateway == true,
+          gateway_layers      = self.gateway_layer_list,
+          is_mobile           = self.is_mobile == true,
+          blind_count         = blind_n,
+          queue_depth         = #self.tx_queue,
+          deferred_count      = #self.deferred_sends,
+          has_pending_tx      = self.pending_tx ~= nil,
+          has_pending_rx      = self.pending_rx ~= nil,
+          rt_dst_count        = rt_n,
+          rt_total_candidates = rt_cands,
+          budget_tier         = compute_budget_tier(self),
+          pct_used            = pct_used,
+        })
+        emit_rt_quality_snapshots(self)
       end
-      local rt_n = 0
-      local rt_cands = 0
-      for _, entry in pairs(self.rt) do
-        rt_n = rt_n + 1
-        if entry.candidates then rt_cands = rt_cands + #entry.candidates end
-      end
-      -- Current duty-cycle position: included so analyze.py §21 can
-      -- compute tier residence time via sample-and-hold across snapshots.
-      -- pct_used is the same fraction compute_budget_tier checks against
-      -- budget_strained_pct / budget_critical_pct / budget_exhausted_pct;
-      -- carrying both is cheap and avoids having to reconstruct one from
-      -- the other in the analyzer when thresholds change.
-      local pct_used = 0
-      if self.duty_cycle_budget_ms and self.duty_cycle_budget_ms > 0 then
-        local used = self:airtime_used_ms(self.duty_cycle_window_ms)
-        pct_used = 100.0 * used / self.duty_cycle_budget_ms
-      end
-      self:emit("node_state_snapshot", {
-        blind_count         = blind_n,
-        queue_depth         = #self.tx_queue,
-        deferred_count      = #self.deferred_sends,
-        has_pending_tx      = self.pending_tx ~= nil,
-        has_pending_rx      = self.pending_rx ~= nil,
-        rt_dst_count        = rt_n,
-        rt_total_candidates = rt_cands,
-        budget_tier         = compute_budget_tier(self),
-        pct_used            = pct_used,
-      })
-      emit_rt_quality_snapshots(self)
       self:after(self.state_snapshot_period_ms, snapshot_loop)
     end
     self:after(self.state_snapshot_period_ms, snapshot_loop)
@@ -5569,7 +6865,8 @@ function on_recv(self, frame, meta)
   if tag == "J" then
     local j = parse_j(frame)
     if not j then return end
-    if j.leaf_id ~= self.leaf_id then return end
+    if j.leaf_id ~= active_leaf_id(self) then return end
+    if join_j_rate_limited(self, j, meta) then return end
 
     if j.opcode == J_OP_DISCOVER then
       self:emit("join_discover_received", {
@@ -5579,24 +6876,35 @@ function on_recv(self, frame, meta)
         gateway_capable = j.gateway_capable == true,
       })
       if meta.src ~= self.id and self.key_hash32 ~= nil then
-        local offer = pack_j_offer(self.leaf_id, self.id, self.key_hash32,
-                                   self.allowed_sf_bitmap or 0,
-                                   self.is_mobile == true,
-                                   self.self_gateway == true)
-        self:emit("join_offer_sent", {
-          to = meta.src,
-          responder_node_id = self.id,
-          responder_key_hash32 = self.key_hash32,
-          data_sf_bitmap = self.allowed_sf_bitmap or 0,
-          requester_mobile = self.is_mobile == true,
-          gateway_capable = self.self_gateway == true,
-        })
-        tx_initiating(self, offer, {
-          sf = self.routing_sf,
-          label = "J",
-          info = string.format("op=offer to=%s data_sf_bitmap=0x%02x",
-                               tostring(meta.src), self.allowed_sf_bitmap or 0),
-        })
+        local delay = self:rand(self.join_offer_backoff_min_ms or 100,
+                                (self.join_offer_backoff_max_ms or 1000) + 1)
+        self:after(delay, function()
+          local tx_leaf_id = active_leaf_id(self)
+          local tx_routing_sf = active_routing_sf(self)
+          local offer = pack_j_offer(tx_leaf_id, self.id, self.key_hash32,
+                                     active_allowed_sf_bitmap(self) or 0,
+                                     self.is_mobile == true,
+                                     self.self_gateway == true)
+          self:emit("join_offer_sent", {
+            to = meta.src,
+            responder_node_id = self.id,
+            responder_key_hash32 = self.key_hash32,
+            data_sf_bitmap = active_allowed_sf_bitmap(self) or 0,
+            layer_id = self.active_layer_id or self.layer_id,
+            requester_mobile = self.is_mobile == true,
+            gateway_capable = self.self_gateway == true,
+            delay_ms = delay,
+            tx_layer_id = self.active_layer_id or self.layer_id,
+            tx_leaf_id = tx_leaf_id,
+            tx_routing_sf = tx_routing_sf,
+          })
+          tx_initiating(self, offer, {
+            sf = tx_routing_sf,
+            label = "J",
+            info = string.format("op=offer to=%s data_sf_bitmap=0x%02x",
+                                 tostring(meta.src), active_allowed_sf_bitmap(self) or 0),
+          })
+        end)
       end
       return
     elseif j.opcode == J_OP_OFFER then
@@ -5610,14 +6918,32 @@ function on_recv(self, frame, meta)
       })
       id_bind_set(self, j.responder_node_id, j.responder_key_hash32,
                   "j_offer", "claimed")
-      if j.data_sf_bitmap ~= nil and j.data_sf_bitmap ~= 0 then
-        self.allowed_sf_bitmap = j.data_sf_bitmap
-        self.allowed_data_sfs = sf_bitmap_to_set(j.data_sf_bitmap)
-        self:emit("join_data_sfs_adopted", {
-          from = meta.src,
-          data_sf_bitmap = self.allowed_sf_bitmap,
-          count = #self.allowed_data_sfs,
-        })
+      if self.join_required and not self.joined
+         and j.data_sf_bitmap ~= nil and j.data_sf_bitmap ~= 0 then
+        if self.join_data_sfs_locked then
+          self:emit("join_data_sfs_offer_ignored", {
+            from = meta.src,
+            data_sf_bitmap = j.data_sf_bitmap,
+            adopted_data_sf_bitmap = self.allowed_sf_bitmap,
+            reason = "already_adopted",
+          })
+        else
+          self.allowed_sf_bitmap = j.data_sf_bitmap
+          self.allowed_data_sfs = sf_bitmap_to_set(j.data_sf_bitmap)
+          self.join_data_sfs_locked = true
+          if (self.active_layer_id or self.layer_id) == self.layer_id then
+            self.active_allowed_sf_bitmap = self.allowed_sf_bitmap
+            self.active_allowed_data_sfs = self.allowed_data_sfs
+          end
+          self:emit("join_data_sfs_adopted", {
+            from = meta.src,
+            data_sf_bitmap = self.allowed_sf_bitmap,
+            count = #self.allowed_data_sfs,
+          })
+        end
+      end
+      if self.join_required and not self.joined then
+        join_start_claim(self, "offer")
       end
       return
     elseif j.opcode == J_OP_CLAIM then
@@ -5631,7 +6957,79 @@ function on_recv(self, frame, meta)
         requester_mobile = j.requester_is_mobile == true,
         gateway_capable = j.gateway_capable == true,
       })
-      id_bind_set(self, j.proposed_node_id, j.key_hash32, "j_claim", "claimed")
+      gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
+                                  j.proposed_node_id, j.key_hash32, "j_claim")
+      try_drain_gateway_handoffs(self)
+      local conflict = false
+      local self_pending_wins = false
+      local existing = self.id_bind and self.id_bind[j.proposed_node_id]
+      if j.proposed_node_id == self.id and self.joined then
+        conflict = true
+      elseif existing and existing.key_hash32 ~= j.key_hash32 then
+        conflict = true
+      elseif self.join_claim_pending
+             and self.join_claim_pending.proposed_node_id == j.proposed_node_id
+             and self.join_claim_pending.key_hash32 ~= j.key_hash32 then
+        local p = self.join_claim_pending
+        self_pending_wins = join_claim_compare(p.key_hash32, p.nonce,
+                                               j.key_hash32, j.nonce)
+        if self_pending_wins then
+          conflict = true
+        else
+          self.join_claim_pending = nil
+          self.join_denied_ids[j.proposed_node_id] = true
+          self:emit("join_claim_denied", {
+            denied_node_id = j.proposed_node_id,
+            owner_key_hash32 = j.key_hash32,
+            claimant_key_hash32 = p.key_hash32,
+            reason = "simultaneous_claim_lost",
+          })
+          self:after(self.join_retry_backoff_ms or 10000, function()
+            if not self.joined then join_start_claim(self, "simultaneous_claim_lost") end
+          end)
+        end
+      end
+      if conflict and self.key_hash32 ~= nil then
+        local owner_key_hash32 = self.key_hash32
+        local owner_claim_epoch = self.join_claim_epoch or 0
+        if self_pending_wins and self.join_claim_pending then
+          owner_key_hash32 = self.join_claim_pending.key_hash32
+          owner_claim_epoch = self.join_claim_pending.claim_epoch or owner_claim_epoch
+        elseif existing and existing.key_hash32 ~= nil then
+          owner_key_hash32 = existing.key_hash32
+        end
+        local deny_reason = self_pending_wins
+                            and J_DENY_REASON_PENDING_CLAIM
+                            or J_DENY_REASON_CONFLICT
+        local tx_leaf_id = active_leaf_id(self)
+        local tx_routing_sf = active_routing_sf(self)
+        local deny = pack_j_deny(tx_leaf_id, j.proposed_node_id,
+                                 owner_key_hash32, j.key_hash32,
+                                 0, owner_claim_epoch,
+                                 deny_reason,
+                                 self.is_mobile == true,
+                                 self.self_gateway == true)
+        self:emit("join_deny_sent", {
+          denied_node_id = j.proposed_node_id,
+          owner_key_hash32 = owner_key_hash32,
+          claimant_key_hash32 = j.key_hash32,
+          owner_lease_age_seconds = 0,
+          owner_claim_epoch = owner_claim_epoch,
+          reason = deny_reason,
+          requester_mobile = self.is_mobile == true,
+          gateway_capable = self.self_gateway == true,
+          tx_layer_id = self.active_layer_id or self.layer_id,
+          tx_leaf_id = tx_leaf_id,
+          tx_routing_sf = tx_routing_sf,
+        })
+        tx_initiating(self, deny, {
+          sf = tx_routing_sf,
+          label = "J",
+          info = string.format("op=deny node=%d", j.proposed_node_id),
+        })
+      else
+        id_bind_set(self, j.proposed_node_id, j.key_hash32, "j_claim", "claimed")
+      end
       return
     elseif j.opcode == J_OP_DENY then
       self:emit("join_deny_received", {
@@ -5646,6 +7044,22 @@ function on_recv(self, frame, meta)
         gateway_capable = j.gateway_capable == true,
       })
       id_bind_set(self, j.denied_node_id, j.owner_key_hash32, "j_deny", "claimed")
+      local p = self.join_claim_pending
+      if self.join_required and not self.joined and p
+         and p.proposed_node_id == j.denied_node_id
+         and j.claimant_key_hash32 == (self.key_hash32 or 0) then
+        self.join_denied_ids[j.denied_node_id] = true
+        self.join_claim_pending = nil
+        self:emit("join_claim_denied", {
+          denied_node_id = j.denied_node_id,
+          owner_key_hash32 = j.owner_key_hash32,
+          claimant_key_hash32 = j.claimant_key_hash32,
+          reason = j.reason,
+        })
+        self:after(self.join_retry_backoff_ms or 10000, function()
+          if not self.joined then join_start_claim(self, "deny_backoff") end
+        end)
+      end
       return
     end
     return
@@ -5658,9 +7072,29 @@ function on_recv(self, frame, meta)
     -- pollute our routing table. Same field as RTS, same admin-managed
     -- 4-bit space. Silent drop (no event spam — expected during
     -- enhanced propagation events).
-    if b.leaf_id ~= self.leaf_id then return end
+    if b.leaf_id ~= active_leaf_id(self) then return end
+    id_bind_set(self, b.src, b.key_hash32, "bcn", "claimed")
+    remember_gateway_schedule(self, b.src, b)
+    gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
+                                b.src, b.key_hash32, "bcn")
+    try_drain_gateway_handoffs(self)
+    if meta.snr ~= nil then
+      rt_merge(self, self.rt, b.src, {
+        next_hop     = b.src,
+        hops         = 1,
+        score        = meta.snr,
+        last_seen_ms = self:now(),
+        n2_hop       = nil,
+        is_gateway   = (b.self_gateway == true),
+      }, (SF_DEMOD_THRESHOLD[active_routing_sf(self)] or -15.0) + self.sf_margin_db)
+    end
+    if b.is_mobile then
+      self.mobile_peers[b.src] = true
+    end
     self:emit("beacon_rx", {
       src = b.src,
+      key_hash32 = b.key_hash32,
+      identity_only = b.is_mobile and #b.entries == 0,
       n_entries = #b.entries,
       seen_bits = b.seen_bits or 0,
       suspect_nodes = b.suspect_nodes and #b.suspect_nodes or 0,
@@ -5771,7 +7205,14 @@ function on_recv(self, frame, meta)
     do
       mark_dest_seen(self, b.src, "beacon_src")
       local direct_score = route_score_from_snr(self, meta.snr)
-      local cand = { next_hop = b.src, score = direct_score, hops = 1, last_seen_ms = now }
+      local cand = {
+        next_hop = b.src,
+        score = direct_score,
+        hops = 1,
+        is_gateway = (b.self_gateway == true),
+        last_seen_ms = now,
+        learned_layer_id = self.active_layer_id or self.layer_id,
+      }
       local action = rt_merge(self, self.rt, b.src, cand, self.routing_snr_floor_db)
       if action == "new" or action == "promote" then
         self:emit("rt_update", {
@@ -5830,6 +7271,7 @@ function on_recv(self, frame, meta)
             hops       = combined_hops,
             is_gateway = (e.is_gateway == true),
             last_seen_ms = now,
+            learned_layer_id = self.active_layer_id or self.layer_id,
           }
           local action = rt_merge(self, self.rt, e.dest, cand, self.routing_snr_floor_db)
           if action == "new" or action == "promote" then
@@ -5878,7 +7320,7 @@ function on_recv(self, frame, meta)
     -- accumulate independent evidence this way, so the spammer can't
     -- evade by picking next-hops who don't observe enough.
     track_originator_observation(self, meta.src, "rts", r.ctr_lo,
-      airtime_ms(self.routing_sf, self.bw_hz, self.cr,
+      airtime_ms(active_routing_sf(self), self.bw_hz, self.cr,
                  self.preamble_sym, #frame))
     -- If we are waiting for a hop ACK from our selected next-hop and we
     -- overhear that next-hop forwarding the same DATA onward, that RTS-fwd is
@@ -5922,7 +7364,7 @@ function on_recv(self, frame, meta)
     -- work. Without this, two networks merging during enhanced RF
     -- propagation would waste airtime on duplicate CTSes and pollute
     -- routing decisions.
-    if r.leaf_id ~= self.leaf_id then return end
+    if r.leaf_id ~= active_leaf_id(self) then return end
 
     self:emit("rts_receiver_state", {
       from = r.src,
@@ -5981,7 +7423,7 @@ function on_recv(self, frame, meta)
         sf_select_snr = sf_select_snr,
       })
       tx_with_retry(self, cts, {
-        sf    = self.routing_sf,
+        sf    = active_routing_sf(self),
         label = "CTS-dup",
         info  = string.format("to=%s msg=%d chosen_sf=%d already_received=1",
           name_of(self, r.src), r.ctr_lo, chosen_sf),
@@ -6010,8 +7452,8 @@ function on_recv(self, frame, meta)
           to = r.src, ctr_lo = r.ctr_lo, dup = true,
           chosen_data_sf = self.pending_rx.chosen_data_sf,
         })
-        tx_with_retry(self, cts, {
-          sf    = self.routing_sf,
+      tx_with_retry(self, cts, {
+          sf    = active_routing_sf(self),
           label = "CTS-dup",
           info  = string.format("re-CTS to=%s msg=%d sf=%d",
             name_of(self, r.src), r.ctr_lo, self.pending_rx.chosen_data_sf),
@@ -6041,7 +7483,7 @@ function on_recv(self, frame, meta)
         name_of(self, r.src), r.ctr_lo, busy_for,
         name_of(self, self.pending_rx.from), self.pending_rx.ctr_lo))
       tx_initiating(self, nack, {
-        sf    = self.routing_sf,
+        sf    = active_routing_sf(self),
         label = "NACK",
         info  = string.format("to=%s msg=%d busy_for=%dms reason=pending_rx",
           name_of(self, r.src), r.ctr_lo, busy_for),
@@ -6122,7 +7564,7 @@ function on_recv(self, frame, meta)
         "nack_tx -> %s ctr_lo=%d reason=budget_low tier=%d",
         name_of(self, r.src), r.ctr_lo, my_tier))
       tx_initiating(self, nack, {
-        sf    = self.routing_sf,
+        sf    = active_routing_sf(self),
         label = "NACK",
         info  = string.format("to=%s msg=%d reason=budget tier=%d",
           name_of(self, r.src), r.ctr_lo, my_tier),
@@ -6176,9 +7618,9 @@ function on_recv(self, frame, meta)
       sf_select_snr = snr_for_sf,
     })
     self:log(string.format("cts_tx -> %s ctr_lo=%d chose SF%d (on routing SF%d)",
-      name_of(self, r.src), r.ctr_lo, chosen_sf, self.routing_sf))
+      name_of(self, r.src), r.ctr_lo, chosen_sf, active_routing_sf(self)))
     tx_with_retry(self, cts, {
-      sf    = self.routing_sf,
+      sf    = active_routing_sf(self),
       label = "CTS",
       info  = string.format("to=%s msg=%d chosen_sf=%d",
         name_of(self, r.src), r.ctr_lo, chosen_sf),
@@ -6268,11 +7710,14 @@ function on_recv(self, frame, meta)
     -- it for the DATA TX and start_ack_timeout uses it for the airtime
     -- estimate. Reject if the receiver's pick isn't in our allowed
     -- bitmap (defends against a malformed CTS).
-    if not sf_in_bitmap(self.allowed_sf_bitmap, c.chosen_data_sf) then
+    local cts_allowed_bitmap = (self.pending_tx and self.pending_tx.tx_sf_bitmap)
+                               or active_allowed_sf_bitmap(self)
+    if not sf_in_bitmap(cts_allowed_bitmap, c.chosen_data_sf) then
       self:emit("cts_invalid_sf", {
         origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
         from = c.src or self.pending_tx.next, ctr_lo = c.ctr_lo,
         chosen_data_sf = c.chosen_data_sf,
+        allowed_sf_bitmap = cts_allowed_bitmap,
       })
       return
     end
@@ -6329,9 +7774,14 @@ function on_recv(self, frame, meta)
         origin = px.origin, payload = px.user_text, ctr = px.ctr,
         dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
         sf = px.chosen_data_sf,
+        data_sf = px.chosen_data_sf,
+        tx_layer_id = px.tx_layer_id,
+        tx_leaf_id = px.tx_leaf_id,
+        tx_routing_sf = px.tx_routing_sf or active_routing_sf(self),
       })
       self:log(string.format("data_tx -> %s ctr_lo=%d ctr=%d payload=%q on SF%d (ACK on SF%d)",
-        name_of(self, px.next), px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf, self.routing_sf))
+        name_of(self, px.next), px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf,
+        px.tx_routing_sf or active_routing_sf(self)))
       local handed = tx_with_retry(self, d, {
         sf    = px.chosen_data_sf,
         label = "DATA",
@@ -6766,6 +8216,7 @@ function on_recv(self, frame, meta)
       enqueue_time_ms = self.pending_tx.enqueue_time_ms or self:now(),
       requeue_count   = self.pending_tx.requeue_count or 0,
       next_attempt_ms = 0,
+      tx_layer_id     = self.pending_tx.tx_layer_id,
     })
     self:emit("tx_requeued", {
       origin = self.pending_tx.origin,
@@ -6806,6 +8257,7 @@ function on_recv(self, frame, meta)
           hops         = candidate_hops,
           score        = data_route_score,
           last_seen_ms = self:now(),
+          learned_layer_id = self.active_layer_id or self.layer_id,
         }
         local action = rt_merge(self, self.rt, d.dst, cand, self.routing_snr_floor_db)
         if action == "new" or action == "promote" then
@@ -6836,23 +8288,29 @@ function on_recv(self, frame, meta)
     local is_e2e_ack  = d.e2e_is_ack
     local e2e_ack_req = d.e2e_ack_req
     local user_text   = d.body         -- body = text for normal DATA, or acked-ctr bytes for E2E ACK
+    local rx_gw_env   = parse_gateway_envelope(user_text)
+    local event_payload = rx_gw_env and rx_gw_env.body or user_text
     mark_dest_seen(self, d.origin, "data_origin")
     mark_dest_seen(self, d.dst, "data_dst")
 
+    local ack_control_sf = active_routing_sf(self)
+    local ack_air_ms = airtime_ms(ack_control_sf, self.bw_hz, self.cr,
+                                  self.preamble_sym, ACK_LEN)
+
     self:emit("data_rx", {
       origin     = d.origin,
-      payload    = user_text,
+      payload    = event_payload,
       ctr        = d.ctr,
       from       = self.pending_rx.from,  -- inbound sender (from pending_rx; d has no src field)
       dst        = d.dst,
       ctr_lo     = d.ctr_lo,
       len        = #d.inner,
     })
-    self:log(string.format(
-      "data_rx <- %s (origin=%s ctr=%d dst=%s ctr_lo=%d, %d inner bytes) -> back to SF%d",
-      name_of(self, self.pending_rx.from), name_of(self, d.origin),
-      d.ctr, name_of(self, d.dst),
-      d.ctr_lo, #d.inner, self.routing_sf))
+	    self:log(string.format(
+	      "data_rx <- %s (origin=%s ctr=%d dst=%s ctr_lo=%d, %d inner bytes) -> back to SF%d",
+	      name_of(self, self.pending_rx.from), name_of(self, d.origin),
+	      d.ctr, name_of(self, d.dst),
+	      d.ctr_lo, #d.inner, ack_control_sf))
 
     -- DATA decoded. Cancel the pending_rx_expiry, retune RX, clear
     -- pending_rx. Then immediately TX the per-hop ACK on routing_sf and
@@ -6865,7 +8323,7 @@ function on_recv(self, frame, meta)
       self:cancel(self.pending_rx_expiry_handle)
       self.pending_rx_expiry_handle = nil
     end
-    self:set_rx_sf(self.routing_sf)
+	    self:set_rx_sf(ack_control_sf)
     self.pending_rx = nil
 
     self.last_acked_from[last_acked_key(rx_from, d.dst, d.ctr_lo, rx_payload_len)] = {
@@ -6887,7 +8345,7 @@ function on_recv(self, frame, meta)
     local is_delivered_for_budget_check = (d.dst == self.id)
     if not is_delivered_for_budget_check and hb_new_remaining < 0 then
       self:emit("hop_budget_exceeded", {
-        origin = d.origin, payload = user_text, ctr = d.ctr,
+        origin = d.origin, payload = event_payload, ctr = d.ctr,
         dst = d.dst, from = rx_from,
         committed = hb_new_committed,
       })
@@ -6906,22 +8364,22 @@ function on_recv(self, frame, meta)
       local nack_payload = ((hb_new_committed & 0xf) << 4) | 0
       local nack = pack_nack(d.ctr_lo, NACK_REASON_HOP_BUDGET, nack_payload, rx_from)
       self:emit("nack_tx", {
-        origin = d.origin, payload = user_text, ctr = d.ctr,
+        origin = d.origin, payload = event_payload, ctr = d.ctr,
         to = rx_from, ctr_lo = d.ctr_lo,
         reason = "hop_budget", committed_hops = hb_new_committed,
       })
       self:log(string.format(
         "nack_tx -> %s reason=hop_budget committed=%d (in lieu of ACK)",
         name_of(self, rx_from), hb_new_committed))
-      tx_with_retry(self, nack, {
-        sf    = self.routing_sf,
-        label = "NACK",
-        info  = string.format("to=%s reason=hop_budget committed=%d",
-          name_of(self, rx_from), hb_new_committed),
-      })
-      self:after(self.ack_air_ms + 1, function()
-        become_free(self)
-      end)
+	      tx_with_retry(self, nack, {
+	        sf    = ack_control_sf,
+	        label = "NACK",
+	        info  = string.format("to=%s reason=hop_budget committed=%d",
+	          name_of(self, rx_from), hb_new_committed),
+	      })
+	      self:after(ack_air_ms + 1, function()
+	        become_free(self)
+	      end)
       return
     end
 
@@ -6939,12 +8397,12 @@ function on_recv(self, frame, meta)
         if prior_from ~= nil and prior_from ~= rx_from then
           local nack = pack_nack(d.ctr_lo, NACK_REASON_LOOP_DUP, prior_from, rx_from)
           self:emit("nack_tx", {
-            origin = d.origin, payload = user_text, ctr = d.ctr,
+            origin = d.origin, payload = event_payload, ctr = d.ctr,
             dst = d.dst, to = rx_from, ctr_lo = d.ctr_lo,
             reason = "loop_duplicate", prior_from = prior_from,
           })
           self:emit("dup_drop", {
-            origin = d.origin, payload = user_text, ctr = d.ctr,
+            origin = d.origin, payload = event_payload, ctr = d.ctr,
             dst = d.dst, from = rx_from, prior_from = prior_from,
             ctr_lo = d.ctr_lo, reason = "loop_duplicate",
           })
@@ -6952,15 +8410,15 @@ function on_recv(self, frame, meta)
             "dup_drop <- %s (origin=%s ctr=%d, prior=%s — NACK loop_duplicate)",
             name_of(self, rx_from), name_of(self, d.origin), d.ctr,
             name_of(self, prior_from)))
-          tx_with_retry(self, nack, {
-            sf    = self.routing_sf,
-            label = "NACK",
-            info  = string.format("to=%s reason=loop_duplicate prior=%s",
-              name_of(self, rx_from), name_of(self, prior_from)),
-          })
-          self:after(self.ack_air_ms + 1, function()
-            become_free(self)
-          end)
+	          tx_with_retry(self, nack, {
+	            sf    = ack_control_sf,
+	            label = "NACK",
+	            info  = string.format("to=%s reason=loop_duplicate prior=%s",
+	              name_of(self, rx_from), name_of(self, prior_from)),
+	          })
+	          self:after(ack_air_ms + 1, function()
+	            become_free(self)
+	          end)
           return
         end
         local my_budget_tier = compute_budget_tier(self)
@@ -6968,21 +8426,21 @@ function on_recv(self, frame, meta)
         if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
         local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint, rx_from)
         self:emit("ack_tx", {
-          origin = d.origin, payload = user_text, ctr = d.ctr,
+          origin = d.origin, payload = event_payload, ctr = d.ctr,
           to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
           budget_tier = my_budget_tier,
           budget_hint = ack_budget_hint,
           duplicate = true,
         })
-        self:log(string.format("ack_tx -> %s ctr_lo=%d budget_hint=%d duplicate (on routing SF%d)",
-          name_of(self, rx_from), d.ctr_lo, ack_budget_hint, self.routing_sf))
-        tx_with_retry(self, ack, {
-          sf    = self.routing_sf,
-          label = "ACK",
-          info  = string.format("to=%s msg=%d duplicate", name_of(self, rx_from), d.ctr_lo),
-        })
+	        self:log(string.format("ack_tx -> %s ctr_lo=%d budget_hint=%d duplicate (on routing SF%d)",
+	          name_of(self, rx_from), d.ctr_lo, ack_budget_hint, ack_control_sf))
+	        tx_with_retry(self, ack, {
+	          sf    = ack_control_sf,
+	          label = "ACK",
+	          info  = string.format("to=%s msg=%d duplicate", name_of(self, rx_from), d.ctr_lo),
+	        })
         self:emit("dup_drop", {
-          origin = d.origin, payload = user_text, ctr = d.ctr,
+          origin = d.origin, payload = event_payload, ctr = d.ctr,
           dst = d.dst, from = rx_from, ctr_lo = d.ctr_lo,
         })
         self:log(string.format(
@@ -7011,18 +8469,18 @@ function on_recv(self, frame, meta)
     if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
     local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint, rx_from)
     self:emit("ack_tx", {
-      origin = d.origin, payload = user_text, ctr = d.ctr,
+      origin = d.origin, payload = event_payload, ctr = d.ctr,
       to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
       budget_tier = my_budget_tier,
       budget_hint = ack_budget_hint,
     })
-    self:log(string.format("ack_tx -> %s ctr_lo=%d budget_hint=%d (on routing SF%d)",
-      name_of(self, rx_from), d.ctr_lo, ack_budget_hint, self.routing_sf))
-    tx_with_retry(self, ack, {
-      sf    = self.routing_sf,
-      label = "ACK",
-      info  = string.format("to=%s msg=%d", name_of(self, rx_from), d.ctr_lo),
-    })
+	    self:log(string.format("ack_tx -> %s ctr_lo=%d budget_hint=%d (on routing SF%d)",
+	      name_of(self, rx_from), d.ctr_lo, ack_budget_hint, ack_control_sf))
+	    tx_with_retry(self, ack, {
+	      sf    = ack_control_sf,
+	      label = "ACK",
+	      info  = string.format("to=%s msg=%d", name_of(self, rx_from), d.ctr_lo),
+	    })
 
     -- Capture the data we need for the post-ack action; the next-step
     -- callback runs after the ACK has cleared the radio so two TXes from
@@ -7035,7 +8493,7 @@ function on_recv(self, frame, meta)
     local d_inner     = d.inner            -- inner bytes verbatim for forwarding
     local d_ctr       = d.ctr
     local d_flags     = d.flags
-    local d_user_text = user_text
+    local d_user_text = event_payload
     local d_committed_at_dst = hb_new_committed   -- §7.6: for E2E ACK actual_hops_used
     local is_delivered = (d.dst == self.id)
 
@@ -7113,14 +8571,56 @@ function on_recv(self, frame, meta)
           end
         end
       else
-        self:emit("delivered", {
-          origin = d_origin, payload = d_user_text, ctr = d_ctr,
-          dst = self.id,
-        })
-        self:log(string.format("DELIVERED from %s: %q (ctr=%d%s)",
-          name_of(self, d_origin), d_user_text, d_ctr,
-          e2e_ack_req and " [E2E-ack requested]" or ""))
-        if e2e_ack_req then
+        local gw_env = rx_gw_env
+        local gateway_consumed = false
+        if gw_env ~= nil and self.self_gateway == true then
+          gateway_consumed = true
+          local target, binding_error = gateway_binding_for_env(self, gw_env)
+
+          if target == nil or not gateway_layer_enabled(self, gw_env.target_layer_id) then
+            self:emit("gateway_no_binding", {
+              origin = d_origin,
+              via_gateway = self.id,
+              target_layer_id = gw_env.target_layer_id,
+              dst_key_hash32 = gw_env.dst_key_hash32,
+              payload = gw_env.body,
+              reason = binding_error or "not_found",
+            })
+            self:log(string.format(
+              "gateway_no_binding layer=%d key_hash32=%u reason=%s",
+              gw_env.target_layer_id, gw_env.dst_key_hash32,
+              binding_error or "not_found"))
+            if (binding_error or "not_found") == "not_found"
+               and gateway_layer_enabled(self, gw_env.target_layer_id) then
+              defer_gateway_handoff(self, gw_env, d_origin, "not_found")
+            end
+          else
+            enqueue_gateway_handoff(self, gw_env, d_origin, target)
+          end
+          -- Gateway control envelope is consumed by the gateway and is not
+          -- emitted as user DATA locally.
+        end
+        if not gateway_consumed then
+          if gw_env ~= nil then
+            self:emit("gateway_envelope_at_non_gateway", {
+              origin = d_origin,
+              dst = self.id,
+              target_layer_id = gw_env.target_layer_id,
+              dst_key_hash32 = gw_env.dst_key_hash32,
+              payload = gw_env.body,
+            })
+            self:log(string.format(
+              "gateway_envelope_at_non_gateway from=%s layer=%d key_hash32=%u -> drop",
+              name_of(self, d_origin), gw_env.target_layer_id, gw_env.dst_key_hash32))
+          else
+            self:emit("delivered", {
+              origin = d_origin, payload = d_user_text, ctr = d_ctr,
+              dst = self.id,
+            })
+            self:log(string.format("DELIVERED from %s: %q (ctr=%d%s)",
+              name_of(self, d_origin), d_user_text, d_ctr,
+              e2e_ack_req and " [E2E-ack requested]" or ""))
+            if e2e_ack_req then
           -- Schedule an E2E ACK send back to d_origin. The return flight
           -- carries DATA_FLAG_E2E_IS_ACK on wire byte 1. Body extended
           -- per §7.6:
@@ -7157,6 +8657,8 @@ function on_recv(self, frame, meta)
           self:log(string.format(
             "e2e_ack_tx_enqueued ctr=%d acked=%d actual_hops=%d dst=%s",
             return_ctr, d_ctr, d_committed_at_dst, name_of(self, d_origin)))
+            end
+          end
         end
       end
     end
@@ -7214,13 +8716,15 @@ function on_recv(self, frame, meta)
     local q = parse_q(frame)
     if not q then return end
     -- Cross-network filter — drop foreign Q before any work.
-    if q.leaf_id ~= self.leaf_id then return end
+    if q.leaf_id ~= active_leaf_id(self) then return end
     -- Don't respond to ourselves (loop guard).
     if q.src == self.id then return end
-    -- Dedup: if we recently responded to the same (opcode, src, dest), skip.
+    -- Dedup: if we recently responded to the same query, skip.
     -- The originator's defer queue still has timer-based retry; if our
     -- response was lost, the next Q-firing window will re-enable us.
-    local key = q.opcode * 65536 + q.src * 256 + q.dest
+    local key = string.format("%d|%d|%d|%u",
+                              q.opcode or 0, q.src or 0, q.dest or 0,
+                              q.key_hash32 or 0)
     local last = self.q_responded_to[key]
     local now = self:now()
     if last and (now - last) < self.q_respond_ttl_ms then return end
@@ -7230,6 +8734,7 @@ function on_recv(self, frame, meta)
       from = q.src,
       dest = q.dest,
       opcode = q.opcode,
+      key_hash32 = q.key_hash32,
       requester_mobile = q.requester_is_mobile == true,
     })
 
@@ -7238,6 +8743,53 @@ function on_recv(self, frame, meta)
       self:log(string.format(
         "q_rx <- %s opcode=REQ_SYNC requester_mobile=%s",
         name_of(self, q.src), tostring(q.requester_is_mobile == true)))
+      return
+    end
+
+    if q.opcode == Q_OP_HASH_QUERY then
+      if q.dest ~= 255 then
+        id_bind_set(self, q.dest, q.key_hash32, "q_hash", "claimed")
+        gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
+                                    q.dest, q.key_hash32, "q_hash")
+        try_drain_gateway_handoffs(self)
+        self:emit("q_hash_binding_rx", {
+          from = q.src,
+          node = q.dest,
+          key_hash32 = q.key_hash32,
+          layer_id = self.active_layer_id or self.layer_id,
+        })
+        return
+      end
+      local node_id = id_bind_find_by_hash(self, q.key_hash32)
+      local matches_self = (self.key_hash32 ~= nil and q.key_hash32 == self.key_hash32)
+      if matches_self or node_id ~= nil then
+        local resolved = matches_self and self.id or node_id
+        local q_leaf_id = active_leaf_id(self)
+        local q_routing_sf = active_routing_sf(self)
+        self:emit("q_hash_binding_tx", {
+          to = q.src,
+          node = resolved,
+          key_hash32 = q.key_hash32,
+          tx_layer_id = self.active_layer_id or self.layer_id,
+          tx_leaf_id = q_leaf_id,
+          tx_routing_sf = q_routing_sf,
+        })
+        tx_initiating(self, pack_q_hash_response(q_leaf_id, self.id, resolved,
+                                                 q.key_hash32,
+                                                 self.is_mobile == true), {
+          sf    = q_routing_sf,
+          label = "Q",
+          info  = string.format("hash32=%u node=%d response",
+                                q.key_hash32 or 0, resolved or 255),
+        })
+        self:log(string.format(
+          "q_rx <- %s asking for key_hash32=%u; response node=%s",
+          name_of(self, q.src), q.key_hash32 or 0, name_of(self, resolved)))
+        return
+      end
+      self:log(string.format(
+        "q_rx <- %s asking for key_hash32=%u; no binding, silent",
+        name_of(self, q.src), q.key_hash32 or 0))
       return
     end
 
@@ -7295,13 +8847,18 @@ function on_command(self, cmd_str)
     local is_gateway = self.self_gateway == true
     local frame = nil
     local info = nil
+    local tx_leaf_id = active_leaf_id(self)
+    local tx_routing_sf = active_routing_sf(self)
 
     if j_kind == "discover" then
-      frame = pack_j_discover(self.leaf_id, key_hash32, is_mobile, is_gateway)
+      frame = pack_j_discover(tx_leaf_id, key_hash32, is_mobile, is_gateway)
       self:emit("join_discover_sent", {
         key_hash32 = key_hash32,
         requester_mobile = is_mobile,
         gateway_capable = is_gateway,
+        tx_layer_id = self.active_layer_id or self.layer_id,
+        tx_leaf_id = tx_leaf_id,
+        tx_routing_sf = tx_routing_sf,
       })
       info = "op=discover"
     elseif j_kind == "claim" then
@@ -7309,9 +8866,9 @@ function on_command(self, cmd_str)
       if proposed == nil or proposed < 0 or proposed > 254 then
         return "ERROR: usage: join_test claim <node_id>"
       end
-      self.join_claim_epoch = (self.join_claim_epoch or 0) & 0xff
+      self.join_claim_epoch = ((self.join_claim_epoch or 0) + 1) & 0xff
       local nonce = self:rand(0, 256)
-      frame = pack_j_claim(self.leaf_id, key_hash32, proposed, 0,
+      frame = pack_j_claim(tx_leaf_id, key_hash32, proposed, 0,
                            self.join_claim_epoch, nonce, is_mobile, is_gateway)
       self:emit("join_claim_sent", {
         proposed_node_id = proposed,
@@ -7321,6 +8878,9 @@ function on_command(self, cmd_str)
         nonce = nonce,
         requester_mobile = is_mobile,
         gateway_capable = is_gateway,
+        tx_layer_id = self.active_layer_id or self.layer_id,
+        tx_leaf_id = tx_leaf_id,
+        tx_routing_sf = tx_routing_sf,
       })
       info = string.format("op=claim node=%d", proposed)
     elseif j_kind == "deny" then
@@ -7330,7 +8890,7 @@ function on_command(self, cmd_str)
         return "ERROR: usage: join_test deny <denied_node_id> <claimant_key_hash32>"
       end
       self.join_claim_epoch = (self.join_claim_epoch or 0) & 0xff
-      frame = pack_j_deny(self.leaf_id, denied, key_hash32, claimant_hash,
+      frame = pack_j_deny(tx_leaf_id, denied, key_hash32, claimant_hash,
                           0, self.join_claim_epoch, J_DENY_REASON_CONFLICT,
                           is_mobile, is_gateway)
       self:emit("join_deny_sent", {
@@ -7342,6 +8902,9 @@ function on_command(self, cmd_str)
         reason = J_DENY_REASON_CONFLICT,
         requester_mobile = is_mobile,
         gateway_capable = is_gateway,
+        tx_layer_id = self.active_layer_id or self.layer_id,
+        tx_leaf_id = tx_leaf_id,
+        tx_routing_sf = tx_routing_sf,
       })
       info = string.format("op=deny node=%d", denied)
     else
@@ -7349,7 +8912,7 @@ function on_command(self, cmd_str)
     end
 
     tx_initiating(self, frame, {
-      sf = self.routing_sf,
+      sf = tx_routing_sf,
       label = "J",
       info = info,
     })
@@ -7364,6 +8927,69 @@ function on_command(self, cmd_str)
   --                              in the header — wire format is the same,
   --                              just one bit set in the payload header.
   local want_e2e = false
+  local target_layer_s, target_hash_s, gateway_text =
+    cmd_str:match("^send_layer (%S+) (%S+) (.+)$")
+  if target_layer_s then
+    local target_layer_id = tonumber(target_layer_s)
+    local dst_key_hash32 = tonumber(target_hash_s)
+    if target_layer_id == nil or dst_key_hash32 == nil then
+      return "ERROR: usage: send_layer <layer_id> <dst_key_hash32> <text>"
+    end
+
+    local dst_id = nil
+    local dst_name = nil
+    local wire_body = gateway_text
+    if target_layer_id == (self.layer_id or 0) then
+      dst_id = id_bind_find_by_hash(self, dst_key_hash32)
+      if dst_id == nil then
+        return string.format("ERROR: no local binding for key_hash32=%u", dst_key_hash32)
+      end
+      dst_name = name_of(self, dst_id)
+    else
+      dst_id = select_gateway_for_layer(self, target_layer_id)
+      if dst_id == nil then
+        return string.format("ERROR: no gateway route for layer=%d", target_layer_id)
+      end
+      dst_name = name_of(self, dst_id)
+      wire_body = pack_gateway_envelope(target_layer_id, dst_key_hash32, gateway_text)
+      self:emit("gateway_envelope_enqueued", {
+        origin = self.id,
+        gateway = dst_id,
+        target_layer_id = target_layer_id,
+        dst_key_hash32 = dst_key_hash32,
+        payload = gateway_text,
+      })
+    end
+
+    local ctr = self:next_ctr(dst_id)
+    local inner = string.char(0) .. string.char(self.id) .. wire_body
+    table.insert(self.tx_queue, {
+      origin     = self.id,
+      dst_id     = dst_id,
+      dst_name   = dst_name,
+      payload    = inner,
+      user_text  = gateway_text,
+      ctr        = ctr,
+      flags      = 0,
+      enqueue_time_ms = self:now(),
+      requeue_count   = 0,
+      next_attempt_ms = 0,
+    })
+    self:emit("tx_enqueue", {
+      origin = self.id, payload = gateway_text, ctr = ctr,
+      dst = dst_id, depth = #self.tx_queue,
+      target_layer_id = target_layer_id,
+      dst_key_hash32 = dst_key_hash32,
+      via_gateway = (target_layer_id ~= (self.layer_id or 0)),
+    })
+    self:log(string.format(
+      "send_layer: queued layer=%d key_hash32=%u via=%s payload=%q ctr=%d",
+      target_layer_id, dst_key_hash32, dst_name, gateway_text, ctr))
+    become_free(self)
+    return string.format("queued gateway-send (depth=%d, ctr=%d)",
+      #self.tx_queue, ctr)
+  end
+
   local dst_name, text = cmd_str:match("^send_e2e (%S+) (.+)$")
   if dst_name then
     want_e2e = true
@@ -7455,6 +9081,9 @@ function on_radio_busy(self, info)
       label = info.label,
       reason = info.reason,
       busy_until_ms = info.busy_until_ms,
+      tx_layer_id = self.pending_tx.tx_layer_id,
+      tx_leaf_id = self.pending_tx.tx_leaf_id,
+      tx_routing_sf = self.pending_tx.tx_routing_sf or active_routing_sf(self),
     })
   end
 
@@ -7475,6 +9104,9 @@ function on_radio_busy(self, info)
       label = info.label,
       reason = info.reason,
       busy_until_ms = info.busy_until_ms,
+      tx_layer_id = self.pending_tx.tx_layer_id,
+      tx_leaf_id = self.pending_tx.tx_leaf_id,
+      tx_routing_sf = self.pending_tx.tx_routing_sf or active_routing_sf(self),
     })
   end
 

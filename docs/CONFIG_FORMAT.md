@@ -12,6 +12,10 @@ network topology, radio physics, per-node Lua scripts, and a test plan.
     "step_ms": 1,
     "radio": { "sf": 7, "bw": 250, "cr": 5 }
   },
+  "config": {
+    "debug_start_ms": 5000,
+    "debug_end_ms": 10000
+  },
   "nodes": [
     { "name": "alice", "script": "examples/flooder.lua", "config": { "role": "originator" } },
     { "name": "bob",   "script": "examples/flooder.lua", "config": { "role": "forwarder"  } }
@@ -71,6 +75,23 @@ orchestrator but useful for the test runner and webapp.
 ### `simulation`
 
 Drives the simulator's clock, default radio, and (optionally) the path-loss model.
+
+### `config`
+
+Optional scenario-wide Lua script config defaults. The runtime merges this
+object into every node's `on_init` config first, then applies
+`nodes[i].config` on top. Use it for knobs that should apply to all nodes,
+such as debug windows:
+
+```json
+"config": {
+  "debug_start_ms": 120000,
+  "debug_end_ms": 180000
+}
+```
+
+Per-node config can still override a global value when a scenario needs one
+node to behave differently.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

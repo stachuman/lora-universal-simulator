@@ -85,6 +85,16 @@ class EventIndex:
         except Exception:
             pass
 
+    def _get_or_create_node_meta(self, name: str, role: str = "script") -> dict:
+        meta = self.node_set.get(name)
+        if meta is None:
+            meta = {"name": name, "role": role}
+            self.node_set[name] = meta
+            self.nodes.append(meta)
+        elif role and not meta.get("role"):
+            meta["role"] = role
+        return meta
+
     def _load(self, path: str):
         logger.info("Loading %s...", path)
         parse_errors = 0
@@ -163,18 +173,49 @@ class EventIndex:
             return
         if etype == "node_ready":
             name = ev["node"]
-            meta = {"name": name, "role": ev.get("role", "script")}
+            already_known = name in self.node_set
+            meta = self._get_or_create_node_meta(name, ev.get("role", "script"))
+            meta["role"] = ev.get("role", meta.get("role", "script"))
             if "lat" in ev:
                 meta["lat"] = ev["lat"]
                 meta["lon"] = ev["lon"]
-            self.node_set[name] = meta
-            self.nodes.append(meta)
-            # Map the implicit numeric id (registration order) to the name
-            # so script_log / script_emit events that carry int node ids
-            # can be re-indexed under the canonical string name.
-            self.id_to_name[len(self.nodes) - 1] = name
+            # Older logs lacked node_layer_info, so fall back to registration
+            # order there. Newer lus logs carry the authoritative runtime id in
+            # node_layer_info; for delayed nodes registration order is wrong.
+            if not already_known:
+                self.id_to_name[len(self.nodes) - 1] = name
             # Don't store as regular event — metadata only
             return
+        if etype == "script_emit" and ev.get("emit_type") == "node_layer_info":
+            node_idx = ev.get("node")
+            data = ev.get("data") or {}
+            name = data.get("name")
+            if not name:
+                name = self.id_to_name.get(node_idx) if isinstance(node_idx, int) else node_idx
+            if name:
+                if isinstance(node_idx, int):
+                    self.id_to_name[node_idx] = name
+                meta = self._get_or_create_node_meta(name, "script")
+                for key in (
+                    "node_id", "layer_id", "leaf_id", "key_hash32",
+                    "is_gateway", "gateway_layers", "is_mobile", "joined",
+                    "routing_sf", "allowed_sf_bitmap",
+                ):
+                    if key in data:
+                        meta[key] = data[key]
+            # Keep as a regular event too, so the timeline can still show it.
+        if etype == "script_emit" and ev.get("emit_type") == "join_adopted":
+            node_idx = ev.get("node")
+            name = self.id_to_name.get(node_idx) if isinstance(node_idx, int) else node_idx
+            data = ev.get("data") or {}
+            if name and name in self.node_set:
+                meta = self.node_set[name]
+                if "node" in data:
+                    meta["node_id"] = data["node"]
+                if "key_hash32" in data:
+                    meta["key_hash32"] = data["key_hash32"]
+                meta["joined"] = True
+            # Keep as a regular event too, so the join transition is visible.
         if etype == "sim_summary":
             self.summary = ev
             return
@@ -385,6 +426,7 @@ class EventIndex:
             "repeater_stats": self.repeater_stats,
             "summary": self.summary,
             "assertions": self.assertions,
+            "id_to_name": self.id_to_name,
         }
 
 

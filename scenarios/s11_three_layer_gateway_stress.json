@@ -1,0 +1,151 @@
+{
+  "_name": "s11_three_layer_gateway_stress",
+  "_desc": "Three-layer gateway stress scenario derived from s10. Layers 4 and 6 both use control SF7 but different leaf IDs; layer 5 uses SF8. Only seed/gateway nodes start with fixed IDs. Joiners learn IDs and DATA SFs through JOIN. Layer 4 has two gateways to different target layers to exercise bridged-layer gateway selection, schedule defers on initial/retry RTS, and non-gateway envelope hardening.",
+  "simulation": {
+    "duration_ms": 360000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 911,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "config": { "debug_start_ms": 120000, "debug_end_ms": 180000 },
+  "nodes": [
+    { "name": "l4_seed", "node_id": 1, "key_hash32": "0x44000001", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "routing_sf": 7, "allowed_data_sfs": [10], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 100, "join_offer_backoff_max_ms": 300, "state_snapshot_period_ms": 30000 } },
+    { "name": "gw_45", "node_id": 20, "key_hash32": "0x4400000a", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "is_gateway": true, "gateway_layers": [ { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [11], "period_ms": 12000, "duration_ms": 4500, "offset_ms": 3000 } ], "routing_sf": 7, "allowed_data_sfs": [10], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 300, "join_offer_backoff_max_ms": 600, "state_snapshot_period_ms": 30000 } },
+    { "name": "gw_46", "node_id": 21, "key_hash32": "0x4400000b", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "is_gateway": true, "gateway_layers": [ { "layer_id": 6, "routing_sf": 7, "allowed_data_sfs": [9], "period_ms": 12000, "duration_ms": 4500, "offset_ms": 7000 } ], "routing_sf": 7, "allowed_data_sfs": [10], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 300, "join_offer_backoff_max_ms": 600, "state_snapshot_period_ms": 30000 } },
+
+    { "name": "l5_seed", "node_id": 101, "key_hash32": "0x55000065", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [11], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 100, "join_offer_backoff_max_ms": 300, "state_snapshot_period_ms": 30000 } },
+    { "name": "gw_54", "node_id": 120, "key_hash32": "0x5500006e", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 5, "is_gateway": true, "gateway_layers": [ { "layer_id": 4, "routing_sf": 7, "allowed_data_sfs": [10], "period_ms": 12000, "duration_ms": 4500, "offset_ms": 3000 } ], "routing_sf": 8, "allowed_data_sfs": [11], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 300, "join_offer_backoff_max_ms": 600, "state_snapshot_period_ms": 30000 } },
+
+    { "name": "l6_seed", "node_id": 151, "key_hash32": "0x66000097", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 6, "routing_sf": 7, "allowed_data_sfs": [9], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 100, "join_offer_backoff_max_ms": 300, "state_snapshot_period_ms": 30000 } },
+    { "name": "gw_64", "node_id": 170, "key_hash32": "0x660000a0", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 6, "is_gateway": true, "gateway_layers": [ { "layer_id": 4, "routing_sf": 7, "allowed_data_sfs": [10], "period_ms": 12000, "duration_ms": 4500, "offset_ms": 7000 } ], "routing_sf": 7, "allowed_data_sfs": [9], "discovery_beacon_period_ms": 2000, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_offer_backoff_min_ms": 300, "join_offer_backoff_max_ms": 600, "state_snapshot_period_ms": 30000 } },
+
+    { "name": "l4_j1", "node_id": null, "key_hash32": "0x44000011", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 30000,
+      "config": { "join_required": true, "layer_id": 4, "routing_sf": 7, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+    { "name": "l4_j2", "node_id": null, "key_hash32": "0x44000012", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 42000,
+      "config": { "join_required": true, "layer_id": 4, "routing_sf": 7, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+    { "name": "l4_j3", "node_id": null, "key_hash32": "0x44000013", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 54000,
+      "config": { "join_required": true, "layer_id": 4, "routing_sf": 7, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+
+    { "name": "l5_j1", "node_id": null, "key_hash32": "0x55000071", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 36000,
+      "config": { "join_required": true, "layer_id": 5, "routing_sf": 8, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+    { "name": "l5_j2", "node_id": null, "key_hash32": "0x55000072", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 48000,
+      "config": { "join_required": true, "layer_id": 5, "routing_sf": 8, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+    { "name": "l5_j3", "node_id": null, "key_hash32": "0x55000073", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 60000,
+      "config": { "join_required": true, "layer_id": 5, "routing_sf": 8, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+
+    { "name": "l6_j1", "node_id": null, "key_hash32": "0x66000081", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 33000,
+      "config": { "join_required": true, "layer_id": 6, "routing_sf": 7, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+    { "name": "l6_j2", "node_id": null, "key_hash32": "0x66000082", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 45000,
+      "config": { "join_required": true, "layer_id": 6, "routing_sf": 7, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } },
+    { "name": "l6_j3", "node_id": null, "key_hash32": "0x66000083", "script": "scenarios/dv_dual_sf.lua", "start_at_ms": 57000,
+      "config": { "join_required": true, "layer_id": 6, "routing_sf": 7, "beacon_period_ms": 12000, "quiet_threshold_ms": 0, "join_listen_ms": 1500, "join_discover_jitter_ms": 500, "join_claim_guard_ms": 2500, "state_snapshot_period_ms": 30000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "l4_seed", "to": "gw_45", "snr": 24.0, "rssi": -66.0, "bidir": true },
+      { "from": "l4_seed", "to": "gw_46", "snr": 23.0, "rssi": -67.0, "bidir": true },
+      { "from": "gw_45", "to": "gw_46", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "l4_j1", "to": "l4_seed", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "l4_j2", "to": "l4_seed", "snr": 21.0, "rssi": -69.0, "bidir": true },
+      { "from": "l4_j3", "to": "gw_46", "snr": 21.0, "rssi": -69.0, "bidir": true },
+      { "from": "l4_j1", "to": "gw_45", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "l4_j2", "to": "gw_46", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "l4_j3", "to": "gw_45", "snr": 17.0, "rssi": -73.0, "bidir": true },
+
+      { "from": "l5_seed", "to": "gw_54", "snr": 24.0, "rssi": -66.0, "bidir": true },
+      { "from": "l5_seed", "to": "gw_45", "snr": 19.0, "rssi": -71.0, "bidir": true },
+      { "from": "gw_54", "to": "gw_45", "snr": 20.0, "rssi": -70.0, "bidir": true },
+      { "from": "gw_54", "to": "l4_seed", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "gw_54", "to": "l4_j1", "snr": 16.0, "rssi": -74.0, "bidir": true },
+      { "from": "l5_j1", "to": "l5_seed", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "l5_j2", "to": "l5_seed", "snr": 21.0, "rssi": -69.0, "bidir": true },
+      { "from": "l5_j3", "to": "gw_54", "snr": 21.0, "rssi": -69.0, "bidir": true },
+      { "from": "l5_j1", "to": "gw_45", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "l5_j2", "to": "gw_45", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "l5_j3", "to": "gw_45", "snr": 17.0, "rssi": -73.0, "bidir": true },
+
+      { "from": "l6_seed", "to": "gw_64", "snr": 24.0, "rssi": -66.0, "bidir": true },
+      { "from": "l6_seed", "to": "gw_46", "snr": 19.0, "rssi": -71.0, "bidir": true },
+      { "from": "gw_64", "to": "gw_46", "snr": 20.0, "rssi": -70.0, "bidir": true },
+      { "from": "l6_j1", "to": "l6_seed", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "l6_j2", "to": "l6_seed", "snr": 21.0, "rssi": -69.0, "bidir": true },
+      { "from": "l6_j3", "to": "gw_64", "snr": 21.0, "rssi": -69.0, "bidir": true },
+      { "from": "l6_j1", "to": "gw_46", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "l6_j2", "to": "gw_46", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "l6_j3", "to": "gw_46", "snr": 17.0, "rssi": -73.0, "bidir": true },
+
+      { "from": "l4_seed", "to": "l6_seed", "snr": 18.0, "rssi": -72.0, "bidir": true },
+      { "from": "gw_45", "to": "gw_64", "snr": 17.0, "rssi": -73.0, "bidir": true },
+      { "from": "l4_j2", "to": "l6_j2", "snr": 16.0, "rssi": -74.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 105000, "node": "l4_seed", "command": "send gw_45 l4-local-to-gw45-a" },
+    { "at_ms": 108000, "node": "l4_j1", "command": "send l4_j3 l4-local-j1-j3-a" },
+    { "at_ms": 111000, "node": "l5_seed", "command": "send gw_54 l5-local-to-gw54-a" },
+    { "at_ms": 114000, "node": "l6_seed", "command": "send gw_64 l6-local-to-gw64-a" },
+
+    { "at_ms": 132000, "node": "l4_seed", "command": "send_layer 5 1426063473 l4-to-l5-j1-a" },
+    { "at_ms": 136000, "node": "l4_seed", "command": "send_layer 6 1711276161 l4-to-l6-j1-a" },
+    { "at_ms": 140000, "node": "l4_j2", "command": "send_layer 5 1426063474 l4j2-to-l5-j2-a" },
+    { "at_ms": 144000, "node": "l4_j3", "command": "send_layer 6 1711276162 l4j3-to-l6-j2-a" },
+
+    { "at_ms": 174000, "node": "l5_seed", "command": "send_layer 4 1140850705 l5-to-l4-j1-a" },
+    { "at_ms": 178000, "node": "l6_seed", "command": "send_layer 4 1140850706 l6-to-l4-j2-a" },
+    { "at_ms": 182000, "node": "l5_j3", "command": "send_layer 4 1140850707 l5j3-to-l4-j3-a" },
+    { "at_ms": 186000, "node": "l6_j3", "command": "send_layer 4 1140850705 l6j3-to-l4-j1-a" },
+
+    { "at_ms": 216000, "node": "l4_seed", "command": "send_layer 5 1426063475 l4-to-l5-j3-b" },
+    { "at_ms": 218000, "node": "l4_seed", "command": "send_layer 6 1711276163 l4-to-l6-j3-b" },
+    { "at_ms": 220000, "node": "l5_seed", "command": "send l5_j2 l5-local-seed-j2-b" },
+    { "at_ms": 222000, "node": "l6_seed", "command": "send l6_j2 l6-local-seed-j2-b" },
+    { "at_ms": 224000, "node": "l4_j1", "command": "send gw_46 l4-local-j1-gw46-b" },
+    { "at_ms": 226000, "node": "l4_j2", "command": "send gw_45 l4-local-j2-gw45-b" },
+
+    { "at_ms": 264000, "node": "l4_seed", "command": "send_layer 5 1426063473 l4-to-l5-j1-c" },
+    { "at_ms": 266000, "node": "l4_seed", "command": "send_layer 6 1711276161 l4-to-l6-j1-c" },
+    { "at_ms": 268000, "node": "l5_seed", "command": "send_layer 4 1140850706 l5-to-l4-j2-c" },
+    { "at_ms": 270000, "node": "l6_seed", "command": "send_layer 4 1140850707 l6-to-l4-j3-c" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "gw_45", "emit_type": "gateway_layer_active", "value": "\"layer_id\":5" },
+    { "type": "script_emit_contains", "node": "gw_46", "emit_type": "gateway_layer_active", "value": "\"layer_id\":6" },
+    { "type": "script_emit_contains", "node": "gw_54", "emit_type": "gateway_layer_active", "value": "\"layer_id\":4" },
+    { "type": "script_emit_contains", "node": "gw_64", "emit_type": "gateway_layer_active", "value": "\"layer_id\":4" },
+
+    { "type": "script_emit_contains", "node": "l4_j1", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l4_j2", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l4_j3", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l5_j1", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l5_j2", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l5_j3", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l6_j1", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l6_j2", "emit_type": "join_adopted", "value": "" },
+    { "type": "script_emit_contains", "node": "l6_j3", "emit_type": "join_adopted", "value": "" },
+
+    { "type": "script_emit_contains", "node": "l4_j1", "emit_type": "join_data_sfs_adopted", "value": "\"data_sf_bitmap\":32" },
+    { "type": "script_emit_contains", "node": "l5_j1", "emit_type": "join_data_sfs_adopted", "value": "\"data_sf_bitmap\":64" },
+    { "type": "script_emit_contains", "node": "l6_j1", "emit_type": "join_data_sfs_adopted", "value": "\"data_sf_bitmap\":16" },
+
+    { "type": "script_emit_contains", "node": "l4_seed", "emit_type": "gateway_envelope_enqueued", "value": "\"target_layer_id\":5" },
+    { "type": "script_emit_contains", "node": "l4_seed", "emit_type": "gateway_envelope_enqueued", "value": "\"target_layer_id\":6" },
+    { "type": "script_emit_contains", "node": "gw_45", "emit_type": "gateway_remote_bind_set", "value": "\"layer_id\":5" },
+    { "type": "script_emit_contains", "node": "gw_46", "emit_type": "gateway_remote_bind_set", "value": "\"layer_id\":6" },
+    { "type": "script_emit_contains", "node": "gw_64", "emit_type": "gateway_remote_bind_set", "value": "\"layer_id\":4" },
+
+    { "type": "script_emit_contains", "node": "l5_j1", "emit_type": "delivered", "value": "l4-to-l5-j1-a" },
+    { "type": "script_emit_contains", "node": "l6_j1", "emit_type": "delivered", "value": "l4-to-l6-j1-a" },
+    { "type": "script_emit_contains", "node": "gw_54", "emit_type": "gateway_no_binding", "value": "\"target_layer_id\":4" },
+    { "type": "script_emit_contains", "node": "gw_64", "emit_type": "gateway_no_binding", "value": "\"target_layer_id\":4" },
+    { "type": "script_emit_contains", "node": "l4_seed", "emit_type": "tx_gateway_schedule_defer", "value": "" }
+  ]
+}

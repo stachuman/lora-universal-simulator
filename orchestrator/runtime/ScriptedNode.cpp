@@ -13,6 +13,7 @@ ScriptedNode::ScriptedNode(int id, std::string name,
                            LuaHost& host, SimRadio& radio, std::ostream& events_out,
                            VirtualClock& clock, std::mt19937& sim_rng)
     : _id(id),
+      _protocol_id(id),
       _name(std::move(name)),
       _host(host),
       _radio(radio),
@@ -272,6 +273,12 @@ sol::table ScriptedNode::api_peers() {
     // neighbours (DEBUG-only — scripts that want neighbour discovery for
     // protocol behaviour must do it on-air). For now: empty table.
     return _host.lua().create_table();
+}
+
+void ScriptedNode::api_set_protocol_id(int protocol_id) {
+    if (protocol_id < 0) protocol_id = -1;
+    if (protocol_id > 255) protocol_id = 255;
+    _protocol_id = protocol_id;
 }
 
 // Dynamic RX-SF retune. Mutates this node's slot in SimController's

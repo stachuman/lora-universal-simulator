@@ -249,7 +249,10 @@ the same; only physical position and direct-neighbour set shift.
 
 **Mechanism.**
 - Per-node `is_mobile` config flag (default false).
-- BCN carries the `is_mobile` bit alongside `self_gateway_flag` from §7.2.
+- BCN carries the `is_mobile` bit alongside `self_gateway_flag` from §7.2 and
+  always carries `key_hash32`. Mobile nodes emit identity-only BCNs
+  (`n_entries=0`, no seen bitmap, no route extension) so neighbours can bind
+  `node_id -> key_hash32` without learning mobile transit routes.
 - Mobile nodes silently drop inbound RTS where `dst != self.id` AND
   `origin != self.id` (= forwarding request from someone else for a third
   party). Diagnostic emit: `rts_drop_mobile_no_forward`.
@@ -264,10 +267,9 @@ the same; only physical position and direct-neighbour set shift.
   protecting the gateway's shared duty-cycle budget for actual cross-layer
   forwarding. Smaller than the mobile penalty because gateways are stable
   and may legitimately sit at topology choke points.
-- Mobile node detects its own neighbour-set shift: when 1-hop direct entries
-  in its rt[] age out OR new direct neighbours appear within
-  `mobile_change_window_ms`, schedule a triggered BCN. Throttled by
-  `mobile_neighbor_change_threshold` to avoid storms.
+- Mobile route changes do not schedule triggered DV beacons. Periodic
+  identity-only BCN plus Q/REQ_SYNC handle endpoint discovery while avoiding
+  route churn as the mobile moves.
 - Route entries where the destination or next hop is mobile may use shorter
   aging than static routes, but this should be tuned per scenario. Earlier
   experiments with overly aggressive mobile TTLs caused `send_no_route`
@@ -292,14 +294,15 @@ This is intentionally the same mechanism needed for future multi-layer
 networks. Mobiles do not get a special transport; they are the first practical
 test case for §7.3.
 
-For implementation, do this in phases:
-1. Add `layer_id` to JSON config and derive `leaf_id = layer_id & 0x0f`.
-2. Allow layer-specific `routing_sf` and `allowed_data_sfs` in scenarios.
-3. Add gateway config for secondary layers, schedule emission, and analyzer
-   telemetry (`layer_sweep_start`, `layer_sweep_end`,
-   `gateway_schedule_announced`, `gateway_schedule_received`).
-4. Add cross-layer DATA handoff once the gateway can maintain route state in
-   more than one layer.
+Current implementation state:
+1. `layer_id` in JSON and `leaf_id = layer_id & 0x0f` derivation are implemented.
+2. Layer-specific `routing_sf` and `allowed_data_sfs` are implemented in scenarios.
+3. Gateway secondary-layer config, BCN schedule emission, and schedule telemetry are implemented:
+   `gateway_schedule_change`, `gateway_schedule_observed`, and `tx_gateway_schedule_defer`.
+4. Single-gateway cross-layer DATA handoff is implemented for known
+   `target_layer_id + dst_key_hash32` bindings.
+5. Remaining work: full layer-scoped route/identity state, multi-gateway overlap
+   search, and adaptive schedule-offset tuning.
 
 ### Composition with other roadmap items
 
@@ -333,8 +336,8 @@ For implementation, do this in phases:
 |---|---|---|
 | `layer_id` | 1 | Logical radio/routing layer; on-wire `leaf_id = layer_id & 0x0f` |
 | `is_mobile` | false | Per-node endpoint flag; mutually exclusive with `is_gateway` |
-| `mobile_neighbor_change_threshold` | 0.5 | Fraction of recent direct neighbours that must shift to fire a triggered BCN |
-| `mobile_change_window_ms` | 60000 | Window over which intra-layer neighbour shifts are evaluated |
+| `mobile_neighbor_change_threshold` | deferred | Earlier neighbour-shift trigger idea is parked; mobiles now use periodic identity-only BCN |
+| `mobile_change_window_ms` | deferred | Earlier neighbour-shift trigger idea is parked; mobiles now use periodic identity-only BCN |
 | `mobile_route_penalty_db` | 20 | Score penalty when a candidate's next_hop is mobile AND not the destination |
 | `gateway_transit_penalty_db` | 8 | Score penalty when candidate's next_hop is a gateway AND not the destination; reserves gateway airtime budget for cross-layer forwarding |
 
@@ -370,9 +373,10 @@ devices have a long-term cryptographic identity and must acquire a compact
 layer-local routing address after boot.
 
 **Design principle.** The 8-bit `node_id` is a lease, not identity. The real
-identity is the node's crypto public key from §8.1. Control-plane frames should
-not carry key hashes on every packet; the hash appears only during join,
-discovery, conflict handling, or explicit identity request.
+identity is the node's crypto public key from §8.1. BCN now carries a fixed
+`key_hash32` beside `src`, so every periodic identity assertion is checkable.
+DATA remains privacy-preserving and does not expose original sender identity in
+clear.
 
 ### Identity model
 
@@ -382,8 +386,9 @@ discovery, conflict handling, or explicit identity request.
   public key. This is enough for join conflict detection and local binding
   tables. Full public key exchange stays pull-based via the identity-card
   mechanism from §8.1.
-- **Layer-local address:** `node_id` in range `1..254`, unique only inside one
-  `layer_id`. `0xff` remains broadcast/special.
+- **Layer-local address:** `node_id` in range `0..254`, unique only inside one
+  `layer_id`. `0xff` is reserved as the temporary unjoined sender id and
+  broadcast/special marker.
 - **Human name:** app-layer metadata. A node may answer a DATA/name query, but
   names are not part of routing, join, or BCN control.
 
@@ -414,7 +419,7 @@ id_bind[node_id] = {
   first_seen_ms,
   last_seen_ms,
   last_key_seen_ms,
-  source,       -- j_claim, j_deny, bcn_ext, identity_reply, data_auth, self
+  source,       -- bcn, j_claim, j_deny, identity_reply, data_auth, self
   confidence,   -- weak, claimed, authenticated
   conflict_hash -- optional last different hash seen for same node_id
 }
@@ -424,13 +429,14 @@ Rules:
 - Same `node_id`, same `key_hash`: refresh `last_seen_ms`.
 - Same `node_id`, different `key_hash`: mark conflict and emit
   `addr_conflict_observed`.
-- Plain BCN/traffic with `src=node_id` and no key hash refreshes
+- BCN always carries `key_hash32`. Same `src`, same hash refreshes both
+  `last_seen_ms` and `last_key_seen_ms`; no binding creates one with
+  `source=bcn`, `confidence=claimed`.
+- Plain non-identity traffic with `src=node_id` and no key hash may refresh
   `last_seen_ms` if the binding exists. It does not create a binding and does
-  not upgrade confidence. This keeps quiet-but-beaconing nodes leased without
-  paying the key-hash cost on every BCN. An impersonator can keep a stale weak
-  binding alive, but cannot upgrade it or decrypt authenticated DATA.
-- Frames that carry a matching key hash refresh both `last_seen_ms` and
-  `last_key_seen_ms`.
+  not upgrade confidence.
+- Any identity-carrying frame with a matching key hash refreshes both
+  `last_seen_ms` and `last_key_seen_ms`.
 - Authenticated DATA or identity-card proof upgrades confidence to
   `authenticated`.
 - Bindings expire after a long absent timeout; exact value is deployment
@@ -441,9 +447,10 @@ The binding table is not part of route selection. Routing still uses compact
 
 ### Join frame family
 
-`Q` is intentionally not reused for first join because Q already has an 8-bit
-`src`, and an unjoined device does not own one yet. Add a compact `J` control
-frame family on the control SF:
+`Q` is intentionally not reused for first join because Q assumes the sender
+already owns a normal short address. An unjoined device transmits `J` frames
+with temporary source id `255` until adoption. The implemented first slice is a
+compact tag-byte `J` control family on the control SF:
 
 ```text
 J_DISCOVER:
@@ -498,6 +505,37 @@ still key-hash ordering because partitions have no shared clock.
 
 ### Join state machine
 
+**Implemented status (2026-05-17).** The simulator/Lua firmware now supports a
+minimal autonomous happy path:
+
+- `config.join_required=true` starts the node as unjoined `id=255`.
+- The node emits `join_listen_start/end`, then `J_DISCOVER`; if no offer is
+  received it retries with backoff and can optionally emit
+  `join_discover_exhausted` after a configured attempt cap.
+- Joined neighbours answer with jittered `J_OFFER`, carrying `data_sf_bitmap`.
+- Only unjoined/join-required nodes adopt DATA SF policy from `J_OFFER`.
+- The joiner chooses a random locally-free id, emits `J_CLAIM`, waits
+  `join_claim_guard_ms`, then adopts via the runtime `set_protocol_id` hook.
+- Existing nodes add observed claims to `id_bind`; conflicting owned/bound IDs
+  trigger `J_DENY`.
+- Pending simultaneous claims for the same id are compared deterministically
+  by `(key_hash32, nonce)`; the losing pending claim backs off instead of
+  adopting.
+- A focused test covers a stable 3-node network plus a 4th unjoined node:
+  `test/t48_join_autonomous_fourth_node.json`.
+
+Known deviations/gaps versus the full design:
+
+- J-frame anti-spam is implemented for untrusted joiner-originated
+  `J_DISCOVER`/`J_CLAIM` frames by `(opcode,key_hash32)` sliding window.
+  `J_OFFER`/`J_DENY` are not rate-limited in this first slice to avoid
+  suppressing legitimate responder traffic during cold boot.
+- Fixed BCN `key_hash32` is implemented. Mobile BCNs carry the same identity
+  hash but no route entries.
+- Partition-merge resolution is not implemented yet; `J_CONFLICT` remains a
+  future concept, not an on-wire opcode in the current frame.
+- `lease_age_seconds` is encoded but currently sent as `0` in the first slice.
+
 1. **LISTEN.** Node starts without `node_id`. It listens on its layer control
    SF for `join_listen_ms`, collecting BCN `src`, destination-seen bitmaps,
    optional identity extensions, overheard traffic IDs, and existing `J`
@@ -527,6 +565,10 @@ Existing nodes defend only IDs they believe are owned:
 - If the node itself owns `proposed_node_id`, emit `J_DENY`.
 - If two unjoined nodes claim the same ID, deterministic tie-break by
   `key_hash` avoids endless oscillation. Loser backs off.
+- New joiners should select randomly from the apparently-free ID set, not
+  first-free. Random selection lowers race probability when several nodes join
+  after the same listen window. If a race still happens, `J_DENY` plus the
+  deterministic tie-break resolves it.
 
 This protocol does not require perfect first-try consensus. Lost DENY frames
 or partition merges can create temporary duplicates; the binding table and
@@ -537,7 +579,9 @@ later conflict handling converge them.
 If a node later observes the same `node_id` with a different `key_hash`:
 
 1. Emit `addr_conflict_observed`.
-2. Send `J_DENY` / `J_CONFLICT` toward the observed claimant if possible.
+2. Send `J_DENY` toward the observed claimant if possible. A future
+   `J_CONFLICT` frame may carry third-party conflict evidence after the basic
+   join path is stable.
 3. If the conflict involves `self.id`, apply deterministic tie-break:
    authenticated binding beats claimed binding; larger advertised lease age
    beats a fresh claim when confidence is equal and the difference is above a
@@ -551,6 +595,24 @@ much airtime.
 There is no assumption that both sides agree who is "older" by wall clock.
 Lease age is advisory and saturating; if ages are close or untrusted, the hash
 tie-break gives every observer the same answer.
+
+### Duplicate-ID scenarios to cover
+
+1. **Forgotten local ID.** Node retains its permanent key but not its short
+   lease. It boots as `255`, sends `J_DISCOVER`, receives `J_OFFER`, and should
+   prefer any previously-known ID associated with its `key_hash32` before
+   selecting a random free ID. This likely requires adding `suggested_node_id`
+   to `J_OFFER` (`255` = no suggestion).
+2. **Stale node resumes with recycled ID.** Node believes it still owns short
+   ID `X`, but the network has rebound `X` to another key while it was silent.
+   When it emits BCN `src=X,key_hash=old`, receivers compare against
+   `id_bind[X]=new`, emit `addr_conflict_observed`, and start the conflict
+   path. The node receiving a valid `J_DENY` for its active ID and own hash
+   must stop normal BCN/DATA, switch to unjoined `255`, and rejoin.
+3. **Race join.** Two unjoined nodes select the same free ID after similar
+   listen windows. Random ID selection lowers probability; if it still occurs,
+   neighbours observe two `J_CLAIM`s or later conflicting BCN hashes and send
+   `J_DENY`. The deterministic tie-break prevents endless oscillation.
 
 ### Gateway and multi-layer leases
 
@@ -583,33 +645,51 @@ same public key to the new layer-local address.
 
 ### BCN and identity hash policy
 
-Do not add `key_hash` to every BCN by default. It is too expensive in dense
-networks.
+BCN carries `key_hash32` as a fixed field. This adds 4 bytes to every BCN, but
+it turns duplicate short-id detection from RF heuristics into deterministic
+identity evidence:
 
-Allowed low-cost uses:
-- `J_DISCOVER` / `J_CLAIM` / `J_DENY` always carry hash.
-- A node may include its own `key_hash32` in a short BCN extension only during
-  DISCOVERY or shortly after join.
-- A node should include its own `key_hash32` in a periodic identity-refresh BCN
-  extension at a very low cadence, e.g. every `identity_bcn_interval` normal
-  BCNs. This renews `last_key_seen_ms` without putting identity hash in every
-  beacon.
-- A node may request identity on demand via the §8.1 identity-card pull path.
-- Authenticated DATA can refresh or upgrade `id_bind` without changing routing
-  frames.
+```text
+BCN src=X key_hash=A, id_bind[X]=A  → refresh binding
+BCN src=X key_hash=B, id_bind[X]=A  → addr_conflict_observed
+```
+
+Rationale:
+
+- Every BCN already asserts "I am short id X"; the hash makes that assertion
+  checkable.
+- Nodes that forgot their short ID can rediscover their previous lease by
+  key hash.
+- Nodes that were silent long enough for the network to recycle their ID are
+  detected when their BCN hash no longer matches `id_bind[X]`.
+- New joiners learn identity bindings passively without waiting for J traffic.
+
+Privacy tradeoff: passive observers can link the same long-term key hash across
+short-id changes. If this becomes unacceptable, the future privacy mode can
+replace `key_hash32` with `trunc32(HMAC(network_psk, public_key || epoch))`,
+rotated by network epoch. The first implementation uses plain `key_hash32`.
+
+Other identity paths remain useful:
+
+- `J_DISCOVER` / `J_CLAIM` / `J_DENY` / `J_OFFER` carry hashes for join and
+  conflict handling.
+- A node may request a full identity card on demand via the §8.1 pull path.
+- Authenticated DATA can upgrade `id_bind` confidence without revealing sender
+  identity to relays.
 
 ### Tunables
 
 | Key | Default | Purpose |
 |---|---|---|
 | `join_required` | false in legacy scenarios, true in firmware-mode scenarios | Boot without a short node_id and run join |
-| `join_listen_ms` | 30000 | Passive listen before discovery/claim |
-| `join_discover_jitter_ms` | 5000..30000 randomized | Spread cold-start `J_DISCOVER` bursts |
-| `join_discover_wait_ms` | 10000 | Wait after `J_DISCOVER` for sync BCN responses |
-| `join_claim_guard_ms` | 30000 | Objection window after `J_CLAIM` |
-| `join_retry_backoff_ms` | 10000..60000 randomized | Delay before retrying after conflict |
-| `id_bind_ttl_ms` | deployment policy, hours/days | Recycle absent short IDs |
-| `identity_bcn_interval` | 100 | Include key_hash BCN extension every N beacons |
+| `join_listen_ms` | 3000 implemented first-slice default; production target 30000 | Passive listen before discovery/claim |
+| `join_discover_jitter_ms` | 3000 implemented first-slice default; production target 5000..30000 randomized | Spread cold-start `J_DISCOVER` bursts |
+| `join_discover_wait_ms` | 10000 | Wait after `J_DISCOVER` for an offer before retrying |
+| `join_discover_max_attempts` | 0 | Optional cap before `join_discover_exhausted`; `0` means unlimited retry |
+| `join_offer_backoff_min_ms` / `join_offer_backoff_max_ms` | 100 / 1000 | Jitter neighbour `J_OFFER` responses |
+| `join_claim_guard_ms` | 3000 implemented first-slice default; production target 30000 | Objection window after `J_CLAIM` |
+| `join_retry_backoff_ms` | 10000 implemented first-slice default; production target 10000..60000 randomized | Delay before retrying after conflict |
+| `id_bind_ttl_ms` | 172800000 implemented first-slice default (48 h); deployment policy may choose longer | Recycle absent short IDs only after identity lease expiry |
 | `join_hash_bits` | 32 | Compact key hash size used in first implementation |
 | `join_j_rate_limit_window_ms` | 300000 | Per-key-hash J-frame rate-limit window |
 | `join_j_max_per_window` | 6 | Max accepted J frames per key hash per observer window |
@@ -620,7 +700,7 @@ Unjoined nodes do not yet have a trusted 8-bit `src`, so normal §1 anti-spam
 does not apply. Observers therefore rate-limit `J` frames by `key_hash32`:
 
 ```text
-join_j_seen[key_hash32] = sliding window of J_DISCOVER/J_CLAIM/J_DENY
+join_j_seen[key_hash32] = sliding window of J_DISCOVER/J_OFFER/J_CLAIM/J_DENY
 if count > join_j_max_per_window:
   ignore J frame and emit join_j_rate_limited
 ```
@@ -638,12 +718,20 @@ The analyzer should be able to distinguish "join is slow but converging" from
 - `join_listen_start`
 - `join_listen_end`
 - `join_discover_sent`
+- `join_discover_received`
+- `join_discover_retry_scheduled`
+- `join_discover_exhausted`
+- `join_offer_sent`
+- `join_offer_received`
+- `join_data_sfs_adopted`
 - `join_claim_sent`
+- `join_claim_received`
 - `join_deny_sent`
 - `join_deny_received`
+- `join_claim_denied`
 - `join_adopted`
 - `addr_conflict_observed`
-- `partition_merge_resolved`
+- `partition_merge_resolved` (future; not emitted by the first slice)
 - `join_j_rate_limited`
 
 Each event should include `layer_id`, `leaf_id`, candidate/adopted `node_id`
@@ -651,13 +739,17 @@ when known, `key_hash32`, and reason.
 
 ### Implementation phases
 
-1. Split simulator `name` from protocol `node_id`; allow `node_id = null`.
-2. Add `public_key`/`key_hash` simulation identity generation.
-3. Add unjoined node state: listen-only except `J` frames.
-4. Implement `J_DISCOVER`, `J_CLAIM`, `J_DENY` encode/decode, including
-   discover jitter, lease age, claim epoch, and J-frame rate limiting.
-5. Implement `id_bind`, plain-BCN refresh policy, identity-refresh BCN
-   extension, and conflict detection.
+1. **Done.** Split simulator `name` from protocol `node_id`; allow
+   `node_id = null`.
+2. **Done.** Add `public_key`/`key_hash32` simulation identity generation.
+3. **Partial.** Add unjoined node state using temporary id `255`; normal
+   beacon emission is suppressed while unjoined.
+4. **Partial.** Implement `J_DISCOVER`, `J_OFFER`, `J_CLAIM`, `J_DENY`
+   encode/decode, discover jitter, claim epoch, and lease-age fields. J-frame
+   rate limiting is still pending.
+5. **Partial.** Implement `id_bind`, plain-frame refresh policy, BCN
+   `key_hash32`, and basic conflict detection. Post-adoption conflict recovery
+   is still pending.
 6. Add gateway per-layer join state, but keep cross-layer DATA handoff disabled
    until secondary-layer leases are stable.
 7. Add small join visual scenario: quiet network, dense network, duplicate
@@ -877,16 +969,22 @@ These belong to a follow-up design pass; the §7.5 delivery mechanism is indepen
 
 ### 4.1 BCN run-length on `next_hop` (concrete proposal)
 
-**Observation.** A node's BCN entries cluster around a small set of dominant next-hops. In a star topology, nearly all entries share `next_hop = gateway`. In typical mesh, 49 entries are usually distributed across 3-5 distinct next-hops. The current 3 B/entry encoding repeats the 8-bit `next_hop` field for every entry — a clear redundancy.
+**Status.** This is a deferred compression proposal from before the fixed BCN
+identity hash decision. Current BCN has an 8-byte base header
+(`'B'`, flags, `src`, entry flags/count, `key_hash32`) and 3-byte route
+entries. A 151-byte cap now fits 47 uncompressed entries.
+
+**Observation.** A node's BCN entries cluster around a small set of dominant next-hops. In a star topology, nearly all entries share `next_hop = gateway`. In typical mesh, a full page is usually distributed across 3-5 distinct next-hops. The current 3 B/entry encoding repeats the 8-bit `next_hop` field for every entry — a clear redundancy.
 
 **Wire format.** Adds a `compressed` flag in byte 1's reserved low nibble. Flag=0 keeps existing 3 B/entry layout (no inflation when compression doesn't help). Flag=1 switches to grouped encoding:
 
 ```
-Header (size unchanged, 4 B):
+Header (size unchanged from current BCN base, 8 B):
 byte 0: 'B'
-byte 1: network_id (4 hi) | flag_compressed (1) | reserved (3 lo)
+byte 1: layer/BCN flags, with one reserved bit reused as flag_compressed
 byte 2: src (8)
-byte 3: n (8)            -- semantic entry count, regardless of encoding
+byte 3: bitmap/extension flags + n (6) -- semantic entry count, regardless of encoding
+bytes 4..7: key_hash32
 
 flag_compressed = 1 body — sequence of groups, each:
   byte g+0: next_hop (8)
@@ -897,24 +995,24 @@ flag_compressed = 1 body — sequence of groups, each:
 **Encoder logic.**
 1. Build the entries list dirty-first (existing differential semantics, capped at `max_entries`).
 2. Sort the SELECTED entries by `next_hop` — preserves dirty-first selection; within the selection, sorting maximizes group runs.
-3. Compute uncompressed size (`4 + 3n`) and compressed size (`4 + 2g + 2n`, where g = distinct next_hops).
+3. Compute uncompressed size (`8 + 3n`) and compressed size (`8 + 2g + 2n`, where g = distinct next_hops).
 4. Emit whichever is smaller; set `flag_compressed` accordingly. Break-even: compressed wins when `g < n/2` (i.e., average group size > 2).
 
 **Decoder logic.** `parse_beacon` reads `flag_compressed` from byte 1. Flag=0 → existing 3-byte loop. Flag=1 → walk groups, expanding each to (dest, group's next_hop, score, hops). Receivers downstream of `parse_beacon` (`rt_merge`, route scoring) see no difference.
 
-**Savings (49-entry BCN, default cap).**
+**Illustrative savings (47-entry BCN, 151-byte cap).**
 
 | Distinct next_hops | Uncompressed | Compressed | Saving |
 |---|---|---|---|
-| 1 (star/gateway) | 151 B | 4 + 2 + 98 = **104 B** | −31% |
-| 3 (typical mesh) | 151 B | 4 + 6 + 98 = **108 B** | −28% |
-| 8 (well-connected) | 151 B | 4 + 16 + 98 = **118 B** | −22% |
-| 25 (sparse uniform) | 151 B | 4 + 50 + 98 = 152 B | flag=0, **0%** |
+| 1 (star/gateway) | 149 B | 8 + 2 + 94 = **104 B** | −30% |
+| 3 (typical mesh) | 149 B | 8 + 6 + 94 = **108 B** | −28% |
+| 8 (well-connected) | 149 B | 8 + 16 + 94 = **118 B** | −21% |
+| 24 (sparse uniform) | 149 B | 8 + 48 + 94 = 150 B | flag=0, **0%** |
 
 Worst-case auto-detected and flagged uncompressed (no inflation cost, only the 1-byte tax of always carrying the flag — and that's a free reused reserved bit).
 
 **Open design question.** What to do with the saved bytes:
-- (A) **Shrink BCN airtime**: keep `beacon_max_entries=49`; compressed BCN goes 151 B → ~110 B average. Direct ~27% airtime reduction. Simplest.
+- (A) **Shrink BCN airtime**: keep `beacon_max_entries=47`; compressed BCN goes ~149 B → ~110 B average. Direct ~25-30% airtime reduction. Simplest.
 - (B) **Pack more entries per BCN**: replace entries cap with byte-budget cap (~151 B). Same airtime, but ~65 entries per page when compression helps → faster RT propagation, faster differential drain. Bigger refactor.
 - (C) **Hybrid**: byte-budget cap; encoder packs until budget hit. Combines both. Most code change.
 
@@ -1054,24 +1152,47 @@ larger hierarchy.
 - Security boundary: bridging needs explicit operator policy. A node should
   not accidentally forward sensitive layer-1 traffic into layer 2.
 
-**Possible direction (not committed).**
-- Per-node config: `layer_id` for ordinary nodes; `gateway_layers` for
-  gateway secondary layers.
-- Frame format keeps the existing `leaf_id` nibble as the active layer filter.
-  Hierarchical DATA (`addr_len + dst`) carries the cross-layer path.
-- Gateway nodes advertise `self_gateway` plus schedule records in BCN. Senders
-  aiming at a cross-layer destination route via the nearest known gateway.
-- Layer-aware duty cycle: each gateway tracks total airtime physically and may
-  additionally enforce per-layer policy shares.
+**V1 decision.**
+- `leaf_id` is **not an address component**. It remains only the compact
+  receiver-side radio filter: `leaf_id = layer_id & 0x0f`.
+- `node_id` is layer-local. The routable local address is
+  `(layer_id, node_id)`, not bare `node_id`.
+- `key_hash32` / public key is the global application identity.
+- Cross-layer send uses a loose source route:
+  `layer_path[] + dst_key_hash32`. For V1 this is restricted to one boundary:
+  `[target_layer_id, dst_key_hash32]`.
+- A sender routes locally to a gateway. The gateway resolves
+  `dst_key_hash32` inside the target layer and then forwards using the
+  target layer's local `node_id`.
+- Gateways must not flood every remote/mobile endpoint into ordinary layer-1
+  DV beacons. They advertise gateway capability and schedule/policy; remote
+  endpoint bindings stay in gateway-local caches.
 
-**Open questions.**
-- How does a node in layer 1 learn which gateway currently reaches a mobile
-  layer endpoint: gateway BCN summaries, pull-based Q, or explicit app config?
-- Address spaces: shared 8-bit node IDs across layers, or per-layer address
-  spaces with gateway translation?
-- Should the bridging policy be operator-configured (whitelist) or dynamic (route quality)?
-- Compose with §8 cryptography: cross-layer traffic should keep end-to-end
-  confidentiality while gateways see only routing headers.
+**V1 implementation slice.**
+- Config:
+  - ordinary nodes: `layer_id`
+  - gateways: `is_gateway=true`, `gateway_layers=[{layer_id=...}]`
+- Source command/API: send to `(target_layer_id, dst_key_hash32, body)`.
+- Source behavior:
+  - if `dst_key_hash32` resolves locally, use normal in-layer DATA;
+  - otherwise choose best known gateway candidate and send a gateway envelope
+    to that gateway using normal DATA.
+- Gateway behavior:
+  - unwrap the gateway envelope after local delivery to the gateway;
+  - resolve `dst_key_hash32` in its target-layer binding cache;
+  - enqueue a normal send to that target layer's local `node_id`.
+- Initial Lua slice may use an inner DATA envelope rather than full
+  `addr_len>0` DATA. Full hierarchical DATA/RTS remains the wire-final
+  format once retune/TDM and per-layer route tables are active.
+
+**Still open after V1.**
+- Retune/TDM state machine and per-layer route tables at the gateway.
+- Gateway lookup/reply frame versus opportunistic gateway DATA envelope.
+- Gateway schedule propagation and hold-at-gateway-neighbor.
+- Operator bridge policy: open gateway, layer whitelist, or identity
+  whitelist.
+- Compose with §8 cryptography: gateways should see routing headers and target
+  identity, but not user plaintext once encryption lands.
 
 ### 7.0 Wire-format decisions (LOCKED 2026-05-12)
 
@@ -1087,7 +1208,7 @@ Locked changes summarize as:
 
 | Frame | Today | Locked | Delta |
 |---|---|---|---|
-| BCN (49-entry, plain leaf) | 151 B | 151 B | 0 (re-pack only) |
+| BCN (47-entry, plain leaf with `key_hash32`) | 149 B | 149 B | 0 (re-pack only) |
 | BCN (gateway, 1 upper layer) | n/a | 156 B | +5 B (schedule record) |
 | RTS (in-leaf, `addr_len=0`) | 8 B | 8 B | 0 (re-pack) |
 | RTS (cross-region, `addr_len=1`) | n/a | 9 B | +1 B per hierarchy hop |
@@ -1150,25 +1271,30 @@ MAC coverage (implementation-deferred to §8 phase): end-to-end MAC covers `dst_
 
 #### 7.0.2 BCN — locked layout
 
+Status update: this section now tracks the implemented Lua wire format, not
+the original 2026-05-12 pre-identity layout. BCN has a mandatory `key_hash32`
+after byte 3, and gateway schedule records include explicit period encoding.
+
 ```
 byte 0: 'B'
 byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
 byte 2: src(8)
-byte 3: n_entries(8)
+byte 3: has_seen_bitmap(1 hi) | has_ext(1) | n_entries(6 lo)
+bytes 4..7: key_hash32(32 LE)
 
 if has_schedule == 1:
-  byte 4: layer_count(8)
-  bytes 5..(4 + 4 × layer_count): schedule records (4 B each)
+  byte 8: layer_count(8)
+  bytes 9..(8 + 4 × layer_count): schedule records (4 B each)
 
 (then n_entries route entries × 3 bytes each, contiguous)
 ```
 
 Schedule record (4 bytes):
 ```
-byte 0: layer(4 hi) | (sf - 5)(3) | rsv(1)
+byte 0: layer(4 hi) | (sf - 5)(3) | period_unit_5s(1)
 byte 1: duration_100ms(8)         -- 0..25.5 s
-byte 2: offset_from_bcn(8)        -- 0..255 s from receiver's bcn_rx_time
-byte 3: reserved(8)               -- future: period override, channel, TX power, etc.
+byte 2: offset_100ms(8)           -- 0..25.5 s from receiver's bcn_rx_time
+byte 3: period_units(8)           -- seconds if unit=0, 5-second units if unit=1
 ```
 
 Route entry (3 bytes):
@@ -1182,7 +1308,9 @@ byte 2: score_bucket(4 hi) | (hops - 1)(3) | is_gateway(1 lo)
 
 `is_gateway` propagation: rides on each rt[] candidate alongside score/hops. Per-candidate storage (since different advertisers can disagree). Tied to existing rt-aging TTLs — no separate lifecycle.
 
-`n_entries` stays 8-bit (today's wire size). No escape mechanism. Practical max ~83 entries for 255 B LoRa frame.
+`n_entries` is 6-bit in the implemented packed byte 3. The practical default
+page cap is 47 entries to keep normal BCN airtime around the old 151-byte cap
+after adding the fixed `key_hash32`.
 
 #### 7.0.3 RTS — locked layout
 
@@ -1246,7 +1374,7 @@ Recommended sequencing to minimize blast radius:
 
 1. **Renames** — `network_id` → `leaf_id`, `msg_id` → `ctr_lo`. Pure internal; no wire-format change. Smallest blast radius, validates the codepath.
 2. **NACK 4→3 B** — encoder/decoder change + sender-side wait-time conversion (apply `× 16` on RX, `÷ 16` on TX). Independent.
-3. **BCN re-pack** — new byte 1 flags, hops-1 encoding, is_gateway bit, schedule-record path (always omitted at first since no node sets `has_schedule=1`). Touches `pack_beacon`/`parse_beacon` and route entry storage.
+3. **BCN re-pack** — new byte 1 flags, hops-1 encoding, is_gateway bit, schedule-record path. Gateways with `gateway_layers` now emit schedule records; non-gateways omit them. Touches `pack_beacon`/`parse_beacon` and route entry storage.
 4. **RTS re-pack** — new byte 3 packing, dst stays 1 B (addr_len=0 only), ctr_lo gets own byte. Touches `pack_rts`/`parse_rts`. In-leaf size unchanged (8 B).
 5. **DATA re-pack** — new flags byte, `ctr` field (replaces today's `origin_seq` payload header), ciphertext = plaintext placeholder, MAC = 4 zero bytes placeholder, E2E flags promoted from payload header to wire byte 1. Touches `pack_data`/`parse_data` and the entire E2E ACK code path. **Biggest single phase.**
 6. **Hierarchy support** (deferred until needed) — `addr_len > 0`, dst byte-array, gateway peeling, schedule-record emission. Not blocking other work.
@@ -1449,10 +1577,10 @@ Route entry (3 bytes — same size as today):
        └──────┴──────┴─────────────────────────────────────────────────────────┘
 
 Schedule record (4 bytes — per upper layer this gateway bridges to):
-       ┌───────────────────────┬─────────┬──────────────────┬──────────────────┐
-       │ layer (4 hi)          │ sf (8)  │ duration_100ms   │ offset_from_bcn  │
-       │ + reserved (4 lo)     │         │ (8 bits)         │ (8 bits, sec)    │
-       └───────────────────────┴─────────┴──────────────────┴──────────────────┘
+       ┌─────────────────────────────┬──────────────────┬──────────────────┬──────────────────┐
+       │ layer(4)|(sf-5)(3)|P5(1)    │ duration_100ms   │ offset_100ms     │ period_units     │
+       │                             │ (8 bits)         │ (8 bits)         │ (8 bits)         │
+       └─────────────────────────────┴──────────────────┴──────────────────┴──────────────────┘
 ```
 
 **Field semantics.**
@@ -1470,16 +1598,18 @@ Schedule record (4 bytes — per upper layer this gateway bridges to):
 | route `hops` | 3 | reduced from 4 bits (protocol caps at 8 hops anyway → 3 bits = 0-7 is fine) |
 | route `is_gateway` | 1 | this destination is a gateway (member of some upper layer); propagates transitively via `rt_merge` |
 | schedule `layer` | 4 | layer nibble this record describes (`layer_id & 0x0f`) |
-| schedule `sf` | 8 | SF used on that layer (could shrink to 4 bits later) |
+| schedule `sf-5` | 3 | SF used on that layer, encoded as `sf - 5` |
+| schedule `P5` | 1 | period unit selector: 0 = seconds, 1 = 5-second units |
 | schedule `duration_100ms` | 8 | how long the gateway is active on this layer per visit (0.1 - 25.5 s) |
-| schedule `offset_from_bcn` | 8 | seconds from THIS BCN's reception to the next layer-window opening (0-255 s); receiver anchors on its local `bcn_rx_time` |
+| schedule `offset_100ms` | 8 | 100 ms units from THIS BCN's reception to the next layer-window opening (0-25.5 s); receiver anchors on its local `bcn_rx_time` |
+| schedule `period_units` | 8 | repetition period in selected units; range is 1-255 s with `P5=0`, or 5-1275 s with `P5=1` |
 
 **Schedule record interpretation (clock-sync-free).**
 
 Each receiver R notes the local time `bcn_rx_time` when it received this BCN. For each schedule record:
-- Next window opens at `R's local time = bcn_rx_time + offset_from_bcn × 1 s`
+- Next window opens at `R's local time = bcn_rx_time + offset_100ms × 100 ms`
 - Window duration: `duration_100ms × 100 ms`
-- Repetition period: implicit — refreshed on each subsequent BCN (no explicit period field needed)
+- Repetition period: `period_units × (P5 ? 5 s : 1 s)`
 
 R re-anchors at every BCN reception. Drift between BCNs is bounded by clock-drift over typical 5-min BCN periods (sub-second drift), negligible for window-sizing in 1-25 s range.
 
@@ -1487,11 +1617,11 @@ R re-anchors at every BCN reception. Drift between BCNs is bounded by clock-drif
 
 | Scenario | Today | New |
 |---|---|---|
-| Plain leaf, 5 routes | 4 + 15 = **19 B** | 4 + 15 = **19 B** (same) |
-| Plain leaf, 49 routes | 4 + 147 = **151 B** | 4 + 1 + 147 = **152 B** (+1 B for n_extended marker) |
-| Gateway leaf with no schedule (= permanent on this layer, no TDM), 5 routes, 3 gateway destinations | n/a | **19 B** (gateway info is bits — zero wire cost) |
-| Gateway with TDM schedule, 1 upper layer, 5 routes | n/a | 4 + 1 + 4 + 15 = **24 B** (+5 B for layer_count + schedule record) |
-| Multi-layer gateway (2 upper layers via TDM), 8 routes | n/a | 4 + 1 + 8 + 24 = **37 B** |
+| Plain leaf, 5 routes | 8 + 15 = **23 B** | 8 + 15 = **23 B** (same) |
+| Plain leaf, 47 routes | 8 + 141 = **149 B** | 8 + 1 + 141 = **150 B** (+1 B for n_extended marker) |
+| Gateway leaf with no schedule (= permanent on this layer, no TDM), 5 routes, 3 gateway destinations | n/a | **23 B** (gateway info is bits — zero wire cost beyond the fixed BCN hash header) |
+| Gateway with TDM schedule, 1 upper layer, 5 routes | n/a | 8 + 1 + 4 + 15 = **28 B** (+5 B for layer_count + schedule record) |
+| Multi-layer gateway (2 upper layers via TDM), 8 routes | n/a | 8 + 1 + 8 + 24 = **41 B** |
 
 **Gateway capability is effectively free for non-TDM gateways.** Only nodes that need to advertise their layer-switching schedule pay the 4 B/layer overhead. A node that is permanently on a single layer (e.g., a dedicated layer-14 hub with no leaf participation) has `has_schedule=0` and pays nothing extra.
 
@@ -1499,26 +1629,105 @@ R re-anchors at every BCN reception. Drift between BCNs is bounded by clock-drif
 
 1. **rt_merge** processes each entry: `rt[dest]` candidate stores `is_gateway` flag alongside score/hops/next_hop.
 2. **Schedule cache**: when a BCN from a direct neighbor has `has_schedule=1`, receiver stores the schedule records keyed by `(src_id, layer)`. On each BCN re-reception, re-anchor against current `bcn_rx_time`. Stale schedules (no BCN heard in 2× period) → drop.
-3. **Cross-network send (alice → bob in another network):** alice's app constructs `addr_len = N, dst = [...]` (see §7.1). The local routing layer treats the frame as "destined for any gateway":
-   - Pick an `rt[]` candidate with `is_gateway=1`, best score
-   - Standard local routing toward that gateway
-   - The chosen gateway takes over at the network boundary
-4. **Detail discovery (rare).** If multiple gateways are present and alice needs to know which specific one bridges to a particular upper-layer network, she sends an app-layer DATA query (encrypted, normal mechanics) — `{type: "gateway_lookup", layer: 14, net: 35}`. Gateway responds with `{answer: yes/no/via X}`. This is RARE because most deployments have static topology config OR a single gateway per leaf.
+3. **Cross-network send (alice → bob in another network):** current v1
+   `send_layer` addresses the destination by `(target_layer_id,
+   dst_key_hash32)`. The local routing layer selects only gateways whose
+   observed BCN schedule advertises that `target_layer_id`, then routes
+   normally toward that gateway.
+4. **Gateway handoff:** the chosen gateway resolves `dst_key_hash32` from
+   its local layer binding cache (`id_bind` for its primary layer,
+   `gateway_remote_bind` for bridged layers). Remote gateway bindings are
+   keyed by `(layer_id,key_hash32)`, refresh on observed BCN/JOIN traffic,
+   and age after `gateway_remote_bind_ttl_ms` of silence. If no binding
+   exists, the gateway emits `gateway_no_binding`, defers the envelope, and
+   emits `Q:HASH_QUERY` on the target layer. If the binding appears before
+   `gateway_handoff_defer_ttl_ms`, the handoff drains into normal target-layer
+   DATA forwarding. Ambiguous bindings still fail closed.
+5. **Reachability discovery is open.** A production design still needs a
+   policy for "which gateway can currently reach this remote hash." Options
+   under consideration are:
+   - gateway BCN extension advertising reachable remote-node summaries;
+   - sender retry across multiple eligible gateways when one returns/no-ops
+     with `gateway_no_binding`;
+   - explicit app/control query such as `gateway_lookup`.
+
+No decision is made yet because the reachable-set extension can become
+expensive, while retry-across-gateways has simpler wire cost but weaker
+latency/delivery guarantees.
 
 **Cross-references.** §7.1 (DATA frame uses `addr_len + dst` whose routing is driven by `is_gateway` markers from this BCN), §7.3 (inter-layer TDM mechanics consume the schedule records), §6.5 (stale-route aging applies to gateway entries like any other route).
 
 **Open questions (deferred).**
 - Self-update of schedule records (when a gateway changes its TDM cadence, peers learn from the next BCN — no explicit "schedule changed" mechanism; just continuous refresh).
 - Layer-14 (and higher) BCNs use the SAME format with semantics shifted (src = layer-14 ID, is_gateway = "member of layer-13", etc.). Recursive design.
+- Remote-node reachability advertisement vs retry-across-gateways remains
+  undecided; current v1 only filters gateways by bridged layer and lets the
+  gateway resolve the final `key_hash32` from its observed binding cache.
 
 ### 7.3 Inter-layer routing protocol (single-radio TDM)
+
+**Current implementation status (2026-05-17).**
+
+Implemented first-slice gateway v1:
+
+- `gateway_layers` config creates secondary layer records with layer id,
+  leaf id, control SF, DATA-SF bitmap, period, duration, and offset.
+- Gateways emit BCN schedule records (`has_schedule=1`) and
+  `gateway_schedule_change` telemetry when the active radio context changes.
+- Direct peers cache gateway schedules from BCN and defer RTS while a gateway
+  is scheduled away from their layer.
+- `send_layer` gateway selection filters candidates by observed bridged-layer
+  set from gateway BCN schedule records; gateways that do not advertise the
+  target layer are not eligible.
+- JOIN uses the active layer context: a new node only needs frequency/control
+  SF out of band and learns DATA SF policy from `J_OFFER`.
+- Cross-layer `send_layer` queues a gateway envelope addressed by
+  `target_layer_id + dst_key_hash32`.
+- Gateways learn remote-layer key bindings from observed BCN/JOIN traffic
+  (`gateway_remote_bind_set`), not by walking simulator node lists.
+- Gateway handoff restores the correct target/primary layer control SF and
+  DATA-SF bitmap before forwarding.
+- Passing acceptance scenario: `scenarios/s09_two_layer_gateway_debug.json`.
+  It uses layer 4 control SF7/DATA SF10 and layer 5 control SF8/DATA SF11,
+  with six join-required nodes learning DATA SFs from JOIN offers.
+
+Not yet implemented:
+
+- Full layer-scoped route state: current `rt[]` is still mostly keyed by
+  short node id, not `(layer_id,node_id)`.
+- Full layer-scoped identity binding: current `id_bind[]` is not yet cleanly
+  partitioned by layer.
+- Safe short-id reuse across layers where the same node id appears in both
+  layers.
+- Adaptive schedule-offset convergence between multiple gateways.
+- Multi-hop upper-layer gateway paths with overlap search.
+- Remote destination reachability across multiple eligible gateways:
+  partially addressed by gateway-local `Q:HASH_QUERY` when a selected gateway
+  lacks a binding. Broader reachable-node advertisement and retry across
+  alternate gateways are still parked for measurement/design.
+- Schedule-defer pre-check on retry paths (`tx_rts_retry`, `rts_timeout_fire`):
+  currently only `issue_send` consults `gateway_schedule_defer_ms`, so a
+  retry initiated just before a gateway's sweep can still waste airtime.
+- Original-origin propagation through cross-layer envelope handoff: today
+  the destination's `delivered` event carries the gateway as origin, not
+  the original sender.
+- Envelope-level replay/dedup at gateways: a retransmitted envelope
+  generates a second handoff with a fresh ctr.
+
+Workbench scenarios:
+- `scenarios/s09_two_layer_gateway_debug.json` — acceptance gate.
+- `scenarios/s10_two_layer_gateway_separation.json` — drive
+  `(layer_id,node_id)` scoping.
+- `scenarios/s11_three_layer_gateway_stress.json` — exercises gateway
+  picker filtering and schedule defer across three layers.
 
 **Problem statement.** A gateway node participates in two or more layers (e.g., leaf SF7 + layer-14 SF11). A single LoRa radio can only be tuned to ONE (SF, frequency) at any instant. To support multi-layer gateway participation on consumer-grade hardware (no dual-radio), the protocol needs a time-division scheme — the gateway alternates between layers on a known schedule, and peers consult that schedule to time their interactions.
 
 **Layer identity.** Config uses full `layer_id`; the wire carries only
 `leaf_id = layer_id & 0x0f` in BCN/RTS. A gateway retune switches the active
-layer context: `leaf_id`, `routing_sf`, `allowed_data_sfs`, route table view,
-and BCN schedule all belong to the currently active layer.
+layer context: `leaf_id`, `routing_sf`, `allowed_data_sfs`, and BCN schedule
+belong to the currently active layer. Route-table and identity-binding views
+are intended to become layer-scoped, but that part remains the next step.
 
 **Mobility use case.** Mobiles are not special-cased in the radio stack. A
 mobile fleet can be assigned to layer 2 with control SF9 while the static city
@@ -1537,7 +1746,7 @@ the real gateway architecture instead of adding a mobile-only SF override.
 
 **Schedule announcement (via gateway's BCN, §7.2).**
 
-The gateway's BCN includes schedule records — one per upper layer it participates in. Receivers anchor schedules against `bcn_rx_time` (no clock sync). Example: a gateway with schedule `{layer=14, sf=11, duration=200, offset=30}` is on layer-14 SF11 from `bcn_rx_time + 30 s` for 20 seconds, repeating from each subsequent BCN.
+The gateway's BCN includes schedule records — one per upper layer it participates in. Receivers anchor schedules against `bcn_rx_time` (no clock sync). Example: a gateway with schedule `{layer=14, sf=11, duration_ms=20000, offset_ms=3000, period_ms=120000}` is on layer-14 SF11 from `bcn_rx_time + 3 s` for 20 seconds, repeating every 120 seconds.
 
 **Listen-on-overlap (intra-upper-layer hops).**
 
@@ -1676,14 +1885,28 @@ Acceptable for non-realtime use cases (chat, status, alerts). Not for sub-second
 - Dual-radio hardware support: out of scope; future "professional" deployments could parallelise. Protocol design works either way.
 - Tuning of `max_offset_drift_per_period_s` and the per-peer-traffic-weight decay window. Initial defaults are placeholders; measurement under simulated multi-gateway scenarios will tune them.
 
-**Implementation cost estimate.**
-- BCN parse/pack extension for schedule records: ~30 lines
-- Schedule cache + drift tracking at receivers: ~80 lines
-- TDM scheduling state machine at gateway (sweep timer, retune logic, return-to-primary): ~150 lines
-- L15 active-avoidance pre-check in `tx_initiating`: ~30 lines
-- Inter-layer queue + overlap detection: ~100 lines
-- Adaptive offset: peer-traffic-weight tracking + overlap-maximizing offset picker + drift-capped update: ~70 lines
-- Tests: schedule drift, overlap windows, missed sweep recovery, cross-layer delivery, schedule advertisement, adaptive offset convergence on 1-hop and 3-hop L14 paths: ~180 lines
+**Implementation status / remaining cost.**
+
+Done in v1:
+- BCN parse/pack extension for schedule records.
+- Schedule cache at receivers.
+- Basic TDM scheduling state machine at gateway: sweep timer, retune,
+  return-to-primary.
+- Direct-neighbour active avoidance: `tx_gateway_schedule_defer`.
+- Gateway picker filters by observed bridged-layer set from BCN schedule
+  records.
+- Single-gateway cross-layer queue/handoff for `send_layer`.
+- Smoke scenario with assertions: `s09_two_layer_gateway_debug.json`.
+
+Remaining:
+- Full layer-scoped route and identity state: primary next step.
+- Remote-node reachability policy for multi-gateway deployments: parked.
+- Overlap detection for gateway-to-gateway paths.
+- Adaptive offset: peer-traffic-weight tracking + overlap-maximizing offset
+  picker + drift-capped update.
+- Tests: short-id collision across layers, route candidate isolation,
+  binding isolation, schedule drift, overlap windows, missed sweep recovery,
+  adaptive offset convergence on 1-hop and 3-hop upper-layer paths.
 
 ### 7.4 Control-plane frame updates (RTS / CTS / ACK / NACK)
 
@@ -2611,6 +2834,11 @@ whichever byte holds it. Single-byte layer-filter dispatch wherever
 
 ### 10.2 Extended sub-command allocation (byte 1 when byte 0 high nibble = `0xF`)
 
+Status note: this EXT/sub-code allocation is retained as future extension
+space. The implemented join first slice does **not** use EXT; it uses literal
+tag byte `'J'` plus an opcode in byte 1, as described in §2a and
+`docs/PROTOCOL.md`.
+
 When the cmd nibble is `0xF`, the **next byte** (byte 1) carries the
 8-bit sub-command code. Byte 0's low nibble is NOT the sub-code —
 it remains a flag nibble like any primary command, and for layer-aware
@@ -2620,22 +2848,39 @@ extended commands.
 
 | Sub-code | Name | Status |
 |---|---|---|
-| `0x00` | J_DISCOVER | designed (§2a) |
-| `0x01` | J_CLAIM | designed (§2a) |
-| `0x02` | J_DENY | designed (§2a) |
-| `0x03` | J_OFFER | implemented first slice (§2a) |
-| `0x04` – `0xFE` | reserved (251 slots) | future |
+| `0x00` – `0xFE` | reserved | future EXT users; join does not consume this space |
 | `0xFF` | second-level escape | reserved (would enable a 16-bit sub-code space via a third byte if 256 ever runs out) |
 
 **Cost.** Extended commands pay +1 B for the sub-code byte vs a
 primary command. J frames are rare events (one per node-boot/rejoin),
 so the byte is amortized to near-zero per-flight overhead.
 
-### 10.3 Per-frame layouts — old vs new
+### 10.3 Per-frame layouts — deferred/superseded proposal
+
+**Status.** This section is historical design material for a future
+command-nibble compaction. It is **not** the implemented wire format. The
+current implementation still uses literal ASCII tag bytes (`'B'`, `'R'`,
+`'C'`, ...), and the authoritative current frame layouts are in
+`docs/PROTOCOL.md` plus §7.0 above. In particular, implemented BCN uses an
+8-byte fixed header with mandatory `key_hash32`; the 4-byte "New" BCN layout
+below was never adopted.
 
 #### B — Beacon
 
-Old (4 B header):
+Current implemented reality:
+```
+byte 0: 'B'
+byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
+byte 2: src(8)
+byte 3: has_seen_bitmap(1) | has_ext(1) | n_entries(6)
+bytes 4..7: key_hash32(32 LE)
+[has_schedule] layer_count(1) + 4×L schedule records
+n_entries × 3 B route entries
+[has_seen_bitmap] 32 B bitmap
+[has_ext] ext_len(1) + TLVs
+```
+
+Historical pre-identity layout:
 ```
 byte 0: 'B' (0x42)
 byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
@@ -2647,7 +2892,7 @@ n_entries × 3 B route entries
 [has_ext] ext_len(1) + TLVs
 ```
 
-New (4 B header):
+Deferred nibble-command proposal (not implemented):
 ```
 byte 0: cmd=0x0(4 hi) | leaf_id(4 lo)
 byte 1: src(8)
@@ -2660,11 +2905,8 @@ n_entries × 3 B route entries
 [has_ext] ext_len(1) + TLVs
 ```
 
-Δ: 0 B header. Layer filter is 1-byte (was 2-byte).
-`n_entries` is 7 bits (0–127) — physical max with 255 B LoRa frame and
-3 B per entry is ~80; 7 bits is comfortable headroom without
-over-allocating. 3 reserved bits in byte 2 + 1 in byte 3 = 4 reserved
-bits for future BCN flags.
+The deferred proposal would make layer filter 1-byte and recover some flag
+bits, but it is parked until current gateway/JOIN behavior stabilizes.
 
 #### R — RTS
 
@@ -2802,52 +3044,28 @@ byte 3: opcode(2 hi) | mobile(1) | rsv(5 lo)
 
 Δ: 0 B. Layer filter is 1-byte. 5 reserved bits in byte 3.
 
-#### J_DISCOVER (extended, new)
+#### J family
 
-New (7 B):
-```
-byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
-byte 1: sub_code = 0x00 (J_DISCOVER)
-byte 2: mobile(1) | stationary(1) | gw_capable(1) | rsv(5)
-bytes 3-6: key_hash32(32)
-```
+Superseded by the implemented tag-byte `J` family in §2a and
+`docs/PROTOCOL.md`.
 
-#### J_CLAIM (extended, new)
+Earlier drafts placed join under the future `EXT` escape with sub-codes
+`J_DISCOVER/J_CLAIM/J_DENY/J_CONFLICT`. The implemented first slice instead
+uses byte 0 as literal tag `'J'` and byte 1 as:
 
-New (10+ B; exact size depends on nonce width chosen at §8.1 lock-in):
-```
-byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
-byte 1: sub_code = 0x01 (J_CLAIM)
-byte 2: mobile(1) | stationary(1) | gw_capable(1) | rsv(5)
-byte 3: proposed_node_id(8)
-bytes 4-7: key_hash32(32)
-byte 8: claim_epoch(8)                              -- §2a-review tie-break
-bytes 9..: nonce (width TBD; ≥1 B)
+```text
+leaf_id(4 hi) | gateway_capable(1) | is_mobile(1) | opcode(2 lo)
 ```
 
-#### J_DENY (extended, new)
+Implemented opcodes:
 
-New (12 B):
-```
-byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
-byte 1: sub_code = 0x02 (J_DENY)
-byte 2: reason(4 hi) | rsv(4 lo)
-byte 3: denied_node_id(8)
-bytes 4-7: owner_key_hash32(32)
-bytes 8-11: claimant_key_hash32(32)
-```
+- `0 = J_DISCOVER` (6 B)
+- `1 = J_CLAIM` (11 B)
+- `2 = J_DENY` (15 B)
+- `3 = J_OFFER` (8 B)
 
-#### J_CONFLICT (extended, future)
-
-New (12 B):
-```
-byte 0: cmd=0xF(4 hi) | leaf_id(4 lo)
-byte 1: sub_code = 0x03 (J_CONFLICT)
-byte 2: conflicting_node_id(8)
-bytes 3-6: observed_key_hash32(32)
-bytes 7-10: known_key_hash32(32)
-byte 11: claim_epoch(8)
-```
+`J_CONFLICT` remains a future post-adoption conflict concept but has no
+on-wire opcode in the current protocol.
 
 ### 10.4 Net wire-cost summary
 
@@ -2861,10 +3079,11 @@ byte 11: claim_epoch(8)
 | K | 3 | 3 | 0 |
 | N | 4 | 4 | 0 |
 | Q | 4 | 4 | 0 |
-| J_DISCOVER | n/a | 7 | new (extended, sub-code in byte 1) |
-| J_CLAIM | n/a | 10+ | new (extended) |
-| J_DENY | n/a | 12 | new (extended) |
-| J_CONFLICT | n/a | 12 | new (extended, future) |
+| J_DISCOVER | n/a | 6 | implemented tag-byte J |
+| J_OFFER | n/a | 8 | implemented tag-byte J |
+| J_CLAIM | n/a | 11 | implemented tag-byte J |
+| J_DENY | n/a | 15 | implemented tag-byte J |
+| J_CONFLICT | n/a | n/a | future concept, no current opcode |
 
 Per-flight typical RTS savings: a 1-RTS clean send saves 1 B; a failed
 3-retry × 3-alt cascade saves up to 9 B of channel air per flight.

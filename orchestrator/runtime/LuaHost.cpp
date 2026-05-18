@@ -77,6 +77,12 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node, int protocol_node_id
             });
         self.set_function("peers",
             [node](sol::object /*self*/) { return node->api_peers(); });
+        self.set_function("set_protocol_id",
+            [node](sol::object self_obj, int protocol_id) {
+                node->api_set_protocol_id(protocol_id);
+                sol::table self = self_obj.as<sol::table>();
+                self["id"] = protocol_id;
+            });
         self.set_function("set_rx_sf",
             [node](sol::object /*self*/, int sf) { node->api_set_rx_sf(sf); });
         self.set_function("set_rx_sf_set",
@@ -197,15 +203,18 @@ void LuaHost::bindSimGlobals(SimController& ctrl) {
             const auto& nodes = ctrl.config().nodes;
             for (size_t i = 0; i < nodes.size(); ++i) {
                 sol::table entry = L.create_table();
-                const int protocol_id = nodes[i].node_id >= 0
-                    ? nodes[i].node_id
-                    : static_cast<int>(i);
+                const int protocol_id = ctrl.protocolNodeId(i);
                 entry["id"]         = protocol_id;
                 entry["runtime_id"] = static_cast<int>(i);
                 entry["name"]       = nodes[i].name;
                 entry["script"]     = nodes[i].script_path;
                 entry["key_hash32"] = static_cast<uint32_t>(nodes[i].key_hash32);
                 entry["public_key"] = nodes[i].public_key;
+                entry["join_required"] =
+                    (nodes[i].config.is_object() &&
+                     nodes[i].config.contains("join_required") &&
+                     nodes[i].config["join_required"].is_boolean() &&
+                     nodes[i].config["join_required"].get<bool>());
                 entry["is_mobile"] =
                     (nodes[i].velocity_mps > 0.0f) ||
                     (nodes[i].config.is_object() &&

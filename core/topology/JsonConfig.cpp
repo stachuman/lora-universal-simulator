@@ -111,6 +111,9 @@ static SimConfig parseJson(const json& j) {
     if (j.contains("_name") && j["_name"].is_string())
         cfg.name = j["_name"].get<std::string>();
 
+    if (j.contains("config") && j["config"].is_object())
+        cfg.config = j["config"];
+
     if (j.contains("simulation")) {
         auto& sim = j["simulation"];
         if (sim.contains("duration_ms")) cfg.simulation.duration_ms = sim["duration_ms"].get<unsigned long>();
