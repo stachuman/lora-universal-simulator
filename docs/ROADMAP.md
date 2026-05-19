@@ -11,8 +11,10 @@ shape of the problem, not the solution. Linked-to-from
 
 **Status — IMPLEMENTED** as silent-drop + originator self-monitoring.
 See `scenarios/dv_dual_sf.lua` header doc block "Anti-spam: 1st-hop
-statistical rate-limit" for full design, and `test/t33_anti_spam_rate_limit.json`
-for the verification scenario. Mechanism summary:
+statistical rate-limit" for full design. Verification scenario
+`t33_anti_spam_rate_limit` was moved to `test/deprecated/` after the
+realism pass shifted exact threshold counts; the mechanism itself
+remains active. Mechanism summary:
 
 - Per-direct-sender RTS/CTS observation counts over sliding 5-min
   window (`originator_window_ms`), deduplicated by msg_id within
@@ -167,7 +169,16 @@ per-origin to per-sender behaviorally classified).
 
 ---
 
-## 2. Mobile nodes (layered endpoint model)
+## 2. Mobile nodes (layered endpoint model) (IMPLEMENTED)
+
+**Status — IMPLEMENTED.** `is_mobile` flag, per-layer `routing_sf` /
+`allowed_data_sfs`, mobile-as-transit penalty, gateway scheduling
+(§7.3), and cross-layer DATA handoff all live in
+`scenarios/dv_dual_sf.lua` and are exercised by `t21_mobility`,
+`t45_mobile_path_loss_*`, `t52_mobile_identity_beacon`, plus
+`scenarios/s07_seattle_mobile_realistic.json` and
+`scenarios/s08_seattle_mobile_lifecycle_2h.json`. The text below
+preserves the original design rationale.
 
 **Problem.** Mobile nodes (handhelds moving between coverage zones) cause
 routing-table churn because their direct neighbours change faster than static
@@ -332,16 +343,27 @@ Current implementation state:
 - **Auto-detection of mobile vs static.** Explicit `is_mobile` config flag
   only.
 
-### Tunables
+### Tunables (as implemented)
+
+Final implementation uses the generic peer-liveness penalty system
+(`peer_{suspect,silent,dead}_penalty_q4` in PROTOCOL) rather than
+the dedicated mobile/gateway-transit penalty knobs originally
+proposed. Mobile-as-transit refusal is handled directly in
+`next_hop_selectable` (silent skip).
 
 | Key | Default | Purpose |
 |---|---|---|
-| `layer_id` | 1 | Logical radio/routing layer; on-wire `leaf_id = layer_id & 0x0f` |
+| `layer_id` | 0 | Logical radio/routing layer; on-wire `leaf_id = layer_id & 0x0f` |
 | `is_mobile` | false | Per-node endpoint flag; mutually exclusive with `is_gateway` |
-| `mobile_neighbor_change_threshold` | deferred | Earlier neighbour-shift trigger idea is parked; mobiles now use periodic identity-only BCN |
-| `mobile_change_window_ms` | deferred | Earlier neighbour-shift trigger idea is parked; mobiles now use periodic identity-only BCN |
-| `mobile_route_penalty_db` | 20 | Score penalty when a candidate's next_hop is mobile AND not the destination |
-| `gateway_transit_penalty_db` | 8 | Score penalty when candidate's next_hop is a gateway AND not the destination; reserves gateway airtime budget for cross-layer forwarding |
+| `is_gateway` | false | Per-node gateway flag |
+| `gateway_layers` | `{}` | Per-gateway secondary-layer schedule records (period/duration/offset per record) |
+
+The originally-proposed `mobile_neighbor_change_threshold` /
+`mobile_change_window_ms` / `mobile_route_penalty_db` /
+`gateway_transit_penalty_db` knobs are superseded: the
+periodic-identity BCN mechanism replaces the change-detection
+trigger, and the generic peer-penalty machinery covers transit
+disincentive.
 
 ### Implementation cost estimate
 
@@ -367,7 +389,18 @@ mobility-stable).
 
 ---
 
-## 2a. Lightweight node join and short-address leasing
+## 2a. Lightweight node join and short-address leasing (IMPLEMENTED)
+
+**Status — IMPLEMENTED (model-side).** Full state machine LISTEN →
+DISCOVER → OFFER → CLAIM → GUARD → ADOPT lives in
+`scenarios/dv_dual_sf.lua` with NV-persisted `claim_epoch`,
+real `lease_age_seconds`, addr-conflict recovery (defense +
+tie-break + forced rejoin), and per-observer J-frame rate-limiting.
+Covered by `t46_node_id_split` through `t60_addr_conflict_forced_rejoin`.
+NV semantics, `(layer_id, key_hash32) → node_id` bindings, partition-
+merge recovery, and gateway cross-layer leasing are all functional;
+the C++ port will inherit the same wire formats and state machine.
+The text below preserves the original design rationale.
 
 **Problem.** Scenario JSON currently gives each node its 8-bit mesh address.
 That is useful for simulation control, but unrealistic for firmware. Real
@@ -700,6 +733,11 @@ Other identity paths remain useful:
 
 ### Tunables
 
+Post-audit (`docs/CONFIG_AUDIT.md`), all `join_*` knobs except
+`join_required` are **PROTOCOL constants** in the C++ port — Lua
+tests can override them as an escape hatch, but production firmware
+hardcodes them.
+
 | Key | Default | Purpose |
 |---|---|---|
 | `join_required` | false in legacy scenarios, true in firmware-mode scenarios | Boot without a short node_id and run join |
@@ -763,19 +801,20 @@ when known, `key_hash32`, and reason.
 1. **Done.** Split simulator `name` from protocol `node_id`; allow
    `node_id = null`.
 2. **Done.** Add `public_key`/`key_hash32` simulation identity generation.
-3. **Partial.** Add unjoined node state using temporary id `255`; normal
-   beacon emission is suppressed while unjoined.
-4. **Partial.** Implement `J_DISCOVER`, `J_OFFER`, `J_CLAIM`, `J_DENY`
-   encode/decode, discover jitter, claim epoch, and lease-age fields. J-frame
-   rate limiting is still pending.
-5. **Partial.** Implement `id_bind`, plain-frame refresh policy, BCN
-   `key_hash32`, and basic conflict detection. Post-adoption conflict recovery
-   is still pending.
-6. Add gateway per-layer join state, but keep cross-layer DATA handoff disabled
-   until secondary-layer leases are stable.
-7. Add small join visual scenario: quiet network, dense network, duplicate
-   claim, late partition merge.
-8. Only after join is stable, connect it to layer-2 mobile/gateway scenarios.
+3. **Done.** Unjoined node state using temporary id `255`; normal beacon
+   emission suppressed while unjoined.
+4. **Done.** `J_DISCOVER`, `J_OFFER`, `J_CLAIM`, `J_DENY` encode/decode,
+   discover jitter, claim epoch (NV-persisted), real `lease_age_seconds`,
+   J-frame rate limiting (`join_j_rate_limited`).
+5. **Done.** `id_bind`, plain-frame refresh policy, BCN `key_hash32`,
+   conflict detection (`addr_conflict_observed`), and post-adoption
+   recovery (defense + deterministic tie-break + forced rejoin).
+6. **Done.** Gateway per-layer join uses active layer context; cross-
+   layer DATA handoff (§7.3) with `gateway_remote_bind` is functional
+   including the `Q:HASH_QUERY` deferred-binding-resolution path.
+7. **Done.** `t46`–`t60` cover quiet network, dense network, duplicate
+   claim, prior-id preference, simultaneous-claim race, partition merge.
+8. **Done.** s07/s08 connect join to mobile/gateway scenarios.
 
 **Cross-references.** §2 uses `layer_id` and mobile endpoint behavior; §7.3
 uses the same layer model for gateways; §8.1 provides the cryptographic
@@ -1749,8 +1788,11 @@ Workbench scenarios:
 - `scenarios/s09_two_layer_gateway_debug.json` — acceptance gate.
 - `scenarios/s10_two_layer_gateway_separation.json` — drive
   `(layer_id,node_id)` scoping.
-- `scenarios/s11_three_layer_gateway_stress.json` — exercises gateway
-  picker filtering and schedule defer across three layers.
+- `scenarios/deprecated/s11_three_layer_gateway_stress.json` —
+  exercises gateway picker filtering and schedule defer across three
+  layers. Moved to `deprecated/` because early-flight delivery
+  assertions don't hold under realistic protocol timing
+  (simultaneous join + gateway discovery transient).
 
 **Problem statement.** A gateway node participates in two or more layers (e.g., leaf SF7 + layer-14 SF11). A single LoRa radio can only be tuned to ONE (SF, frequency) at any instant. To support multi-layer gateway participation on consumer-grade hardware (no dual-radio), the protocol needs a time-division scheme — the gateway alternates between layers on a known schedule, and peers consult that schedule to time their interactions.
 
@@ -2334,7 +2376,13 @@ This means multicast naturally pairs with **§3 channel mechanics** (group PSK f
 
 **Cross-references.** §7.1 (unicast DATA shares the encryption + MAC structure), §3 (channels are the primary use case for multicast; both modes used), §10 in PROTOCOL.md (origin-level dedup via `seen_origins` is for unicast — multicast has its own per-destination forwarding dedup), §1 (each multicast frame = one origination at 1st-hop counters), §9 (originator identity in encrypted body; dst_list visible to forwarders for routing).
 
-### 7.6 DATA hop budget + opportunistic rt-learning (per-flight TTL + route-info propagation)
+### 7.6 DATA hop budget + opportunistic rt-learning (per-flight TTL + route-info propagation) (IMPLEMENTED)
+
+**Status — IMPLEMENTED.** Per-flight `hop_budget` (originator initializes
+to `rt[dst].hops + hop_budget_slack`, default 3) and forwarder-side
+`rt_learn_from_data` both live in `scenarios/dv_dual_sf.lua`. Hop-budget
+exhaustion emits `hop_budget_exceeded` and a `NACK_REASON_HOP_BUDGET`
+to the upstream sender; covered by `test/t36_hop_budget_exceeded.json`.
 
 **Problem statement.** The 8-hop rt-merge filter ("Routes with hops > 8 rejected") bounds the rt[]-entry hops field but does NOT enforce an end-to-end ceiling on actual DATA-flight path length. AND: rt[] views drift out of sync between forwarders because BCN propagation is throttled to save airtime — so each forwarder uses a slightly different (often stale) view, and the locally-optimal choices don't compose into the globally-shortest path.
 
@@ -3213,9 +3261,10 @@ maps this directly to `int16_t` with no FPU on Cortex-M.
 - **I/O boundaries**: `meta.snr` (runtime float dB) → `db_to_q4` at
   ingress; all telemetry events / log messages convert back via
   `q4_to_db` so NDJSON stays human-readable dB.
-- **Config knobs keep `_db` suffix** in the JSON scenario format
-  (`peer_dead_penalty_db: 80.0`, etc.) — `on_init` converts to Q4
-  storage. No scenario changes were needed.
+- **PROTOCOL constants store Q4 directly** (e.g.
+  `peer_dead_penalty_q4 = 1280` = 80.0 dB × 16). The `_db` config
+  knobs were removed in §11 step C (audit) — these values are no
+  longer scenario-tunable; see `docs/CONFIG_AUDIT.md`.
 
 Quantization noise: alpha = 0.3 → Q4 5 (=0.3125), a 4% relative
 error in EWMA weight. Penalty / threshold constants are integer dB,
