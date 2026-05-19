@@ -965,6 +965,26 @@ PROTOCOL = {
   originator_priority_max_per_window = 5,
   originator_priority_window_ms      = 3600000,  -- 1 h
 
+  -- ---- Channel gossip (ROADMAP §3) ----
+  -- Shared FIFO across all subscribed channels — no per-channel quota.
+  -- 128 entries × ~200 B avg ≈ 25 KB total buffer; fits comfortably on
+  -- nRF52840's 256 KB RAM.
+  cap_channel_buffer            = 128,
+  channel_msg_max_payload_bytes = 200,
+  -- BCN extension TLV body cap is 15 bytes (4-bit length field). With
+  -- 1-byte count + 4-byte IDs that's max 3 IDs per BCN digest.
+  channel_dirty_max_per_bcn     = 3,
+  -- Pull rate-limit: ignore same-ID pull requests within this window
+  -- (avoids requesting from multiple neighbours simultaneously).
+  channel_pull_window_ms        = 5000,
+  -- Random delay before sending a scheduled pull. If we overhear someone
+  -- else's pull-response carrying the same ID before this expires, we
+  -- cancel our own (the promiscuous-reception piggyback).
+  channel_pull_jitter_ms        = 500,
+  -- Per-BCN-cycle cap on pulls scheduled at this node (prevents pull
+  -- storms when a new joiner sees many missing IDs in neighbour digests).
+  cap_channel_pulls_per_bcn_cycle = 3,
+
   -- ---- Cascade-requeue (Phase C) ----
   cascade_requeue_max            = 3,
   cascade_requeue_base_ms        = 5000,
@@ -1061,6 +1081,12 @@ local BCN_N_ENTRIES_MASK    = 0x3f
 local BCN_SEEN_BITMAP_BYTES = 32
 local BCN_EXT_TYPE_SUSPECT_NODES = 1
 local BCN_EXT_TYPE_LIVENESS_STATE = 2
+-- ROADMAP §3 gossip channels: dirty-bit list of recent channel message IDs.
+-- TLV length is 4-bit so body ≤ 15 bytes. Body layout: count(1B) + ID(4B) × N.
+-- That gives 1 + 3×4 = 13 ≤ 15 → cap at 3 IDs per BCN. Multi-TLV (multiple
+-- digest extensions in same BCN) is a future enhancement if propagation
+-- needs more headroom; for v1 the lazy convergence model is fine with 3.
+BCN_EXT_TYPE_CHANNEL_DIGEST = 3   -- global to stay under 200-locals limit
 local PEER_LEVEL_SUSPECT = 1
 local PEER_LEVEL_SILENT  = 2
 local PEER_LEVEL_DEAD    = 3
@@ -1229,6 +1255,34 @@ local function build_suspect_nodes_ext(node)
          #records
 end
 
+-- ROADMAP §3 channel digest TLV.
+-- Picks up to channel_dirty_max_per_bcn dirty IDs (most-recently-received
+-- first) and emits ONE TLV: count(1B) + ID(4B) × N. Body ≤ 13 bytes
+-- (1 + 3×4) which fits the 4-bit length field. Returns (tlv_bytes, count)
+-- or (nil, 0) when no dirty IDs to advertise.
+function build_channel_digest_ext(node)
+  if not node.channel_buffer or #node.channel_buffer == 0 then return nil, 0 end
+  local max_ids = math.min(node.channel_dirty_max_per_bcn or 3, 3)
+  if max_ids <= 0 then return nil, 0 end
+  -- Walk buffer newest-first (we appended chronologically, so the tail is
+  -- newest). Collect up to max_ids entries with `dirty == true`.
+  local picked = {}
+  for i = #node.channel_buffer, 1, -1 do
+    local e = node.channel_buffer[i]
+    if e.dirty then
+      table.insert(picked, e.id)
+      if #picked >= max_ids then break end
+    end
+  end
+  if #picked == 0 then return nil, 0 end
+  local body = string.char(#picked & 0xff)
+  for _, id in ipairs(picked) do
+    body = body .. channel_msg_id_to_bytes(id)
+  end
+  return string.char((BCN_EXT_TYPE_CHANNEL_DIGEST << 4) | (#body & 0x0f)) .. body,
+         #picked
+end
+
 local function pack_beacon_byte1(node)
   local leaf_id = node.active_leaf_id or node.leaf_id
   local b = (leaf_id & 0xf) << 4
@@ -1306,6 +1360,12 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   local ext_payload, suspect_bits = nil, 0
   if not node.is_mobile then
     ext_payload, suspect_bits = build_suspect_nodes_ext(node)
+  end
+  -- ROADMAP §3: append channel digest as an additional TLV in the ext
+  -- block. Multiple TLVs are supported by the parser already.
+  local channel_digest_tlv, channel_dirty_n = build_channel_digest_ext(node)
+  if channel_digest_tlv then
+    ext_payload = (ext_payload or "") .. channel_digest_tlv
   end
   local header = "B"
                  .. string.char(byte1)
@@ -1499,6 +1559,18 @@ local function parse_beacon(frame)
           })
           i = i + 2
         end
+      elseif typ == BCN_EXT_TYPE_CHANNEL_DIGEST then
+        -- ROADMAP §3: count(1B) + ID(4B) × N. count must match (len - 1)/4.
+        if len < 1 then return nil end
+        local count = frame:byte(pos) & 0xff
+        if len ~= 1 + count * 4 then return nil end
+        out.channel_digest_ids = out.channel_digest_ids or {}
+        local i = 0
+        while i < count do
+          local id = channel_msg_id_from_bytes(frame, pos + 1 + i * 4)
+          table.insert(out.channel_digest_ids, id)
+          i = i + 1
+        end
       end
       pos = pos + len
     end
@@ -1656,9 +1728,42 @@ end
 --     LAYOUT stays unchanged — only encryption gets enabled.
 -- DATA wire-level E2E flag bits (byte 1 of the DATA frame, bits 2-3).
 -- These replaced the old inner-payload origin header flags in §7.0.1.
-local DATA_FLAG_E2E_ACK_REQ = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)
-local DATA_FLAG_E2E_IS_ACK  = 0x04   -- bit 2 of byte 1 (E2E_IS_ACK)
-local DATA_FLAG_PRIORITY    = 0x02   -- bit 1 of byte 1 (PRIORITY — urgency; was IS_MULTICAST before §3 redesign)
+local DATA_FLAG_E2E_ACK_REQ    = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)
+local DATA_FLAG_E2E_IS_ACK     = 0x04   -- bit 2 of byte 1 (E2E_IS_ACK)
+local DATA_FLAG_PRIORITY       = 0x02   -- bit 1 of byte 1 (PRIORITY — urgency; was IS_MULTICAST before §3 redesign)
+DATA_FLAG_PAYLOAD_TYPE_M = 0x01   -- bit 0 of byte 1 (channel gossip msg; §3.4.1 layout)
+
+-- ROADMAP §3 channel flavor byte (inside the M payload). Globals to
+-- stay under the 200-locals-per-main-function limit.
+CHANNEL_FLAVOR_PUBLIC  = 0   -- plaintext body
+CHANNEL_FLAVOR_GROUP   = 1   -- ChaCha20 + MAC (crypto layered later)
+CHANNEL_FLAVOR_PRIVATE = 2   -- ChaCha20 + Ed25519 (crypto layered later)
+
+-- Global channel message ID layout (4 bytes, big-endian):
+--   bits 31..24 : origin node_id (8 bits)
+--   bits 23..8  : key_hash32 low 16 bits (mitigates id-recycle collisions)
+--   bits  7..0  : ctr low 8 bits
+-- See ROADMAP §3 "Message ID format" + weak-spot #3 for collision-risk
+-- analysis. Acceptable for real-world network lifetimes.
+function channel_msg_id(origin_id, key_hash32, ctr)
+  return (((origin_id or 0) & 0xff)     << 24)
+       | ((((key_hash32 or 0) & 0xffff)) << 8)
+       | ((ctr or 0) & 0xff)
+end
+
+function channel_msg_id_to_bytes(id)
+  return string.char((id >> 24) & 0xff)
+       .. string.char((id >> 16) & 0xff)
+       .. string.char((id >>  8) & 0xff)
+       .. string.char( id        & 0xff)
+end
+
+function channel_msg_id_from_bytes(s, off)
+  return ((s:byte(off    ) & 0xff) << 24)
+       | ((s:byte(off + 1) & 0xff) << 16)
+       | ((s:byte(off + 2) & 0xff) <<  8)
+       |  (s:byte(off + 3) & 0xff)
+end
 local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
 local GW_ENV_MAGIC = "\31G1"         -- gateway DATA envelope v1: magic + layer + key_hash32 + body
 
@@ -1751,9 +1856,14 @@ local function parse_nack(frame)
   return out
 end
 
-local Q_OP_ROUTE_QUERY = 0
-local Q_OP_REQ_SYNC    = 1
-Q_OP_HASH_QUERY  = 2
+local Q_OP_ROUTE_QUERY  = 0
+local Q_OP_REQ_SYNC     = 1
+Q_OP_HASH_QUERY         = 2
+-- ROADMAP §3 channel gossip pull. Body: count(1B) + ID(4B) × N. Sent
+-- unicast (Q `dest` = target neighbour we want to pull from). The 2-bit
+-- opcode field is now exhausted; future Q opcodes will need a sub-code
+-- escape inside the body.
+Q_OP_CHANNEL_PULL = 3   -- global (200-locals limit)
 -- Opcode 3 is reserved for a future full-public-key query; v1 has no
 -- full-key payload yet.
 local Q_FLAG_MOBILE    = 0x04
@@ -1804,6 +1914,16 @@ function pack_q_hash_response(leaf_id, src, resolved_node_id, key_hash32, reques
          .. q_pack_u32_le(key_hash32 or 0)
 end
 
+-- ROADMAP §3 channel-pull request. Frame: 4-byte Q header + count(1B) + ID(4B) × N.
+-- dest = node we want to pull from (unicast). ids is a Lua array of 32-bit IDs.
+function pack_q_channel_pull(leaf_id, src, target, ids, requester_is_mobile)
+  local body = string.char(#ids & 0xff)
+  for _, id in ipairs(ids) do
+    body = body .. channel_msg_id_to_bytes(id)
+  end
+  return pack_q(leaf_id, src, target, Q_OP_CHANNEL_PULL, requester_is_mobile) .. body
+end
+
 local function parse_q(frame)
   if #frame < 4 or frame:sub(1,1) ~= "Q" then return nil end
   local flags = frame:byte(4) & 0x0f
@@ -1817,6 +1937,14 @@ local function parse_q(frame)
   if out.opcode == Q_OP_HASH_QUERY then
     if #frame < 8 then return nil end
     out.key_hash32 = q_parse_u32_le(frame, 5)
+  elseif out.opcode == Q_OP_CHANNEL_PULL then
+    if #frame < 5 then return nil end
+    local count = frame:byte(5) & 0xff
+    if #frame < 5 + count * 4 then return nil end
+    out.channel_ids = {}
+    for i = 0, count - 1 do
+      table.insert(out.channel_ids, channel_msg_id_from_bytes(frame, 6 + i * 4))
+    end
   end
   return out
 end
@@ -2104,7 +2232,7 @@ local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
   --   committed: committed_hops (4 bits, 0-15); default 0
   --   prev_fwd_rt_hops: previous fwd's claim of dst's hops (8 bits); default 0
   local addr_len = 0                                      -- in-leaf only this phase
-  local byte1 = ((addr_len & 0x7) << 5) | (flags & 0x0e) -- flags: bits 1-3 only
+  local byte1 = ((addr_len & 0x7) << 5) | (flags & 0x0f) -- flags: bits 0-3 (PAYLOAD_TYPE_M, PRIORITY, E2E_IS_ACK, E2E_ACK_REQ)
   local hb = hop_budget or {}
   local hb_remaining = math.min(15, math.max(0, hb.remaining or 15))
   local hb_committed = math.min(15, math.max(0, hb.committed or 0))
@@ -2129,7 +2257,7 @@ local function parse_data(frame)
   local b1 = frame:byte(2)
   local addr_len = (b1 >> 5) & 0x07
   if addr_len ~= 0 then return nil end        -- hierarchy deferred
-  local flags    = b1 & 0x0e                  -- bits 1-3
+  local flags    = b1 & 0x0f                  -- bits 0-3 (PAYLOAD_TYPE_M, PRIORITY, E2E_IS_ACK, E2E_ACK_REQ)
   local next_hop = frame:byte(3)
   local dst      = frame:byte(4)
   local hop_budget_byte   = frame:byte(5)
@@ -2143,28 +2271,43 @@ local function parse_data(frame)
   local inner_end = #frame - MAC_LEN
   if inner_end < 9 then return nil end
   local inner    = frame:sub(9, inner_end)
-  if #inner < 2 then return nil end           -- need src_addr_len + src_addr
-  local src_addr_len = inner:byte(1)
-  if src_addr_len ~= 0 then return nil end    -- flat addresses only this phase
-  local origin   = inner:byte(2)
-  local body     = inner:sub(3)
-  return {
+
+  local out = {
     flags         = flags,
     e2e_ack_req   = (flags & DATA_FLAG_E2E_ACK_REQ) ~= 0,
     e2e_is_ack    = (flags & DATA_FLAG_E2E_IS_ACK) ~= 0,
     priority      = (flags & DATA_FLAG_PRIORITY) ~= 0,
+    payload_type_m = (flags & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0,
     next          = next_hop,
     dst           = dst,
     hop_remaining = hb_remaining,
     hop_committed = hb_committed,
     prev_fwd_rt_hops = prev_fwd_rt_hops,
     ctr           = ctr,
-    ctr_lo        = ctr & 0xf,               -- low nibble for hop-level match
-    origin        = origin,
-    body          = body,
-    -- 'inner' kept for verbatim relay by forwarders
+    ctr_lo        = ctr & 0xf,
     inner         = inner,
   }
+
+  -- ROADMAP §3 M-payload inner layout: id(4B) + channel_id(1B) + flavor(1B) + body(N)
+  if out.payload_type_m then
+    if #inner < 6 then return nil end
+    out.channel_msg_id  = channel_msg_id_from_bytes(inner, 1)
+    out.channel_id      = inner:byte(5)
+    out.channel_flavor  = inner:byte(6)
+    out.body            = inner:sub(7)
+    -- M frames don't carry an `origin` field — that's encoded inside the
+    -- channel_msg_id (high 8 bits = origin node_id).
+    out.origin          = (out.channel_msg_id >> 24) & 0xff
+    return out
+  end
+
+  -- Normal DATA inner: src_addr_len(1) + src_addr(1) + body
+  if #inner < 2 then return nil end
+  local src_addr_len = inner:byte(1)
+  if src_addr_len ~= 0 then return nil end    -- flat addresses only this phase
+  out.origin = inner:byte(2)
+  out.body   = inner:sub(3)
+  return out
 end
 
 -- ---------- airtime + retry plumbing ----------------------------------------
@@ -2567,6 +2710,161 @@ function check_peer_priority_budget(self, sender_id, now)
   return n < cap, n
 end
 
+-- ============================================================================
+-- Channel-buffer helpers (ROADMAP §3 gossip channels)
+--
+-- Shared FIFO ring across all subscribed channels (Principle 2 — no channel
+-- gets dedicated bandwidth based on subscription count). Entries are appended
+-- chronologically; on overflow we prefer evicting entries whose `seen_by`
+-- covers all current direct neighbours (safely propagated), falling back to
+-- absolute-oldest if no such entry exists.
+--
+-- Global functions to stay below Lua's 200-locals-per-main-chunk limit.
+-- ============================================================================
+
+function channel_buffer_find(self, id)
+  if not self.channel_buffer then return nil, nil end
+  for i, e in ipairs(self.channel_buffer) do
+    if e.id == id then return e, i end
+  end
+  return nil, nil
+end
+
+function channel_buffer_mark_seen_by(self, id, neighbour_id)
+  local e = channel_buffer_find(self, id)
+  if e == nil or neighbour_id == nil then return false end
+  e.seen_by = e.seen_by or {}
+  if not e.seen_by[neighbour_id] then
+    e.seen_by[neighbour_id] = true
+    return true
+  end
+  return false
+end
+
+-- Pick the oldest entry whose seen_by covers all live direct neighbours.
+-- Falls back to the absolute-oldest. Returns (index, "safe" | "fallback").
+function channel_buffer_pick_eviction(self)
+  if not self.channel_buffer or #self.channel_buffer == 0 then return nil, nil end
+  -- Determine "current direct neighbours" = nodes in rt with hops==1.
+  -- Empty set → "safe" rule trivially satisfied; just evict the oldest.
+  local neighbours = {}
+  if self.rt then
+    for dest_id, entry in pairs(self.rt) do
+      local c = entry.candidates and entry.candidates[1]
+      if c and c.hops == 1 then table.insert(neighbours, dest_id) end
+    end
+  end
+  if #neighbours == 0 then
+    return 1, "fallback"   -- no neighbours observed yet
+  end
+  for i, e in ipairs(self.channel_buffer) do
+    local all_seen = true
+    for _, nbr in ipairs(neighbours) do
+      if not (e.seen_by and e.seen_by[nbr]) then all_seen = false; break end
+    end
+    if all_seen then return i, "safe" end
+  end
+  return 1, "fallback"
+end
+
+-- Add a new entry to the channel buffer. If at cap, evict oldest first.
+-- Returns (added, evicted_entry_or_nil).
+function channel_buffer_add(self, entry)
+  self.channel_buffer = self.channel_buffer or {}
+  local cap = self.cap_channel_buffer or 128
+  local evicted = nil
+  if #self.channel_buffer >= cap then
+    local idx, mode = channel_buffer_pick_eviction(self)
+    if idx ~= nil then
+      evicted = table.remove(self.channel_buffer, idx)
+      self:emit("channel_msg_evicted", {
+        id = evicted.id,
+        channel_id = evicted.channel_id,
+        seen_by_all_neighbours = (mode == "safe"),
+        cap = cap,
+      })
+      self:emit("table_cap_hit", {
+        table = "channel_buffer", size = cap, cap = cap, action = "evict",
+        evicted_id = evicted.id, mode = mode,
+      })
+    end
+  end
+  table.insert(self.channel_buffer, entry)
+  return true, evicted
+end
+
+-- ROADMAP §3 BCN digest -> Q_CHANNEL_PULL scheduler.
+-- Called from on_recv 'B' when the beacon carried a CHANNEL_DIGEST TLV.
+-- For each ID in the digest:
+--   - If we already have it: mark seen_by[bcn_sender] (lets us evict it
+--     once everyone we can reach has it).
+--   - Else: schedule a Q_CHANNEL_PULL to bcn_sender after a random jitter,
+--     unless we recently pulled the same ID or we've already scheduled
+--     cap_channel_pulls_per_bcn_cycle pulls for this BCN.
+-- Pending pulls are cancellable via channel_pull_pending[id] = nil — set
+-- when an M-payload DATA frame promiscuously delivers the ID before our
+-- jitter fires.
+function process_channel_digest(self, b)
+  if not b or not b.channel_digest_ids then return end
+  local now = self:now()
+  local pull_cap = self.cap_channel_pulls_per_bcn_cycle or 3
+  local scheduled = 0
+  for _, id in ipairs(b.channel_digest_ids) do
+    local existing = channel_buffer_find(self, id)
+    if existing ~= nil then
+      if channel_buffer_mark_seen_by(self, id, b.src) and debug_emit_allowed(self) then
+        self:emit("channel_msg_seen_by_neighbour", {
+          id = id, channel_id = existing.channel_id, neighbour = b.src,
+        })
+      end
+    elseif scheduled < pull_cap then
+      local recent = self.channel_pull_recent and self.channel_pull_recent[id]
+      local window = self.channel_pull_window_ms or 5000
+      if recent == nil or (now - recent) >= window then
+        local jitter = self:rand(0, (self.channel_pull_jitter_ms or 500) + 1)
+        self.channel_pull_pending = self.channel_pull_pending or {}
+        self.channel_pull_pending[id] = { target = b.src, scheduled_at = now }
+        scheduled = scheduled + 1
+        local target = b.src
+        self:after(jitter, function()
+          local pending = self.channel_pull_pending and self.channel_pull_pending[id]
+          if pending == nil then return end
+          -- Re-check: did the message arrive via promiscuous overhear?
+          if channel_buffer_find(self, id) ~= nil then
+            self.channel_pull_pending[id] = nil
+            self:emit("channel_pull_suppressed", {
+              ids = {id}, overheard_from = "promiscuous_receive",
+            })
+            return
+          end
+          -- Inline lookups: process_channel_digest is defined earlier
+          -- in the chunk than `active_leaf_id`/`active_routing_sf` (both
+          -- `local function` and not yet in scope at parse time), so we
+          -- can't call them by name from this closure.
+          local q_leaf_id = self.active_leaf_id or self.leaf_id
+          local q_routing_sf = (self.gateway_layer_by_id
+                                and self.gateway_layer_by_id[self.active_layer_id]
+                                and self.gateway_layer_by_id[self.active_layer_id].routing_sf)
+                               or self.routing_sf
+          local frame = pack_q_channel_pull(q_leaf_id, self.id, target,
+                                             {id}, self.is_mobile == true)
+          tx_initiating(self, frame, {
+            sf    = q_routing_sf,
+            label = "Q",
+            info  = string.format("channel_pull target=%d id=0x%08x", target, id),
+          })
+          self:emit("channel_pull_sent", {
+            to = target, ids = {id}, trigger = "bcn_digest",
+          })
+          self.channel_pull_recent = self.channel_pull_recent or {}
+          self.channel_pull_recent[id] = self:now()
+          self.channel_pull_pending[id] = nil
+        end)
+      end
+    end
+  end
+end
+
 function record_peer_priority_observation(self, sender_id, now)
   if not self.peer_priority_observations then self.peer_priority_observations = {} end
   local obs = self.peer_priority_observations[sender_id]
@@ -2722,7 +3020,7 @@ end
 -- Optional `after_tx` fires the instant the bytes are handed to the radio
 -- — RTS callers use this to start rts_timeout from the *actual* TX time,
 -- otherwise the timer can fire mid-defer and burn a retry for nothing.
-local function tx_initiating(self, bytes, opts, after_tx)
+function tx_initiating(self, bytes, opts, after_tx)   -- global (referenced by process_channel_digest, defined earlier in chunk)
   local label = opts.label or ""
   if self.join_required and not self.joined and label ~= "J" then
     self:emit("tx_unjoined_blocked", {
@@ -6814,6 +7112,17 @@ function on_init(self, config)
   -- DATA_FLAG_PRIORITY set over non-priority items at any given
   -- requeue_count. No separate queue needed; ordering is purely
   -- comparator-based.
+
+  -- ROADMAP §3 channel gossip state. Shared FIFO across all channels;
+  -- entry shape: {id, channel_id, flavor, payload, received_at,
+  -- seen_by (table keyed by neighbour node_id), dirty (bool)}.
+  self.channel_buffer        = {}
+  -- Pull rate-limit: per-ID timestamp of most recent pull from us.
+  self.channel_pull_recent   = {}
+  -- Pull-pending: id -> {at, target_node_id} for pulls awaiting jitter
+  -- expiry. If we overhear an M-response carrying the id before `at`
+  -- fires, the entry is dropped (channel_pull_suppressed).
+  self.channel_pull_pending  = {}
   -- Proactive tier-aware routing: route_strictly_better applies a
   -- dynamic score penalty on top of raw SNR margin. The penalty scales
   -- with the peer's known budget tier and with how many viable
@@ -7721,7 +8030,10 @@ function on_recv(self, frame, meta)
       seen_bits = b.seen_bits or 0,
       suspect_nodes = b.suspect_nodes and #b.suspect_nodes or 0,
       liveness_states = b.liveness_states and #b.liveness_states or 0,
+      channel_digest_ids = b.channel_digest_ids and #b.channel_digest_ids or 0,
     })
+    -- ROADMAP §3 channel gossip: react to CHANNEL_DIGEST TLV if present.
+    process_channel_digest(self, b)
     if b.seen_bitmap then
       local seen_n, refreshed_n = apply_seen_bitmap(self, b.seen_bitmap, "bitmap", b.src)
       self:emit("seen_bitmap_rx", {
@@ -8904,6 +9216,73 @@ function on_recv(self, frame, meta)
       end
     end
 
+    -- ROADMAP §3: M-payload (channel gossip) takes a separate path —
+    -- promiscuous merge regardless of `to=`, hop-ACK only when addressed,
+    -- and NO forwarding (channels propagate via gossip, not routing).
+    if d.payload_type_m then
+      local id = d.channel_msg_id
+      local existing = channel_buffer_find(self, id)
+      if existing == nil then
+        local entry = {
+          id          = id,
+          channel_id  = d.channel_id,
+          flavor      = d.channel_flavor,
+          payload     = d.body,
+          received_at = self:now(),
+          seen_by     = { [meta.src] = true },
+          dirty       = true,
+          origin      = d.origin,
+        }
+        channel_buffer_add(self, entry)
+        local source_label = (d.next == self.id) and "pull_target" or "overheard"
+        self:emit("channel_msg_received", {
+          id = id, channel_id = d.channel_id, flavor = d.channel_flavor,
+          source = source_label, from = meta.src,
+          buffer_depth = #self.channel_buffer,
+        })
+        if source_label == "overheard" then
+          self:emit("channel_msg_overheard", {
+            id = id, channel_id = d.channel_id,
+            from = meta.src, intended_to = d.next,
+          })
+        end
+        -- Cancel any pending pull for this id (promiscuous piggyback)
+        if self.channel_pull_pending and self.channel_pull_pending[id] then
+          self.channel_pull_pending[id] = nil
+          self:emit("channel_pull_suppressed", {
+            ids = {id}, overheard_from = meta.src,
+          })
+        end
+      else
+        channel_buffer_mark_seen_by(self, id, meta.src)
+      end
+
+      -- Hop-level ACK only when addressed to us. Overhearers stop here.
+      if d.next ~= self.id then return end
+      if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
+      local ack_control_sf = active_routing_sf(self)
+      local my_budget_tier = compute_budget_tier(self)
+      local ack_budget_hint = my_budget_tier
+      if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
+      local ack = pack_ack(d.ctr_lo, meta_snr_q4, ack_budget_hint, meta.src)
+      self:emit("ack_tx", {
+        origin = self.id, payload = "[CH_M]", ctr = d.ctr,
+        to = meta.src, ctr_lo = d.ctr_lo, data_snr = meta.snr,
+        budget_tier = my_budget_tier, budget_hint = ack_budget_hint,
+        duplicate = false, payload_type = "M",
+      })
+      tx_with_retry(self, ack, {
+        sf    = ack_control_sf, label = "ACK",
+        info  = string.format("to=%s msg=%d M-ack",
+                              name_of(self, meta.src), d.ctr_lo),
+      })
+      self.pending_rx = nil
+      self:after(self.ack_air_ms + 1, function()
+        become_free(self)
+      end)
+      return
+    end
+
     if d.next ~= self.id then return end
     if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
 
@@ -9461,6 +9840,62 @@ function on_recv(self, frame, meta)
       return
     end
 
+    -- ROADMAP §3: channel-pull request. We respond with PAYLOAD_TYPE_M
+    -- DATA frames for each requested ID we have. Pull responses are
+    -- enqueued in tx_queue at the LOWEST priority (channel gossip is
+    -- subordinate to DM + priority + routing traffic per PRINCIPLES.md
+    -- principle 1). Non-target nodes that overhear the response merge
+    -- the message into their own buffer (promiscuous reception).
+    if q.opcode == Q_OP_CHANNEL_PULL then
+      local have_ids = {}
+      local missing_ids = {}
+      for _, id in ipairs(q.channel_ids or {}) do
+        local entry = channel_buffer_find(self, id)
+        if entry ~= nil then
+          table.insert(have_ids, id)
+          -- Build M-payload-type DATA frame body. Inner layout is:
+          --   id(4B) | channel_id(1B) | flavor(1B) | body(N) | mac(4B placeholder)
+          local m_inner = channel_msg_id_to_bytes(id)
+                        .. string.char(entry.channel_id & 0xff)
+                        .. string.char(entry.flavor & 0xff)
+                        .. (entry.payload or "")
+          local return_ctr = self:next_ctr(q.src)
+          table.insert(self.tx_queue, {
+            origin       = self.id,
+            dst_id       = q.src,
+            dst_name     = name_of(self, q.src),
+            payload      = m_inner,
+            user_text    = string.format("[CH_M ch=%d id=0x%08x]",
+                                          entry.channel_id, id),
+            ctr          = return_ctr,
+            flags        = DATA_FLAG_PAYLOAD_TYPE_M,
+            enqueue_time_ms = self:now(),
+            requeue_count   = 0,
+            next_attempt_ms = 0,
+          })
+          -- Mark requester as having received it (will be confirmed once
+          -- the M-frame is ACK'd, but we record optimistically).
+          channel_buffer_mark_seen_by(self, id, q.src)
+        else
+          table.insert(missing_ids, id)
+        end
+      end
+      self:emit("channel_pull_received", {
+        from = q.src,
+        ids = q.channel_ids or {},
+      })
+      if #have_ids > 0 then
+        self:emit("channel_msg_pulled", {
+          to = q.src, ids = have_ids, missing = missing_ids,
+        })
+        self:log(string.format(
+          "channel_pull_received from=%s n_requested=%d n_have=%d n_missing=%d",
+          name_of(self, q.src), #(q.channel_ids or {}), #have_ids, #missing_ids))
+        become_free(self)
+      end
+      return
+    end
+
     if q.opcode ~= Q_OP_ROUTE_QUERY then
       self:log(string.format(
         "q_rx <- %s unknown opcode=%d; silent",
@@ -9670,6 +10105,53 @@ function on_command(self, cmd_str)
     become_free(self)
     return string.format("queued gateway-send (depth=%d, ctr=%d)",
       #self.tx_queue, ctr)
+  end
+
+  -- ROADMAP §3 channel send: send_channel <channel_id> <text>
+  -- Originator adds entry to channel_buffer with dirty=true; next BCN
+  -- advertises the ID via channel_digest_ext; neighbours pull on demand.
+  local ch_id_s, ch_text = cmd_str:match("^send_channel (%S+) (.+)$")
+  if ch_id_s then
+    local ch_id = tonumber(ch_id_s)
+    if ch_id == nil or ch_id < 0 or ch_id > 255 then
+      return "ERROR: usage: send_channel <channel_id 0-255> <text>"
+    end
+    if #ch_text > (self.channel_msg_max_payload_bytes or 200) then
+      self:emit("channel_send_oversized", {
+        channel_id = ch_id, len = #ch_text,
+        max = self.channel_msg_max_payload_bytes,
+      })
+      return string.format("ERROR: channel payload too large (%d > max %d bytes)",
+                           #ch_text, self.channel_msg_max_payload_bytes)
+    end
+    -- Build entry. Use our own next_ctr against ourselves as the
+    -- per-origin ctr (cheap unique counter); only the low 8 bits go
+    -- into the ID, so reuse after 256 messages on the same channel
+    -- is collision-resolvable via received_at deduplication.
+    local local_ctr = self:next_ctr(self.id)
+    local id = channel_msg_id(self.id, self.key_hash32 or 0, local_ctr)
+    -- Public flavor for v1 — group/private crypto comes later.
+    local entry = {
+      id           = id,
+      channel_id   = ch_id,
+      flavor       = CHANNEL_FLAVOR_PUBLIC,
+      payload      = ch_text,
+      received_at  = self:now(),
+      seen_by      = {},
+      dirty        = true,
+      origin       = self.id,
+    }
+    local added, evicted = channel_buffer_add(self, entry)
+    self:emit("channel_msg_received", {
+      id = id, channel_id = ch_id, flavor = CHANNEL_FLAVOR_PUBLIC,
+      source = "self_originate",
+      payload = ch_text,
+      buffer_depth = #self.channel_buffer,
+    })
+    self:log(string.format("send_channel: ch=%d id=0x%08x payload=%q (buffer=%d)",
+      ch_id, id, ch_text, #self.channel_buffer))
+    return string.format("channel msg queued (ch=%d, id=0x%08x, buffer=%d)",
+                         ch_id, id, #self.channel_buffer)
   end
 
   -- Priority variants tried first (most specific match wins):
