@@ -786,6 +786,86 @@ def test_channel_gossip_empty_run_is_silent():
         assert r["n_originated"] == 0
         assert r["total_received"] == 0
         assert r["leaks"] == []
+        assert r["slowest"]["id"] is None
+        assert r["peak_pull_burst"]["count"] == 0
+        assert r["first_eviction_ms"] is None
+        assert r["first_leak_ms"] is None
+        analyze.print_section_channel_gossip(r)   # must not crash
+    finally:
+        os.unlink(path)
+
+
+def test_channel_gossip_investigation_windows():
+    """Slowest-propagation, pull-burst, eviction and leak timestamps
+       must surface as concrete `investigation_windows` jump-points so
+       the operator knows where in the run to look."""
+    cfg = {
+        "nodes": [
+            {"name": "L1a", "config": {"layer_id": 1}},
+            {"name": "L1b", "config": {"layer_id": 1}},
+            {"name": "L1c", "config": {"layer_id": 1}},
+            {"name": "L2a", "config": {"layer_id": 2}},  # leak target
+        ]
+    }
+    events = [
+        # msg 100: fast propagation (Δ 200 ms).
+        _emit(0, 1000, "channel_msg_received",
+              id=100, channel_id=7, flavor=0, source="self_originate",
+              buffer_depth=1),
+        _emit(1, 1200, "channel_msg_received",
+              id=100, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=1),
+        # msg 200: slow (Δ 60 s) — should be the slowest.
+        _emit(0, 5000, "channel_msg_received",
+              id=200, channel_id=7, flavor=0, source="self_originate",
+              buffer_depth=2),
+        _emit(1, 6000, "channel_msg_received",
+              id=200, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=2),
+        _emit(2, 65000, "channel_msg_received",
+              id=200, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=2),
+        # Pull burst: 5 pulls bunched at t=10000-10500 (peak window).
+        _emit(1, 9000, "channel_pull_sent", to=0, ids=[100]),
+        _emit(1, 10000, "channel_pull_sent", to=0, ids=[200]),
+        _emit(2, 10100, "channel_pull_sent", to=0, ids=[200]),
+        _emit(2, 10200, "channel_pull_sent", to=0, ids=[100]),
+        _emit(1, 10400, "channel_pull_sent", to=0, ids=[200]),
+        _emit(2, 10500, "channel_pull_sent", to=0, ids=[200]),
+        # Eviction at t=12000.
+        _emit(0, 12000, "channel_msg_evicted", id=42, reason="cap_hit"),
+        # Cross-layer leak: L2a receives msg 200 at t=70000.
+        _emit(3, 70000, "channel_msg_received",
+              id=200, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=1),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_channel_gossip(path, cfg)
+
+        # Slowest: msg 200, origin t=5000, last hop t=70000 (the leaked one).
+        sl = r["slowest"]
+        assert sl["id"] == 200, sl
+        assert sl["origin_t"] == 5000
+        assert sl["last_recipient_t"] == 70000
+        assert sl["delay_ms"] == 65000
+
+        # Peak pull burst: the 5 pulls clustered at 10000-10500 should
+        # dominate the lone pull at 9000. Window is 5 s long; the densest
+        # 5-s slice should hold 6 pulls (9000-13999 covers all 6, or
+        # 10000-14999 covers 5). Window detection picks the slice ending
+        # at the latest matched ts.
+        pb = r["peak_pull_burst"]
+        assert pb["count"] >= 5, pb
+
+        # First eviction surfaces at 12000 ms.
+        assert r["first_eviction_ms"] == 12000
+        assert r["last_eviction_ms"] == 12000
+
+        # P11 leak: L2a (layer 2) received from origin in layer 1 at t=70000.
+        assert r["first_leak_ms"] == 70000
+        assert r["last_leak_ms"] == 70000
+
         analyze.print_section_channel_gossip(r)   # must not crash
     finally:
         os.unlink(path)

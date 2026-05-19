@@ -3933,6 +3933,13 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
     evicted_events = 0
     oversized_events = 0
 
+    # Time-stamp streams retained for the investigation-windows block:
+    # they let print_section_channel_gossip surface concrete jump-points
+    # ("look at t=2:34.5 — 12x pull burst") instead of just aggregate counts.
+    pull_sent_ts: list[int] = []
+    evicted_ts: list[int] = []
+    oversized_ts: list[int] = []
+
     for e in iter_events(events_path, since_ms):
         if e.get("type") != "script_emit":
             continue
@@ -3962,6 +3969,7 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
             pulls_sent += 1
             ids = d.get("ids") or []
             pulls_sent_ids += len(ids)
+            pull_sent_ts.append(t)
         elif et == "channel_pull_received":
             pulls_received += 1
             ids = d.get("ids") or []
@@ -3976,8 +3984,10 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
             seen_by_neighbour += 1
         elif et == "channel_msg_evicted":
             evicted_events += 1
+            evicted_ts.append(t)
         elif et == "channel_send_oversized":
             oversized_events += 1
+            oversized_ts.append(t)
 
     # Derived per-message metrics.
     coverages: list[int] = []
@@ -3986,18 +3996,43 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
     msgs_by_origin_layer: Counter = Counter()
     received_by_layer_pair: Counter = Counter()  # (origin_layer, recv_layer) -> count
 
+    # Track the slowest-converging message and the timestamp of the first
+    # cross-layer leak — both feed the investigation-windows block.
+    slowest = {"id": None, "origin_t": 0, "last_recipient_t": 0,
+               "delay_ms": 0, "origin_node": None, "channel_id": 0,
+               "n_recipients": 0}
+    leak_ts_first: int | None = None
+    leak_ts_last: int | None = None
+
     for mid, ot in origin_t.items():
         rec = receivers.get(mid, {})
         coverages.append(len(rec))
         ol = layer_of.get(origin_node.get(mid, -1), 0)
         msgs_by_origin_layer[ol] += 1
         leaked_to_layers: set[int] = set()
+        max_rt = ot
         for rn, (rt, _src) in rec.items():
             rl = layer_of.get(rn, 0)
             received_by_layer_pair[(ol, rl)] += 1
             latencies.append(rt - ot)
+            if rt > max_rt:
+                max_rt = rt
             if rl != ol:
                 leaked_to_layers.add(rl)
+                if leak_ts_first is None or rt < leak_ts_first:
+                    leak_ts_first = rt
+                if leak_ts_last is None or rt > leak_ts_last:
+                    leak_ts_last = rt
+        if rec and (max_rt - ot) > slowest["delay_ms"]:
+            slowest = {
+                "id":               mid,
+                "origin_t":         ot,
+                "last_recipient_t": max_rt,
+                "delay_ms":         max_rt - ot,
+                "origin_node":      origin_node.get(mid),
+                "channel_id":       origin_channel.get(mid, 0),
+                "n_recipients":     len(rec),
+            }
         if leaked_to_layers:
             leaks.append({
                 "id":           mid,
@@ -4014,6 +4049,21 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
         s = sorted(xs)
         k = max(0, min(len(s) - 1, int(round(p * (len(s) - 1)))))
         return s[k]
+
+    # Peak pull-burst window: slide a 5 s window across pull_sent_ts, pick the
+    # densest bucket. Caller can correlate it against the 5-s windows in
+    # sections (4) concurrency and (15) duty-cycle.
+    BURST_WINDOW_MS = 5000
+    peak_burst = {"count": 0, "start_ms": 0, "end_ms": 0}
+    if pull_sent_ts:
+        pts = sorted(pull_sent_ts)
+        j = 0
+        for i in range(len(pts)):
+            while pts[j] < pts[i] - BURST_WINDOW_MS:
+                j += 1
+            cnt = i - j + 1
+            if cnt > peak_burst["count"]:
+                peak_burst = {"count": cnt, "start_ms": pts[j], "end_ms": pts[i]}
 
     return {
         "n_originated":         len(origin_t),
@@ -4045,6 +4095,22 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
         "leaks":                leaks,
         "msgs_by_origin_layer": dict(msgs_by_origin_layer),
         "received_by_layer_pair": {f"{a}->{b}": c for (a, b), c in received_by_layer_pair.items()},
+        # --- Investigation-windows inputs ------------------------------------
+        # "Where in the run should I look?" — concrete timestamps caller can
+        # jump to in the viz / NDJSON / debug-window scenario rerun.
+        "slowest":              slowest,
+        "peak_pull_burst":      peak_burst,
+        "first_eviction_ms":    (evicted_ts[0] if evicted_ts else None),
+        "last_eviction_ms":     (evicted_ts[-1] if evicted_ts else None),
+        "first_oversized_ms":   (oversized_ts[0] if oversized_ts else None),
+        "first_leak_ms":        leak_ts_first,
+        "last_leak_ms":         leak_ts_last,
+        # Mean rate over the analyzed window — used to highlight the burst
+        # multiplier ("12x mean"). The print function computes this from the
+        # event count + run duration; storing the raw bounds keeps the
+        # section signature consistent.
+        "pull_sent_first_ms":   (pull_sent_ts[0] if pull_sent_ts else None),
+        "pull_sent_last_ms":    (pull_sent_ts[-1] if pull_sent_ts else None),
     }
 
 
@@ -4130,6 +4196,65 @@ def print_section_channel_gossip(r: dict) -> None:
                   f"({leak['n_recipients']} recipients)")
         if len(leaks) > 5:
             print(f"      … and {len(leaks) - 5} more")
+
+    # Investigation windows: concrete timestamps to jump to in the viz /
+    # NDJSON / a debug-window scenario rerun. Each line is "here, look".
+    def fmt_t(ms: int | None) -> str:
+        if ms is None:
+            return "—"
+        total = max(0.0, float(ms) / 1000.0)
+        m = int(total // 60)
+        s = total - m * 60
+        return f"{m:>3d}:{s:05.2f}"
+
+    have_anything = (
+        r["slowest"]["id"] is not None
+        or r["peak_pull_burst"]["count"] > 0
+        or r["first_eviction_ms"] is not None
+        or r["first_oversized_ms"] is not None
+        or r["first_leak_ms"] is not None
+    )
+    if not have_anything:
+        return
+    print(f"  investigation windows (jump-to-here):")
+
+    sl = r["slowest"]
+    if sl["id"] is not None:
+        print(f"    slowest propagation: msg 0x{sl['id']:08x} "
+              f"(ch={sl['channel_id']} origin=node{sl['origin_node']}) "
+              f"posted {fmt_t(sl['origin_t'])} → last hop "
+              f"{fmt_t(sl['last_recipient_t'])} (Δ {sl['delay_ms']/1000:.1f}s, "
+              f"reached {sl['n_recipients']} nodes)")
+
+    pb = r["peak_pull_burst"]
+    if pb["count"] > 0 and r["pull_sent_first_ms"] is not None:
+        span_ms = max(1, r["pull_sent_last_ms"] - r["pull_sent_first_ms"])
+        steady_rate = r["pulls_sent"] / (span_ms / 1000.0)            # pulls/s
+        burst_rate = pb["count"] / max(1.0, (pb["end_ms"] - pb["start_ms"]) / 1000.0)
+        mult = burst_rate / steady_rate if steady_rate > 0 else 0
+        print(f"    peak pull burst:     {pb['count']} pulls in "
+              f"[{fmt_t(pb['start_ms'])} – {fmt_t(pb['end_ms'])}]  "
+              f"({mult:.1f}× steady-state)")
+
+    if r["first_eviction_ms"] is not None:
+        if r["evicted_events"] == 1:
+            print(f"    first eviction:      {fmt_t(r['first_eviction_ms'])}")
+        else:
+            print(f"    eviction window:     "
+                  f"{fmt_t(r['first_eviction_ms'])} – "
+                  f"{fmt_t(r['last_eviction_ms'])}  "
+                  f"({r['evicted_events']} events)")
+
+    if r["first_oversized_ms"] is not None:
+        print(f"    first oversized:     {fmt_t(r['first_oversized_ms'])}")
+
+    if r["first_leak_ms"] is not None:
+        if r["first_leak_ms"] == r["last_leak_ms"]:
+            print(f"    first P11 leak:      {fmt_t(r['first_leak_ms'])}")
+        else:
+            print(f"    P11 leak window:     "
+                  f"{fmt_t(r['first_leak_ms'])} – "
+                  f"{fmt_t(r['last_leak_ms'])}")
 
 
 # ---- Headline -------------------------------------------------------------
