@@ -9216,9 +9216,14 @@ function on_recv(self, frame, meta)
       end
     end
 
-    -- ROADMAP §3: M-payload (channel gossip) takes a separate path —
-    -- promiscuous merge regardless of `to=`, hop-ACK only when addressed,
-    -- and NO forwarding (channels propagate via gossip, not routing).
+    -- ROADMAP §3: M-payload (channel gossip) gets a promiscuous merge
+    -- early — EVERY node in radio range adds the message to its own
+    -- channel_buffer regardless of `to=`. Overhearers stop here.
+    -- Addressed nodes (d.next == self.id) fall through to the normal
+    -- DATA path so the hop-level ACK + multi-hop forwarding work
+    -- exactly like DM. Forwarders en-route to the pull requester are
+    -- thus ALSO carriers of the channel message — every hop benefits
+    -- from the gossip propagation.
     if d.payload_type_m then
       local id = d.channel_msg_id
       local existing = channel_buffer_find(self, id)
@@ -9234,7 +9239,14 @@ function on_recv(self, frame, meta)
           origin      = d.origin,
         }
         channel_buffer_add(self, entry)
-        local source_label = (d.next == self.id) and "pull_target" or "overheard"
+        local source_label
+        if d.next == self.id and d.dst == self.id then
+          source_label = "pull_target"
+        elseif d.next == self.id then
+          source_label = "forwarder"
+        else
+          source_label = "overheard"
+        end
         self:emit("channel_msg_received", {
           id = id, channel_id = d.channel_id, flavor = d.channel_flavor,
           source = source_label, from = meta.src,
@@ -9257,30 +9269,12 @@ function on_recv(self, frame, meta)
         channel_buffer_mark_seen_by(self, id, meta.src)
       end
 
-      -- Hop-level ACK only when addressed to us. Overhearers stop here.
+      -- Overhearers (not on the routed path) — done.
       if d.next ~= self.id then return end
-      if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
-      local ack_control_sf = active_routing_sf(self)
-      local my_budget_tier = compute_budget_tier(self)
-      local ack_budget_hint = my_budget_tier
-      if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
-      local ack = pack_ack(d.ctr_lo, meta_snr_q4, ack_budget_hint, meta.src)
-      self:emit("ack_tx", {
-        origin = self.id, payload = "[CH_M]", ctr = d.ctr,
-        to = meta.src, ctr_lo = d.ctr_lo, data_snr = meta.snr,
-        budget_tier = my_budget_tier, budget_hint = ack_budget_hint,
-        duplicate = false, payload_type = "M",
-      })
-      tx_with_retry(self, ack, {
-        sf    = ack_control_sf, label = "ACK",
-        info  = string.format("to=%s msg=%d M-ack",
-                              name_of(self, meta.src), d.ctr_lo),
-      })
-      self.pending_rx = nil
-      self:after(self.ack_air_ms + 1, function()
-        become_free(self)
-      end)
-      return
+      -- Addressed: fall through to normal DATA flow for ACK + multi-hop
+      -- forward toward d.dst. If d.dst == self.id we're the pull
+      -- requester, the normal path will emit `delivered` (slightly
+      -- misleading label for channels but functionally correct).
     end
 
     if d.next ~= self.id then return end
@@ -9840,13 +9834,13 @@ function on_recv(self, frame, meta)
       return
     end
 
-    -- ROADMAP §3: channel-pull request. We respond with PAYLOAD_TYPE_M
-    -- DATA frames for each requested ID we have. Pull responses are
-    -- enqueued in tx_queue at the LOWEST priority (channel gossip is
-    -- subordinate to DM + priority + routing traffic per PRINCIPLES.md
-    -- principle 1). Non-target nodes that overhear the response merge
-    -- the message into their own buffer (promiscuous reception).
+    -- ROADMAP §3: channel-pull request. Q_CHANNEL_PULL is unicast
+    -- (dest = specific target the requester wants to pull from).
+    -- Non-target nodes that decoded the frame must silently ignore —
+    -- they MAY look at the response (M-payload DATA) for promiscuous
+    -- merge, but they must NOT try to answer the pull themselves.
     if q.opcode == Q_OP_CHANNEL_PULL then
+      if q.dest ~= self.id then return end
       local have_ids = {}
       local missing_ids = {}
       for _, id in ipairs(q.channel_ids or {}) do
