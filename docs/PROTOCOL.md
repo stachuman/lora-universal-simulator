@@ -351,27 +351,36 @@ byte:  0    1                        2     3    4    5     6...(5+n)  last 4
        │    │ rsv (1)                │     │    │ lo │ hi  │ (n+2 B)  │ (4 B) │
        │    │ E2E_ACK_REQ (1)        │     │    │    │     │          │ zeros │
        │    │ E2E_IS_ACK (1)         │     │    │    │     │          │       │
-       │    │ IS_MULTICAST (1)       │     │    │    │     │          │       │
-       │    │ rsv (1)                │     │    │    │     │          │       │
+       │    │ PRIORITY (1)           │     │    │    │     │          │       │
+       │    │ PAYLOAD_TYPE_M (1)     │     │    │    │     │          │       │
        └────┴────────────────────────┴─────┴────┴────┴─────┴──────────┴───────┘
 
 Total: 10 + n bytes for in-leaf (addr_len=0). n = body bytes.
 
-ciphertext slot (= plaintext today):
+ciphertext slot for normal DATA:
   byte 6  : src_addr_len (= 0 for in-leaf / flat addresses this phase)
   byte 7  : src_addr     (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
   bytes 8+: body         (user text for normal DATA; [acked_ctr_lo, acked_ctr_hi] for E2E ACK)
 
 byte 1 flag bits (low to high):
-  bit 0 (0x01): reserved
-  bit 1 (0x02): IS_MULTICAST  (always 0 this phase — multicast deferred)
-  bit 2 (0x04): E2E_IS_ACK    (this DATA IS an E2E ACK; body = [acked_ctr_lo, acked_ctr_hi])
-  bit 3 (0x08): E2E_ACK_REQ   (origin requests end-to-end confirmation)
-  bit 4 (0x10): reserved      (gained from shrinking addr_len from 4 to 3 bits)
-  bits 5-7:     addr_len       (always 0 this phase — hierarchy deferred)
+  bit 0 (0x01): PAYLOAD_TYPE_M (channel gossip message; ciphertext slot
+                                uses §3.4.1 layout — see below)
+  bit 1 (0x02): PRIORITY        (urgency; queue precedence + separate
+                                anti-spam ledger — see §3.4.2)
+  bit 2 (0x04): E2E_IS_ACK      (this DATA IS an E2E ACK; body = [acked_ctr_lo, acked_ctr_hi])
+  bit 3 (0x08): E2E_ACK_REQ     (origin requests end-to-end confirmation)
+  bit 4 (0x10): reserved
+  bits 5-7:     addr_len         (always 0 this phase — hierarchy deferred)
 
 hop-level ctr_lo: low nibble of ctr (ctr & 0xf), used for pending_rx matching.
 ```
+
+**Historical note.** Bit 0 was previously `reserved`; bit 1 was previously
+`IS_MULTICAST` (for ROADMAP §7.5, now obsolete — see ROADMAP §3 for the
+gossip-based channel design that replaced it). Combining `PAYLOAD_TYPE_M`
+and `PRIORITY` on the same frame is undefined behaviour today — channel
+gossip flows at lowest tx_queue priority and isn't expected to need urgency
+elevation. Receivers MAY drop frames with both bits set.
 
 - `ctr` (16-bit LE): per-(origin, dst) outbound counter, promoted to plaintext
   wire bytes 4-5. Replaces the 3-byte inner origin-header (flags + origin_seq).
@@ -390,6 +399,60 @@ hop-level ctr_lo: low nibble of ctr (ctr & 0xf), used for pending_rx matching.
   once §8 crypto lands. Receiver ignores MAC bytes today.
 - In-leaf size: 10 + n bytes (vs 8 + n before §7.0.1). The +2 B overhead
   is the crypto/privacy stub cost; wire layout is identical once §8 lands.
+
+#### 3.4.1 Channel-message payload (`PAYLOAD_TYPE_M`)
+
+When byte-1 bit 0 (`PAYLOAD_TYPE_M`) is set, the DATA frame carries a
+channel-gossip message (ROADMAP §3). The ciphertext-slot layout is
+different from normal DATA — no `src_addr_len` / `src_addr` prefix:
+
+```
+ciphertext slot for PAYLOAD_TYPE_M:
+  bytes 6-9   : id (4 B, BE)       global message ID
+                                   = (origin_node_id << 24) |
+                                     ((key_hash32 & 0xFFFF) << 8) |
+                                     (ctr_lo8 & 0xFF)
+  byte 10     : channel_id         8-bit; flavor-specific semantics
+  byte 11     : flavor              0 = public (plaintext body)
+                                    1 = group   (ChaCha20 + MAC)
+                                    2 = private (ChaCha20 + Ed25519 sig)
+  bytes 12+   : body (var)         flavor-specific content
+  last 4      : MAC                placeholder; will carry per-flavor tag
+                                   under §8 crypto
+```
+
+**Routing semantics.** PAYLOAD_TYPE_M frames are emitted as the response
+to a `Q_CHANNEL_PULL` request (Q opcode in §3.7). The DATA frame's `next`
+and `dst` fields point at the pull requester for ACK purposes, BUT every
+node within radio range merges the message into its own `channel_buffer`
+regardless of `to=`. This **promiscuous reception** is the gossip
+mechanism's core efficiency: one pull-response exchange benefits up to N
+overhearing neighbours.
+
+Forwarders carry M frames at the **lowest tx_queue priority** — they
+yield to normal DM, hop-level control, and PRIORITY traffic. Channels
+are eventually-consistent best-effort; if a frame is dropped at the
+forwarder, the next BCN digest re-advertises the dirty ID and the
+recipient pulls again.
+
+#### 3.4.2 PRIORITY flag
+
+When byte-1 bit 1 (`PRIORITY`) is set, the originator is asserting
+the frame carries urgent content (ICE, emergency, medical). Behaviour:
+
+| Layer | Behaviour |
+|---|---|
+| Originator | Hard-capped at `originator_priority_max_per_window = 5` frames per `originator_priority_window_ms = 3600000` (1 h). Crossing → silent drop + `priority_send_capped` event |
+| Forwarder `tx_queue` | PRIORITY items pop before normal traffic. Cascade-requeue preserves priority |
+| 1st-hop neighbour anti-spam | Separate ledger from normal anti-spam: max 5 PRIORITY frames per hour per direct sender (keyed on `meta.src`, not claimed origin — persona-rotation defeat). Crossing → silent drop + `rts_drop_originator_priority_throttle` |
+| Duty cycle | Unchanged. PRIORITY gets earlier airtime, not extra airtime. STRAINED/CRITICAL/EXHAUSTED tiers still apply |
+| Retry dedup | Unchanged. `originator_retry_dedup_ms = 10000` rule applies — same ctr_lo within window counts as one origination |
+
+Use cases: a small burst of unicast DMs to specific contacts ("send to
+family + neighbour + medic" = 3 frames). For "warn everyone in an area",
+that's a public channel (§3 gossip), not a flood of PRIORITY unicasts.
+
+See ROADMAP §3a for the design rationale and budget arithmetic.
 
 ### 3.5 ACK (`'K'`) — 3 bytes
 
@@ -2316,6 +2379,16 @@ expectations) subscribe by event_type.
 | `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
 | `max_payload_clamped` | Init-time guard. Configured `max_payload_bytes` exceeds the LoRa PHY 255-byte frame minus fixed overhead (`DATA_HDR_LEN + DATA_INNER_OVERHEAD` = 14); clamped to the hard cap (241) | `requested`, `clamped_to`, `lora_max_frame`, `fixed_overhead` |
 | `send_oversized` | Originator-side rejection of a user payload exceeding `max_payload_bytes`. The send never enters `tx_queue`; runtime `tx_oversized` remains the radio-side backstop for frames built outside this path | `dst`, `dst_name`, `len`, `max`, optional `e2e`, optional `target_layer_id` / `dst_key_hash32` / `envelope_overhead` for `send_layer` |
+| `channel_msg_received` | A `PAYLOAD_TYPE_M` DATA frame was merged into our `channel_buffer` (either because we were the `to=` target of a pull response, or via promiscuous overhearing of someone else's pull response) | `id`, `channel_id`, `flavor`, `source` (`pull_target` / `overheard`), `from` (immediate radio sender) |
+| `channel_msg_pulled` | We responded to a `Q_CHANNEL_PULL` by emitting one or more PAYLOAD_TYPE_M DATA frames | `to`, `ids[]` (those we had), `missing[]` (requested but absent in our buffer) |
+| `channel_msg_overheard` | We merged a PAYLOAD_TYPE_M frame we weren't the target of — the promiscuous-reception benefit | `id`, `channel_id`, `from`, `intended_to` |
+| `channel_msg_evicted` | Channel buffer reached `cap_channel_buffer`; oldest entry was dropped | `id`, `channel_id`, `seen_by_all_neighbours` (bool) |
+| `channel_pull_sent` | We emitted a `Q_CHANNEL_PULL` to a neighbour | `to`, `ids[]`, `trigger` (`new_dirty_in_bcn` / `digest_gap`) |
+| `channel_pull_received` | Inbound `Q_CHANNEL_PULL`; will trigger one or more `channel_msg_pulled` responses | `from`, `ids[]` |
+| `channel_pull_suppressed` | A scheduled pull was cancelled because we overheard the response carrying the requested IDs before our jitter expired | `ids[]`, `overheard_from` |
+| `channel_digest_emitted` | Our outgoing BCN included a `BCN_EXT_TYPE_CHANNEL_DIGEST` extension with N dirty IDs | `dirty_ids[]`, `total_buffer_size` |
+| `priority_send_capped` | Originator hit `originator_priority_max_per_window` — own PRIORITY send dropped silently. UX hint for "wait before next priority send" | `dst`, `dst_name`, `window_ms`, `cap`, `current_count` |
+| `rts_drop_originator_priority_throttle` | 1st-hop neighbour detected a direct sender exceeding the per-hour priority cap; silently dropped the RTS | `from`, `ctr_lo`, `apparent_origination`, `window_ms`, `cap` |
 
 ---
 
@@ -2472,13 +2545,20 @@ block for current values):
 - Hop budget: `hop_budget_slack`, `hop_budget_max_initial`
 - Bounded state caps: `cap_seen_origins`, `cap_q_queried`,
   `cap_q_responded_to`, `cap_deferred_sends`,
-  `cap_gateway_deferred_handoffs`, `cap_id_bind` — emit `table_cap_hit`
-  on overflow (§13.6)
+  `cap_gateway_deferred_handoffs`, `cap_id_bind`,
+  `cap_channel_buffer` — emit `table_cap_hit` on overflow (§13.6)
 - Identity / gateway: `id_bind_ttl_ms`, `gateway_schedule_guard_ms`
 - Join: `join_{listen,discover_jitter,discover_wait}_ms`,
   `join_discover_max_attempts`, `join_offer_backoff_{min,max}_ms`,
   `join_claim_guard_ms`, `join_retry_backoff_ms`,
   `join_j_rate_limit_window_ms`, `join_j_max_per_window`
+- **Channel gossip (ROADMAP §3, deferred)**: `cap_channel_buffer = 128`,
+  `channel_msg_max_payload_bytes = 200`,
+  `channel_dirty_max_per_bcn = 6`, `channel_pull_window_ms = 5000`,
+  `channel_pull_jitter_ms = 500`, `cap_channel_pulls_per_bcn_cycle = 3`
+- **Priority unicast (ROADMAP §3a, deferred)**:
+  `originator_priority_max_per_window = 5`,
+  `originator_priority_window_ms = 3600000` (1 h)
 
 ### 14.6 Q4 fixed-point dB (internal)
 

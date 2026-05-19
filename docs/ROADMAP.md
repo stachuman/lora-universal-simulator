@@ -823,180 +823,275 @@ REQ_SYNC/sync-BCN pattern reused by `J_DISCOVER`.
 
 ---
 
-## 3. Channels (unified primitive — public, group, private)
+## 3. Channels — gossip-based delivery (DESIGN LOCKED 2026-05-19)
 
-**Problem.** Mesh networks need multi-recipient communication beyond per-pair DM (§7.1, §8.1): public alerts, friend group chats, family/team private discussions. Pure flood is not viable (saturates duty cycle in dense meshes); per-recipient unicast doesn't scale beyond ~5 members. We need ONE multi-recipient primitive with policy variations for the three flavors.
+**Problem.** Mesh networks need multi-recipient communication beyond
+per-pair DM (§7.1, §8.1): public alerts, friend group chats,
+family/team private discussions.
 
-**Design principle.** A SINGLE wire-level delivery mechanism — **the multicast DATA frame defined in §7.5** — serves all three channel flavors. The two modes of §7.5 cover the spectrum:
+**Design history.** An earlier draft of §3 (now in git history)
+proposed a multicast-DATA-frame approach via §7.5 — sender knows
+the recipient list, mesh delivers via loose-tree fan-out. That
+design was abandoned 2026-05-19 because it's a flood-equivalent
+mechanism that violates Principle 2 (`docs/PRINCIPLES.md`): even
+loose-tree multicast costs O(N) airtime per message and breaks at
+real network density. Section §7.5 (multicast DATA frame) is
+correspondingly obsolete; see the note there.
 
-- `dst_count > 0` (explicit-list multicast) → group / private channels
-- `dst_count == 0` (multicast-to-all) → public channels
-
-**Public / group / private differ ONLY in (a) crypto choice, (b) admission policy, and (c) which §7.5 mode they use** — all of these are app-layer / config concerns layered on top of the same wire primitive.
-
-This consolidates what was previously sketched in §3 (public broadcast) and §6 (ad-hoc channels) into one coherent design built on §7.5.
+**Design principle.** Channels propagate via **lazy gossip with dirty
+bits**, the same mechanism the BCN plane uses for route entries. One
+airtime cost per message, regardless of mesh size. Convergence
+latency is minutes, not seconds — explicit trade-off accepted
+because (a) channels are async-flavoured by use case and (b) we have
+[[Package B]] priority unicast for time-critical traffic.
 
 ### The three flavors
 
-| Flavor | §7.5 mode | Membership | Crypto | Discovery | Use case |
-|---|---|---|---|---|---|
-| **Public** | `dst_count = 0` (multicast-to-all) | Open (anyone listens / posts) | None — plaintext | Channel ID published openly (well-known list, app config) | System alerts, weather, emergency, public announcements |
-| **Group** | `dst_count > 0` (explicit list) | Anyone with the channel PSK | Symmetric channel PSK (ChaCha20+MAC) | Channel ID + PSK distributed at invitation (QR code, in-app share); recipient list known to originator | Friend group chat, team coordination, neighborhood watch |
-| **Private** | `dst_count > 0` (explicit list) | Strict member-list, signed by admin | Group PSK + per-message author signature (Ed25519) | Member-list managed by admin, distributed via signed announcement | Family chat, sensitive discussion |
+Public / group / private differ only at the **crypto layer** and in
+how membership is managed. The **wire mechanism is identical**: an
+opaque payload byte-array carried through the gossip layer. Protocol
+forwarders don't know or care which flavor they're carrying.
 
-### Channel ID (1 byte)
+| Flavor | Inner payload | Membership | Discovery |
+|---|---|---|---|
+| **Public** | `channel_id(1B) | user_text(N)` plaintext | Open — anyone listens / posts | Channel ID well-known (app config) |
+| **Group** | `ChaCha20(channel_psk, nonce, [channel_id(1B) | user_text(N)]) + MAC(4B)` | Anyone with the channel PSK | PSK distributed at invitation (QR / in-app share) |
+| **Private** | `ChaCha20 + Ed25519(author_key, ciphertext[16:])` — sig replaces MAC | Strict member-list, signed by admin | Admin-managed; member-list propagation is app-layer |
 
-Channel ID is **not on the wire** as a separate field — it's encoded INSIDE the encrypted payload (group/private) or inside the plaintext payload (public). The wire-level multicast frame (§7.5) doesn't need to know the channel ID — it just needs to know who to deliver to (explicit list) or "everyone" (multicast-to-all).
+`channel_id` is **inside** the payload (encrypted in group/private),
+not on the wire — observers don't learn which channel is in use, only
+that "a channel message exists".
 
-**Reason this works:**
-- Recipients (whether explicit list or "all") decrypt/parse the payload to discover the channel ID
-- App layer routes to the appropriate channel handler based on the channel ID
-- Non-recipients in multicast-to-all mode simply ignore channel-IDs they don't subscribe to (app-layer filter)
+### Wire mechanism
 
-This keeps the wire format minimal — no special channel-frame-type at the protocol layer.
+Three additions to the protocol — no new full frame types beyond
+the DATA payload-type extension:
 
-### Encrypted body structure
-
-The body inside the §7.5 multicast frame:
-
-| Flavor | Inner payload structure |
+| Element | Purpose |
 |---|---|
-| **Public** | `channel_id(1B) | user_text(N)` — plaintext; no encryption needed (anyone receiving multicast-to-all sees it; app-layer filter by channel ID) |
-| **Group** | `ChaCha20(channel_psk, derive_nonce(ctr, channel_id), [channel_id(1B) | user_text(N)]) + MAC(4B)` — symmetric group key |
-| **Private** | `ChaCha20(channel_psk, ...) + Ed25519_sig(author_id_key, ciphertext truncated to 16 B)` — sig replaces MAC; verifies author identity against channel's known member-list |
+| **`BCN_EXT_TYPE_CHANNEL_DIGEST`** (new BCN extension TLV) | Advertise "I have these recently-received message IDs" — Phase-1 dirty list of up to 6 IDs at 4 bytes each = ~26 B per BCN |
+| **`Q_CHANNEL_PULL`** (new Q opcode) | Unicast request: "send me these IDs". Body: `target_node(1B) + count(1B) + ID(4B) × N` |
+| **DATA payload type `M`** (new `payload_type` flag in DATA byte 1) | Carries a channel message. Layout: `id(4B) | channel_id(1B) | flavor(1B) | body(N) | mac(4B)`. Promiscuously received — every node in radio range merges into its own `channel_buffer`, regardless of `to=` |
 
-For private channels, the author identity is in the encrypted body:
+The promiscuous-merge property is the key efficiency win: one
+Q_CHANNEL_PULL → one M-response → up to N neighbours benefit from
+the same airtime cost. Direction is "deliberate request, broadcast
+answer", mirroring how every BCN benefits every listener.
+
+### Message ID format
+
+4-byte global ID: `id = (origin_node_id << 24) | ((key_hash32 & 0xFFFF) << 8) | (ctr & 0xFF)`.
+The 16 bits of key-hash mitigate `node_id` recycling collisions
+across owners; theoretical collision probability is acceptable for
+real-world network lifetimes (see weak-spots note in this section's
+implementation phase).
+
+### Per-node state
+
 ```
-inner = author_pubkey_hash(2B) | channel_id(1B) | user_text(N) | author_signature(16B truncated)
-```
+channel_buffer[cap_channel_buffer = 128]   ring, FIFO eviction
+  entry:
+    id            : 4 B (global)
+    channel_id    : 1 B
+    flavor        : 1 B (0=public, 1=group, 2=private)
+    payload       : up to channel_msg_max_payload_bytes (200 B)
+    received_at   : ms
+    seen_by       : bitmap of direct neighbours acknowledged seeing this
+    dirty         : bool — advertise in next BCN digest
 
-Author's pubkey is one of the channel's known member identities. Verifier checks signature against each known member's pubkey; first match identifies author. 16-byte truncated Ed25519 sig gives 2⁻¹²⁸ forgery probability — strong enough.
-
-### Delivery via §7.5 multicast
-
-All channel messages are sent as §7.5 multicast frames. The mode chosen depends on the channel flavor:
-
-**Public channel send:**
-```
-Sender encodes: channel_id + user_text (plaintext)
-Sender issues §7.5 multicast with dst_count = 0 (multicast-to-all)
-Mesh delivers to every reachable node via loose-tree-on-all-rt[] forwarding
-Every receiving node: app-layer checks if it subscribes to channel_id;
-  if yes, deliver to app; if no, drop silently
-```
-
-**Group / private channel send:**
-```
-Sender knows the channel's current member list (from QR-share or app-layer manifest)
-Sender encrypts payload with channel PSK (group) or PSK+sig (private)
-Sender issues §7.5 multicast with dst_count = N, dst_list = current members
-Mesh delivers via explicit-list loose-tree forwarding to those specific members
-Receiving members trial-verify MAC/sig and decrypt
-```
-
-**This means forwarders need ZERO channel-specific state.** They just route §7.5 multicast frames. The channel layer is purely at the endpoints (senders + recipients). 
-
-### Open problem: subscriber discovery for group/private channels
-
-The §7.5 explicit-list mode REQUIRES the originator to know the recipient list. For group/private channels with stable membership (QR-share at invite time), this is fine — the app maintains the list locally.
-
-But three scenarios need design attention:
-- **New member joins**: how do other members learn the new member is now a recipient?
-- **Member leaves / is removed**: how do other members stop including them in their dst_list?
-- **Member-list sync across the group**: what happens when alice's local member-list disagrees with bob's?
-
-This is the still-open subscriber-discovery problem. Options to be discussed:
-- App-layer "membership manifest" distributed at join, refreshed on changes (each member maintains own list; updates via signed broadcast)
-- Server-registry (per §3 server discussion) — single source of truth
-- Bloom filter in BCN — approximate; useful only for hint-based discovery
-- Pull-based query when sender doesn't know membership
-
-**For now, this is parked as a separate design item — see "Open problems" below.**
-
-### Cross-leaf channel bridging (configured gateway)
-
-Channels are intra-leaf by design. Cross-leaf bridging requires explicit operator configuration at gateways. The gateway receives the §7.5 multicast frame in one leaf, translates encryption if needed, and re-emits as a multicast frame in the destination leaf.
-
-**Gateway configuration:**
-```
-bridge_channels = [
-  { src_leaf=33, src_ch=3, dst_leaf=27, dst_ch=7, src_psk=..., dst_psk=... },
-  { src_leaf=27, src_ch=7, dst_leaf=33, dst_ch=3, src_psk=..., dst_psk=... },  -- reverse direction
-]
+peer_known_ids[peer_id]  : digest of what each neighbour claims to have
 ```
 
-**Gateway behavior** on receiving a channel-3 multicast in leaf 33:
-1. Decrypt using leaf-33 channel-3 PSK (or skip if public)
-2. Read out channel_id from decrypted payload
-3. Re-encrypt using leaf-27 channel-7 PSK (or skip if public)
-4. Emit §7.5 multicast in leaf 27 with the destination list translated to leaf-27 member IDs (for group/private; or `dst_count=0` for public-channel-bridging)
+**Buffer is shared across all channels** — 128 entries total, not
+per-channel. A noisy public channel can crowd out a quiet private
+one; that's deliberate per Principle 2 (channels share the airtime
+budget; a node listening to more channels gets slower per-channel
+convergence, not bigger bandwidth).
 
-**The gateway is a TRUSTED INTERMEDIARY** for channels — it sees plaintext during translation. Different from §7.1 DM where end-to-end confidentiality means gateways can't read user content. **For channels, bridge-by-trust is the design** (real-world IRC/Discord bridges work this way).
+**128-entry buffer (~25 KB at 200 B avg payload)** is sized to give
+the budget-respecting gossip layer a healthy cushion. The protocol
+respects duty-cycle tiers (STRAINED/CRITICAL/EXHAUSTED) — when the
+network is busy, gossip slows; the buffer holds messages until
+airtime is available.
 
-For PUBLIC channels: bridging is trivial — gateway just relays plaintext between configured (src_leaf, src_ch) ↔ (dst_leaf, dst_ch) pairs, possibly with channel_id remapping. Uses `dst_count=0` multicast-to-all on both sides.
+### Propagation flow
 
-### Open problems (parked for separate discussion)
+```
+ORIGINATOR
+  app calls channel_send(channel_id, payload)
+  store {id, channel_id, payload, dirty=true} in channel_buffer
+  no immediate TX — wait for next periodic / triggered BCN
 
-The unified §7.5-based delivery is settled, but **subscriber discovery for group/private channels** is still open:
+NEXT BCN-FIRE at originator
+  beacon packer appends BCN_EXT_TYPE_CHANNEL_DIGEST
+  digest includes our dirty IDs (top ~6 by recency)
+  BCN goes out as usual
 
-1. **New-member onboarding** — how does an existing member learn that bob just joined channel X?
-2. **Member-list sync** — what happens when alice's local member-list for channel X differs from carol's?
-3. **Member removal** — how does the group propagate "bob is out" + new PSK to remaining members securely?
-4. **Stale-member handling** — if alice sends to {bob, carol, dave} but dave has left and rotated keys, dave still gets the frame but can't decrypt; no harm done, but he sees "garbage from alice"
+RECEIVER (neighbour)
+  on_recv 'B' → parse extensions → channel_digest_ext seen
+  for each ID in digest:
+    if not in own channel_buffer
+       and not pulled within channel_pull_window_ms
+       and pull-budget for this BCN-cycle not exhausted:
+      schedule Q_CHANNEL_PULL toward BCN-sender after
+      channel_pull_jitter_ms random delay
+    if during jitter someone else's pull-response is overheard
+       carrying that ID: cancel our own pull
+  mark seen_by[BCN-sender] for IDs we already own
 
-Possible directions (TBD):
-- App-layer "membership manifest" — each member maintains the list locally; updates via signed broadcast from admin
-- Server-registry (per the §3 server discussion) — single source of truth queried before send
-- Bloom filter in BCN — approximate; useful as a hint but not authoritative
-- Pull-based query — sender asks "members of channel X?" before send, caches the answer
+PULL RESPONDER
+  on_recv 'Q' opcode Q_CHANNEL_PULL → pop requested IDs from buffer
+  enqueue M-payload-type DATA frames to to=requester (LOWEST tx_queue priority)
+  each M-frame: id + channel_id + flavor + body + mac
 
-These belong to a follow-up design pass; the §7.5 delivery mechanism is independent of whichever discovery method we choose.
+PROMISCUOUS RECEIVER (any node in radio range)
+  on_recv 'D' with payload_type=M
+    even if to != self.id: parse + merge into channel_buffer if new
+    if to == self.id: also ACK the frame (normal unicast path)
 
-### Composition with other roadmap items
+EVICTION
+  on channel_buffer full + new arrival:
+    prefer evicting entries where seen_by covers all current neighbours
+    otherwise evict oldest by received_at
+    emit channel_msg_evicted
+```
 
-| Subsystem | Channel impact |
-|---|---|
-| **§7.1 DATA** | Channel messages don't use unicast DATA — they always go through §7.5 multicast |
-| **§7.2 BCN** | **No mandatory subscription extension needed** for the multicast-based design. Optional BCN subscription advertisement remains useful if a discovery-by-BCN approach is later chosen, but it's not baseline. |
-| **§7.3 inter-layer** | Channels are intra-leaf; cross-leaf bridging is via configured gateway re-encryption — NOT via TDM scheduling. Channel messages stay at leaf SF. |
-| **§7.5 multicast** | **The delivery mechanism**. All three flavors use §7.5; differ only in `dst_count` and crypto. |
-| **§1 anti-spam** | Per-1st-hop counters apply unchanged — the originator of a channel message counts toward their own quota. Future: optional per-channel rate cap at forwarders. |
-| **§2 mobile** | Channel subscriptions are app-layer state carried with the user across moves; member-list sync needed (see open problems). |
-| **§5 E2E ACK** | Channel messages skip E2E ACK (no single recipient). `E2E_ACK_REQ` MUST be 0 for channel multicast. |
-| **§7.4 RTS / CTS / ACK** | Channel multicast still uses standard hop-level RTS-CTS-DATA-ACK chain at each split point. |
-| **§8.1 crypto** | Channel uses LEAF-LOCAL group PSK (not §8.1's per-pair X25519 keys). Distribution is operational (QR code at channel join). Forward secrecy not provided. |
-| **§9 T2 privacy** | dst_list (when present) is plaintext on wire (forwarders need it for routing). Channel ID lives INSIDE encrypted payload — observers don't learn which channel is being used. Sender identity within encrypted body is hidden. |
+### Cost analysis
 
-### What this design deliberately doesn't solve
+| Scenario | Flood (Meshtastic) | Multicast (old §3) | Gossip (this) |
+|---|---|---|---|
+| Airtime per message in 50-node mesh | ~50 × frame_airtime | ~50 × frame_airtime (loose tree) | ~1 originator-airtime + N digest-bytes-in-BCN |
+| Convergence time to all nodes | seconds | seconds-minutes | minutes-hours |
+| Behaviour at partition merge | message lost | message lost | converges on rejoin |
+| Behaviour for offline-then-online node | message lost | message lost | catches up automatically |
+| Storage requirement at each node | 0 | 0 transient | ~25 KB ring buffer |
 
-- **Reliability guarantees** for channel messages. Best-effort, no per-subscriber ACK. Lost messages stay lost. Apps that need reliability must use unicast DM (§7.1) instead.
-- **Cross-leaf channels without operator setup.** Bridging requires manual gateway configuration. No auto-discovery.
-- **Per-channel rate limiting beyond §1 anti-spam.** Future enhancement.
-- **Forward secrecy** for channel messages. Same trade as §8.1 — channel PSK is reused; rotation requires re-distribution.
-- **Member removal in private channels.** Hard problem (removed member still has old PSK). Requires PSK rotation + redistribution to remaining members. App-layer concern; protocol provides the wire to deliver the new key.
-- **Subscriber discovery for group/private channels** — parked, see "Open problems" above.
-- **Channel discovery primitive** — no "list nearby active channels" mechanism. Channel IDs are well-known (public) or invitation-distributed (group/private).
-- **Coverage of newly-joined nodes for public channels.** Public channels use multicast-to-all (§7.5 `dst_count=0`) which only reaches nodes in `rt[]`. New joiners not yet in `rt[]` miss public broadcasts until BCN propagation completes (~5 min).
-
-### Tunables
-
-(Most tunables live at §7.5 multicast. Channel-specific tunables:)
+### Tunables (all P-class — see CONFIG_AUDIT.md)
 
 | Key | Default | Purpose |
 |---|---|---|
-| `channel_rate_cap_per_min` | 10 | (Future) per-channel rate limit at forwarders; prevents single channel saturating |
-| `channel_member_list_max` | 64 | App-layer cap on members per channel (depends on member-list-sync mechanism chosen) |
+| `cap_channel_buffer` | 128 | Ring-buffer entry count; shared across all channels |
+| `channel_msg_max_payload_bytes` | 200 | Per-message body cap (fits within `max_payload_bytes_hard_cap` — 41 bytes of headroom for inner crypto framing) |
+| `channel_dirty_max_per_bcn` | 6 | Max IDs in a single BCN's digest TLV (24 B + framing) |
+| `channel_pull_window_ms` | 5000 | Per-ID dedup at requester (don't pull same ID twice within window) |
+| `channel_pull_jitter_ms` | 500 | Random delay before sending pull; lets neighbours coordinate by overhearing |
+| `cap_channel_pulls_per_bcn_cycle` | 3 | Cap pulls scheduled per received BCN — prevents new-joiner / partition-merge pull storms |
 
-### Implementation cost estimate
+### Open problems (deferred, app-layer or v2)
 
-- Channel encoding/decoding inside §7.5 payload (channel_id field + flavor-specific crypto): ~80 lines
-- Group PSK + per-message Ed25519 signing for private channels: ~100 lines (depends on chosen ed25519 implementation)
-- App-layer dispatch on incoming multicast based on channel_id: ~30 lines
-- Gateway cross-leaf bridge config + re-encryption: ~80 lines
-- Subscriber-discovery mechanism (TBD which approach): ~150-300 lines depending on choice
-- Tests: public/group/private message flow, cross-leaf bridge, member-list verification, stale-member behavior: ~200 lines
+- **Member-list management for group/private channels** — the
+  protocol carries opaque ciphertext; who has the PSK is an app-layer
+  concern (QR onboarding, signed-by-admin membership manifest).
+  Membership changes (new member, removed member, PSK rotation) all
+  happen at the app layer and ride on the same gossip mechanism.
+- **Replay protection** — currently the receive-side dedup is by
+  `id` only. A replayed-by-attacker M-frame with an unrecycled ID
+  would be re-merged. Mitigation: dedup by (id, received_at within
+  channel_pull_window) — drop if same ID arrives twice in that
+  window from different sources. Iteration when concrete attack
+  scenario surfaces.
+- **Cross-leaf channel bridging** — gateway acts as a trusted
+  intermediary that re-encrypts public/group content across layers.
+  Config-driven; see the multi-network §7.3 implementation for the
+  gateway primitives.
 
-**Cross-references.** §6 (consolidated into this section), §7.5 (THE delivery mechanism — all flavors use multicast), §7.1 (multicast frame is a §7.1 DATA variant), §7.2 (BCN unchanged for channels), §7.3 (intra-leaf only), §1 (per-1st-hop anti-spam unchanged), §2 (mobile subscriptions need member-list sync), §8.1 (channel PSK independent of per-pair session keys), §9 (channel ID hidden in encrypted body; only dst_list visible).
+### Implementation phases
+
+1. Wire format: BCN extension TLV encode/decode + Q_CHANNEL_PULL opcode + DATA payload-type M.
+2. `channel_buffer` state + dirty-bit set/clear on origination/receive.
+3. Pull request + response paths; pull rate-limit + overhearing-cancellation logic.
+4. Promiscuous reception of M-type DATA (parse + merge regardless of `to=`).
+5. Eviction policy + cap-hit telemetry.
+6. Public channel happy path (no crypto), tests t63+.
+7. Group channel: PSK + MAC verify on receive.
+8. Private channel: Ed25519 sig verify on receive.
+9. Cross-leaf bridging at gateways (operator-configured).
+
+### Composition with other principles
+
+- **Principle 1 (airtime)**: gossip is O(M), not O(N×M). Honoured.
+- **Principle 2 (never flood)**: no broadcast TX; all forwarding is
+  pulled deliberately. Honoured.
+- **Principle 4 (eventually consistent)**: partition merge and
+  offline-then-online catch-up are first-class behaviours, not edge
+  cases. Honoured.
+- **Principle 6 (bounded state)**: `cap_channel_buffer = 128` is
+  hard-capped; `table_cap_hit` fires on overflow.
+- **Principle 9 (single mechanism)**: this is the ONLY way channel
+  messages move. No multicast frame, no flood mode.
+
+---
+
+## 3a. Priority unicast — urgency (DESIGN LOCKED 2026-05-19)
+
+**Problem.** Some messages need elevated delivery treatment (ICE,
+emergency, medical) without introducing a parallel "loud" mode that
+breaks the no-flood principle.
+
+**Design principle (per `docs/PRINCIPLES.md` #10).** Priority is
+**queue precedence on the existing unicast path**, with hard caps to
+prevent abuse. Not a new wire format, not a new delivery mechanism.
+
+### Wire change
+
+One bit in DATA byte 1 reserved set:
+
+```
+DATA_FLAG_PRIORITY = 0x02   -- was reserved
+```
+
+No new frame type. Identical RTS-CTS-DATA-ACK sequence at each hop.
+
+### State + behaviour
+
+| Layer | Effect |
+|---|---|
+| **Originator** | Hard cap `originator_priority_max_per_window = 5` over `originator_priority_window_ms = 3600000` (1 hour). Crossing → silently drop own send + emit `priority_send_capped` (UX hint). |
+| **Forwarder tx_queue** | Priority queue: PRIORITY items pop before normal. Cascade-requeue path preserves priority. |
+| **1st-hop neighbour anti-spam** | Same per-direct-sender mechanism as the existing originator anti-spam, but **with a separate, tighter ledger for priority**: per direct sender, max 5 PRIORITY frames per hour. Crossing → silent drop + `rts_drop_originator_priority_throttle`. Persona-rotation defeat: keys on `meta.src` (physical sender), not the claimed origin. |
+| **Duty cycle** | Unchanged. PRIORITY gets earlier airtime, not extra airtime. STRAINED/CRITICAL/EXHAUSTED tiers still apply. |
+| **Retry dedup** | Unchanged. `originator_retry_dedup_ms = 10000` rule applies — same `ctr_lo` within window counts as one origination. |
+
+### Budget arithmetic
+
+At 1% duty (EU868 g1) = 36 s TX budget per hour per node:
+- 5 priority frames × ~200 ms typical × up to 6 hops max-forward
+  = 6 s = 17% of the hourly budget
+- Leaves 83% for normal traffic
+- 5/hour is tight enough that priority abuse hurts the abuser
+
+At 10% duty (EU868 g3, per `memory/project_band_choice`) the
+proportion drops to 1.7%. Even more generous.
+
+### New PROTOCOL constants
+
+```
+originator_priority_max_per_window = 5
+originator_priority_window_ms      = 3600000   -- 1 hour
+```
+
+### New events
+
+- `priority_send_capped` — originator hit its own cap; UX hint
+- `rts_drop_originator_priority_throttle` — 1st-hop saw priority
+  abuse from a direct sender
+
+### Use cases
+
+- ICE message to specific contact ("I'm injured, send help") — 1–3 unicast priority sends
+- Emergency status update to family ("evacuated, safe at X") — 2–4 unicast priority sends
+- **NOT**: warning everyone in an area (that's a public channel via §3 gossip; slower but reaches all subscribers)
+
+### Implementation phases
+
+1. Wire flag bit + encoder/decoder update.
+2. `originator_priority_counter` sliding window.
+3. `tx_queue` priority-insertion semantics.
+4. 1st-hop priority anti-spam ledger (separate from normal).
+5. Tests covering: priority bypasses normal-throttle, separate ledger
+   catches priority-spam, cascade_requeue preserves priority,
+   duty-cycle EXHAUSTED still blocks priority TX.
+
 
 ---
 
@@ -2107,7 +2202,25 @@ The behavioral classifier (`R[X]` and `C[X]` distinct-msg_id counts per direct s
 - Pending state keying migration (`msg_id` → `ctr_lo`): ~30 lines across the matching helpers
 - Tests: RTS round-trip for each `addr_len` value (0, 1, 2), CTS/ACK matching with new ctr semantics, cross-layer RTS with hierarchical dst: ~80 lines
 
-### 7.5 Multicast DATA frame (two modes: explicit-list AND multicast-to-all)
+### 7.5 ~~Multicast DATA frame~~ — OBSOLETE (superseded by §3 gossip)
+
+**Status — OBSOLETE 2026-05-19.** The multicast DATA frame was the
+load-bearing mechanism in the original §3 channels design. §3 has
+since been rewritten to use **gossip with dirty bits** (BCN extension
++ `Q_CHANNEL_PULL` + DATA payload type M) — a fundamentally different
+mechanism that doesn't fan out at forwarders. See `docs/PRINCIPLES.md`
+Principle 2 ("never flood") for the rationale: loose-tree multicast
+is O(N) airtime per message, which is the same shape as flooding and
+unacceptable per Principle 1 (airtime is the scarce resource).
+
+The original §7.5 design text is preserved below for historical
+context and in case a future use case surfaces where targeted small-N
+multicast (3–10 explicit recipients) genuinely outperforms either
+N-unicast or gossip. Until that surfaces: don't implement.
+
+---
+
+### 7.5 (HISTORICAL) Multicast DATA frame (two modes: explicit-list AND multicast-to-all)
 
 **Problem statement.** Multi-recipient delivery (group DMs, channel messages, public broadcasts) needs an efficient wire-level primitive. Two unsatisfying defaults:
 
