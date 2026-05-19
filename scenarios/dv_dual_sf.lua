@@ -2806,6 +2806,11 @@ end
 -- jitter fires.
 function process_channel_digest(self, b)
   if not b or not b.channel_digest_ids then return end
+  -- Principle 11: gateways don't participate in channel gossip (would
+  -- leak across layers via the gateway's BCN digest). Skip pull
+  -- scheduling entirely. The matching skip on the merge side is in
+  -- the M-payload-type DATA handler in on_recv.
+  if self.self_gateway then return end
   local now = self:now()
   local pull_cap = self.cap_channel_pulls_per_bcn_cycle or 3
   local scheduled = 0
@@ -9226,47 +9231,58 @@ function on_recv(self, frame, meta)
     -- from the gossip propagation.
     if d.payload_type_m then
       local id = d.channel_msg_id
-      local existing = channel_buffer_find(self, id)
-      if existing == nil then
-        local entry = {
-          id          = id,
-          channel_id  = d.channel_id,
-          flavor      = d.channel_flavor,
-          payload     = d.body,
-          received_at = self:now(),
-          seen_by     = { [meta.src] = true },
-          dirty       = true,
-          origin      = d.origin,
-        }
-        channel_buffer_add(self, entry)
-        local source_label
-        if d.next == self.id and d.dst == self.id then
-          source_label = "pull_target"
-        elseif d.next == self.id then
-          source_label = "forwarder"
+      -- Principle 11: channels are local-by-design. Gateways carry DM
+      -- across layers via the envelope handoff, but they do NOT
+      -- participate in channel gossip — otherwise an L1 channel
+      -- message would land in the gateway's buffer, get advertised in
+      -- its next BCN digest (on whichever layer is currently active),
+      -- and leak across the boundary. M-frames still get FORWARDED
+      -- through the gateway by the normal DATA path below; only the
+      -- gossip-participation steps (buffer merge, seen_by tracking,
+      -- pending-pull cancellation) are skipped.
+      if not self.self_gateway then
+        local existing = channel_buffer_find(self, id)
+        if existing == nil then
+          local entry = {
+            id          = id,
+            channel_id  = d.channel_id,
+            flavor      = d.channel_flavor,
+            payload     = d.body,
+            received_at = self:now(),
+            seen_by     = { [meta.src] = true },
+            dirty       = true,
+            origin      = d.origin,
+          }
+          channel_buffer_add(self, entry)
+          local source_label
+          if d.next == self.id and d.dst == self.id then
+            source_label = "pull_target"
+          elseif d.next == self.id then
+            source_label = "forwarder"
+          else
+            source_label = "overheard"
+          end
+          self:emit("channel_msg_received", {
+            id = id, channel_id = d.channel_id, flavor = d.channel_flavor,
+            source = source_label, from = meta.src,
+            buffer_depth = #self.channel_buffer,
+          })
+          if source_label == "overheard" then
+            self:emit("channel_msg_overheard", {
+              id = id, channel_id = d.channel_id,
+              from = meta.src, intended_to = d.next,
+            })
+          end
+          -- Cancel any pending pull for this id (promiscuous piggyback)
+          if self.channel_pull_pending and self.channel_pull_pending[id] then
+            self.channel_pull_pending[id] = nil
+            self:emit("channel_pull_suppressed", {
+              ids = {id}, overheard_from = meta.src,
+            })
+          end
         else
-          source_label = "overheard"
+          channel_buffer_mark_seen_by(self, id, meta.src)
         end
-        self:emit("channel_msg_received", {
-          id = id, channel_id = d.channel_id, flavor = d.channel_flavor,
-          source = source_label, from = meta.src,
-          buffer_depth = #self.channel_buffer,
-        })
-        if source_label == "overheard" then
-          self:emit("channel_msg_overheard", {
-            id = id, channel_id = d.channel_id,
-            from = meta.src, intended_to = d.next,
-          })
-        end
-        -- Cancel any pending pull for this id (promiscuous piggyback)
-        if self.channel_pull_pending and self.channel_pull_pending[id] then
-          self.channel_pull_pending[id] = nil
-          self:emit("channel_pull_suppressed", {
-            ids = {id}, overheard_from = meta.src,
-          })
-        end
-      else
-        channel_buffer_mark_seen_by(self, id, meta.src)
       end
 
       -- Overhearers (not on the routed path) — done.
