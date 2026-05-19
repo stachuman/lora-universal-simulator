@@ -660,5 +660,136 @@ def test_anti_spam_clean_run_emits_nothing():
         os.unlink(path)
 
 
+# ---- channel gossip (§3 Package A) ---------------------------------------
+
+def test_channel_gossip_aggregates_volume_and_coverage():
+    """Two posts, several receivers spread by pull/forwarder.
+       Section must count posts, classify receivers by source label,
+       and compute per-message coverage stats."""
+    cfg = {"nodes": [{"name": f"n{i}", "config": {"layer_id": 1}}
+                     for i in range(5)]}
+    events = [
+        _emit(0, 1000, "channel_msg_received",
+              id=100, channel_id=7, flavor=0, source="self_originate",
+              buffer_depth=1),
+        _emit(1, 1200, "channel_msg_received",
+              id=100, channel_id=7, flavor=0, source="pull_target",
+              buffer_depth=1),
+        _emit(2, 1300, "channel_msg_received",
+              id=100, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=1),
+        _emit(0, 2000, "channel_msg_received",
+              id=200, channel_id=7, flavor=0, source="self_originate",
+              buffer_depth=2),
+        _emit(3, 2400, "channel_msg_received",
+              id=200, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=2),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_channel_gossip(path, cfg)
+        assert r["n_originated"] == 2
+        assert r["source_counts"]["self_originate"] == 2
+        assert r["source_counts"]["pull_target"] == 1
+        assert r["source_counts"]["forwarder"] == 2
+        # msg 100: 2 distinct receivers (nodes 1, 2). msg 200: 1 receiver.
+        assert r["coverage_min"] == 1
+        assert r["coverage_max"] == 2
+        # propagation latency: msg 100 -> 200ms + 300ms; msg 200 -> 400ms.
+        assert r["latency_max_ms"] == 400
+        # No cross-layer leaks (all nodes in layer 1).
+        assert r["leaks"] == []
+        analyze.print_section_channel_gossip(r)
+    finally:
+        os.unlink(path)
+
+
+def test_channel_gossip_detects_layer_locality_leak():
+    """Principle 11: receiver on a different layer than origin = LEAK.
+       Section must surface it via the `leaks` list."""
+    cfg = {
+        "nodes": [
+            {"name": "L1a", "config": {"layer_id": 1}},
+            {"name": "L1b", "config": {"layer_id": 1}},
+            {"name": "L2a", "config": {"layer_id": 2}},  # cross-layer leak
+        ]
+    }
+    events = [
+        _emit(0, 1000, "channel_msg_received",
+              id=99, channel_id=7, flavor=0, source="self_originate",
+              buffer_depth=1),
+        _emit(1, 1100, "channel_msg_received",
+              id=99, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=1),
+        _emit(2, 1500, "channel_msg_received",   # leaked to L2
+              id=99, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=1),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_channel_gossip(path, cfg)
+        assert len(r["leaks"]) == 1
+        leak = r["leaks"][0]
+        assert leak["origin_layer"] == 1
+        assert leak["leaked_to"] == [2]
+        assert leak["n_recipients"] == 2
+        # Layer-pair map records both same- and cross-layer arrivals.
+        assert r["received_by_layer_pair"].get("1->1", 0) == 1
+        assert r["received_by_layer_pair"].get("1->2", 0) == 1
+        analyze.print_section_channel_gossip(r)
+    finally:
+        os.unlink(path)
+
+
+def test_channel_gossip_pull_amplification_and_hit_rate():
+    """Pull-side metrics: amplification = pulls_sent / originated,
+       hit rate = pulled_ids / pull_requested_ids."""
+    cfg = {"nodes": [{"name": "n0"}, {"name": "n1"}, {"name": "n2"}]}
+    events = [
+        _emit(0, 1000, "channel_msg_received",
+              id=42, source="self_originate", buffer_depth=1, channel_id=7,
+              flavor=0),
+        # Two pull_sent (one with 1 id, one with 2 ids) → 3 ids requested.
+        _emit(1, 2000, "channel_pull_sent", to=0, ids=[42]),
+        _emit(2, 2100, "channel_pull_sent", to=0, ids=[42, 9999]),
+        # Responder side: origin receives both, has only id=42.
+        _emit(0, 2200, "channel_pull_received", **{"from": 1, "ids": [42]}),
+        _emit(0, 2210, "channel_msg_pulled", to=1, ids=[42], missing={}),
+        _emit(0, 2300, "channel_pull_received",
+              **{"from": 2, "ids": [42, 9999]}),
+        _emit(0, 2310, "channel_msg_pulled", to=2, ids=[42], missing=[9999]),
+        _emit(1, 2350, "channel_pull_suppressed", ids=[7777],
+              overheard_from=0),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_channel_gossip(path, cfg)
+        assert r["pulls_sent"] == 2
+        assert r["pulls_sent_ids"] == 3
+        assert r["pulls_received"] == 2
+        assert r["pull_requested_ids"] == 3
+        assert r["msg_pulled_events"] == 2
+        assert r["pulled_ids"] == 2          # 2 of 3 requested ids served
+        assert r["pulls_suppressed"] == 1
+        analyze.print_section_channel_gossip(r)
+    finally:
+        os.unlink(path)
+
+
+def test_channel_gossip_empty_run_is_silent():
+    """No channel events → section returns zeros and prints a single line."""
+    cfg = {"nodes": [{"name": "n0"}]}
+    events = [_emit(0, 1000, "tx_enqueue", origin=0, ctr=1)]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_channel_gossip(path, cfg)
+        assert r["n_originated"] == 0
+        assert r["total_received"] == 0
+        assert r["leaks"] == []
+        analyze.print_section_channel_gossip(r)   # must not crash
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

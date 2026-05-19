@@ -3893,6 +3893,245 @@ def print_section_27_inter_layer(r: dict) -> None:
         print(f"  gateway_schedule_received:     {r['gateway_schedule_received']}")
 
 
+def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
+    """Channel-gossip metrics (ROADMAP §3 Package A).
+
+    Aggregates the channel_* event stream into:
+      • origination + reception volume per source label
+      • per-message coverage distribution (how many distinct nodes received
+        each posted message)
+      • propagation latency p50/p90/p99 (origin time to first hop reception
+        at each receiver)
+      • Principle-11 layer-locality check (any cross-layer leak = bug)
+      • pull amplification + pull hit rate + suppression rate
+      • eviction + oversize counters
+      • buffer-depth distribution
+    """
+    nodes = cfg.get("nodes", [])
+    layer_of: dict[int, int] = {}
+    for i, n in enumerate(nodes):
+        layer_of[i] = int(n.get("config", {}).get("layer_id", 0) or 0)
+
+    # Per-message: origin info from self_originate; recipients accumulated.
+    origin_t: dict[int, int] = {}        # msg_id -> ts
+    origin_node: dict[int, int] = {}     # msg_id -> node id
+    origin_channel: dict[int, int] = {}  # msg_id -> channel_id
+    receivers: dict[int, dict[int, tuple[int, str]]] = {}  # msg_id -> {node_id: (ts, source)}
+
+    source_counts: Counter = Counter()
+    buffer_depths: list[int] = []
+
+    pulls_sent = 0
+    pulls_sent_ids = 0
+    pulls_received = 0           # events on responder side
+    msg_pulled_events = 0        # responder had >=1 of requested
+    pulled_ids = 0               # total ids served across all pulls
+    pull_requested_ids = 0       # total ids requested across all pull_sent
+    pulls_suppressed = 0         # promiscuous overhear cancelled a pending pull
+    overheard_events = 0
+    seen_by_neighbour = 0
+    evicted_events = 0
+    oversized_events = 0
+
+    for e in iter_events(events_path, since_ms):
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type", "")
+        d = e.get("data") or {}
+        node = e.get("node")
+        t = e.get("time_ms", 0)
+
+        if et == "channel_msg_received":
+            src = d.get("source", "?")
+            source_counts[src] += 1
+            mid = d.get("id")
+            bd = d.get("buffer_depth")
+            if isinstance(bd, int):
+                buffer_depths.append(bd)
+            if src == "self_originate":
+                if mid is not None and mid not in origin_t:
+                    origin_t[mid] = t
+                    origin_node[mid] = node
+                    origin_channel[mid] = d.get("channel_id", 0)
+            else:
+                if mid is not None:
+                    receivers.setdefault(mid, {})[node] = (t, src)
+        elif et == "channel_msg_overheard":
+            overheard_events += 1
+        elif et == "channel_pull_sent":
+            pulls_sent += 1
+            ids = d.get("ids") or []
+            pulls_sent_ids += len(ids)
+        elif et == "channel_pull_received":
+            pulls_received += 1
+            ids = d.get("ids") or []
+            pull_requested_ids += len(ids)
+        elif et == "channel_msg_pulled":
+            msg_pulled_events += 1
+            ids = d.get("ids") or []
+            pulled_ids += len(ids)
+        elif et == "channel_pull_suppressed":
+            pulls_suppressed += 1
+        elif et == "channel_msg_seen_by_neighbour":
+            seen_by_neighbour += 1
+        elif et == "channel_msg_evicted":
+            evicted_events += 1
+        elif et == "channel_send_oversized":
+            oversized_events += 1
+
+    # Derived per-message metrics.
+    coverages: list[int] = []
+    latencies: list[int] = []
+    leaks: list[dict] = []          # cross-layer leak descriptors
+    msgs_by_origin_layer: Counter = Counter()
+    received_by_layer_pair: Counter = Counter()  # (origin_layer, recv_layer) -> count
+
+    for mid, ot in origin_t.items():
+        rec = receivers.get(mid, {})
+        coverages.append(len(rec))
+        ol = layer_of.get(origin_node.get(mid, -1), 0)
+        msgs_by_origin_layer[ol] += 1
+        leaked_to_layers: set[int] = set()
+        for rn, (rt, _src) in rec.items():
+            rl = layer_of.get(rn, 0)
+            received_by_layer_pair[(ol, rl)] += 1
+            latencies.append(rt - ot)
+            if rl != ol:
+                leaked_to_layers.add(rl)
+        if leaked_to_layers:
+            leaks.append({
+                "id":           mid,
+                "origin_node":  origin_node.get(mid),
+                "origin_layer": ol,
+                "leaked_to":    sorted(leaked_to_layers),
+                "n_recipients": len(rec),
+                "channel_id":   origin_channel.get(mid, 0),
+            })
+
+    def _pct(xs: list[int], p: float) -> int:
+        if not xs:
+            return 0
+        s = sorted(xs)
+        k = max(0, min(len(s) - 1, int(round(p * (len(s) - 1)))))
+        return s[k]
+
+    return {
+        "n_originated":         len(origin_t),
+        "source_counts":        dict(source_counts),
+        "total_received":       sum(source_counts.values()),
+        "overheard_events":     overheard_events,
+        "seen_by_neighbour":    seen_by_neighbour,
+        "evicted_events":       evicted_events,
+        "oversized_events":     oversized_events,
+        "pulls_sent":           pulls_sent,
+        "pulls_sent_ids":       pulls_sent_ids,
+        "pulls_received":       pulls_received,
+        "pull_requested_ids":   pull_requested_ids,
+        "msg_pulled_events":    msg_pulled_events,
+        "pulled_ids":           pulled_ids,
+        "pulls_suppressed":     pulls_suppressed,
+        "coverage_mean":        (sum(coverages) / len(coverages)) if coverages else 0.0,
+        "coverage_p50":         _pct(coverages, 0.50),
+        "coverage_p90":         _pct(coverages, 0.90),
+        "coverage_max":         max(coverages) if coverages else 0,
+        "coverage_min":         min(coverages) if coverages else 0,
+        "latency_p50_ms":       _pct(latencies, 0.50),
+        "latency_p90_ms":       _pct(latencies, 0.90),
+        "latency_p99_ms":       _pct(latencies, 0.99),
+        "latency_max_ms":       max(latencies) if latencies else 0,
+        "buffer_depth_p50":     _pct(buffer_depths, 0.50),
+        "buffer_depth_p90":     _pct(buffer_depths, 0.90),
+        "buffer_depth_max":     max(buffer_depths) if buffer_depths else 0,
+        "leaks":                leaks,
+        "msgs_by_origin_layer": dict(msgs_by_origin_layer),
+        "received_by_layer_pair": {f"{a}->{b}": c for (a, b), c in received_by_layer_pair.items()},
+    }
+
+
+def print_section_channel_gossip(r: dict) -> None:
+    print("\n=== (30) channel gossip (§3 Package A) ===")
+    if r["n_originated"] == 0 and r["total_received"] == 0:
+        print("  (no channel-gossip activity in this run)")
+        return
+
+    print(f"  posts originated:             {r['n_originated']}")
+    sc = r["source_counts"]
+    print(f"  channel_msg_received total:   {r['total_received']}")
+    print(f"    self_originate:             {sc.get('self_originate', 0)}")
+    print(f"    pull_target:                {sc.get('pull_target', 0)}")
+    print(f"    forwarder:                  {sc.get('forwarder', 0)}")
+    print(f"    overheard:                  {sc.get('overheard', 0)}")
+    if r["overheard_events"]:
+        print(f"  channel_msg_overheard events: {r['overheard_events']}")
+    if r["seen_by_neighbour"]:
+        print(f"  seen_by_neighbour (BCN ack):  {r['seen_by_neighbour']}")
+
+    if r["n_originated"]:
+        print(f"  per-msg coverage (distinct recipients excl. origin):")
+        print(f"    min={r['coverage_min']}  p50={r['coverage_p50']}  "
+              f"p90={r['coverage_p90']}  max={r['coverage_max']}  "
+              f"mean={r['coverage_mean']:.1f}")
+
+    if r["latency_max_ms"]:
+        print(f"  propagation latency (origin → recipient):")
+        print(f"    p50={r['latency_p50_ms']} ms  p90={r['latency_p90_ms']} ms  "
+              f"p99={r['latency_p99_ms']} ms  max={r['latency_max_ms']} ms")
+
+    if r["buffer_depth_max"]:
+        print(f"  buffer-depth at receive: "
+              f"p50={r['buffer_depth_p50']}  p90={r['buffer_depth_p90']}  "
+              f"max={r['buffer_depth_max']}")
+
+    print(f"  pull activity:")
+    print(f"    channel_pull_sent:          {r['pulls_sent']} "
+          f"({r['pulls_sent_ids']} ids requested)")
+    print(f"    channel_pull_received:      {r['pulls_received']} "
+          f"({r['pull_requested_ids']} ids requested by peers)")
+    print(f"    channel_msg_pulled events:  {r['msg_pulled_events']} "
+          f"({r['pulled_ids']} ids served)")
+    if r["pulls_suppressed"]:
+        print(f"    pulls_suppressed (overheard): {r['pulls_suppressed']}")
+
+    if r["pulls_sent"] and r["n_originated"]:
+        amp = r["pulls_sent"] / r["n_originated"]
+        print(f"  pull amplification:           "
+              f"{amp:.2f} pull/originated_msg "
+              f"({'high' if amp > 5 else 'ok' if amp > 1 else 'low'})")
+    if r["pull_requested_ids"]:
+        hit = r["pulled_ids"] / r["pull_requested_ids"]
+        print(f"  pull hit rate (responder):    "
+              f"{100*hit:.1f}% ({r['pulled_ids']}/{r['pull_requested_ids']} ids served)")
+    if r["pulls_sent"]:
+        sup = r["pulls_suppressed"] / r["pulls_sent"]
+        print(f"  pull suppression rate:        "
+              f"{100*sup:.1f}% (overheard before send)")
+
+    if r["evicted_events"] or r["oversized_events"]:
+        print(f"  buffer pressure:")
+        print(f"    channel_msg_evicted:        {r['evicted_events']}")
+        print(f"    channel_send_oversized:     {r['oversized_events']}")
+    else:
+        print(f"  buffer pressure:              none (no evictions, no oversize)")
+
+    # Principle 11 layer-locality check.
+    leaks = r["leaks"]
+    pairs = r["received_by_layer_pair"]
+    same_layer = sum(v for k, v in pairs.items() if k.split("->")[0] == k.split("->")[1])
+    cross_layer = sum(v for k, v in pairs.items() if k.split("->")[0] != k.split("->")[1])
+    print(f"  Principle 11 (channels local-by-design):")
+    if not leaks:
+        print(f"    OK — {same_layer} same-layer receptions, 0 cross-layer")
+    else:
+        print(f"    LEAK — {len(leaks)} message(s) crossed layers "
+              f"({cross_layer} cross-layer receptions vs {same_layer} same-layer)")
+        for leak in leaks[:5]:
+            print(f"      id=0x{leak['id']:08x} origin=node{leak['origin_node']} "
+                  f"(layer {leak['origin_layer']}) → layers {leak['leaked_to']} "
+                  f"({leak['n_recipients']} recipients)")
+        if len(leaks) > 5:
+            print(f"      … and {len(leaks) - 5} more")
+
+
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
@@ -4316,6 +4555,9 @@ def main() -> None:
         section_mobile_visibility(args.events, cfg, warmup_end_ms))
 
     print_section_27_inter_layer(section_inter_layer(args.events, cfg, warmup_end_ms))
+
+    print_section_channel_gossip(
+        section_channel_gossip(args.events, cfg, warmup_end_ms))
 
     print_headline(cfg, args.events, ctrl, warmup_end_ms)
 
