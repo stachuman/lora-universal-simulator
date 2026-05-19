@@ -1781,6 +1781,40 @@ function lease_age_seconds_now(self)
   return age
 end
 
+-- Bounded-state plumbing. The C++ port will run on a Cortex-M-class MCU
+-- with low-tens-of-kB RAM; any table that scales with mesh size, traffic,
+-- or churn needs an explicit cap. Until the port lands these are advisory
+-- — when a cap is reached we refuse the new entry and emit `table_cap_hit`
+-- so pathological growth is visible in run analysis. Caps are tuned per
+-- table in on_init and overridable via config.
+function count_keys(t)
+  if t == nil then return 0 end
+  local n = 0
+  for _ in pairs(t) do n = n + 1 end
+  return n
+end
+
+-- Emit + log when current_size >= cap. Returns true if at/over cap so the
+-- caller can refuse the insert. `extra` is merged into the event payload
+-- (typically the would-be key so the operator can see what was dropped).
+function table_cap_hit(self, table_name, current_size, cap, action, extra)
+  if cap <= 0 or current_size < cap then return false end
+  local payload = {
+    table  = table_name,
+    size   = current_size,
+    cap    = cap,
+    action = action or "refuse",
+  }
+  if extra then
+    for k, v in pairs(extra) do payload[k] = v end
+  end
+  self:emit("table_cap_hit", payload)
+  self:log(string.format(
+    "table_cap_hit %s size=%d cap=%d action=%s",
+    table_name, current_size, cap, action or "refuse"))
+  return true
+end
+
 function join_j_rate_limited(self, j, meta)
   local key_hash32 = join_rate_limit_key(j)
   if key_hash32 == nil then return false end
@@ -3227,6 +3261,13 @@ local function id_bind_set(self, node_id, key_hash32, source, confidence)
     return false
   end
   local is_new = prev == nil
+  if is_new
+     and table_cap_hit(self, "id_bind", count_keys(self.id_bind),
+                       self.cap_id_bind or 0, "refuse",
+                       {node = node_id, key_hash32 = key_hash32,
+                        source = source or "unknown"}) then
+    return false
+  end
   local rec = prev or {
     key_hash32 = key_hash32,
     first_seen_ms = now,
@@ -3917,6 +3958,12 @@ local function emit_route_query(self, dst_id, dst_name, reason)
   end
   local q_leaf_id = active_leaf_id(self)
   local q_routing_sf = active_routing_sf(self)
+  if self.q_queried[dst_id] == nil
+     and table_cap_hit(self, "q_queried", count_keys(self.q_queried),
+                       self.cap_q_queried or 0, "refuse",
+                       {key = "dst:" .. tostring(dst_id)}) then
+    return now_q, false
+  end
   self.q_queried[dst_id] = now_q
   self:emit("q_tx", {
     opcode = Q_OP_ROUTE_QUERY,
@@ -3965,6 +4012,11 @@ function emit_hash_route_query(self, target_layer_id, key_hash32, reason)
     q_routing_sf = rec.routing_sf
   end
 
+  if self.q_queried[q_key] == nil
+     and table_cap_hit(self, "q_queried", count_keys(self.q_queried),
+                       self.cap_q_queried or 0, "refuse", {key = q_key}) then
+    return now_q, false
+  end
   self.q_queried[q_key] = now_q
   self:emit("q_tx", {
     opcode = Q_OP_HASH_QUERY,
@@ -3993,6 +4045,11 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
                                     user_text, ctr, flags, reason,
                                     previous_hop, queue_meta,
                                     candidate_total, blocked_count, blocked_kind)
+  if table_cap_hit(self, "deferred_sends", #self.deferred_sends,
+                   self.cap_deferred_sends or 0, "refuse",
+                   {origin = origin, dst = dst_id, ctr = ctr, reason = reason}) then
+    return
+  end
   local deferred = {
     origin       = origin, dst_id = dst_id, dst_name = dst_name,
     payload      = payload, user_text = user_text, ctr = ctr, flags = flags,
@@ -4100,6 +4157,14 @@ end
 
 function defer_gateway_handoff(self, gw_env, d_origin, reason)
   if self.gateway_deferred_handoffs == nil then self.gateway_deferred_handoffs = {} end
+  if table_cap_hit(self, "gateway_deferred_handoffs",
+                   #self.gateway_deferred_handoffs,
+                   self.cap_gateway_deferred_handoffs or 0, "refuse",
+                   {origin = d_origin,
+                    target_layer_id = gw_env.target_layer_id,
+                    reason = reason}) then
+    return
+  end
   local now = self:now()
   local q_at, q_sent = emit_hash_route_query(self, gw_env.target_layer_id,
                                              gw_env.dst_key_hash32,
@@ -6829,6 +6894,14 @@ function on_init(self, config)
   self.key_hash32 = self.key_hash32 or config.key_hash32
   self.id_bind_ttl_ms = config.id_bind_ttl_ms or 172800000  -- 48 h
   self.gateway_remote_bind_ttl_ms = config.gateway_remote_bind_ttl_ms or self.id_bind_ttl_ms
+  -- Bounded-state caps. Sized for a small (~50 node) mesh on a Cortex-M MCU.
+  -- Set to 0 to disable. See `table_cap_hit` helper and §13 of PROTOCOL.md.
+  self.cap_seen_origins              = config.cap_seen_origins              or 256
+  self.cap_q_queried                 = config.cap_q_queried                 or 128
+  self.cap_q_responded_to            = config.cap_q_responded_to            or 128
+  self.cap_deferred_sends            = config.cap_deferred_sends            or 32
+  self.cap_gateway_deferred_handoffs = config.cap_gateway_deferred_handoffs or 32
+  self.cap_id_bind                   = config.cap_id_bind                   or 256
   self.join_denied_ids = {}
   self.join_claim_pending = nil
   -- NV-backed state. claim_epoch is monotonic across reboots so a
@@ -8627,8 +8700,13 @@ function on_recv(self, frame, meta)
       -- arriving at us short-circuits via dup_drop. We DID receive the
       -- frame; we just can't carry it further.
       local seen_key = seen_origin_key(d.origin, d.dst, d.ctr)
-      self.seen_origins[seen_key] = self:now() + self.seen_origin_ttl_ms
-      self.seen_origin_from[seen_key] = rx_from
+      if self.seen_origins[seen_key] ~= nil
+         or not table_cap_hit(self, "seen_origins", count_keys(self.seen_origins),
+                              self.cap_seen_origins or 0, "refuse",
+                              {key = seen_key}) then
+        self.seen_origins[seen_key] = self:now() + self.seen_origin_ttl_ms
+        self.seen_origin_from[seen_key] = rx_from
+      end
       -- NACK back to the upstream so it learns rt[dst] was under-estimating.
       -- Use tx_with_retry (RESPONSE class, same priority as ACK would have
       -- been) so the NACK reaches upstream within its ACK-await window.
@@ -8726,8 +8804,13 @@ function on_recv(self, frame, meta)
           self.seen_origin_from[k] = nil
         end
       end
-      self.seen_origins[seen_key] = now_ms + self.seen_origin_ttl_ms
-      self.seen_origin_from[seen_key] = rx_from
+      if self.seen_origins[seen_key] ~= nil
+         or not table_cap_hit(self, "seen_origins", count_keys(self.seen_origins),
+                              self.cap_seen_origins or 0, "refuse",
+                              {key = seen_key}) then
+        self.seen_origins[seen_key] = now_ms + self.seen_origin_ttl_ms
+        self.seen_origin_from[seen_key] = rx_from
+      end
     end
 
     -- Piggyback our measurement of THIS DATA's SNR into the ACK's 4-bit
@@ -9000,6 +9083,11 @@ function on_recv(self, frame, meta)
     local last = self.q_responded_to[key]
     local now = self:now()
     if last and (now - last) < self.q_respond_ttl_ms then return end
+    if last == nil
+       and table_cap_hit(self, "q_responded_to", count_keys(self.q_responded_to),
+                         self.cap_q_responded_to or 0, "refuse", {key = key}) then
+      return
+    end
     self.q_responded_to[key] = now
 
     self:emit("q_rx", {

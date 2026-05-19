@@ -3160,6 +3160,66 @@ disruption across one v2 break is better than two.
 
 ---
 
+## 11. Pre-port hardening (Lua → C++ on Cortex-M)
+
+The Lua script is the **firmware model**. Items in this section don't
+add protocol features — they tighten the model so the C++ port doesn't
+hit MCU-specific walls (flash/RAM budget, fixed-point arithmetic,
+deterministic RNG). Each item below is independently shippable.
+
+### 11.1 Bounded-state caps + cap-hit telemetry (IMPLEMENTED 2026-05-19)
+
+Every state-table that scales with mesh size, traffic, or churn now has
+an explicit `cap_*` knob (defaults sized for ~50-node mesh). When the
+cap is reached the offending insert is **refused** and a `table_cap_hit`
+event fires with `{table, size, cap, action, key|origin/dst/ctr}`. This
+surfaces pathological growth as run telemetry instead of an MCU OOM.
+
+Capped tables (default in parentheses):
+
+- `q_queried` (128) — recently-queried route/hash destinations
+- `q_responded_to` (128) — distinct Q-source keys we've answered
+- `seen_origins` (256) — `(origin,dst,ctr)` dedup; existing TTL prune
+  keeps it well below cap in healthy traffic
+- `deferred_sends` (32) — sends waiting for a route
+- `gateway_deferred_handoffs` (32) — cross-layer envelopes held for
+  binding resolution
+- `id_bind` (256) — `(node_id → key_hash32)` bindings; `id_bind_ttl_ms`
+  ages stale entries out separately
+
+Skipped (already structurally bounded): `tx_stash` (keyed by static
+`RETRY_ELIGIBLE` label set), `gateway_layer_*` (bounded by configured
+layer count), per-peer `peer_*`/`snr_ewma_*` maps (bounded by neighbor
+count and naturally pruned), `rt` (bounded by destinations).
+
+Test coverage: `test/t61_table_cap_hit_q_queried.json` (cap=2, three
+distinct destinations, refuses the third). Healthy runs (s09/s10/s11)
+emit zero `table_cap_hit` events at defaults.
+
+### 11.2 Fixed-point dB conversion (PENDING)
+
+The model uses Lua-native float for SNR, RSSI, EWMA, route scores. Port
+target is `int16_t` Q4 (1/16 dB, range ±2048 dB, ~60 math sites). Risk:
+score-comparison cliffs near rounding boundaries — needs cross-checked
+test fixtures.
+
+### 11.3 RNG-seed contract (PENDING)
+
+Cross-implementation tests need the Lua model and C++ port to produce
+identical event sequences for a given seed. The Lua side currently
+calls `math.random` directly in ~15 places (jitter, backoff, claim
+tie-break). Wrap behind a single `self:rng()` and document the per-call
+intent so the C++ port can reproduce the stream.
+
+### 11.4 Cryptography
+
+Tracked in §8. Pre-port classification: the wire format already reserves
+nonce/AEAD-tag bytes; what's missing is the keying material and the
+state-machine integration. Multi-week effort; tackle after 11.2/11.3
+land so the SNR/RNG plumbing is stable.
+
+---
+
 ## Not on this list, but worth flagging
 
 These came up in analysis but are smaller or already partly addressed:

@@ -2313,6 +2313,7 @@ expectations) subscribe by event_type.
 | `gateway_envelope_at_non_gateway` | Non-gateway received gateway envelope DATA; this is treated as routing/gateway misconvergence and dropped | `origin`, `dst`, `target_layer_id`, `dst_key_hash32`, `payload` |
 | `q_hash_binding_tx` | Node answered `Q:HASH_QUERY` with a resolved `(node_id,key_hash32)` binding | `to`, `node`, `key_hash32`, `tx_layer_id`, `tx_leaf_id`, `tx_routing_sf` |
 | `q_hash_binding_rx` | Node received a `Q:HASH_QUERY` binding response and updated `id_bind`; gateways also update `gateway_remote_bind` | `from`, `node`, `key_hash32`, `layer_id` |
+| `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
 
 ---
 
@@ -2467,6 +2468,23 @@ wire `origin`).
 | `gateway_layer_duration_ms` | 5000 | Default duration for secondary-layer gateway windows |
 | `gateway_layer_offset_ms` | 5000 | Default first offset for secondary-layer gateway windows |
 | `gateway_schedule_guard_ms` | 100 | Extra delay after a gateway foreign-layer window before peers retry local-layer RTS |
+
+### 14.6a Bounded-state caps
+
+Pre-port hardening for the C++ MCU target. Each cap is the maximum
+number of live entries before new inserts are refused and a
+`table_cap_hit` event fires (§13.6). Defaults are sized for a small
+~50-node mesh; raise for larger fleets, lower for stricter telemetry.
+Set to `0` to disable the cap entirely.
+
+| Key | Default | Description |
+|---|---|---|
+| `cap_seen_origins` | 256 | Max `(origin, dst, ctr)` dedup entries; the existing TTL prune keeps the working set well below this in healthy traffic |
+| `cap_q_queried` | 128 | Max recently-queried `dst_id` / hash-query keys; controls outbound Q-rate fan-out |
+| `cap_q_responded_to` | 128 | Max distinct Q-source keys we've answered; controls inbound Q-response work |
+| `cap_deferred_sends` | 32 | Max sends waiting for a route (§11a.2) |
+| `cap_gateway_deferred_handoffs` | 32 | Max cross-layer envelopes a gateway holds awaiting binding resolution |
+| `cap_id_bind` | 256 | Max `(node_id → key_hash32)` bindings; `id_bind_ttl_ms` ages stale entries out separately |
 
 ### 14.7 Runtime-injected (don't override unless you know why)
 
