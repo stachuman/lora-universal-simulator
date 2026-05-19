@@ -53,6 +53,12 @@ Headline: **of 121 knobs, only 20 stay user-tunable in the C++ port.**
   a 64% drop. The remaining reads are 22 T + 5 F + 8 D + 3 derived-
   from-radio (the LBT timing trio: `retry_jitter_ms`,
   `lbt_backoff_ms`, `flood_lbt_max_defer_ms`).
+- Step D (rewrite PROTOCOL.md §14) — **done**. §14 now shows only the
+  20 T + 5 F + 8 D knobs in dedicated sub-sections (§14.1–§14.4),
+  with §14.5 referencing the PROTOCOL block as the read-only source
+  of truth for the 82 P-class constants. Section row count dropped
+  from ~115 to ~56 (-51%). Scenario authors now see only what they
+  can actually configure in deployment.
 
 User decisions (2026-05-19) on the four judgment calls:
 - `max_payload_bytes`: T, default raised to 230, hard-clamped to 241 (done).

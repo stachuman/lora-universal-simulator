@@ -1741,7 +1741,9 @@ a pre-dedup measurement — the ctr_lo dedup cut false positives by
 96%); 94 self-over-budget emits caught legitimate "over fair-share
 but not necessarily malicious" senders.
 
-**Configuration knobs** — see §14.4a.
+**Configuration knobs** — `originator_max_per_window` is the only
+tunable in §14.1. Window/airtime-share/retry-dedup/self-warn are
+PROTOCOL constants (§14.5).
 
 **Cross-references.** §9 (privacy-compatible variant from the start),
 §11.5 (budget tiers — feed into self-monitoring threshold), §7.4 (E2E
@@ -2319,189 +2321,171 @@ expectations) subscribe by event_type.
 
 ## 14. Configuration reference
 
-All knobs are read in `on_init` from `config` (the per-node table in
-the JSON scenario). Defaults shown.
+The scenario JSON's per-node `config` block exposes only the runtime-
+tunable surface. The bulk of the protocol's parameter set is
+production-fixed and lives in the `PROTOCOL = { ... }` table at the
+top of `scenarios/dv_dual_sf.lua` — the C++ port maps that block
+directly to a `protocol_constants.h` header. See `docs/CONFIG_AUDIT.md`
+for the full classification (20 T / 82 P / 5 F / 8 D, post-audit).
 
-### 14.1 Radio
+In the Lua model, **`apply_protocol_constants(self, config)` honors
+config overrides** as an escape hatch for dedicated tests (e.g. t55
+shrinks `gateway_remote_bind_ttl_ms` from 48 h to 8 s, t61 shrinks
+`cap_q_queried` from 128 to 2). The C++ port has no such escape: P-
+class values are `constexpr` and tests run against them with a longer
+wallclock. Knobs documented below are the only ones intended to be
+set in production scenario JSON.
+
+### 14.1 Tunable — deployment configuration (20 keys)
+
+The full T-class surface. Every other knob folds into PROTOCOL.
+
+#### Identity
+
+| Key | Default | Description |
+|---|---|---|
+| `is_gateway` | false | Node advertises gateway capability and bridges to `gateway_layers` |
+| `is_mobile` | false | Node is mobile; relaxes route aging, never used as transit |
+| `join_required` | false | Boot without a short ID; use temporary id 255 and run the J-frame join state machine |
+| `layer_id` / `leaf_id` | 0 | Logical radio/routing layer; on-wire as 4-bit nibble (`layer_id & 0x0f`). `leaf_id` is the legacy alias |
+| `key_hash32` | nil | This node's 32-bit identity hash; future NV-backed in real firmware |
+
+#### Radio
 
 | Key | Default | Description |
 |---|---|---|
 | `routing_sf` | 7 | SF for BCN, RTS, ACK |
 | `allowed_data_sfs` | `{12}` | SFs offered in RTS bitmap; receiver picks |
-| `sf_margin_db` | 5.0 | Headroom required above demod threshold for SF pick |
 | `bw_hz` | 250000 | LoRa BW in Hz (override of `_sim_bw_hz`) |
 | `cr` | 5 | Coding rate (5..8 = CR4/5..CR4/8) |
-| `preamble_sym` | 16 | LoRa preamble symbol count |
+| `duty_cycle` | 0.01 | ETSI EN 300 220 default; T because region-specific |
+| `duty_cycle_window_ms` | 3600000 | 1-hour rolling regulatory window |
 
-### 14.2 Beacon
-
-| Key | Default | Description |
-|---|---|---|
-| `discovery_beacon_period_ms` | 5000 | Fast beacon period while node-local DISCOVERY is active |
-| `beacon_period_ms` | 900000 | Operational period (15 min) |
-| `discovery_ms` | 60000 | Max node-local discovery duration after boot |
-| `beacon_boot_grace_ms` | 120000 | After boot, allow fast triggered BCNs despite the steady-state minimum interval |
-| `discovery_min_bcn_rx` | 3 | Exit discovery after this many BCN receptions |
-| `discovery_min_routes` | 8 | Exit discovery after this many route-table destinations |
-| `beacon_max_bytes` | 151 | Max beacon frame size — 8-byte header including `key_hash32` + 47 × 3-byte entries at default cap |
-| `beacon_trigger_jitter_min_ms` | 2000 | Triggered beacon coalescing delay min |
-| `beacon_trigger_jitter_max_ms` | 10000 | Triggered beacon coalescing delay max |
-| `beacon_trigger_min_interval_ms` | 120000 | Steady-state minimum interval between this node's successful BCN TX and a triggered BCN |
-| `quiet_threshold_ms` | 30000 | Adaptive throttle silence requirement |
-| `beacon_silence_jitter_ms` | 10000 | Defer-jitter after silence detected |
-| `beacon_max_idle_ms` | 900000 (15 min) | Max idle before busy throttle is bypassed (§6.2). Set to 0 to disable. |
-| `peer_suspect_bcn_max` | 8 | Max suspected node ids carried in one BCN extension TLV. Wire TLV caps this at 15. |
-
-### 14.3 Join
+#### MAC
 
 | Key | Default | Description |
 |---|---|---|
-| `join_required` | `false` | Start without a valid short ID, use temporary id `255`, and run J-frame join |
-| `join_listen_ms` | 3000 | Passive listen before sending `J_DISCOVER` |
-| `join_discover_jitter_ms` | 3000 | Random delay after listen before `J_DISCOVER` |
-| `join_discover_wait_ms` | 10000 | Wait after `J_DISCOVER` for at least one `J_OFFER` before retrying |
-| `join_discover_max_attempts` | 0 | Max discover attempts before `join_discover_exhausted`; `0` means unlimited retry |
-| `join_offer_backoff_min_ms` | 100 | Minimum responder jitter before `J_OFFER` |
-| `join_offer_backoff_max_ms` | 1000 | Maximum responder jitter before `J_OFFER` |
-| `join_claim_guard_ms` | 3000 | Time to wait after `J_CLAIM` before adopting if no `J_DENY` arrives |
-| `join_retry_backoff_ms` | 10000 | Retry delay after claim denial |
-| `join_j_rate_limit_window_ms` | 300000 | Per-observer sliding window for untrusted `J_DISCOVER` / `J_CLAIM` frames keyed by `(opcode,key_hash32)`; 0 disables |
-| `join_j_max_per_window` | 6 | Max accepted untrusted joiner J frames per `(opcode,key_hash32)` window; 0 disables |
+| `max_payload_bytes` | 230 | Max user-payload byte length. Network-wide convention — all nodes must agree. Hard-clamped at init to LoRa PHY ceiling (`LORA_MAX_FRAME_BYTES - DATA_HDR_LEN - DATA_INNER_OVERHEAD` = 241); see `max_payload_clamped` event. Originator emits `send_oversized` and rejects sends > cap. |
 
-### 14.4 Data plane
+#### Beacon / boot
 
 | Key | Default | Description |
 |---|---|---|
-| `cts_to_data_gap_ms` | 5 | Originator pause between CTS-rx and DATA-tx |
-| `rts_timeout_ms` | computed | airtime(routing_sf, RTS) + airtime(data_sf, CTS) |
-| `rts_busy_retry_ms` | 30 | Retry delay when our retry timer fires while we're mid-RX |
-| `rts_max_retries` | 3 | RTS retry budget. Was 8 before fix `7ba772c` (drop pending_tx NACK + cap retries). With base ~5 s `rts_timeout` under load, 8 retries = ~30+ s per next-hop before alt-switching; 3 retries = ~12 s per next-hop, ~36 s across K=3 alts. Bounds wallclock pending_tx time so a stuck flight clears faster. |
-| `route_snr_conservatism_db` | 3.0 | SNR subtracted before storing route candidate score, so marginal control-plane samples do not over-promote DATA paths. |
-| `next_hop_live_ttl_ms` | 1200000 | Hard route-selection freshness TTL for immediate next-hop liveness. Shorter than destination route TTL. |
-| `peer_suspect_rts_timeouts` | 2 | Consecutive RTS timeouts before a next-hop is marked suspect. |
-| `peer_silent_rts_timeouts` | 3 | Consecutive RTS timeouts before a next-hop is marked silent. |
-| `peer_dead_rts_timeouts` | 6 | RTS timeouts before a next-hop can be promoted to explicit dead, subject to the evidence window. |
-| `peer_suspect_ttl_ms` | 300000 | Suspect mark TTL. |
-| `peer_silent_ttl_ms` | 900000 | Silent mark TTL. |
-| `peer_dead_ttl_ms` | 3600000 | Dead mark TTL; cleared immediately by any valid frame from that node. |
-| `peer_dead_evidence_window_ms` | 900000 | Minimum elapsed time from first RTS timeout before dead promotion. |
-| `peer_suspect_penalty_db` | 12.0 | Effective route-score penalty for suspect next-hops. |
-| `peer_silent_penalty_db` | 40.0 | Effective route-score penalty for silent next-hops. |
-| `peer_dead_penalty_db` | 80.0 | Effective route-score penalty for dead next-hops. |
-| `max_payload_bytes` | 230 | Max user-payload byte length. Network-wide convention — all nodes must agree, or receiver `pending_rx_expiry` sizing diverges. Hard-clamped at init to LoRa PHY ceiling (`LORA_MAX_FRAME_BYTES - DATA_HDR_LEN - DATA_INNER_OVERHEAD` = 241); see `max_payload_clamped` event. Originator emits `send_oversized` and rejects sends > cap. |
-| `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
-| `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
-| `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
-| `q_query_ttl_ms` | 5000 | Sender Q dedup window — don't re-fire for same dest (§3.7) |
-| `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (opcode,src,dest) (§3.7) |
-| `gateway_handoff_defer_ttl_ms` | `send_defer_ttl_ms` | How long a gateway holds a cross-layer envelope while `Q:HASH_QUERY` tries to discover the target-layer binding |
-| `req_sync_on_boot` | true | During DISCOVERY, send `Q:REQ_SYNC` if route table remains poor |
-| `req_sync_listen_ms` | 8000 | Listen before first boot-time `REQ_SYNC` |
-| `req_sync_retry_ms` | 30000 | Retry interval for boot-time `REQ_SYNC` while still in DISCOVERY |
-| `req_sync_min_routes` | `discovery_min_routes` | Suppress boot-time `REQ_SYNC` once this many routes are known |
-| `sync_response_enabled` | true | Allow node to answer `Q:REQ_SYNC` with full sync BCN |
-| `sync_response_min_routes` | 1 | Minimum route count before answering `REQ_SYNC` |
-| `sync_response_backoff_min_ms` | 500 | Min randomized sync-response delay |
-| `sync_response_backoff_max_ms` | 6000 | Max randomized sync-response delay |
-| `sync_response_mobile_penalty_ms` | 8000 | Extra delay when responder is mobile |
-| `sync_response_requester_mobile_penalty_ms` | 2000 | Extra delay when requester is mobile |
-| `sync_response_suppress_window_ms` | 12000 | Suppress pending response after hearing another useful BCN |
+| `beacon_period_ms` | 900000 | Steady-state operational period (15 min) |
+| `beacon_max_idle_ms` | 900000 | Max idle before busy throttle is bypassed (§6.2). 0 = disable |
+| `req_sync_min_routes` | `PROTOCOL.discovery_min_routes` (8) | Suppress boot-time REQ_SYNC once this many routes are known. Override for sparse-route meshes (s07/s08 set 2) |
+
+#### Routing
+
+| Key | Default | Description |
+|---|---|---|
 | `rt_aging_ttl_neighbor_ms` | 2700000 (45 min) | Direct-neighbour candidate TTL — see §6.5 |
 | `rt_aging_ttl_remote_ms` | 10800000 (3 h) | Multi-hop candidate TTL — see §6.5 |
-| `rt_aging_check_period_ms` | 60000 | Aging-scan period — see §6.5 |
-| `id_bind_ttl_ms` | 172800000 (48 h) | Identity binding TTL; route aging does not recycle node IDs |
-| `gateway_remote_bind_ttl_ms` | `id_bind_ttl_ms` | Gateway remote binding TTL for `(layer_id,key_hash32)->node_id`; 0 disables remote binding aging |
-| `cascade_requeue_max` | 3 | Phase C — max cascade-exhaust requeues before drop (§5.6) |
-| `cascade_requeue_base_ms` | 5000 | Phase C — base backoff (exponential: base × 2^(count-1)) |
-| `cascade_requeue_backoff_cap_ms` | 30000 | Phase C — backoff caps at this value |
-| `cascade_requeue_total_max_ms` | 60000 | Phase C — total wallclock cap; older items drop (was 120000 pre-D3) |
-| `cascade_requeue_load_threshold` | 0 | Phase D3 — local tx_queue depth above which the effective requeue budget shrinks (§5.6) |
-| `state_snapshot_period_ms` | 60000 | Period for `node_state_snapshot` event (§11.6); 0 = disable |
-| `debug_start` / `debug_start_ms` | unset | Start of debug emit window in simulation ms; when set, noisy diagnostics are suppressed before this time |
-| `debug_end` / `debug_end_ms` | unset | End of debug emit window in simulation ms; when set, noisy diagnostics are suppressed after this time |
-| `e2e_ack_ttl_ms` | 60000 | E2E delivery ACK pending-entry TTL at originator (§7.4) — after this, emit `e2e_ack_timeout` |
 
-### 14.5 Channel access
+#### Anti-spam / E2E
+
+| Key | Default | Description |
+|---|---|---|
+| `originator_max_per_window` | 6 | Apparent-origination threshold per `PROTOCOL.originator_window_ms` (~72/hr at default). Per-network fairness policy |
+| `e2e_ack_ttl_ms` | 60000 | E2E delivery ACK pending-entry TTL at originator (§7.4) |
+
+#### Gateway
+
+| Key | Default | Description |
+|---|---|---|
+| `gateway_layers` | `{}` | Secondary layer records (only meaningful when `is_gateway: true`). Each record may set `layer_id`, `routing_sf`/`sf`, `allowed_data_sfs`, `period_ms` (default 30000), `duration_ms` (default 5000), `offset_ms` (default 5000), and optional `leaf_id` override for tests. Per-record fields are the only source — no node-level fallbacks |
+
+### 14.2 Feature flags (5 keys)
+
+Always on in production. Test scenarios disable them to isolate
+specific behaviors. The C++ port can wrap each in `#ifdef ENABLE_X`
+to compile out for certification builds.
 
 | Key | Default | Description |
 |---|---|---|
 | `lbt_enabled` | true | Pre-check `channel_busy_until` before initiating/flood TX |
-| `lbt_backoff_ms` | half RTS-airtime | Random slack added after `busy_until` for LBT defers |
-| `retry_jitter_ms` | one RTS-airtime | RTS retry randomization width |
-| `flood_lbt_max_defer_ms` | one beacon-airtime | LBT defer cap for FLOOD |
-| `duty_cycle` | 0.01 | ETSI EN 300 220 default |
-| `duty_cycle_window_ms` | 3600000 | 1-hour rolling window |
-| `budget_strained_pct` | 50 | ≤ this % used → HEALTHY tier; > → STRAINED (§11.5) |
-| `budget_critical_pct` | 80 | > this → CRITICAL (budget-NACK + own-beacon-skip kick in) |
-| `budget_exhausted_pct` | 95 | > this → EXHAUSTED |
-| `budget_blind_strained_ms` | 60000 (1 min) | Sender-side blind window after STRAINED budget-NACK |
-| `budget_blind_critical_ms` | 180000 (3 min) | Same, for CRITICAL |
-| `budget_blind_exhausted_ms` | 300000 (5 min) | Same, for EXHAUSTED |
-| `neighbor_budget_tier_ttl_ms` | 300000 (5 min) | Tier-aware routing — last-known peer tier expires after this; saturated peers return to primary pool when no fresh NACK |
+| `seen_bitmap_enabled` | true | Append destination-freshness bitmap to BCN frames (§6.4) |
+| `req_sync_on_boot` | true | During DISCOVERY, send `Q:REQ_SYNC` if route table remains poor |
+| `rt_learn_from_data` | true | Opportunistically install route entries from carried DATA frames (§7.6) |
+| `sync_response_enabled` | true | Allow this node to answer `Q:REQ_SYNC` with a full sync BCN |
 
-### 14.5a Anti-spam (1st-hop rate-limit)
+### 14.3 Debug-only (8 keys)
 
-Reactive count-based originator throttle at every 1st-hop neighbour.
-Works under §9 T2 privacy (observes physical-layer `meta.src`, not the
-wire `origin`).
+Not used in production. The C++ port compiles them out (or
+hardcodes the production value). The Lua model accepts them for
+dedicated tests + run analysis.
 
 | Key | Default | Description |
 |---|---|---|
-| `originator_window_ms` | 300000 (5 min) | Sliding window for per-direct-sender RTS/CTS observation counts |
-| `originator_max_per_window` | 6 | Apparent-origination threshold per window (≈72/hr); over → silent-drop inbound RTS |
-| `originator_airtime_share` | 0.25 | Per-sender airtime backstop; > this fraction of N's own duty cycle → silent-drop regardless of count |
-| `originator_retry_dedup_ms` | 10000 | Same-ctr_lo retries within this window count as ONE origination (don't inflate `R[X]` with retries) |
-| `originator_self_warn_fraction` | 0.5 | Originator's self-monitor threshold = this × `originator_max_per_window`; on terminal failure, emit `originator_self_over_budget` |
+| `rts_timeout_ms` | computed per-flight | Override the per-flight RTS-timeout derivation (debug stress only) |
+| `gateway_remote_bind_ttl_ms` | `id_bind_ttl_ms` (48 h) | Override the gateway remote-bind TTL. Production = `#define = ID_BIND_TTL_MS`. t55 sets 8000 ms to verify aging-out path |
+| `state_snapshot_period_ms` | 60000 | Period for `node_state_snapshot` event (§11.6); 0 = disable |
+| `originator_self_warn_fraction` | 0.5 | Self-warning trigger fraction (diagnostic hint emission) |
+| `debug_start_ms` / `debug_start` | unset | Start of debug emit window (sim ms); suppresses noisy diagnostics before this time |
+| `debug_end_ms` / `debug_end` | unset | End of debug emit window |
+| `nv` | `{}` | Test seed for NV-persisted state (e.g. `nv = { claim_epoch = 42 }`). Real firmware reads NV directly |
 
-### 14.6 Layer / mesh
-
-| Key | Default | Description |
-|---|---|---|
-| `layer_id` | 0 | Logical radio/routing layer; preferred config key |
-| `leaf_id` | 0 | Legacy shorthand and on-wire 4-bit layer nibble (`layer_id & 0x0f`); receivers reject foreign layers |
-| `is_gateway` | false | Node advertises gateway capability and may participate in `gateway_layers` |
-| `gateway_layers` | `{}` | Secondary layer records. Each record may set `layer_id`, `routing_sf`/`sf`, `allowed_data_sfs`, `period_ms` (default 30000), `duration_ms` (default 5000), `offset_ms` (default 5000), and optional `leaf_id` override for tests. Per-record fields are the only source — no node-level fallbacks. |
-| `gateway_schedule_guard_ms` | 100 | Extra delay after a gateway foreign-layer window before peers retry local-layer RTS |
-
-### 14.6b Q4 fixed-point dB (internal)
-
-All SNR/RSSI/score/EWMA storage and arithmetic is `int16_t` Q4
-(1 unit = 1/16 dB). Config knobs keep the `_db` suffix (float dB
-input); `on_init` converts to Q4 storage via `db_to_q4`. Telemetry
-events and logs convert back via `q4_to_db` for human readability.
-The C++ port maps Q4 directly to `int16_t` with no FPU. See
-ROADMAP §11.2 for the full inventory.
-
-Affected config keys (input is float dB; internally stored as Q4):
-`peer_suspect_penalty_db`, `peer_silent_penalty_db`, `peer_dead_penalty_db`,
-`route_snr_conservatism_db`, `sf_margin_db`, `snr_ewma_alpha`. All keep
-their existing names and units in the scenario JSON.
-
-### 14.6a Bounded-state caps
-
-Pre-port hardening for the C++ MCU target. Each cap is the maximum
-number of live entries before new inserts are refused and a
-`table_cap_hit` event fires (§13.6). Defaults are sized for a small
-~50-node mesh; raise for larger fleets, lower for stricter telemetry.
-Set to `0` to disable the cap entirely.
-
-| Key | Default | Description |
-|---|---|---|
-| `cap_seen_origins` | 256 | Max `(origin, dst, ctr)` dedup entries; the existing TTL prune keeps the working set well below this in healthy traffic |
-| `cap_q_queried` | 128 | Max recently-queried `dst_id` / hash-query keys; controls outbound Q-rate fan-out |
-| `cap_q_responded_to` | 128 | Max distinct Q-source keys we've answered; controls inbound Q-response work |
-| `cap_deferred_sends` | 32 | Max sends waiting for a route (§11a.2) |
-| `cap_gateway_deferred_handoffs` | 32 | Max cross-layer envelopes a gateway holds awaiting binding resolution |
-| `cap_id_bind` | 256 | Max `(node_id → key_hash32)` bindings; `id_bind_ttl_ms` ages stale entries out separately |
-
-### 14.7 Runtime-injected (don't override unless you know why)
+### 14.4 Runtime-injected (don't override unless you know why)
 
 | Key | Source | Description |
 |---|---|---|
-| `_sim_bw_hz` | runtime | Resolved BW in Hz from radio block |
-| `_sim_cr` | runtime | Resolved CR from radio block |
-| `_sim_duty_cycle` | runtime | Resolved duty_cycle from radio block |
-| `_sim_duty_cycle_window_ms` | runtime | Resolved window from radio block |
+| `_sim_bw_hz` | runtime | Resolved BW in Hz from `simulation.radio` block |
+| `_sim_cr` | runtime | Resolved CR |
+| `_sim_duty_cycle` | runtime | Resolved duty_cycle |
+| `_sim_duty_cycle_window_ms` | runtime | Resolved window |
+
+### 14.5 PROTOCOL constants (read-only reference)
+
+All 82 P-class knobs are pinned in the `PROTOCOL = { ... }` table at
+the top of `scenarios/dv_dual_sf.lua`. They are protocol-design
+parameters, not deployment parameters; changing one is a wire/behaviour
+change and requires running the full suite. Categories (see the Lua
+block for current values):
+
+- Radio: `preamble_sym`, `sf_margin_q4`
+- MAC: `cts_to_data_gap_ms`, `rts_busy_retry_ms`, `rts_max_retries`
+- Beacon: `discovery_beacon_period_ms`, `beacon_max_bytes`,
+  `beacon_trigger_jitter_*_ms`, `beacon_trigger_min_interval_ms`,
+  `quiet_threshold_ms`, `beacon_silence_jitter_ms`, `seen_bitmap_ttl_ms`
+- Boot: `discovery_ms`, `discovery_min_bcn_rx`, `discovery_min_routes`,
+  `beacon_boot_grace_ms`, `req_sync_listen_ms`, `req_sync_retry_ms`
+- Routing: `rt_aging_check_period_ms`, `next_hop_live_ttl_ms`,
+  `route_snr_conservatism_q4`, `snr_ewma_alpha_q4`
+- Peer liveness: `peer_suspect_rts_timeouts`, `peer_silent_rts_timeouts`,
+  `peer_dead_rts_timeouts`, `peer_{suspect,silent,dead}_ttl_ms`,
+  `peer_dead_evidence_window_ms`, `peer_{suspect,silent,dead}_penalty_q4`,
+  `peer_suspect_bcn_max`
+- Duty-cycle tiers: `budget_{strained,critical,exhausted}_pct`,
+  `budget_blind_{strained,critical,exhausted}_ms`,
+  `neighbor_budget_tier_ttl_ms`
+- Anti-spam: `originator_window_ms`, `originator_airtime_share`,
+  `originator_retry_dedup_ms`
+- Cascade requeue: `cascade_requeue_max`, `cascade_requeue_base_ms`,
+  `cascade_requeue_backoff_cap_ms`, `cascade_requeue_total_max_ms`,
+  `cascade_requeue_load_threshold`
+- Q frames: `q_query_ttl_ms`, `q_respond_ttl_ms`
+- Sync response: `sync_response_backoff_{min,max}_ms`,
+  `sync_response_mobile_penalty_ms`,
+  `sync_response_requester_mobile_penalty_ms`,
+  `sync_response_suppress_window_ms`
+- Defer/dedup: `send_defer_ttl_ms`, `last_acked_ttl_ms`, `seen_origin_ttl_ms`
+- Hop budget: `hop_budget_slack`, `hop_budget_max_initial`
+- Bounded state caps: `cap_seen_origins`, `cap_q_queried`,
+  `cap_q_responded_to`, `cap_deferred_sends`,
+  `cap_gateway_deferred_handoffs`, `cap_id_bind` — emit `table_cap_hit`
+  on overflow (§13.6)
+- Identity / gateway: `id_bind_ttl_ms`, `gateway_schedule_guard_ms`
+- Join: `join_{listen,discover_jitter,discover_wait}_ms`,
+  `join_discover_max_attempts`, `join_offer_backoff_{min,max}_ms`,
+  `join_claim_guard_ms`, `join_retry_backoff_ms`,
+  `join_j_rate_limit_window_ms`, `join_j_max_per_window`
+
+### 14.6 Q4 fixed-point dB (internal)
+
+All SNR/RSSI/score/EWMA storage and arithmetic is `int16_t` Q4
+(1 unit = 1/16 dB). PROTOCOL stores Q4 values directly. Telemetry
+events and logs convert back via `q4_to_db` for human readability.
+The C++ port maps Q4 to `int16_t` with no FPU. See ROADMAP §11.2.
 
 ---
 
