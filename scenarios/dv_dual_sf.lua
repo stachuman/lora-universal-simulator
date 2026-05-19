@@ -779,31 +779,218 @@
 -- (chain-min SNR score). The decode helper returns the BIN CENTER so
 -- EWMAs / comparisons treat quantization as fair rounding, not
 -- systematic bias toward bin lower edge.
-local function bucket_of_snr_4b(snr_db)
-  local b = math.floor((snr_db + 20) / 2)
+
+-- ============================================================
+-- Q4 fixed-point dB representation (pre-port hardening, ROADMAP §11.2)
+--
+-- All internal SNR/RSSI/score/EWMA storage and arithmetic is `int16_t`
+-- Q4 — 1 unit = 1/16 dB, range -2048.0 .. +2047.9375 dB. The C++ port
+-- maps this directly to `int16_t` with no FPU. Floats survive only at
+-- I/O boundaries: ingress (meta.snr / meta.rssi from runtime) converts
+-- via `db_to_q4` immediately; egress (events, logs) converts back via
+-- `q4_to_db` for human readability. Wire buckets work in Q4.
+--
+-- Alpha (EWMA weight) is also Q4 — alpha=0.3 → 5 (=0.3125 dB-fraction),
+-- range [0, Q4_SCALE]. Quantization noise on alpha is intentional.
+-- ============================================================
+Q4_SCALE = 16
+Q4_MAX   =  32767   -- int16_t saturation
+Q4_MIN   = -32768
+
+function db_to_q4(db)
+  if db == nil then return nil end
+  local v
+  if db >= 0 then v = math.floor(db * Q4_SCALE + 0.5)
+  else            v = -math.floor(-db * Q4_SCALE + 0.5) end
+  if v >  Q4_MAX then return  Q4_MAX end
+  if v <  Q4_MIN then return  Q4_MIN end
+  return v
+end
+
+function q4_to_db(q4)
+  if q4 == nil then return nil end
+  return q4 / Q4_SCALE
+end
+
+-- EWMA in Q4: result = (alpha * sample + (SCALE - alpha) * prev) // SCALE.
+-- alpha_q4 must already be in [0, Q4_SCALE].
+function q4_ewma(prev_q4, sample_q4, alpha_q4)
+  return (alpha_q4 * sample_q4 + (Q4_SCALE - alpha_q4) * prev_q4) // Q4_SCALE
+end
+
+-- Wire-bucket helpers take Q4 in / return Q4 out. The bucket index
+-- itself is unitless. -20 dB = -320 Q4 (bucket-0 lower edge), bucket
+-- centers at -19, -17, ... +11 dB (i.e. -304, -272, ... +176 in Q4),
+-- bin width = 2 dB = 32 Q4.
+local function bucket_of_snr_4b(snr_q4)
+  local b = (snr_q4 - (-20 * Q4_SCALE)) // (2 * Q4_SCALE)
   if b < 0 then b = 0 end
   if b > 15 then b = 15 end
   return b
 end
 
 local function snr_of_bucket_4b(bucket)
-  return -19 + bucket * 2  -- -19, -17, ..., +9, +11 (bin centers)
+  return (-19 + bucket * 2) * Q4_SCALE
 end
 
--- ACK keeps its fixed 2-byte wire size. The low nibble is split into
--- a 2-bit budget hint plus a 2-bit coarse DATA-leg SNR hint.
-local function bucket_of_snr_2b(snr_db)
-  if snr_db == nil then return 3 end
-  if snr_db < -12 then return 0 end
-  if snr_db < -4 then return 1 end
+-- ACK 2-bit SNR bucket. -12 dB = -192 Q4, -4 dB = -64 Q4. Centers
+-- (-16, -8, +4) chosen to match the prior `snr_of_bucket_2b` table.
+local function bucket_of_snr_2b(snr_q4)
+  if snr_q4 == nil then return 3 end
+  if snr_q4 < -192 then return 0 end
+  if snr_q4 <  -64 then return 1 end
   return 2
 end
 
 local function snr_of_bucket_2b(bucket)
-  if bucket == 0 then return -16 end
-  if bucket == 1 then return -8 end
-  if bucket == 2 then return 4 end
+  if bucket == 0 then return -16 * Q4_SCALE end
+  if bucket == 1 then return  -8 * Q4_SCALE end
+  if bucket == 2 then return   4 * Q4_SCALE end
   return nil
+end
+
+-- ============================================================================
+-- PROTOCOL — production-fixed constants (audit class "P", see CONFIG_AUDIT.md)
+--
+-- These are not runtime-tunable. In the C++ port they become a
+-- `protocol_constants.h` header of `constexpr` values. The Lua model
+-- applies them via `apply_protocol_constants(self)` at the top of
+-- `on_init`. Per-scenario config can only set the ~20 T (tunable) +
+-- 5 F (feature-flag) + ~8 D (debug-only) knobs that remain in on_init's
+-- config-reading block. Touching anything here is a protocol-design
+-- change, not a deployment choice — change the value, run the suite,
+-- update the port.
+-- ============================================================================
+PROTOCOL = {
+  -- ---- Radio / PHY (P-class only; SF/BW/CR/duty are T, set per-network) ----
+  preamble_sym                   = 16,         -- SX1262 default; varying breaks interop
+  sf_margin_q4                   = 80,         -- 5.0 dB Q4 — demod-threshold safety
+
+  -- ---- MAC / channel access (P-class only) ----
+  cts_to_data_gap_ms             = 5,          -- HW SF-switch settle
+  rts_busy_retry_ms              = 30,         -- receiver-busy reschedule
+  rts_max_retries                = 3,          -- cascade-analysis tuned
+
+  -- ---- Beacon plane ----
+  discovery_beacon_period_ms     = 5000,       -- boot-time fast cadence
+  beacon_max_bytes               = 151,        -- frame size cap (LoRa ≈ 256)
+  beacon_trigger_jitter_min_ms   = 2000,       -- triggered-beacon coalescing
+  beacon_trigger_jitter_max_ms   = 10000,
+  beacon_trigger_min_interval_ms = 120000,     -- storm-prone trigger rate limit
+  quiet_threshold_ms             = 30000,      -- channel-busy throttle gate
+  beacon_silence_jitter_ms       = 10000,      -- thundering-herd spread
+  seen_bitmap_ttl_ms             = 1800000,    -- derived: 2× beacon period
+
+  -- ---- Boot / discovery ----
+  discovery_ms                   = 60000,
+  discovery_min_bcn_rx           = 3,
+  discovery_min_routes           = 8,
+  beacon_boot_grace_ms           = 120000,
+  req_sync_listen_ms             = 8000,
+  req_sync_retry_ms              = 30000,
+
+  -- ---- Routing (DV) ----
+  rt_aging_check_period_ms       = 60000,
+  next_hop_live_ttl_ms           = 1200000,    -- 20 min
+  route_snr_conservatism_q4      = 0,          -- 0.0 dB Q4 — no-op today
+  snr_ewma_alpha_q4              = 5,          -- 0.3 ≈ 5/16, ~10-sample window
+
+  -- ---- Peer liveness (suspect/silent/dead tiers) ----
+  peer_suspect_rts_timeouts      = 2,
+  peer_silent_rts_timeouts       = 3,
+  peer_dead_rts_timeouts         = 6,
+  peer_suspect_ttl_ms            = 300000,     -- 5 min
+  peer_silent_ttl_ms             = 900000,     -- 15 min
+  peer_dead_ttl_ms               = 3600000,    -- 1 h
+  peer_dead_evidence_window_ms   = 900000,     -- min elapsed for dead promotion
+  peer_suspect_penalty_q4        = 192,        -- 12.0 dB Q4
+  peer_silent_penalty_q4         = 640,        -- 40.0 dB Q4
+  peer_dead_penalty_q4           = 1280,       -- 80.0 dB Q4
+  peer_suspect_bcn_max           = 8,
+
+  -- ---- Duty-cycle budget tiers ----
+  budget_strained_pct            = 50,         -- >50% used → STRAINED
+  budget_critical_pct            = 80,         -- >80% used → CRITICAL
+  budget_exhausted_pct           = 95,         -- >95% used → EXHAUSTED
+  budget_blind_strained_ms       = 60000,      -- per-tier blind windows
+  budget_blind_critical_ms       = 180000,
+  budget_blind_exhausted_ms      = 300000,
+  neighbor_budget_tier_ttl_ms    = 300000,     -- 5 min
+
+  -- ---- Anti-spam originator rate-limit (P-class only) ----
+  originator_window_ms           = 300000,     -- 5 min sliding window
+  originator_airtime_share       = 0.25,       -- backstop
+  originator_retry_dedup_ms      = 10000,
+
+  -- ---- Cascade-requeue (Phase C) ----
+  cascade_requeue_max            = 3,
+  cascade_requeue_base_ms        = 5000,
+  cascade_requeue_backoff_cap_ms = 30000,
+  cascade_requeue_total_max_ms   = 60000,
+  cascade_requeue_load_threshold = 0,
+
+  -- ---- Q frames ----
+  q_query_ttl_ms                 = 5000,
+  q_respond_ttl_ms               = 10000,
+
+  -- ---- Sync response (REQ_SYNC, P-class only) ----
+  sync_response_backoff_min_ms   = 500,
+  sync_response_backoff_max_ms   = 6000,
+  sync_response_mobile_penalty_ms          = 8000,
+  sync_response_requester_mobile_penalty_ms = 2000,
+  sync_response_suppress_window_ms = 12000,
+
+  -- ---- Defer / dedup ----
+  send_defer_ttl_ms              = 30000,
+  last_acked_ttl_ms              = 10000,
+  seen_origin_ttl_ms             = 30000,
+
+  -- ---- Hop budget (§7.6) ----
+  hop_budget_slack               = 3,
+  hop_budget_max_initial         = 15,         -- 4-bit field max
+
+  -- ---- Bounded-state caps (§11.1 in ROADMAP) ----
+  cap_seen_origins               = 256,
+  cap_q_queried                  = 128,
+  cap_q_responded_to             = 128,
+  cap_deferred_sends             = 32,
+  cap_gateway_deferred_handoffs  = 32,
+  cap_id_bind                    = 256,
+
+  -- ---- Identity binding ----
+  id_bind_ttl_ms                 = 172800000,  -- 48 h
+
+  -- ---- Gateway scheduling ----
+  gateway_schedule_guard_ms      = 100,
+
+  -- ---- Join state machine (§2a) ----
+  join_listen_ms                 = 3000,
+  join_discover_jitter_ms        = 3000,
+  join_discover_wait_ms          = 10000,
+  join_discover_max_attempts     = 0,          -- 0 = unlimited
+  join_offer_backoff_min_ms      = 100,
+  join_offer_backoff_max_ms      = 1000,
+  join_claim_guard_ms            = 3000,
+  join_retry_backoff_ms          = 10000,
+  join_j_rate_limit_window_ms    = 300000,     -- 5 min
+  join_j_max_per_window          = 6,
+}
+
+-- Bulk-apply PROTOCOL constants onto a node. Called near the top of
+-- on_init. `config` can override individual values — this is the Lua
+-- model's escape hatch for dedicated tests that need accelerated
+-- timings (e.g. t55 shrinks gateway_remote_bind_ttl_ms from 48 h to
+-- 8 s; t61 shrinks cap_q_queried from 128 to 2). The C++ port has no
+-- such escape hatch — these become `constexpr` and tests run against
+-- the production values with a longer wallclock instead.
+function apply_protocol_constants(self, config)
+  for k, v in pairs(PROTOCOL) do
+    if config ~= nil and config[k] ~= nil then
+      self[k] = config[k]
+    else
+      self[k] = v
+    end
+  end
 end
 
 -- Differential pack_beacon — two-tier emission.
@@ -1281,13 +1468,14 @@ end
 
 -- Update a per-neighbor SNR EWMA in-place. First sample seeds the EWMA
 -- (no warmup ramp); subsequent samples blend with `alpha`. Default alpha
--- 0.3 → ~10-sample effective window.
-local function update_snr_ewma(table_, nbr_id, snr_db, alpha)
+-- 0.3 → Q4 5 → ~10-sample effective window. Storage is Q4; pass Q4 in.
+local function update_snr_ewma(table_, nbr_id, snr_q4, alpha_q4)
+  if snr_q4 == nil then return end
   local prev = table_[nbr_id]
   if prev == nil then
-    table_[nbr_id] = snr_db
+    table_[nbr_id] = snr_q4
   else
-    table_[nbr_id] = alpha * snr_db + (1 - alpha) * prev
+    table_[nbr_id] = q4_ewma(prev, snr_q4, alpha_q4)
   end
 end
 
@@ -1364,8 +1552,9 @@ end
 --   byte 0 : tag 'K'
 --   byte 1 : ctr_lo (4 hi) | budget_hint (2) | snr_bucket_coarse (2 lo)
 --   byte 2 : intended previous-hop id
-local function pack_ack(ctr_lo, snr_db, budget_hint, to_id)
-  local bucket = bucket_of_snr_2b(snr_db)
+-- snr_q4 is Q4 SNR (1/16 dB) of the DATA leg as measured by the receiver.
+local function pack_ack(ctr_lo, snr_q4, budget_hint, to_id)
+  local bucket = bucket_of_snr_2b(snr_q4)
   local hint = budget_hint or 0
   if hint < 0 then hint = 0 end
   if hint > 3 then hint = 3 end
@@ -1380,7 +1569,7 @@ local function parse_ack(frame)
   return {
     ctr_lo            = (b1 >> 4) & 0xf,
     budget_hint       = (b1 >> 2) & 0x3,
-    snr_db            = snr_of_bucket_2b(bucket),
+    snr_q4            = snr_of_bucket_2b(bucket),   -- Q4 (1/16 dB)
     snr_bucket        = bucket,
     snr_bucket_coarse = bucket,
     to                = frame:byte(3),
@@ -1942,6 +2131,13 @@ end
 -- protocol — bump these if the frame layout changes.
 local RTS_LEN = 8       -- 'R' + src + next + [addr_len|rsv|leaf_id] + dst + [ctr_lo<<4|rsv] + sf_bitmap + payload_len
 local CTS_LEN = 3       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | already_received) + to
+-- SX126x / SX127x LoRa PHY length register is 8-bit → 255 bytes max for
+-- the *entire* on-air frame. Anything longer is physically untransmittable.
+-- The runtime enforces this at TX with a `tx_oversized` event; the script
+-- enforces it at send-time (see send_oversized) to fail fast at the
+-- originator instead of after queueing.
+LORA_MAX_FRAME_BYTES = 255
+
 local DATA_HDR_LEN = 8  -- 'D' + byte1 + next + dst + hop_budget + prev_fwd_rt_hops + ctr_lo + ctr_hi (inner+MAC follow)
 -- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
 -- RTS payload_len = #body + DATA_INNER_OVERHEAD for in-leaf frames.
@@ -1983,9 +2179,10 @@ end
 -- the linear pattern at the high-data-rate end. Mirrors the C++
 -- SimRadio::getSnrThreshold table so script and runtime agree on what
 -- "decodable" means.
+-- Q4 dB (1/16 dB units). SF5 = -2.5 dB → -40; SF12 = -20.0 dB → -320.
 local SF_DEMOD_THRESHOLD = {
-  [5]  =  -2.5, [6]  =  -5.0, [7]  =  -7.5, [8]  = -10.0,
-  [9]  = -12.5, [10] = -15.0, [11] = -17.5, [12] = -20.0,
+  [5]  =  -40, [6]  =  -80, [7]  = -120, [8]  = -160,
+  [9]  = -200, [10] = -240, [11] = -280, [12] = -320,
 }
 
 -- Bitmap helpers. bit (sf-5) of `bm` = SF acceptable for the DATA leg.
@@ -2013,15 +2210,15 @@ local function sf_bitmap_to_set(bm)
 end
 
 -- Choose the fastest (lowest) SF in the bitmap whose demod threshold leaves
--- at least `margin_db` of headroom against the measured link SNR. Falls
+-- at least `margin_q4` of headroom against the measured link SNR. Falls
 -- back to the most-robust (highest) allowed SF if nothing meets the
 -- margin — the link is borderline but we still try. Returns nil only on
--- empty bitmap (caller should reject the RTS).
-local function select_data_sf(rx_snr_db, sf_bitmap, margin_db)
+-- empty bitmap (caller should reject the RTS). All inputs are Q4.
+local function select_data_sf(rx_snr_q4, sf_bitmap, margin_q4)
   -- Ascending pass: prefer fastest SF that has the SNR headroom.
   for sf = 5, 12 do
     if sf_in_bitmap(sf_bitmap, sf) and
-       rx_snr_db >= SF_DEMOD_THRESHOLD[sf] + margin_db then
+       rx_snr_q4 >= SF_DEMOD_THRESHOLD[sf] + margin_q4 then
       return sf
     end
   end
@@ -2034,17 +2231,18 @@ local function select_data_sf(rx_snr_db, sf_bitmap, margin_db)
   return nil   -- empty bitmap
 end
 
-local function data_sf_selection_snr(self, peer_id, current_snr)
-  local ewma = self.snr_ewma_in[peer_id]
-  if ewma == nil then return current_snr, nil end
+-- All Q4 in / out.
+local function data_sf_selection_snr(self, peer_id, current_snr_q4)
+  local ewma_q4 = self.snr_ewma_in[peer_id]
+  if ewma_q4 == nil then return current_snr_q4, nil end
   -- For marginal edges, a stale/high EWMA can make CTS advertise a DATA SF
   -- the current RTS sample cannot support. Use the conservative side of both.
-  return math.min(current_snr, ewma), ewma
+  return math.min(current_snr_q4, ewma_q4), ewma_q4
 end
 
-local function route_score_from_snr(self, snr_db)
-  if snr_db == nil then return nil end
-  return snr_db - (self.route_snr_conservatism_db or 0.0)
+local function route_score_from_snr(self, snr_q4)
+  if snr_q4 == nil then return nil end
+  return snr_q4 - (self.route_snr_conservatism_q4 or 0)
 end
 
 -- Labels eligible for on_radio_busy retry. BCN is periodic — the next
@@ -2530,11 +2728,12 @@ end
 -- no alternative = soft nudge; multiple alternatives = move load hard.
 -- Tier 0 = HEALTHY (no penalty), 1 = STRAINED, 2 = CRITICAL,
 -- 3 = EXHAUSTED.
+-- Q4 dB penalty (1.0 dB = 16). 7 dB = 112, 14 dB = 224, etc.
 local TIER_SCORE_PENALTY_BY_ALTS_DB = {
-  [0] = { [0] = 0.0, [1] = 0.0,  [2] = 0.0  },
-  [1] = { [0] = 1.0, [1] = 4.0,  [2] = 7.0  },
-  [2] = { [0] = 7.0, [1] = 14.0, [2] = 21.0 },
-  [3] = { [0] = 8.0, [1] = 15.0, [2] = 25.0 },
+  [0] = { [0] =   0, [1] =   0, [2] =   0 },
+  [1] = { [0] =  16, [1] =  64, [2] = 112 },
+  [2] = { [0] = 112, [1] = 224, [2] = 336 },
+  [3] = { [0] = 128, [1] = 240, [2] = 400 },
 }
 
 -- Read this node's belief about neighbour `node_id`'s budget tier.
@@ -2560,11 +2759,12 @@ local function get_neighbor_tier(self, node_id)
   return tier
 end
 
-local function viable_alternatives_for_candidate(c, candidates, viab_db)
+-- viab_q4 is the Q4 "viable alternative" threshold (routing SNR floor).
+local function viable_alternatives_for_candidate(c, candidates, viab_q4)
   if not candidates then return 0 end
   local n = 0
   for _, alt in ipairs(candidates) do
-    if alt.next_hop ~= c.next_hop and alt.score >= viab_db then
+    if alt.next_hop ~= c.next_hop and alt.score >= viab_q4 then
       n = n + 1
       if n >= 2 then return 2 end
     end
@@ -2572,13 +2772,14 @@ local function viable_alternatives_for_candidate(c, candidates, viab_db)
   return n
 end
 
-local function budget_penalty_db(self, c, candidates, viab_db)
+-- Returns Q4 penalty (dB * 16) and viable-alt count.
+local function budget_penalty_db(self, c, candidates, viab_q4)
   local tier = get_neighbor_tier(self, c.next_hop)
-  if tier <= BUDGET_TIER_HEALTHY then return 0.0, 0 end
-  local viable_alts = viable_alternatives_for_candidate(c, candidates, viab_db)
+  if tier <= BUDGET_TIER_HEALTHY then return 0, 0 end
+  local viable_alts = viable_alternatives_for_candidate(c, candidates, viab_q4)
   local by_alts = TIER_SCORE_PENALTY_BY_ALTS_DB[tier]
                   or TIER_SCORE_PENALTY_BY_ALTS_DB[BUDGET_TIER_EXHAUSTED]
-  return by_alts[viable_alts] or by_alts[2] or 0.0, viable_alts
+  return by_alts[viable_alts] or by_alts[2] or 0, viable_alts
 end
 
 get_peer_suspect_level = function(self, node_id)
@@ -2602,12 +2803,13 @@ get_peer_suspect_level = function(self, node_id)
   return 0
 end
 
+-- Returns Q4 penalty (dB * 16). Defaults: 80 dB / 40 dB / 12 dB.
 local function peer_suspect_penalty_db(self, node_id)
   local level = get_peer_suspect_level(self, node_id)
-  if level >= PEER_LEVEL_DEAD then return self.peer_dead_penalty_db or 80.0, level end
-  if level >= PEER_LEVEL_SILENT then return self.peer_silent_penalty_db or 40.0, level end
-  if level == PEER_LEVEL_SUSPECT then return self.peer_suspect_penalty_db or 12.0, level end
-  return 0.0, 0
+  if level >= PEER_LEVEL_DEAD   then return self.peer_dead_penalty_q4    or 1280, level end
+  if level >= PEER_LEVEL_SILENT then return self.peer_silent_penalty_q4  or  640, level end
+  if level == PEER_LEVEL_SUSPECT then return self.peer_suspect_penalty_q4 or  192, level end
+  return 0, 0
 end
 
 is_next_hop_fresh = function(self, node_id)
@@ -2701,12 +2903,12 @@ next_hop_selectable = function(self, dst_id, c, previous_hop, alts_tried,
   return true
 end
 
--- Tier-aware effective score: c.score minus dynamic dB penalty for its
+-- Tier-aware effective score: c.score minus dynamic Q4 penalty for its
 -- next_hop's known budget tier and temporary silence suspicion. Use this
 -- anywhere we previously compared raw c.score, so the routing table tracks
--- usable capacity/liveness, not just radio quality.
-local function effective_score(self, c, candidates, viab_db)
-  local penalty = budget_penalty_db(self, c, candidates, viab_db)
+-- usable capacity/liveness, not just radio quality. All Q4.
+local function effective_score(self, c, candidates, viab_q4)
+  local penalty = budget_penalty_db(self, c, candidates, viab_q4)
   local suspect_penalty = peer_suspect_penalty_db(self, c.next_hop)
   return c.score - penalty - suspect_penalty
 end
@@ -2742,15 +2944,15 @@ local function route_candidate_context(self, dst_id, next_hop)
   for i, c in ipairs(entry.candidates) do
     if c.next_hop == next_hop then
       out.candidate_rank = i
-      out.route_score = c.score
+      out.route_score = q4_to_db(c.score)
       local penalty, viable_alts = budget_penalty_db(
-        self, c, entry.candidates, self.routing_snr_floor_db)
-      out.budget_penalty_db = penalty
+        self, c, entry.candidates, self.routing_snr_floor_q4)
+      out.budget_penalty_db = q4_to_db(penalty)
       local suspect_penalty, suspect_level = peer_suspect_penalty_db(self, c.next_hop)
-      out.suspect_penalty_db = suspect_penalty
+      out.suspect_penalty_db = q4_to_db(suspect_penalty)
       out.next_suspect_level = suspect_level
       out.viable_alts = viable_alts
-      out.route_score_eff = effective_score(self, c, entry.candidates, self.routing_snr_floor_db)
+      out.route_score_eff = q4_to_db(effective_score(self, c, entry.candidates, self.routing_snr_floor_q4))
       out.route_hops = c.hops
       out.route_age_ms = c.last_seen_ms and (now - c.last_seen_ms) or nil
       local ttl = route_ttl_for_candidate(self, c)
@@ -2947,7 +3149,7 @@ local function resort_routes_for_neighbor_penalty(self, node_id, reason, local_o
       end
       if affected and #entry.candidates > 1 then
         local old_primary = entry.candidates[1].next_hop
-        sort_route_candidates(self, entry.candidates, self.routing_snr_floor_db)
+        sort_route_candidates(self, entry.candidates, self.routing_snr_floor_q4)
         local new_primary = entry.candidates[1].next_hop
         if old_primary == node_id then
           if new_primary == node_id then
@@ -3111,7 +3313,7 @@ refresh_route_order = function(self, dest_id, reason)
   local entry = self.rt[dest_id]
   if not entry or not entry.candidates or #entry.candidates < 2 then return nil end
   local old_primary = entry.candidates[1].next_hop
-  sort_route_candidates(self, entry.candidates, self.routing_snr_floor_db)
+  sort_route_candidates(self, entry.candidates, self.routing_snr_floor_q4)
   local new_primary = entry.candidates[1].next_hop
   if new_primary ~= old_primary then
     entry.dirty = true
@@ -3855,8 +4057,8 @@ emit_rt_debug_route = function(self, dest_id, reason, detail)
         next_hop = c.next_hop,
         n2_hop = c.n2_hop,
         hops = c.hops,
-        score = c.score,
-        score_eff = effective_score(self, c, entry.candidates, self.routing_snr_floor_db),
+        score = q4_to_db(c.score),
+        score_eff = q4_to_db(effective_score(self, c, entry.candidates, self.routing_snr_floor_q4)),
         age_ms = age,
         ttl_ms = ttl,
         expires_in_ms = (ttl and ttl > 0 and age) and (ttl - age) or nil,
@@ -5018,7 +5220,7 @@ try_drain_deferred = function(self)
         local settle_until = d.q_sent_at_ms + self.q_response_settle_ms
         if now < settle_until then
           settle_ms = (settle_until - now)
-                    + self:rand(0, self.q_response_settle_jitter_ms + 1)
+                    + self:rand(0, self.lbt_backoff_ms + 1)
           next_attempt_ms = now + settle_ms
         end
       end
@@ -5514,24 +5716,25 @@ local function maybe_exit_discovery(self, reason)
   end
 end
 
-local function learn_direct_from_frame(self, src_id, snr_db, source)
-  if src_id == nil or src_id == self.id or snr_db == nil then return "no_src" end
-  local route_score = route_score_from_snr(self, snr_db)
+-- Takes Q4 SNR (caller converts from runtime meta.snr float).
+local function learn_direct_from_frame(self, src_id, snr_q4, source)
+  if src_id == nil or src_id == self.id or snr_q4 == nil then return "no_src" end
+  local route_score_q4 = route_score_from_snr(self, snr_q4)
   local cand = {
     next_hop = src_id,
-    score = route_score,
+    score = route_score_q4,
     hops = 1,
     last_seen_ms = self:now(),
     learned_layer_id = self.active_layer_id or self.layer_id,
   }
-  local action = rt_merge(self, self.rt, src_id, cand, self.routing_snr_floor_db)
+  local action = rt_merge(self, self.rt, src_id, cand, self.routing_snr_floor_q4)
   if action == "new" or action == "promote" or action == "primary_refresh" then
     self:emit("rt_update", {
       dest = src_id,
       next = src_id,
-      score = route_score,
-      rx_snr = snr_db,
-      route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+      score = q4_to_db(route_score_q4),
+      rx_snr = q4_to_db(snr_q4),
+      route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
       hops = 1,
       slot = "primary",
       trigger = source or "direct_frame",
@@ -5541,9 +5744,9 @@ local function learn_direct_from_frame(self, src_id, snr_db, source)
     self:emit("rt_update", {
       dest = src_id,
       next = src_id,
-      score = route_score,
-      rx_snr = snr_db,
-      route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+      score = q4_to_db(route_score_q4),
+      rx_snr = q4_to_db(snr_q4),
+      route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
       hops = 1,
       slot = "alt",
       trigger = source or "direct_frame",
@@ -6300,6 +6503,11 @@ local function schedule_gateway_layer_window(self, rec)
 end
 
 function on_init(self, config)
+  -- Apply production-fixed PROTOCOL constants first. Config overrides
+  -- are honored — Lua model's escape hatch for dedicated tests; the
+  -- C++ port hardcodes these. See docs/CONFIG_AUDIT.md.
+  apply_protocol_constants(self, config)
+
   -- Node-level identity flags (BCN byte 1 bits 3:1).
   -- Defaults false; no current scenario sets these config keys.
   -- has_schedule: gateways advertise their single-radio layer windows.
@@ -6321,42 +6529,32 @@ function on_init(self, config)
   -- or FORWARDING; receivers pick from it based on link SNR + margin.
   -- Default keeps old single-SF behaviour by listing one SF.
   self.allowed_data_sfs = config.allowed_data_sfs or { 12 }
-  self.sf_margin_db     = config.sf_margin_db    or 5.0
   self.allowed_sf_bitmap = sf_set_to_bitmap(self.allowed_data_sfs)
   self.join_data_sfs_locked = not self.join_required
   -- Viability floor for rt entries: a route is "viable" iff its chain-min
   -- SNR clears the routing-plane (RTS/CTS/ACK ride on routing_sf) demod
-  -- threshold + sf_margin_db. route_strictly_better treats viable routes
+  -- threshold + sf_margin. route_strictly_better treats viable routes
   -- as strictly preferred over non-viable ones; within each group it's
   -- hops-first. A non-viable rt entry is still kept (better than no entry —
   -- the data SF can fall back to a slower one if the routing-plane SNR is
   -- borderline) but never preferred over an actually-decodable path.
-  self.routing_snr_floor_db = (SF_DEMOD_THRESHOLD[self.routing_sf] or -15.0)
-                              + self.sf_margin_db
-  -- Two beacon periods: a fast one used during firmware-local discovery
-  -- after node boot, and a much slower one for steady-state operation.
-  -- `beacon_period_warmup_ms` is accepted as a legacy scenario alias, but
-  -- simulator warmup itself must not drive firmware decisions.
-  self.discovery_beacon_period_ms = config.discovery_beacon_period_ms
-                                    or config.beacon_period_warmup_ms
-                                    or 5000
+  self.routing_snr_floor_q4 = (SF_DEMOD_THRESHOLD[self.routing_sf] or -240)
+                              + self.sf_margin_q4
+  -- Steady-state beacon period (T-class). `discovery_beacon_period_ms`
+  -- is a PROTOCOL constant.
   self.beacon_period_ms        = config.beacon_period_ms        or 900000
   -- Real firmware does not know about simulator warmup. A node that just
   -- booted briefly runs discovery: fast/full BCNs until it has heard enough
   -- of the mesh or a bounded timeout expires. After that, normal BCNs are
   -- dirty-only plus the seen bitmap. Late joiners get the same local
-  -- discovery window starting at their own boot time.
-  self.discovery_ms            = config.discovery_ms            or 60000
-  self.discovery_min_bcn_rx    = config.discovery_min_bcn_rx    or 3
-  self.discovery_min_routes    = config.discovery_min_routes    or 8
+  -- discovery window starting at their own boot time. Most discovery
+  -- knobs are PROTOCOL constants; only the F-class boot toggle and the
+  -- T-class `req_sync_min_routes` stay config-driven here.
   self.discovery_started_ms    = self:now()
   self.discovery_until_ms      = self.discovery_started_ms + self.discovery_ms
-  self.beacon_boot_grace_ms    = config.beacon_boot_grace_ms    or 120000
   self.discovery_bcn_rx_count  = 0
   self.discovery_mode          = (self.discovery_ms > 0)
   self.req_sync_on_boot        = (config.req_sync_on_boot ~= false)
-  self.req_sync_listen_ms      = config.req_sync_listen_ms      or 8000
-  self.req_sync_retry_ms       = config.req_sync_retry_ms       or 30000
   self.req_sync_min_routes     = config.req_sync_min_routes     or self.discovery_min_routes
   self.last_req_sync_tx_ms     = nil
   -- Optional destination freshness bitmap appended to BCN frames. It is
@@ -6364,16 +6562,10 @@ function on_init(self, config)
   -- route candidates refresh only when the existing candidate's next_hop
   -- is the bitmap sender.
   self.seen_bitmap_enabled     = (config.seen_bitmap_enabled ~= false)
-  self.seen_bitmap_ttl_ms      = config.seen_bitmap_ttl_ms      or 1800000
   self.dest_seen_ms            = {}
   -- Triggered beacons: coalesce route mutations for a few seconds, then
-  -- emit a dirty-only BCN. Steady-state triggers are rate-limited so
-  -- transient route churn does not become a beacon storm; boot/discovery
-  -- gets a short grace window where triggers remain fast.
-  self.beacon_trigger_jitter_min_ms = config.beacon_trigger_jitter_min_ms or 2000
-  self.beacon_trigger_jitter_max_ms = config.beacon_trigger_jitter_max_ms or 10000
-  self.beacon_trigger_min_interval_ms =
-    config.beacon_trigger_min_interval_ms or 120000
+  -- emit a dirty-only BCN. All trigger-jitter / min-interval knobs are
+  -- PROTOCOL constants.
   self.triggered_beacon_pending     = false
   -- Adaptive beacon throttle. Suppress periodic beacon emission when the
   -- node has heard ANY frame on the channel within the last
@@ -6395,8 +6587,6 @@ function on_init(self, config)
   -- jitter — a thundering herd. The wider this jitter, the better the
   -- spread, at the cost of slightly delayed beacon delivery.
   self.last_rx_routing_sf_ms     = nil
-  self.quiet_threshold_ms        = config.quiet_threshold_ms        or 30000
-  self.beacon_silence_jitter_ms  = config.beacon_silence_jitter_ms  or 10000
 
   -- Max-idle override: bypass the quiet_threshold gate if this node
   -- hasn't BCN'd in beacon_max_idle_ms. In dense meshes the channel
@@ -6434,17 +6624,11 @@ function on_init(self, config)
   -- from `_in` because asymmetric links would otherwise pollute the
   -- inbound estimate. `_out` is exposed for future routing/RTS-bitmap
   -- use; SF picks today still read `_in` only.
-  self.snr_ewma_alpha = config.snr_ewma_alpha or 0.3
+  -- alpha is a Q4 fraction in [0, Q4_SCALE]. PROTOCOL pins it to 5
+  -- (=0.3125, ~10-sample effective window).
   self.snr_ewma_in    = {}
   self.snr_ewma_out   = {}
-  -- Cap the size of each beacon to fit in a single LoRa frame. Current BCN
-  -- has an 8-byte fixed header ('B' + flags + src + n/flags + key_hash32)
-  -- and 3-byte route entries, so the default 151-byte cap fits 47 entries.
-  -- Networks with more nodes than max_entries get a rotating page each fire,
-  -- driven by self.beacon_offset; rt_merge at receivers fills in entries as
-  -- it hears them across rounds. Scenarios that want more entries per page
-  -- can bump beacon_max_bytes (e.g., 200 → 64 entries).
-  self.beacon_max_bytes   = config.beacon_max_bytes   or 151
+  -- beacon_max_bytes is a PROTOCOL constant (151, fits 47 entries).
   -- Header is 4 bytes ('B' + leaf_id_byte + src + n); entries 3 bytes each.
   self.beacon_max_entries = math.max(1,
     math.floor((self.beacon_max_bytes - 8) / 3))
@@ -6456,7 +6640,6 @@ function on_init(self, config)
   -- Final fallbacks match MeshCore SX1262 defaults.
   self.bw_hz            = config.bw_hz           or config._sim_bw_hz or 250000
   self.cr               = config.cr              or config._sim_cr    or 5
-  self.preamble_sym     = config.preamble_sym    or 16
   -- Regulatory duty cycle. Default 1% / 1h matches ETSI EN 300 220
   -- (Europe 868 MHz ISM sub-band g1). The runtime hard-blocks TXes that
   -- breach this; this script also self-regulates pre-TX so we defer
@@ -6480,28 +6663,16 @@ function on_init(self, config)
   --   • sender-side: on receiving a budget-NACK, mark the responder
   --     blind for a tier-proportional window, naturally rerouting via
   --     the existing classify_blind machinery.
-  self.budget_strained_pct  = config.budget_strained_pct  or 50    -- ≤50% used = HEALTHY ; >50% = STRAINED
-  self.budget_critical_pct  = config.budget_critical_pct  or 80    -- >80% used = CRITICAL
-  self.budget_exhausted_pct = config.budget_exhausted_pct or 95    -- >95% used = EXHAUSTED
-  -- Sender-side: when we receive a budget NACK, mark the peer blind
-  -- for this duration (per tier). After it expires we'll try again;
-  -- if the peer is still saturated it'll NACK us again.
-  self.budget_blind_strained_ms  = config.budget_blind_strained_ms  or  60000   -- 1 min
-  self.budget_blind_critical_ms  = config.budget_blind_critical_ms  or 180000   -- 3 min
-  self.budget_blind_exhausted_ms = config.budget_blind_exhausted_ms or 300000   -- 5 min
+  -- Budget tier thresholds + per-tier blind windows are PROTOCOL constants.
   -- Anti-spam — per-sender RTS/CTS counts over sliding window for the
-  -- 1st-hop statistical classifier. See header doc block "Anti-spam:
-  -- 1st-hop statistical rate-limit". Tracked here, enforced (silent
-  -- drop) inside the RTS handler. Thresholds tuned for chat-app
-  -- traffic (~10 msg/hr) being comfortably under, and 200 msg/hr
-  -- spam being caught immediately.
+  -- 1st-hop statistical classifier. State tables only; window/threshold/
+  -- airtime-share/retry-dedup are PROTOCOL constants. `originator_max_per_window`
+  -- stays T (per-network fairness policy); `originator_self_warn_fraction`
+  -- stays D (diagnostic hint).
   self.per_sender_originator        = {}
   self.own_origination_events       = {}
-  self.originator_window_ms         = config.originator_window_ms         or 300000   -- 5 min
-  self.originator_max_per_window    = config.originator_max_per_window    or 6        -- ≈ 72/hr
-  self.originator_airtime_share     = config.originator_airtime_share     or 0.25     -- backstop
-  self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5    -- emit self-warning at half threshold
-  self.originator_retry_dedup_ms    = config.originator_retry_dedup_ms    or 10000    -- 10s — longer than typical RTS-rty cycle so retries dedup; <<window so ctr_lo wrap counts as fresh
+  self.originator_max_per_window    = config.originator_max_per_window    or 6
+  self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5
   -- Proactive tier-aware routing: route_strictly_better applies a
   -- dynamic score penalty on top of raw SNR margin. The penalty scales
   -- with the peer's known budget tier and with how many viable
@@ -6511,21 +6682,12 @@ function on_init(self, config)
   -- pool.
   self.neighbor_budget_tier         = {}
   self.neighbor_budget_tier_set_at  = {}
-  self.neighbor_budget_tier_ttl_ms  = config.neighbor_budget_tier_ttl_ms or 300000   -- 5 min
-  -- Route scoring is intentionally more conservative than the instantaneous
-  -- SNR sample used to decode a control frame. DATA can select a slower SF,
-  -- but marginal links fluctuate; this offset keeps them usable while
-  -- preferring cleaner alternatives when they exist.
-  self.route_snr_conservatism_db    = config.route_snr_conservatism_db or 0
-  -- Direct next-hop liveness is intentionally shorter than route TTL:
-  -- a destination route may still be useful, but the immediate relay must
-  -- have been heard recently before we spend RTS attempts on it.
-  self.next_hop_live_ttl_ms         = config.next_hop_live_ttl_ms or 1200000  -- 20 min
   -- Peer-silence suspicion. Repeated RTS timeouts against the same next-hop
   -- are local evidence that a route is stale or the peer is temporarily
   -- unreachable. We do not delete routes; we apply a temporary score penalty
   -- and advertise a compact BCN extension so nearby nodes can avoid the
   -- peer while it is silent. Any valid frame from the peer clears the mark.
+  -- All thresholds + penalties + TTLs are PROTOCOL constants.
   self.peer_rts_timeouts        = {}
   self.peer_first_rts_timeout_ms = {}
   self.peer_suspect_until       = {}
@@ -6533,38 +6695,13 @@ function on_init(self, config)
   self.peer_dead_until          = {}
   self.peer_suspect_advertise_until = {}
   self.peer_dead_advertise_until = {}
-  self.peer_suspect_rts_timeouts = config.peer_suspect_rts_timeouts or 2
-  self.peer_silent_rts_timeouts  = config.peer_silent_rts_timeouts  or 3
-  self.peer_dead_rts_timeouts    = config.peer_dead_rts_timeouts    or 6
-  self.peer_suspect_ttl_ms       = config.peer_suspect_ttl_ms       or 300000
-  self.peer_silent_ttl_ms        = config.peer_silent_ttl_ms        or 900000
-  self.peer_dead_ttl_ms          = config.peer_dead_ttl_ms          or 3600000
-  self.peer_dead_evidence_window_ms =
-    config.peer_dead_evidence_window_ms or 900000
-  self.peer_suspect_penalty_db   = config.peer_suspect_penalty_db   or 12.0
-  self.peer_silent_penalty_db    = config.peer_silent_penalty_db    or 40.0
-  self.peer_dead_penalty_db      = config.peer_dead_penalty_db      or 80.0
-  self.peer_suspect_bcn_max      = (config.peer_suspect_bcn_max ~= nil)
-                                    and config.peer_suspect_bcn_max or 8
-  -- Inter-frame gap between CTS RX and DATA TX (originator side). The
-  -- simulator's set_rx_sf is instantaneous, but real hardware needs a
-  -- handful of µs to settle on the new SF — pad with 5ms by default.
-  self.cts_to_data_gap_ms = config.cts_to_data_gap_ms or 5
-  -- RTS retry policy. The default timeout is computed per flight from the
-  -- transaction's routing SF, so gateway windows using another control SF
-  -- get the correct RTS+CTS airtime. Override via config for stress tests.
-  -- rts_busy_retry_ms is used when our retry timer fires while we're mid-RX
-  -- of someone else's flight (pending_rx set) — short reschedule rather
-  -- than TX over their incoming data plane.
-  -- rts_max_retries: 3 retries × K=3 alts caps a stuck send at ~3-4 retry
-  -- intervals × ~5 s = ~15-20 s per next-hop and ~45-60 s total wallclock.
-  -- Previously 8 (×3 alts = 24 retries) which could exceed 2 minutes
-  -- wallclock — too slow to free pending_tx when a next-hop is genuinely
-  -- stuck in an ACK-loss loop.
+  -- RTS retry policy. rts_busy_retry_ms / rts_max_retries / route_snr_*
+  -- / next_hop_live_ttl_ms / cts_to_data_gap_ms / neighbor_budget_tier_ttl_ms
+  -- are all PROTOCOL constants. rts_timeout_ms remains a config override
+  -- (debug-only, classified D); production derives it per-flight from
+  -- routing_sf.
   self.rts_timeout_override_ms = config.rts_timeout_ms
   self.rts_timeout_ms = self.rts_timeout_override_ms or rts_timeout_base_ms(self, self.routing_sf)
-  self.rts_busy_retry_ms  = config.rts_busy_retry_ms  or 30
-  self.rts_max_retries    = config.rts_max_retries    or 3
   -- Cascade-requeue knobs (Phase C): when pending_tx exhausts all K alts
   -- (true path_cascade_exhausted), instead of dropping immediately we push
   -- the item back into tx_queue with exponential backoff so other
@@ -6591,17 +6728,8 @@ function on_init(self, config)
   --                                     of tools/analyze.py for the
   --                                     cascade-waste detector this knob
   --                                     was added to mitigate.
-  self.cascade_requeue_max            = config.cascade_requeue_max            or 3
-  self.cascade_requeue_base_ms        = config.cascade_requeue_base_ms        or 5000
-  self.cascade_requeue_backoff_cap_ms = config.cascade_requeue_backoff_cap_ms or 30000
-  -- Wallclock cap. Successful deliveries on s04 take median 10 s, p95
-  -- 54 s, max 163 s — so a 60 s cap keeps most legitimate slow paths
-  -- alive while killing failed cascades that would otherwise dwell for
-  -- 3-13 min. Together with the load_threshold adaptation below this
-  -- forms a two-axis cap (per-message wallclock + node-local pressure)
-  -- on cascade-requeue dwell time.
-  self.cascade_requeue_total_max_ms   = config.cascade_requeue_total_max_ms   or 60000
-  self.cascade_requeue_load_threshold = config.cascade_requeue_load_threshold or 0
+  -- cascade_requeue_* are PROTOCOL constants. See PROTOCOL block at top
+  -- of file for the per-knob rationale.
   -- TX-policy controls (see "TX policy classes" section above).
   --   lbt_enabled            — pre-check channel_busy_until before TX of
   --                            initiating-directed (RTS / NACK) and flood
@@ -6632,10 +6760,28 @@ function on_init(self, config)
   self.flood_lbt_max_defer_ms = config.flood_lbt_max_defer_ms or
     airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym,
                self.beacon_max_bytes)
-  -- Maximum payload byte length the protocol carries; sets pending_rx_expiry
-  -- (we don't know the actual payload yet, so we budget the max). Tighten in
-  -- config if you've capped your payloads, loosen if you allow longer ones.
-  self.max_payload_bytes  = config.max_payload_bytes  or 50
+  -- Maximum user-payload byte length. Network-wide convention: all nodes
+  -- in a mesh MUST agree, otherwise receiver pending_rx_expiry sizing
+  -- diverges and large DATAs trip premature expiries on tight-budget peers.
+  -- Default 230 matches Meshtastic's max chat size; leaves 11 bytes of
+  -- margin under the LoRa PHY 255-byte frame cap (DATA_HDR_LEN=8 +
+  -- DATA_INNER_OVERHEAD=6 = 14 bytes of fixed overhead → 241 hard ceiling).
+  -- Hard-clamped to the LoRa ceiling below; config can only tighten, not
+  -- exceed.
+  self.max_payload_bytes  = config.max_payload_bytes  or 230
+  local payload_hard_max = LORA_MAX_FRAME_BYTES - DATA_HDR_LEN - DATA_INNER_OVERHEAD
+  if self.max_payload_bytes > payload_hard_max then
+    self:emit("max_payload_clamped", {
+      requested = self.max_payload_bytes,
+      clamped_to = payload_hard_max,
+      lora_max_frame = LORA_MAX_FRAME_BYTES,
+      fixed_overhead = DATA_HDR_LEN + DATA_INNER_OVERHEAD,
+    })
+    self:log(string.format(
+      "max_payload_bytes %d exceeds LoRa frame ceiling, clamped to %d",
+      self.max_payload_bytes, payload_hard_max))
+    self.max_payload_bytes = payload_hard_max
+  end
   -- Per-hop DATA-ACK on routing_sf. The timer is set at DATA-queue time
   -- (inside the cts_to_data_gap after-callback) so it must cover the full
   -- DATA airtime + ACK airtime. start_ack_timeout computes the exact
@@ -6686,7 +6832,6 @@ function on_init(self, config)
   -- entries past TTL emit send_giveup. Forwarders never defer (they're
   -- mid-flight; lost-route mid-flight is a real failure).
   self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, ctr, flags, queued_at_ms}
-  self.send_defer_ttl_ms  = config.send_defer_ttl_ms or 30000
   self.gateway_deferred_handoffs = {}
   self.gateway_handoff_defer_ttl_ms = config.gateway_handoff_defer_ttl_ms
                                       or self.send_defer_ttl_ms
@@ -6697,7 +6842,6 @@ function on_init(self, config)
   -- (rts_max_retries × rts_timeout ≈ 1.5 s) and well below the wrap
   -- interval at any plausible per-sender send rate.
   self.last_acked_from    = {}
-  self.last_acked_ttl_ms  = config.last_acked_ttl_ms or 10000
   -- 4-bit network identifier — externally managed (admin sets per node).
   -- Receivers reject foreign-network BCN/RTS at the routing layer
   -- before doing CTS/DATA work. 0 = default mesh; 1..15 = distinct meshes.
@@ -6763,7 +6907,6 @@ function on_init(self, config)
   --   3 hours covers several missed remote rotations.
   self.rt_aging_ttl_neighbor_ms = config.rt_aging_ttl_neighbor_ms or 2700000    -- 45 min
   self.rt_aging_ttl_remote_ms   = config.rt_aging_ttl_remote_ms   or 10800000   -- 3 h
-  self.rt_aging_check_period_ms = config.rt_aging_check_period_ms or 60000     -- 1 min
   -- Q dedup tracking. Sender side: don't re-fire route-query Q for the
   -- same dest within q_query_ttl_ms. Responder side: don't respond to the
   -- same (opcode, src, dest) Q within q_respond_ttl_ms. REQ_SYNC responses
@@ -6771,28 +6914,19 @@ function on_init(self, config)
   -- satisfy a joiner without every nearby node emitting a full BCN.
   self.q_queried       = {}                                  -- {dest_id → t_ms_last_queried}
   self.q_responded_to  = {}                                  -- {key → t_ms_last_responded}
-  self.q_query_ttl_ms   = config.q_query_ttl_ms   or 5000
-  self.q_respond_ttl_ms = config.q_respond_ttl_ms or 10000
   -- After a route appears due to Q-driven BCN discovery, hold the
   -- deferred DATA briefly so nearby Q-response BCNs can finish. This
   -- avoids the first RTS colliding with late/deferred beacon responders
   -- in hidden-terminal layouts.
-  local q_settle_default = self.beacon_trigger_jitter_max_ms
-                         + airtime_ms(self.routing_sf, self.bw_hz, self.cr,
-                                      self.preamble_sym, self.beacon_max_bytes)
-                         + self.lbt_backoff_ms
-  self.q_response_settle_ms = config.q_response_settle_ms or q_settle_default
-  self.q_response_settle_jitter_ms = config.q_response_settle_jitter_ms
-                                     or self.lbt_backoff_ms
+  -- Settle window for Q-driven send draining (see "Q response settle" use
+  -- site in the deferred-send drain loop). Derived from radio params; not
+  -- runtime-tunable. Jitter is shared with lbt_backoff_ms.
+  self.q_response_settle_ms = self.beacon_trigger_jitter_max_ms
+                            + airtime_ms(self.routing_sf, self.bw_hz, self.cr,
+                                         self.preamble_sym, self.beacon_max_bytes)
+                            + self.lbt_backoff_ms
   self.sync_response_enabled = (config.sync_response_enabled ~= false)
-  self.sync_response_min_routes = config.sync_response_min_routes or 1
-  self.sync_response_backoff_min_ms = config.sync_response_backoff_min_ms or 500
-  self.sync_response_backoff_max_ms = config.sync_response_backoff_max_ms or 6000
-  self.sync_response_mobile_penalty_ms = config.sync_response_mobile_penalty_ms or 8000
-  self.sync_response_requester_mobile_penalty_ms =
-    config.sync_response_requester_mobile_penalty_ms or 2000
-  self.sync_response_suppress_window_ms =
-    config.sync_response_suppress_window_ms or 12000
+  -- backoff / penalty / suppress windows are PROTOCOL constants.
   self.sync_response_pending = {}
   -- Diagnostic-only: periodic node_state_snapshot emit cadence.
   -- Captures blind_until count, tx_queue depth, deferred_sends count,
@@ -6812,7 +6946,6 @@ function on_init(self, config)
   -- SF10 can take a few seconds with retries.
   self.seen_origins       = {}
   self.seen_origin_from   = {}
-  self.seen_origin_ttl_ms = config.seen_origin_ttl_ms or 30000
   -- Per-(self → peer) outbound 16-bit counter. Replaces the old flat next_origin_seq.
   -- RAM-only this phase; NV persistence deferred to §8 crypto. Keyed by peer_id.
   self.peer_send_counter  = {}   -- [peer_id] → last sent ctr value (0 = never sent)
@@ -6830,8 +6963,7 @@ function on_init(self, config)
   -- slack=3 (default) catches worst-wandering flights while preserving moderate
   -- detours; calibrated against s04_seattle_realistic data showing ~4% delivery
   -- impact at slack=3.
-  self.hop_budget_slack       = config.hop_budget_slack       or 3
-  self.hop_budget_max_initial = config.hop_budget_max_initial or 15  -- 4-bit field max
+  -- hop_budget_slack / hop_budget_max_initial are PROTOCOL constants.
   self.rt_learn_from_data     = config.rt_learn_from_data     or true
 
   -- next_ctr: per-(self, peer) outbound counter, wraps at 65535→1.
@@ -6875,14 +7007,17 @@ function on_init(self, config)
     end
     if layer_id ~= nil then
       layer_id = math.floor(layer_id)
+      -- Schedule defaults if the per-record `gateway_layers[i]` entry
+      -- omits a field. No node-level config fallback — per-record values
+      -- (or these compile-time defaults) are the only sources.
       local rec = {
         layer_id = layer_id,
         leaf_id = leaf_id or layer_leaf_id(layer_id),
         routing_sf = routing_sf or self.routing_sf,
         allowed_data_sfs = allowed_data_sfs or self.allowed_data_sfs,
-        duration_ms = duration_ms or config.gateway_layer_duration_ms or 5000,
-        period_ms = period_ms or config.gateway_layer_period_ms or 30000,
-        offset_ms = offset_ms or config.gateway_layer_offset_ms or 5000,
+        duration_ms = duration_ms or 5000,
+        period_ms = period_ms or 30000,
+        offset_ms = offset_ms or 5000,
       }
       rec.allowed_sf_bitmap = sf_set_to_bitmap(rec.allowed_data_sfs)
       self.gateway_layer_set[layer_id] = true
@@ -6892,16 +7027,15 @@ function on_init(self, config)
     end
   end
   self.key_hash32 = self.key_hash32 or config.key_hash32
-  self.id_bind_ttl_ms = config.id_bind_ttl_ms or 172800000  -- 48 h
+  -- id_bind_ttl_ms is a PROTOCOL constant (48 h). gateway_remote_bind_ttl_ms
+  -- stays D-class (config-overridable for accelerated TTL aging tests; see
+  -- t55). Production: `#define = ID_BIND_TTL_MS`.
   self.gateway_remote_bind_ttl_ms = config.gateway_remote_bind_ttl_ms or self.id_bind_ttl_ms
   -- Bounded-state caps. Sized for a small (~50 node) mesh on a Cortex-M MCU.
   -- Set to 0 to disable. See `table_cap_hit` helper and §13 of PROTOCOL.md.
-  self.cap_seen_origins              = config.cap_seen_origins              or 256
-  self.cap_q_queried                 = config.cap_q_queried                 or 128
-  self.cap_q_responded_to            = config.cap_q_responded_to            or 128
-  self.cap_deferred_sends            = config.cap_deferred_sends            or 32
-  self.cap_gateway_deferred_handoffs = config.cap_gateway_deferred_handoffs or 32
-  self.cap_id_bind                   = config.cap_id_bind                   or 256
+  -- Bounded-state caps are PROTOCOL constants — sized at port time, not
+  -- in the field. See PROTOCOL block; runtime emits `table_cap_hit`
+  -- (§13.6 in PROTOCOL.md) when one is reached.
   self.join_denied_ids = {}
   self.join_claim_pending = nil
   -- NV-backed state. claim_epoch is monotonic across reboots so a
@@ -6918,17 +7052,8 @@ function on_init(self, config)
   else
     self.adopted_at_ms = nil
   end
-  self.join_listen_ms = config.join_listen_ms or 3000
-  self.join_discover_jitter_ms = config.join_discover_jitter_ms or 3000
-  self.join_discover_wait_ms = config.join_discover_wait_ms or 10000
-  self.join_discover_max_attempts = config.join_discover_max_attempts or 0
+  -- All join-state-machine timing knobs are PROTOCOL constants.
   self.join_discover_attempts = 0
-  self.join_offer_backoff_min_ms = config.join_offer_backoff_min_ms or 100
-  self.join_offer_backoff_max_ms = config.join_offer_backoff_max_ms or 1000
-  self.join_claim_guard_ms = config.join_claim_guard_ms or 3000
-  self.join_retry_backoff_ms = config.join_retry_backoff_ms or 10000
-  self.join_j_rate_limit_window_ms = config.join_j_rate_limit_window_ms or 300000
-  self.join_j_max_per_window = config.join_j_max_per_window or 6
   if self.key_hash32 ~= nil and self.joined then
     id_bind_set(self, self.id, self.key_hash32, "self", "authenticated")
   end
@@ -6975,7 +7100,7 @@ function on_init(self, config)
     .. "(airtime: RTS=%dms CTS=%dms ACK=%dms all@SF%d, "
     .. "rts_timeout=%dms pending_rx_expiry=%dms)",
     self.id, self.name, self.routing_sf, sf_list_str, self.allowed_sf_bitmap,
-    self.sf_margin_db, self.beacon_period_ms, self.peer_count,
+    q4_to_db(self.sf_margin_q4), self.beacon_period_ms, self.peer_count,
     airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN),
     airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, CTS_LEN),
     self.ack_air_ms, self.routing_sf,
@@ -7147,8 +7272,11 @@ function on_recv(self, frame, meta)
   -- ~10-sample running estimate instead of one snapshot. Same EWMA covers
   -- every frame type (beacon/RTS/CTS/DATA/ACK/NACK) since SNR is a
   -- physical link property, not frame-type-specific.
-  if meta.src ~= nil and meta.snr ~= nil then
-    update_snr_ewma(self.snr_ewma_in, meta.src, meta.snr, self.snr_ewma_alpha)
+  -- Convert the runtime's float dB SNR to Q4 at ingress; all internal
+  -- routing/EWMA/score math operates on Q4 from here on.
+  local meta_snr_q4 = (meta.snr ~= nil) and db_to_q4(meta.snr) or nil
+  if meta.src ~= nil and meta_snr_q4 ~= nil then
+    update_snr_ewma(self.snr_ewma_in, meta.src, meta_snr_q4, self.snr_ewma_alpha_q4)
   end
   local learned_direct_pre = false
   -- Per-RX direct-neighbour route learning. Learn only after the frame is
@@ -7156,8 +7284,8 @@ function on_recv(self, frame, meta)
   -- on one layer can pollute that layer's rt[] with a foreign-layer sender
   -- before the later per-frame leaf filter rejects the payload.
   local function learn_rx_source(source)
-    if meta.src == nil or meta.snr == nil then return false end
-    local pre_action = learn_direct_from_frame(self, meta.src, meta.snr, source or "direct_frame")
+    if meta.src == nil or meta_snr_q4 == nil then return false end
+    local pre_action = learn_direct_from_frame(self, meta.src, meta_snr_q4, source or "direct_frame")
     learned_direct_pre = (pre_action == "new"
                           or pre_action == "promote"
                           or pre_action == "primary_refresh"
@@ -7420,15 +7548,15 @@ function on_recv(self, frame, meta)
     gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
                                 b.src, b.key_hash32, "bcn")
     try_drain_gateway_handoffs(self)
-    if meta.snr ~= nil then
+    if meta_snr_q4 ~= nil then
       rt_merge(self, self.rt, b.src, {
         next_hop     = b.src,
         hops         = 1,
-        score        = meta.snr,
+        score        = meta_snr_q4,
         last_seen_ms = self:now(),
         n2_hop       = nil,
         is_gateway   = (b.self_gateway == true),
-      }, (SF_DEMOD_THRESHOLD[active_routing_sf(self)] or -15.0) + self.sf_margin_db)
+      }, (SF_DEMOD_THRESHOLD[active_routing_sf(self)] or -240) + self.sf_margin_q4)
     end
     if b.is_mobile then
       self.mobile_peers[b.src] = true
@@ -7546,29 +7674,29 @@ function on_recv(self, frame, meta)
     -- primary) to avoid spamming on every refresh round.
     do
       mark_dest_seen(self, b.src, "beacon_src")
-      local direct_score = route_score_from_snr(self, meta.snr)
+      local direct_score_q4 = route_score_from_snr(self, meta_snr_q4)
       local cand = {
         next_hop = b.src,
-        score = direct_score,
+        score = direct_score_q4,
         hops = 1,
         is_gateway = (b.self_gateway == true),
         last_seen_ms = now,
         learned_layer_id = self.active_layer_id or self.layer_id,
       }
-      local action = rt_merge(self, self.rt, b.src, cand, self.routing_snr_floor_db)
+      local action = rt_merge(self, self.rt, b.src, cand, self.routing_snr_floor_q4)
       if action == "new" or action == "promote" then
         self:emit("rt_update", {
-          dest = b.src, next = b.src, score = direct_score, rx_snr = meta.snr,
-          route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+          dest = b.src, next = b.src, score = q4_to_db(direct_score_q4), rx_snr = meta.snr,
+          route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
           hops = 1, slot = "primary",
         })
         self:log(string.format("rt[%s] direct → primary, score=%.1f dB rx_snr=%.1f dB hops=1",
-          name_of(self, b.src), direct_score, meta.snr))
+          name_of(self, b.src), q4_to_db(direct_score_q4), meta.snr))
         rt_changed = true
       elseif action == "alt_install" then
         self:emit("rt_update", {
-          dest = b.src, next = b.src, score = direct_score, rx_snr = meta.snr,
-          route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+          dest = b.src, next = b.src, score = q4_to_db(direct_score_q4), rx_snr = meta.snr,
+          route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
           hops = 1, slot = "alt",
         })
       elseif learned_direct_pre and self.rt[b.src] ~= nil then
@@ -7602,39 +7730,39 @@ function on_recv(self, frame, meta)
           suspect_level = get_peer_suspect_level(self, e.next),
         })
       else
-        local rx_score = route_score_from_snr(self, meta.snr)
-        local combined_score = math.min(rx_score, e.score)
+        local rx_score_q4 = route_score_from_snr(self, meta_snr_q4)
+        local combined_score_q4 = math.min(rx_score_q4, e.score)
         local combined_hops  = e.hops + 1
         if combined_hops <= 8 then
           local cand = {
             next_hop   = b.src,
             n2_hop     = e.next,   -- N's claimed next-hop for e.dest; used by rt_prune_cycle
-            score      = combined_score,
+            score      = combined_score_q4,
             hops       = combined_hops,
             is_gateway = (e.is_gateway == true),
             last_seen_ms = now,
             learned_layer_id = self.active_layer_id or self.layer_id,
           }
-          local action = rt_merge(self, self.rt, e.dest, cand, self.routing_snr_floor_db)
+          local action = rt_merge(self, self.rt, e.dest, cand, self.routing_snr_floor_q4)
           if action == "new" or action == "promote" then
             self:emit("rt_update", {
               dest = e.dest, next = b.src,
-              score = combined_score, rx_snr = meta.snr,
-              route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
-              advertised_score = e.score, hops = combined_hops, slot = "primary",
+              score = q4_to_db(combined_score_q4), rx_snr = meta.snr,
+              route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
+              advertised_score = q4_to_db(e.score), hops = combined_hops, slot = "primary",
             })
             self:log(string.format("rt[%s] via %s, hops=%d score=%.1f dB rx_snr=%.1f dB (primary)",
-              name_of(self, e.dest), name_of(self, b.src), combined_hops, combined_score, meta.snr))
+              name_of(self, e.dest), name_of(self, b.src), combined_hops, q4_to_db(combined_score_q4), meta.snr))
             rt_changed = true
           elseif action == "alt_install" then
             self:emit("rt_update", {
               dest = e.dest, next = b.src,
-              score = combined_score, rx_snr = meta.snr,
-              route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
-              advertised_score = e.score, hops = combined_hops, slot = "alt",
+              score = q4_to_db(combined_score_q4), rx_snr = meta.snr,
+              route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
+              advertised_score = q4_to_db(e.score), hops = combined_hops, slot = "alt",
             })
             self:log(string.format("rt[%s] via %s, hops=%d score=%.1f dB rx_snr=%.1f dB (alt)",
-              name_of(self, e.dest), name_of(self, b.src), combined_hops, combined_score, meta.snr))
+              name_of(self, e.dest), name_of(self, b.src), combined_hops, q4_to_db(combined_score_q4), meta.snr))
           end
         end
       end
@@ -7711,7 +7839,7 @@ function on_recv(self, frame, meta)
       dst = r.dst,
       ctr_lo = r.ctr_lo,
       rx_snr = meta.snr,
-      ewma_snr = self.snr_ewma_in[r.src] or meta.snr,
+      ewma_snr = q4_to_db(self.snr_ewma_in[r.src] or meta_snr_q4),
       has_pending_tx = self.pending_tx ~= nil,
       pending_tx_ctr_lo = self.pending_tx and self.pending_tx.ctr_lo or nil,
       pending_tx_next = self.pending_tx and self.pending_tx.next or nil,
@@ -7741,9 +7869,9 @@ function on_recv(self, frame, meta)
       if chosen_sf ~= nil and not sf_in_bitmap(r.sf_bitmap, chosen_sf) then
         chosen_sf = nil
       end
-      local sf_select_snr, ewma_snr = data_sf_selection_snr(self, r.src, meta.snr)
+      local sf_select_snr_q4, ewma_snr_q4 = data_sf_selection_snr(self, r.src, meta_snr_q4)
       chosen_sf = chosen_sf or select_data_sf(
-        sf_select_snr, r.sf_bitmap, self.sf_margin_db)
+        sf_select_snr_q4, r.sf_bitmap, self.sf_margin_q4)
       if chosen_sf == nil then
         for sf = 5, 12 do
           if sf_in_bitmap(r.sf_bitmap, sf) then
@@ -7759,8 +7887,8 @@ function on_recv(self, frame, meta)
         chosen_data_sf = chosen_sf,
         already_received = true,
         rx_snr = meta.snr,
-        ewma_snr = ewma_snr,
-        sf_select_snr = sf_select_snr,
+        ewma_snr = q4_to_db(ewma_snr_q4),
+        sf_select_snr = q4_to_db(sf_select_snr_q4),
       })
       tx_with_retry(self, cts, {
         sf    = active_routing_sf(self),
@@ -7917,8 +8045,8 @@ function on_recv(self, frame, meta)
     -- EWMA only helps when it is lower than that sample.
     -- Empty bitmap → nothing we can do; silent drop (sender's rts_timeout
     -- will handle it).
-    local snr_for_sf, ewma_snr = data_sf_selection_snr(self, r.src, meta.snr)
-    local chosen_sf  = select_data_sf(snr_for_sf, r.sf_bitmap, self.sf_margin_db)
+    local snr_for_sf_q4, ewma_snr_q4 = data_sf_selection_snr(self, r.src, meta_snr_q4)
+    local chosen_sf  = select_data_sf(snr_for_sf_q4, r.sf_bitmap, self.sf_margin_q4)
     if chosen_sf == nil then
       self:emit("rts_drop_no_sf", {
         from = r.src, ctr_lo = r.ctr_lo,
@@ -7932,7 +8060,7 @@ function on_recv(self, frame, meta)
     self:emit("rts_rx", {
       from = r.src, dst = r.dst, ctr_lo = r.ctr_lo,
       sf_bitmap = r.sf_bitmap, chosen_data_sf = chosen_sf,
-      rx_snr = meta.snr, ewma_snr = ewma_snr, sf_select_snr = snr_for_sf,
+      rx_snr = meta.snr, ewma_snr = q4_to_db(ewma_snr_q4), sf_select_snr = q4_to_db(snr_for_sf_q4),
     })
     self:log(string.format(
       "rts_rx <- %s (dst=%s ctr_lo=%d sf_bitmap=0x%02x snr=%.1fdB) -> chose SF%d",
@@ -7954,8 +8082,8 @@ function on_recv(self, frame, meta)
       to = r.src, ctr_lo = r.ctr_lo,
       chosen_data_sf = chosen_sf,
       rx_snr = meta.snr,
-      ewma_snr = ewma_snr,
-      sf_select_snr = snr_for_sf,
+      ewma_snr = q4_to_db(ewma_snr_q4),
+      sf_select_snr = q4_to_db(snr_for_sf_q4),
     })
     self:log(string.format("cts_tx -> %s ctr_lo=%d chose SF%d (on routing SF%d)",
       name_of(self, r.src), r.ctr_lo, chosen_sf, active_routing_sf(self)))
@@ -8196,13 +8324,13 @@ function on_recv(self, frame, meta)
     -- decisions; without recording it now, the data wouldn't be there
     -- when those changes land.
     local ack_src = self.pending_tx.next
-    if ack_src ~= nil and k.snr_db ~= nil then
-      update_snr_ewma(self.snr_ewma_out, ack_src, k.snr_db, self.snr_ewma_alpha)
+    if ack_src ~= nil and k.snr_q4 ~= nil then
+      update_snr_ewma(self.snr_ewma_out, ack_src, k.snr_q4, self.snr_ewma_alpha_q4)
       self:emit("ack_snr_feedback", {
         from = ack_src, ctr_lo = k.ctr_lo,
-        data_snr_db = k.snr_db, snr_bucket = k.snr_bucket,
+        data_snr_db = q4_to_db(k.snr_q4), snr_bucket = k.snr_bucket,
         snr_bucket_coarse = k.snr_bucket_coarse,
-        ewma_out = self.snr_ewma_out[ack_src],
+        ewma_out = q4_to_db(self.snr_ewma_out[ack_src]),
       })
     end
     local ack_budget_reranked = 0
@@ -8216,14 +8344,14 @@ function on_recv(self, frame, meta)
       payload = self.pending_tx.user_text,
       ctr = self.pending_tx.ctr,
       from = self.pending_tx.next, ctr_lo = k.ctr_lo,
-      data_snr_db = k.snr_db,
+      data_snr_db = q4_to_db(k.snr_q4),
       snr_bucket_coarse = k.snr_bucket_coarse,
       budget_hint = k.budget_hint,
       budget_reranked = ack_budget_reranked,
     })
     self:log(string.format("ack_rx <- %s ctr_lo=%d data_snr=%s budget_hint=%d -> hop complete",
       name_of(self, self.pending_tx.next), k.ctr_lo,
-      k.snr_db and string.format("%.1fdB", k.snr_db) or "n/a",
+      k.snr_q4 and string.format("%.1fdB", q4_to_db(k.snr_q4)) or "n/a",
       k.budget_hint or 0))
     self.pending_tx = nil
     become_free(self)
@@ -8595,28 +8723,28 @@ function on_recv(self, frame, meta)
       local carrier_claim = d.prev_fwd_rt_hops or 0
       local candidate_hops = carrier_claim + 1
       if carrier_claim > 0 and candidate_hops <= 8 and d.dst ~= self.id then
-        local data_route_score = route_score_from_snr(self, meta.snr)
+        local data_route_score_q4 = route_score_from_snr(self, meta_snr_q4)
         local cand = {
           next_hop     = carrier,
           hops         = candidate_hops,
-          score        = data_route_score,
+          score        = data_route_score_q4,
           last_seen_ms = self:now(),
           learned_layer_id = self.active_layer_id or self.layer_id,
         }
-        local action = rt_merge(self, self.rt, d.dst, cand, self.routing_snr_floor_db)
+        local action = rt_merge(self, self.rt, d.dst, cand, self.routing_snr_floor_q4)
         if action == "new" or action == "promote" then
           self:emit("rt_update", {
-            dest = d.dst, next = carrier, score = data_route_score,
+            dest = d.dst, next = carrier, score = q4_to_db(data_route_score_q4),
             rx_snr = meta.snr,
-            route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+            route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
             hops = candidate_hops, slot = "primary",
             trigger = "data_rt_learn",
           })
         elseif action == "alt_install" then
           self:emit("rt_update", {
-            dest = d.dst, next = carrier, score = data_route_score,
+            dest = d.dst, next = carrier, score = q4_to_db(data_route_score_q4),
             rx_snr = meta.snr,
-            route_snr_conservatism_db = self.route_snr_conservatism_db or 0.0,
+            route_snr_conservatism_db = q4_to_db(self.route_snr_conservatism_q4 or 0),
             hops = candidate_hops, slot = "alt",
             trigger = "data_rt_learn",
           })
@@ -8773,7 +8901,7 @@ function on_recv(self, frame, meta)
         local my_budget_tier = compute_budget_tier(self)
         local ack_budget_hint = my_budget_tier
         if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
-        local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint, rx_from)
+        local ack = pack_ack(d.ctr_lo, meta_snr_q4, ack_budget_hint, rx_from)
         self:emit("ack_tx", {
           origin = d.origin, payload = event_payload, ctr = d.ctr,
           to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
@@ -8821,7 +8949,7 @@ function on_recv(self, frame, meta)
     local my_budget_tier = compute_budget_tier(self)
     local ack_budget_hint = my_budget_tier
     if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
-    local ack = pack_ack(d.ctr_lo, meta.snr, ack_budget_hint, rx_from)
+    local ack = pack_ack(d.ctr_lo, meta_snr_q4, ack_budget_hint, rx_from)
     self:emit("ack_tx", {
       origin = d.origin, payload = event_payload, ctr = d.ctr,
       to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
@@ -9324,6 +9452,17 @@ function on_command(self, cmd_str)
       })
     end
 
+    if #wire_body > self.max_payload_bytes then
+      self:emit("send_oversized", {
+        dst = dst_id, dst_name = dst_name, len = #wire_body,
+        max = self.max_payload_bytes,
+        target_layer_id = target_layer_id, dst_key_hash32 = dst_key_hash32,
+        envelope_overhead = (target_layer_id ~= (self.layer_id or 0)) and (#wire_body - #gateway_text) or 0,
+      })
+      return string.format("ERROR: payload too large (%d > max %d bytes, includes %d envelope overhead)",
+                           #wire_body, self.max_payload_bytes,
+                           (target_layer_id ~= (self.layer_id or 0)) and (#wire_body - #gateway_text) or 0)
+    end
     local ctr = self:next_ctr(dst_id)
     local inner = string.char(0) .. string.char(self.id) .. wire_body
     table.insert(self.tx_queue, {
@@ -9364,6 +9503,14 @@ function on_command(self, cmd_str)
   end
   local dst_id = self.name_to_id[dst_name]
   if dst_id == nil then return "ERROR: unknown dst: " .. dst_name end
+  if #text > self.max_payload_bytes then
+    self:emit("send_oversized", {
+      dst = dst_id, dst_name = dst_name, len = #text,
+      max = self.max_payload_bytes, e2e = want_e2e,
+    })
+    return string.format("ERROR: payload too large (%d > max %d bytes)",
+                         #text, self.max_payload_bytes)
+  end
   -- Stamp this user-message with a per-(self,dst) 16-bit outbound counter.
   -- The pair (origin_id, ctr) is the globally-unique e2e message id used
   -- by every receiving node for dedup. Replaces the old flat next_origin_seq.

@@ -2045,8 +2045,6 @@ being the bootstrap wait. The user sees `send_deferred` immediately
 | Key | Default | Description |
 |---|---|---|
 | `send_defer_ttl_ms` | 30000 | How long deferred originator sends are held before `send_giveup` fires |
-| `q_response_settle_ms` | trigger jitter max + max BCN airtime + LBT backoff | Hold a Q-drained send until most Q-response BCNs have finished |
-| `q_response_settle_jitter_ms` | `lbt_backoff_ms` | Extra random spread before first RTS after Q discovery |
 
 No new wire format. No additional state at neighbours. Pure script-side
 addition that uses existing primitives.
@@ -2314,6 +2312,8 @@ expectations) subscribe by event_type.
 | `q_hash_binding_tx` | Node answered `Q:HASH_QUERY` with a resolved `(node_id,key_hash32)` binding | `to`, `node`, `key_hash32`, `tx_layer_id`, `tx_leaf_id`, `tx_routing_sf` |
 | `q_hash_binding_rx` | Node received a `Q:HASH_QUERY` binding response and updated `id_bind`; gateways also update `gateway_remote_bind` | `from`, `node`, `key_hash32`, `layer_id` |
 | `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
+| `max_payload_clamped` | Init-time guard. Configured `max_payload_bytes` exceeds the LoRa PHY 255-byte frame minus fixed overhead (`DATA_HDR_LEN + DATA_INNER_OVERHEAD` = 14); clamped to the hard cap (241) | `requested`, `clamped_to`, `lora_max_frame`, `fixed_overhead` |
+| `send_oversized` | Originator-side rejection of a user payload exceeding `max_payload_bytes`. The send never enters `tx_queue`; runtime `tx_oversized` remains the radio-side backstop for frames built outside this path | `dst`, `dst_name`, `len`, `max`, optional `e2e`, optional `target_layer_id` / `dst_key_hash32` / `envelope_overhead` for `send_layer` |
 
 ---
 
@@ -2338,7 +2338,6 @@ the JSON scenario). Defaults shown.
 | Key | Default | Description |
 |---|---|---|
 | `discovery_beacon_period_ms` | 5000 | Fast beacon period while node-local DISCOVERY is active |
-| `beacon_period_warmup_ms` | 5000 | Legacy alias for `discovery_beacon_period_ms` |
 | `beacon_period_ms` | 900000 | Operational period (15 min) |
 | `discovery_ms` | 60000 | Max node-local discovery duration after boot |
 | `beacon_boot_grace_ms` | 120000 | After boot, allow fast triggered BCNs despite the steady-state minimum interval |
@@ -2389,14 +2388,12 @@ the JSON scenario). Defaults shown.
 | `peer_suspect_penalty_db` | 12.0 | Effective route-score penalty for suspect next-hops. |
 | `peer_silent_penalty_db` | 40.0 | Effective route-score penalty for silent next-hops. |
 | `peer_dead_penalty_db` | 80.0 | Effective route-score penalty for dead next-hops. |
-| `max_payload_bytes` | 50 | Receiver's pending_rx_expiry budget cap |
+| `max_payload_bytes` | 230 | Max user-payload byte length. Network-wide convention — all nodes must agree, or receiver `pending_rx_expiry` sizing diverges. Hard-clamped at init to LoRa PHY ceiling (`LORA_MAX_FRAME_BYTES - DATA_HDR_LEN - DATA_INNER_OVERHEAD` = 241); see `max_payload_clamped` event. Originator emits `send_oversized` and rejects sends > cap. |
 | `last_acked_ttl_ms` | 10000 | last_acked_from cache TTL |
 | `seen_origin_ttl_ms` | 30000 | End-to-end dedup TTL |
 | `send_defer_ttl_ms` | 30000 | Deferred originator-send hold window — see §11a |
 | `q_query_ttl_ms` | 5000 | Sender Q dedup window — don't re-fire for same dest (§3.7) |
 | `q_respond_ttl_ms` | 10000 | Responder Q dedup window — don't re-respond to same (opcode,src,dest) (§3.7) |
-| `q_response_settle_ms` | trigger jitter max + max BCN airtime + LBT backoff | Hold first RTS after `Q:ROUTE_QUERY` until most response BCNs finish (§11a.2) |
-| `q_response_settle_jitter_ms` | `lbt_backoff_ms` | Extra random spread for Q-drained sends |
 | `gateway_handoff_defer_ttl_ms` | `send_defer_ttl_ms` | How long a gateway holds a cross-layer envelope while `Q:HASH_QUERY` tries to discover the target-layer binding |
 | `req_sync_on_boot` | true | During DISCOVERY, send `Q:REQ_SYNC` if route table remains poor |
 | `req_sync_listen_ms` | 8000 | Listen before first boot-time `REQ_SYNC` |
@@ -2463,11 +2460,22 @@ wire `origin`).
 | `layer_id` | 0 | Logical radio/routing layer; preferred config key |
 | `leaf_id` | 0 | Legacy shorthand and on-wire 4-bit layer nibble (`layer_id & 0x0f`); receivers reject foreign layers |
 | `is_gateway` | false | Node advertises gateway capability and may participate in `gateway_layers` |
-| `gateway_layers` | `{}` | Secondary layer records. Each record may set `layer_id`, `routing_sf`/`sf`, `allowed_data_sfs`, `period_ms`, `duration_ms`, `offset_ms`, and optional `leaf_id` override for tests |
-| `gateway_layer_period_ms` | 30000 | Default period for secondary-layer gateway windows |
-| `gateway_layer_duration_ms` | 5000 | Default duration for secondary-layer gateway windows |
-| `gateway_layer_offset_ms` | 5000 | Default first offset for secondary-layer gateway windows |
+| `gateway_layers` | `{}` | Secondary layer records. Each record may set `layer_id`, `routing_sf`/`sf`, `allowed_data_sfs`, `period_ms` (default 30000), `duration_ms` (default 5000), `offset_ms` (default 5000), and optional `leaf_id` override for tests. Per-record fields are the only source — no node-level fallbacks. |
 | `gateway_schedule_guard_ms` | 100 | Extra delay after a gateway foreign-layer window before peers retry local-layer RTS |
+
+### 14.6b Q4 fixed-point dB (internal)
+
+All SNR/RSSI/score/EWMA storage and arithmetic is `int16_t` Q4
+(1 unit = 1/16 dB). Config knobs keep the `_db` suffix (float dB
+input); `on_init` converts to Q4 storage via `db_to_q4`. Telemetry
+events and logs convert back via `q4_to_db` for human readability.
+The C++ port maps Q4 directly to `int16_t` with no FPU. See
+ROADMAP §11.2 for the full inventory.
+
+Affected config keys (input is float dB; internally stored as Q4):
+`peer_suspect_penalty_db`, `peer_silent_penalty_db`, `peer_dead_penalty_db`,
+`route_snr_conservatism_db`, `sf_margin_db`, `snr_ewma_alpha`. All keep
+their existing names and units in the scenario JSON.
 
 ### 14.6a Bounded-state caps
 

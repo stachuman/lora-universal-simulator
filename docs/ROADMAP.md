@@ -3196,12 +3196,33 @@ Test coverage: `test/t61_table_cap_hit_q_queried.json` (cap=2, three
 distinct destinations, refuses the third). Healthy runs (s09/s10/s11)
 emit zero `table_cap_hit` events at defaults.
 
-### 11.2 Fixed-point dB conversion (PENDING)
+### 11.2 Fixed-point dB conversion (IMPLEMENTED 2026-05-19)
 
-The model uses Lua-native float for SNR, RSSI, EWMA, route scores. Port
-target is `int16_t` Q4 (1/16 dB, range ±2048 dB, ~60 math sites). Risk:
-score-comparison cliffs near rounding boundaries — needs cross-checked
-test fixtures.
+All internal SNR/RSSI/score/EWMA storage and arithmetic is `int16_t`
+Q4 — 1 unit = 1/16 dB, range -2048.0 .. +2047.9375 dB. The C++ port
+maps this directly to `int16_t` with no FPU on Cortex-M.
+
+- **Helpers** (`Q4_SCALE = 16`): `db_to_q4`, `q4_to_db`, `q4_ewma`.
+- **Storage in Q4**: `snr_ewma_in[id]`, `snr_ewma_out[id]`, `c.score`
+  on route candidates, beacon `e.score`, `SF_DEMOD_THRESHOLD[sf]`,
+  `TIER_SCORE_PENALTY_BY_ALTS_DB[tier][alts]`, `self.sf_margin_q4`,
+  `self.routing_snr_floor_q4`, `self.snr_ewma_alpha_q4`,
+  `self.route_snr_conservatism_q4`, `self.peer_{suspect,silent,dead}_penalty_q4`.
+- **Wire-bucket helpers** (`bucket_of_snr_4b/2b`, `snr_of_bucket_4b/2b`)
+  operate in Q4; the wire bucket index is unchanged.
+- **I/O boundaries**: `meta.snr` (runtime float dB) → `db_to_q4` at
+  ingress; all telemetry events / log messages convert back via
+  `q4_to_db` so NDJSON stays human-readable dB.
+- **Config knobs keep `_db` suffix** in the JSON scenario format
+  (`peer_dead_penalty_db: 80.0`, etc.) — `on_init` converts to Q4
+  storage. No scenario changes were needed.
+
+Quantization noise: alpha = 0.3 → Q4 5 (=0.3125), a 4% relative
+error in EWMA weight. Penalty / threshold constants are integer dB,
+so they convert exactly.
+
+Regression: all 16 t46-t61 tests pass; s09/s10/s11 sim-end cleanly
+with no observable behavior change beyond ≤1/16 dB rounding.
 
 ### 11.3 RNG-seed contract (PENDING)
 
