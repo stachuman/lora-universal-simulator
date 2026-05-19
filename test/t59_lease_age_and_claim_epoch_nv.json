@@ -1,0 +1,41 @@
+{
+  "_name": "t59_lease_age_and_claim_epoch_nv",
+  "_desc": "Two pre-joined nodes (alice id=5, bob id=6) in layer 1. alice's config.nv seeds claim_epoch=42, so alice's first J_CLAIM emit at t=15000 carries claim_epoch=43 (load+increment). alice's adopted_at_ms is set in on_init at t=0, so at t=15000 her lease_age_seconds=15. bob then tries join_test claim 5 (alice's id) at t=18000; alice's J_CLAIM handler detects conflict (self.id == proposed AND self.joined) and emits J_DENY with owner_lease_age_seconds=18 and owner_claim_epoch=43 (alice's last-saved epoch). Verifies NV-backed claim_epoch monotonicity and real lease_age_seconds in both CLAIM (sender side) and DENY (defender side).",
+  "simulation": {
+    "duration_ms": 22000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 59,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "node_id": 5, "key_hash32": "0x11111111", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 60000, "discovery_beacon_period_ms": 30000, "quiet_threshold_ms": 0,
+        "nv": { "claim_epoch": 42 } } },
+    { "name": "bob", "node_id": 6, "key_hash32": "0x22222222", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 60000, "discovery_beacon_period_ms": 30000, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 15000, "node": "alice", "command": "join_test claim 99" },
+    { "at_ms": 18000, "node": "bob", "command": "join_test claim 5" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_claim_sent", "value": "\"proposed_node_id\":99" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_claim_sent", "value": "\"claim_epoch\":43" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_claim_sent", "value": "\"lease_age_seconds\":15" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "join_claim_received", "value": "\"proposed_node_id\":99" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "join_claim_received", "value": "\"claim_epoch\":43" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "join_claim_received", "value": "\"lease_age_seconds\":15" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_deny_sent", "value": "\"denied_node_id\":5" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_deny_sent", "value": "\"owner_lease_age_seconds\":18" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "join_deny_sent", "value": "\"owner_claim_epoch\":43" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "join_deny_received", "value": "\"owner_lease_age_seconds\":18" },
+    { "type": "script_emit_contains", "node": "bob", "emit_type": "join_deny_received", "value": "\"owner_claim_epoch\":43" }
+  ]
+}

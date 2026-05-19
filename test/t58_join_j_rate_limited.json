@@ -1,0 +1,39 @@
+{
+  "_name": "t58_join_j_rate_limited",
+  "_desc": "Observer rate-limits J_DISCOVER frames per (opcode, key_hash32) sliding window. joiner sends 5 J_DISCOVERs in rapid succession via the join_test REPL command; observer's join_j_max_per_window=3 means it accepts the first 3 and emits join_j_rate_limited for the 4th and 5th. The window is 10 s, much longer than the test send cadence, so all 5 fall within the same window. Verifies join-frame anti-spam at the observer side.",
+  "simulation": {
+    "duration_ms": 12000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 58,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "joiner", "node_id": 1, "key_hash32": "0x55555555", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 60000, "discovery_beacon_period_ms": 30000, "quiet_threshold_ms": 0 } },
+    { "name": "observer", "node_id": 2, "key_hash32": "0x22222222", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 60000, "discovery_beacon_period_ms": 30000, "quiet_threshold_ms": 0,
+        "join_j_max_per_window": 3, "join_j_rate_limit_window_ms": 10000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "joiner", "to": "observer", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000, "node": "joiner", "command": "join_test discover" },
+    { "at_ms": 3000, "node": "joiner", "command": "join_test discover" },
+    { "at_ms": 4000, "node": "joiner", "command": "join_test discover" },
+    { "at_ms": 5000, "node": "joiner", "command": "join_test discover" },
+    { "at_ms": 6000, "node": "joiner", "command": "join_test discover" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "joiner", "emit_type": "join_discover_sent", "value": "\"key_hash32\":1431655765" },
+    { "type": "script_emit_contains", "node": "observer", "emit_type": "join_discover_received", "value": "\"key_hash32\":1431655765" },
+    { "type": "script_emit_contains", "node": "observer", "emit_type": "join_j_rate_limited", "value": "\"key_hash32\":1431655765" },
+    { "type": "script_emit_contains", "node": "observer", "emit_type": "join_j_rate_limited", "value": "\"max_per_window\":3" },
+    { "type": "script_emit_contains", "node": "observer", "emit_type": "join_j_rate_limited", "value": "\"opcode\":\"discover\"" },
+    { "type": "script_emit_contains", "node": "observer", "emit_type": "join_j_rate_limited", "value": "\"count\":3" }
+  ]
+}

@@ -534,9 +534,28 @@ Known deviations/gaps versus the full design:
   suppressing legitimate responder traffic during cold boot.
 - Fixed BCN `key_hash32` is implemented. Mobile BCNs carry the same identity
   hash but no route entries.
-- Partition-merge resolution is not implemented yet; `J_CONFLICT` remains a
-  future concept, not an on-wire opcode in the current frame.
-- `lease_age_seconds` is encoded but currently sent as `0` in the first slice.
+- Partition-merge resolution is functionally implemented via the
+  addr_conflict recovery action: when `id_bind_set` detects a key
+  mismatch on `self.id` for an adopted owner, it emits a defensive
+  J_DENY (new reason code `J_DENY_REASON_OWN_ID_DEFENSE = 3`) carrying
+  the defender's `lease_age_seconds` and `claim_epoch`. The duplicate's
+  J_DENY handler runs `addr_conflict_tie_break` (older lease wins;
+  equal → higher epoch; equal → lower key) and, on loss, calls
+  `forced_rejoin` to yield the id and re-run the join state machine.
+  Telemetry: `addr_conflict_defense`, `addr_conflict_tie_break`,
+  `addr_conflict_forced_rejoin`. Verified by t60. A dedicated
+  `J_CONFLICT` opcode is no longer needed — the existing J_DENY frame
+  carries everything required.
+- `lease_age_seconds` is populated with a real local-clock value:
+  `floor((now - adopted_at_ms) / 1000)`, saturating at 65535. `adopted_at_ms`
+  is set on `join_adopted` for unjoined nodes and at `on_init` for pre-joined
+  (pinned-id) nodes. Both `J_CLAIM` (own lease) and `J_DENY` (defender's
+  lease) wire fields now carry the real value.
+- `claim_epoch` is NV-backed via a thin `self.nv` shim (`nv_get`/`nv_set`).
+  On init the node loads the previously-saved epoch; every increment is
+  immediately persisted. The wire field is still 8-bit and wraps after 256
+  boots — partition-merge tie-break consumers should handle wraparound
+  explicitly. Tests seed the initial NV with `config.nv = {"claim_epoch":N}`.
 
 1. **LISTEN.** Node starts without `node_id`. It listens on its layer control
    SF for `join_listen_ms`, collecting BCN `src`, destination-seen bitmaps,

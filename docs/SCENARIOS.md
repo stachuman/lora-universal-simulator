@@ -1537,31 +1537,41 @@ t=200000 (much later) alice's device powers back on (RAM-persisted id=5):
 alice's BCN, including charlie himself). It is **not** recovered:
 - Bindings are not overwritten on plain conflict (the `addr_conflict_observed`
   event fires but `id_bind_set` returns false).
-- Neither alice nor charlie takes corrective action — both continue
-  operating with id=5.
-- Routing for id=5 partially fails: hop-level matching (CTS/ACK
-  `ctr_lo` and ACK `to_id`) sees both nodes claim ownership, causing
-  ambiguity for any traffic targeting id=5.
+- The conflict is **detected** via `addr_conflict_observed` at both
+  alice and charlie (and at any third-party observer in range).
+- Recovery is now **automatic** via the own-id defense + tie-break +
+  forced-rejoin loop (see §5.9 below). When alice returns and her BCN
+  reaches charlie, charlie's `id_bind_set` fires the
+  `addr_conflict_defense` hook → charlie emits J_DENY carrying
+  charlie's lease_age + claim_epoch. alice's J_DENY handler runs the
+  tie-break: typically alice (older deployment, longer lease) wins,
+  charlie loses and triggers `forced_rejoin`, yielding the id.
 
-**Required follow-up work (in priority order):**
+**Implemented mechanisms (all verified in t59 / t60):**
 
-1. **Recovery action on `addr_conflict_observed` from a plain BCN.**
-   Two designs to choose between:
-   - (a) The node observing the conflict in its **own** id (i.e.,
-     conflict.node == self.id AND known_key == self.key) triggers a
-     forced rejoin after a brief debounce. The intuition: "someone
-     else is claiming my id; one of us needs to move." Tie-break by
-     `lease_age` or `claim_epoch` to decide who moves.
-   - (b) Observers (any third party) emit a synthesized `J_DENY` for
-     the more-recent claimant. Forces the new claimant to rejoin.
-2. **`claim_epoch` NV persistence across reboots** — required for the
-   tie-break to be deterministic across the boot boundary.
-3. **`lease_age_seconds` populated with real value** — currently
-   always sent as 0; without real values, tie-break can't compare
-   "older deployment wins."
-4. **Test coverage** — a t51 with deliberate alice-silence + charlie-claim
-   + alice-return, asserting `addr_conflict_observed` is emitted and (once
-   recovery lands) the right side wins.
+1. **Recovery action on `addr_conflict_observed`** — `id_bind_set` now
+   fires `addr_conflict_recovery_send_deny` when the conflict involves
+   `self.id` with `prev.key == self.key`. The defensive J_DENY carries
+   `reason=J_DENY_REASON_OWN_ID_DEFENSE`, the defender's
+   `lease_age_seconds`, and `claim_epoch`. The duplicate's J_DENY
+   handler runs `addr_conflict_tie_break` and, on loss, calls
+   `forced_rejoin`. Test: **t60**.
+2. **`claim_epoch` NV persistence** — via the `self.nv` shim
+   (`nv_get`/`nv_set`). `on_init` loads the previously-saved epoch;
+   `join_start_claim` increments and persists. Tests seed via
+   `config.nv = {"claim_epoch": N}`. The 8-bit wire field wraps after
+   256 boots; consumers must still handle wraparound. Test: **t59**.
+3. **`lease_age_seconds` populated with real value** — computed as
+   `floor((self:now() - self.adopted_at_ms) / 1000)`, saturating to
+   16 bits. `adopted_at_ms` is set on `join_adopted` for unjoined
+   nodes and at `on_init` for pre-joined nodes. Both `J_CLAIM` (own
+   lease) and `J_DENY` (defender's lease) wire fields carry the real
+   value. Test: **t59**.
+
+**Remaining open** — a dedicated test for the "alice goes silent,
+charlie joins as id=5, alice returns" scenario (uses t60's mechanism
+but in a less synthetic setup). t60 already proves the underlying
+machinery works end-to-end.
 
 ### 7c — Future: with recovery action in place
 
@@ -1576,15 +1586,22 @@ return.
 independently. The partitions merge after a long RF outage. Both
 nodes' BCNs reach each other.
 
-**Required mechanisms (all currently unimplemented):**
+**Required mechanisms (current status):**
 
 1. Identity-aware BCN: implemented (every BCN carries `key_hash32`).
-2. NV-persistent `claim_epoch`: **not implemented** — counter resets on
-   reboot.
-3. Lease-age advertisement: **not implemented** — `lease_age_seconds`
-   sent as 0.
-4. Recovery action on `addr_conflict_observed`: **not implemented**
-   (see §5.7 follow-up).
+2. NV-persistent `claim_epoch`: **implemented** via `self.nv` shim
+   (`nv_get`/`nv_set`); incrementing claims save before TX. Wire field
+   is 8-bit so consumers must handle 256-boot wraparound.
+3. Lease-age advertisement: **implemented** — `lease_age_seconds` is
+   `floor((now - adopted_at_ms) / 1000)`, saturating at 16 bits.
+   Verified by t59.
+4. Recovery action on `addr_conflict_observed`: **implemented** via
+   defensive J_DENY + tie-break + forced_rejoin (`addr_conflict_defense`
+   → `addr_conflict_tie_break` → `addr_conflict_forced_rejoin`).
+   Verified by t60. Partition-merge resolution is now functionally
+   covered for the simple two-node collision case; the same mechanism
+   generalizes to N-node partition merge because each pair-wise
+   collision resolves independently via the tie-break.
 
 **Outline of intended exchange (once mechanisms exist).**
 
@@ -2087,9 +2104,9 @@ Cross-reference of mechanisms each scenario depends on:
 | GUARD-window defense-in-depth | Implemented | 5.5 |
 | Re-discover with backoff + max_attempts | Implemented | 5.2 |
 | Joiner adopts DATA SF policy from OFFER (first valid offer wins) | Implemented | 5.1 |
-| `claim_epoch` NV persistence | **Not implemented** | 5.7c, 5.8 |
-| `lease_age_seconds` populated with real value | **Not implemented** | 5.7c, 5.8 |
-| Recovery action on `addr_conflict_observed` from plain traffic | **Not implemented** | 5.7b, 5.7c, 5.8 |
+| `claim_epoch` NV persistence (via `self.nv` shim, seedable by `config.nv`) | Implemented | 5.7c, 5.8, t59 |
+| `lease_age_seconds` populated with real value (`now - adopted_at_ms`, floor seconds, saturating to 16 bits) | Implemented | 5.7c, 5.8, t59 |
+| Recovery action on `addr_conflict_observed` from plain traffic (defensive DENY → tie-break → forced_rejoin) | Implemented | 5.7b, 5.7c, 5.8, t60 |
 | J-frame anti-spam rate-limiting | Implemented for `J_DISCOVER`/`J_CLAIM` by `(opcode,key_hash32)` | 5.6 |
 | Reset `join_discover_attempts` on `join_adopted` | Implemented | 5.2 |
 | Gateway BCN schedule records + `gateway_schedule_change` | Implemented | 6.1, 6.4 |

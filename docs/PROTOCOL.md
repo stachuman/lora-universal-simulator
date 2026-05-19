@@ -187,9 +187,20 @@ if E == 1:
 `source="bcn"` and `confidence="claimed"`. If the existing binding has the
 same hash, refresh `last_seen_ms` and `last_key_seen_ms`. If the existing
 binding has a different hash, emit `addr_conflict_observed`; this is hard
-evidence of duplicate/recycled short-id use. The first implementation should
-record and expose the conflict before automatically evicting routes or forcing
-rejoin.
+evidence of duplicate/recycled short-id use.
+
+**Own-id defense + forced-rejoin recovery.** When the conflict involves
+*our own* short id (`node_id == self.id` and the stored `prev.key_hash32`
+matches `self.key_hash32`), the adopted owner emits a defensive J_DENY
+with `reason=OWN_ID_DEFENSE`, carrying its own `lease_age_seconds` and
+`claim_epoch`. The duplicate (claimant) runs the tie-break in its J_DENY
+handler: older lease wins; equal → higher epoch; equal → lower key_hash.
+Loser triggers `forced_rejoin`: yields the contested id (adds it to
+`join_denied_ids`), clears `joined`, drops self-binding, re-runs
+`join_start_claim`, and emits `addr_conflict_forced_rejoin`. Winner
+stays adopted unchanged. Telemetry: `addr_conflict_defense` (the DENY
+emit) and `addr_conflict_tie_break` (winner-or-loser determination).
+Verified by `test/t60_addr_conflict_forced_rejoin.json`.
 
 **Mobile identity beacons:** mobile nodes emit BCN with `is_mobile=1`,
 `key_hash32`, and `n_entries=0`. They omit route entries, destination-seen
@@ -567,8 +578,16 @@ Current denial reasons:
 
 All multi-byte integer fields are little-endian. `lease_age` is saturating,
 local-clock-relative seconds; it is only a deterministic tie-break input
-during partition merge or simultaneous claims, not an absolute timestamp. In
-the current first slice it is encoded but transmitted as `0`.
+during partition merge or simultaneous claims, not an absolute timestamp.
+The Lua model computes `lease_age = floor((self:now() - self.adopted_at_ms)
+/ 1000)` with 16-bit saturation. `self.adopted_at_ms` is set on
+`join_adopted` for unjoined nodes and at `on_init` for pre-joined
+(pinned-id) nodes. `claim_epoch` is NV-backed via `self.nv` (see
+`nv_get`/`nv_set` helpers): on init the node loads the previously-saved
+epoch; `join_start_claim` increments and re-persists before each
+transmission. The 8-bit field wraps after 256 boots — tie-break consumers
+must handle wraparound. Tests can seed initial NV with `config.nv = {
+"claim_epoch": N }` at the node level.
 
 ### 3.6 NACK (`'N'`) — 4 bytes
 
@@ -2235,6 +2254,9 @@ expectations) subscribe by event_type.
 | `id_bind_aged` | Identity binding expired and the short ID became recyclable | `node`, `key_hash32`, `age_ms`, `ttl_ms`, `source`, `confidence` |
 | `id_bind_reused` | Join candidate picker selected an ID whose expired binding was just recycled | `node`, `key_hash32` |
 | `addr_conflict_observed` | Existing binding saw different key hash for same short id | `node`, `known_key_hash32`, `observed_key_hash32`, `source` |
+| `addr_conflict_defense` | Adopted owner of `node` observed a competing key claiming the same id and emitted a defensive J_DENY (reason=OWN_ID_DEFENSE) carrying its own lease_age + claim_epoch | `node`, `own_key_hash32`, `claimant_key_hash32`, `own_lease_age_seconds`, `own_claim_epoch`, `source` |
+| `addr_conflict_tie_break` | Adopted node received a J_DENY targeting its own id and ran the lease/epoch/key tie-break against the sender's claim | `node`, `i_win`, `my_lease_age_seconds`, `my_claim_epoch`, `my_key_hash32`, `their_lease_age_seconds`, `their_claim_epoch`, `their_key_hash32` |
+| `addr_conflict_forced_rejoin` | Adopted node lost the tie-break: yielded its id, added the contested id to denied_ids, switched to unjoined, and re-entered the join state machine | `prior_node_id`, `reason`, `observed_owner_key_hash32`, `observed_owner_lease_age_seconds`, `observed_owner_claim_epoch` |
 
 ### 13.4 Failure / cascade
 

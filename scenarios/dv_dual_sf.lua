@@ -1599,6 +1599,7 @@ local J_FLAG_GATEWAY_CAPABLE = 0x08
 
 local J_DENY_REASON_CONFLICT = 1
 local J_DENY_REASON_PENDING_CLAIM = 2
+local J_DENY_REASON_OWN_ID_DEFENSE = 3   -- adopted-owner defends its id from a duplicate
 
 local function pack_u16_le(v)
   v = math.floor(v or 0) & 0xffff
@@ -1751,6 +1752,33 @@ function join_rate_limit_key(j)
     return j.key_hash32
   end
   return nil
+end
+
+-- NV-persistence shim. In real firmware these map to flash/EEPROM
+-- read/write; in the model they map to an in-RAM table. Tests can seed
+-- initial NV state via `config.nv = { claim_epoch = N, ... }`.
+function nv_get(self, key, default)
+  self.nv = self.nv or {}
+  local v = self.nv[key]
+  if v == nil then return default end
+  return v
+end
+
+function nv_set(self, key, value)
+  self.nv = self.nv or {}
+  self.nv[key] = value
+end
+
+-- Seconds since this node adopted its current short-id. Used as
+-- lease_age_seconds in J_CLAIM (own claim) and J_DENY (defender's
+-- assertion). 0 means "no adoption yet" — either an unjoined node or
+-- one whose adoption time is unknown. Saturates to 16-bit wire range.
+function lease_age_seconds_now(self)
+  if self.adopted_at_ms == nil then return 0 end
+  local age = math.floor((self:now() - self.adopted_at_ms) / 1000)
+  if age < 0 then age = 0 end
+  if age > 65535 then age = 65535 end
+  return age
 end
 
 function join_j_rate_limited(self, j, meta)
@@ -3186,6 +3214,16 @@ local function id_bind_set(self, node_id, key_hash32, source, confidence)
       observed_key_hash32 = key_hash32,
       source = source or "unknown",
     })
+    -- Own-id defense: if THIS node is the adopted owner of `node_id`
+    -- (joined, prev.key matches our own key), send a defensive J_DENY
+    -- so the impostor can run the tie-break in its J_DENY handler.
+    if self.joined
+       and node_id == self.id
+       and prev.key_hash32 == (self.key_hash32 or 0)
+       and addr_conflict_recovery_send_deny ~= nil then
+      addr_conflict_recovery_send_deny(self, node_id, prev.key_hash32,
+                                       key_hash32, source)
+    end
     return false
   end
   local is_new = prev == nil
@@ -3476,6 +3514,12 @@ local function gateway_note_remote_binding(self, layer_id, node_id, key_hash32, 
     })
     return
   end
+  -- Preserve the ambiguous flag across same-node refreshes. Once two
+  -- physical nodes have been observed claiming the same (layer,key), a
+  -- later beacon from one of them does NOT resolve the ambiguity — both
+  -- nodes are still alive. The ambiguous state clears only when one side
+  -- ages out via gateway_remote_bind_ttl_ms (see age_out_gateway_remote_bind).
+  local was_ambiguous = prev and prev.ambiguous == true
   self.gateway_remote_bind[key] = {
     layer_id = layer_id,
     node_id = node_id,
@@ -3483,14 +3527,18 @@ local function gateway_note_remote_binding(self, layer_id, node_id, key_hash32, 
     source = source or "observed",
     first_seen_ms = prev and prev.first_seen_ms or now,
     last_seen_ms = now,
-    ambiguous = false,
+    ambiguous = was_ambiguous,
+    conflicting_node = prev and prev.conflicting_node or nil,
+    conflicting_source = prev and prev.conflicting_source or nil,
   }
-  self:emit("gateway_remote_bind_set", {
-    layer_id = layer_id,
-    node = node_id,
-    key_hash32 = key_hash32,
-    source = source or "observed",
-  })
+  if not was_ambiguous then
+    self:emit("gateway_remote_bind_set", {
+      layer_id = layer_id,
+      node = node_id,
+      key_hash32 = key_hash32,
+      source = source or "observed",
+    })
+  end
 end
 
 local function age_out_gateway_remote_bind(self)
@@ -5918,6 +5966,28 @@ local function join_claim_compare(hash_a, nonce_a, hash_b, nonce_b)
   return nonce_a < nonce_b
 end
 
+-- Tie-break for "two adopted nodes claim the same id" recovery.
+-- Returns true if (my_lease, my_epoch, my_key) wins over the other side.
+-- Rule: older lease wins; if equal, higher epoch wins (more recent boot);
+-- if equal, lower key_hash wins (deterministic).
+function addr_conflict_tie_break(my_lease, my_epoch, my_key,
+                                 their_lease, their_epoch, their_key)
+  my_lease   = my_lease   or 0
+  their_lease = their_lease or 0
+  if my_lease ~= their_lease then
+    return my_lease > their_lease
+  end
+  my_epoch   = my_epoch   or 0
+  their_epoch = their_epoch or 0
+  if my_epoch ~= their_epoch then
+    return my_epoch > their_epoch
+  end
+  my_key   = my_key   or 0
+  their_key = their_key or 0
+  return my_key < their_key
+end
+
+
 local function join_send_discover(self, reason)
   if not self.join_required or self.joined then return false end
   self.join_discover_attempts = (self.join_discover_attempts or 0) + 1
@@ -5976,7 +6046,9 @@ local function join_start_claim(self, reason)
     return false
   end
   self.join_claim_epoch = ((self.join_claim_epoch or 0) + 1) & 0xff
+  nv_set(self, "claim_epoch", self.join_claim_epoch)
   local nonce = self:rand(0, 256)
+  local lease_age = lease_age_seconds_now(self)
   self.join_claim_pending = {
     proposed_node_id = proposed,
     key_hash32 = self.key_hash32 or 0,
@@ -5986,14 +6058,14 @@ local function join_start_claim(self, reason)
   }
   local tx_leaf_id = active_leaf_id(self)
   local tx_routing_sf = active_routing_sf(self)
-  local frame = pack_j_claim(tx_leaf_id, self.key_hash32 or 0, proposed, 0,
+  local frame = pack_j_claim(tx_leaf_id, self.key_hash32 or 0, proposed, lease_age,
                              self.join_claim_epoch, nonce,
                              self.is_mobile == true,
                              self.self_gateway == true)
   self:emit("join_claim_sent", {
     proposed_node_id = proposed,
     key_hash32 = self.key_hash32 or 0,
-    lease_age_seconds = 0,
+    lease_age_seconds = lease_age,
     claim_epoch = self.join_claim_epoch,
     nonce = nonce,
     requester_mobile = self.is_mobile == true,
@@ -6044,6 +6116,7 @@ local function join_start_claim(self, reason)
     self.joined = true
     self.id = proposed
     self:set_protocol_id(proposed)
+    self.adopted_at_ms = self:now()
     self.join_discover_attempts = 0
     self.name_to_id[self.name] = proposed
     self.id_to_name[proposed] = self.name
@@ -6052,11 +6125,83 @@ local function join_start_claim(self, reason)
       key_hash32 = self.key_hash32 or 0,
       claim_epoch = p.claim_epoch,
       nonce = p.nonce,
+      adopted_at_ms = self.adopted_at_ms,
     })
     send_beacon_page(self, "sync")
     send_req_sync_q(self, "join_adopted")
   end)
   return true
+end
+
+-- ---- addr_conflict recovery action (own-id defense + forced rejoin) ----
+-- When this node sees a different key_hash claiming its own short id
+-- (typically via a peer BCN reaching us after the duplicate's
+-- adoption), id_bind_set fires `addr_conflict_observed` and then calls
+-- this defense. We send a J_DENY carrying our real lease_age + epoch.
+-- The duplicate (claimant) runs the tie-break in its J_DENY handler; if
+-- it loses it triggers forced_rejoin to give up the id.
+function addr_conflict_recovery_send_deny(self, node_id, owner_key, claimant_key, source)
+  if not self.joined or self.key_hash32 == nil then return false end
+  if node_id ~= self.id then return false end
+  if owner_key ~= self.key_hash32 then return false end
+  if claimant_key == nil or claimant_key == self.key_hash32 then return false end
+  local owner_lease_age = lease_age_seconds_now(self)
+  local tx_leaf_id = active_leaf_id(self)
+  local tx_routing_sf = active_routing_sf(self)
+  local deny = pack_j_deny(tx_leaf_id, node_id,
+                           self.key_hash32, claimant_key,
+                           owner_lease_age, self.join_claim_epoch or 0,
+                           J_DENY_REASON_OWN_ID_DEFENSE,
+                           self.is_mobile == true,
+                           self.self_gateway == true)
+  self:emit("addr_conflict_defense", {
+    node = node_id,
+    own_key_hash32 = self.key_hash32,
+    claimant_key_hash32 = claimant_key,
+    own_lease_age_seconds = owner_lease_age,
+    own_claim_epoch = self.join_claim_epoch or 0,
+    source = source or "unknown",
+  })
+  tx_initiating(self, deny, {
+    sf = tx_routing_sf,
+    label = "J",
+    info = string.format("op=deny (own-id-defense) node=%d claimant=%u",
+                         node_id, claimant_key & 0xffffffff),
+  })
+  return true
+end
+
+-- Yield current id and re-run the join state machine. Triggered when
+-- this node loses the addr_conflict tie-break against a peer claiming
+-- the same id with stronger lease/epoch. The contested id is added to
+-- denied_ids so the random picker won't immediately re-pick it.
+function forced_rejoin(self, reason, owner_key, owner_lease_age, owner_epoch)
+  if not self.joined then return false end
+  local prior_id = self.id
+  self.joined = false
+  self.adopted_at_ms = nil
+  self.join_required = true
+  self.join_claim_pending = nil
+  self.id = JOIN_UNJOINED_ID
+  self:set_protocol_id(JOIN_UNJOINED_ID)
+  self.join_denied_ids = self.join_denied_ids or {}
+  self.join_denied_ids[prior_id] = true
+  -- Drop our own self-binding for the prior id so the local id_bind table
+  -- doesn't hold a stale claim by us. Other peers' bindings refresh on
+  -- their own BCN/J observation cycles.
+  if self.id_bind ~= nil and self.id_bind[prior_id] ~= nil
+     and self.id_bind[prior_id].key_hash32 == (self.key_hash32 or 0) then
+    self.id_bind[prior_id] = nil
+  end
+  self:emit("addr_conflict_forced_rejoin", {
+    prior_node_id = prior_id,
+    reason = reason or "addr_conflict_lost",
+    observed_owner_key_hash32 = owner_key,
+    observed_owner_lease_age_seconds = owner_lease_age,
+    observed_owner_claim_epoch = owner_epoch,
+  })
+  -- Re-run join immediately. The picker excludes the contested id.
+  return join_start_claim(self, reason or "addr_conflict_lost")
 end
 
 local function schedule_gateway_layer_window(self, rec)
@@ -6686,6 +6831,20 @@ function on_init(self, config)
   self.gateway_remote_bind_ttl_ms = config.gateway_remote_bind_ttl_ms or self.id_bind_ttl_ms
   self.join_denied_ids = {}
   self.join_claim_pending = nil
+  -- NV-backed state. claim_epoch is monotonic across reboots so a
+  -- partition-merge tie-break can deterministically order claims by
+  -- "newer boot wins" (assuming the wire field saturates at 8 bits,
+  -- 256 boots before wraparound).
+  self.nv = config.nv or {}
+  self.join_claim_epoch = nv_get(self, "claim_epoch", 0)
+  -- Pre-joined (pinned-id) nodes record their adoption time at init so
+  -- their J_DENY responses carry a real lease_age_seconds. Unjoined
+  -- nodes set adopted_at_ms when join_adopted fires.
+  if self.joined then
+    self.adopted_at_ms = self:now()
+  else
+    self.adopted_at_ms = nil
+  end
   self.join_listen_ms = config.join_listen_ms or 3000
   self.join_discover_jitter_ms = config.join_discover_jitter_ms or 3000
   self.join_discover_wait_ms = config.join_discover_wait_ms or 10000
@@ -7079,9 +7238,10 @@ function on_recv(self, frame, meta)
                             or J_DENY_REASON_CONFLICT
         local tx_leaf_id = active_leaf_id(self)
         local tx_routing_sf = active_routing_sf(self)
+        local owner_lease_age = lease_age_seconds_now(self)
         local deny = pack_j_deny(tx_leaf_id, j.proposed_node_id,
                                  owner_key_hash32, j.key_hash32,
-                                 0, owner_claim_epoch,
+                                 owner_lease_age, owner_claim_epoch,
                                  deny_reason,
                                  self.is_mobile == true,
                                  self.self_gateway == true)
@@ -7089,7 +7249,7 @@ function on_recv(self, frame, meta)
           denied_node_id = j.proposed_node_id,
           owner_key_hash32 = owner_key_hash32,
           claimant_key_hash32 = j.key_hash32,
-          owner_lease_age_seconds = 0,
+          owner_lease_age_seconds = owner_lease_age,
           owner_claim_epoch = owner_claim_epoch,
           reason = deny_reason,
           requester_mobile = self.is_mobile == true,
@@ -7120,6 +7280,38 @@ function on_recv(self, frame, meta)
         gateway_capable = j.gateway_capable == true,
       })
       id_bind_set(self, j.denied_node_id, j.owner_key_hash32, "j_deny", "claimed")
+      -- Joined-state recovery: a peer with the same id is asserting
+      -- ownership of MY id with a competing lease/epoch. Tie-break:
+      -- older lease wins; equal → higher epoch; equal → lower key.
+      if self.joined and self.key_hash32 ~= nil
+         and j.denied_node_id == self.id
+         and j.claimant_key_hash32 == self.key_hash32
+         and j.owner_key_hash32 ~= self.key_hash32 then
+        local my_lease = lease_age_seconds_now(self)
+        local my_epoch = self.join_claim_epoch or 0
+        local i_win = addr_conflict_tie_break(
+          my_lease, my_epoch, self.key_hash32,
+          j.owner_lease_age_seconds or 0,
+          j.owner_claim_epoch or 0,
+          j.owner_key_hash32 or 0)
+        self:emit("addr_conflict_tie_break", {
+          node = self.id,
+          i_win = i_win,
+          my_lease_age_seconds = my_lease,
+          my_claim_epoch = my_epoch,
+          my_key_hash32 = self.key_hash32,
+          their_lease_age_seconds = j.owner_lease_age_seconds or 0,
+          their_claim_epoch = j.owner_claim_epoch or 0,
+          their_key_hash32 = j.owner_key_hash32 or 0,
+        })
+        if not i_win and forced_rejoin ~= nil then
+          forced_rejoin(self, "addr_conflict_lost",
+                        j.owner_key_hash32,
+                        j.owner_lease_age_seconds,
+                        j.owner_claim_epoch)
+        end
+        return
+      end
       local p = self.join_claim_pending
       if self.join_required and not self.joined and p
          and p.proposed_node_id == j.denied_node_id
@@ -8947,13 +9139,15 @@ function on_command(self, cmd_str)
         return "ERROR: usage: join_test claim <node_id>"
       end
       self.join_claim_epoch = ((self.join_claim_epoch or 0) + 1) & 0xff
+      nv_set(self, "claim_epoch", self.join_claim_epoch)
       local nonce = self:rand(0, 256)
-      frame = pack_j_claim(tx_leaf_id, key_hash32, proposed, 0,
+      local lease_age = lease_age_seconds_now(self)
+      frame = pack_j_claim(tx_leaf_id, key_hash32, proposed, lease_age,
                            self.join_claim_epoch, nonce, is_mobile, is_gateway)
       self:emit("join_claim_sent", {
         proposed_node_id = proposed,
         key_hash32 = key_hash32,
-        lease_age_seconds = 0,
+        lease_age_seconds = lease_age,
         claim_epoch = self.join_claim_epoch,
         nonce = nonce,
         requester_mobile = is_mobile,
@@ -8970,14 +9164,15 @@ function on_command(self, cmd_str)
         return "ERROR: usage: join_test deny <denied_node_id> <claimant_key_hash32>"
       end
       self.join_claim_epoch = (self.join_claim_epoch or 0) & 0xff
+      local owner_lease_age = lease_age_seconds_now(self)
       frame = pack_j_deny(tx_leaf_id, denied, key_hash32, claimant_hash,
-                          0, self.join_claim_epoch, J_DENY_REASON_CONFLICT,
+                          owner_lease_age, self.join_claim_epoch, J_DENY_REASON_CONFLICT,
                           is_mobile, is_gateway)
       self:emit("join_deny_sent", {
         denied_node_id = denied,
         owner_key_hash32 = key_hash32,
         claimant_key_hash32 = claimant_hash,
-        owner_lease_age_seconds = 0,
+        owner_lease_age_seconds = owner_lease_age,
         owner_claim_epoch = self.join_claim_epoch,
         reason = J_DENY_REASON_CONFLICT,
         requester_mobile = is_mobile,
