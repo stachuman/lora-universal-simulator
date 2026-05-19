@@ -160,3 +160,33 @@ that's a public channel via gossip — slower convergence, intentional.
 **Visible in:** the `DATA_FLAG_PRIORITY` bit in §3.4 (no new frame
 type); `originator_priority_max_per_window = 5` over a 1-hour window
 (tight enough that abuse hurts the abuser).
+
+## 11. Channels are local-by-design
+
+Gossip channels (ROADMAP §3) propagate **only within their originating
+layer**. Gateways do NOT bridge channel-message traffic across layers
+— channels are not a cross-layer multicast primitive.
+
+This composes with the other principles:
+
+- **Principle 1 (airtime is scarce)**: cross-layer channel multicast
+  would have to flow through every gateway and re-propagate via gossip
+  on the far side — quadratic in (layers × mesh size). Local-only
+  keeps it linear.
+- **Principle 9 (single mechanism per concern)**: cross-layer is the
+  unicast/DM path's job (via gateway envelope handoff, §7.3). Don't
+  also make channels cross-layer.
+- **Practical**: chat-flavoured channel use cases ARE inherently local
+  ("Capitol Hill neighbourhood chat"). For genuinely cross-mesh
+  messaging, use a unicast DM to a specific person.
+
+A future "exception" — explicit per-channel bridge config at a
+gateway, with a separate (much lower) channel bridge budget — is
+parked as ROADMAP §3.1 design-only. Until it lands, "channels are
+local" is a hard rule and the analyzer + test infrastructure can
+rely on it.
+
+**Visible in:** the absence of any channel-bridging code in the
+gateway DATA-handoff path (`gateway_envelope_*` only handles DM); the
+fact that BCN extension `CHANNEL_DIGEST` is filtered by `leaf_id`
+like every other BCN payload.

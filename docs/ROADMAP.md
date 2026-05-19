@@ -1019,6 +1019,26 @@ EVICTION
   hard-capped; `table_cap_hit` fires on overflow.
 - **Principle 9 (single mechanism)**: this is the ONLY way channel
   messages move. No multicast frame, no flood mode.
+- **Principle 11 (channels are local)**: gossip stays within a layer.
+  Gateways DO NOT bridge channel messages. See §3.1 for the parked
+  future design.
+
+### 3.1 Cross-layer channels (DEFERRED design)
+
+By default, channels are **local to their originating layer** (per
+`docs/PRINCIPLES.md` #11). When a genuine cross-layer use case
+surfaces, four candidate designs to choose from:
+
+| # | Design | Pro | Con |
+|---|---|---|---|
+| A | **Explicit per-channel bridge config at a gateway**: operator marks "bridge channel #N from layer-X to layer-Y at rate ≤R msg/hour". Gateway re-emits matching channel messages into the target layer's gossip after the rate-limit + maybe a re-encryption step | Operator-curated; bounded airtime cost; works for "publish from city HQ to neighbourhood layers" | Requires admin config; trust-the-gateway model (sees plaintext for public, decryption-needed for group) |
+| B | **App-layer relay**: a user-mode node subscribes to two layers (e.g., gateway-with-extra-radio) and re-posts what it sees from layer-A onto layer-B's channel-N. No protocol change | Zero protocol surface; flexible | Loses "channel identity" — re-posted message has a NEW id, different origin; can't trace provenance |
+| C | **Channel uplink with per-channel quota**: like A but with a per-channel rate token shared across all bridged gateways, preventing operator misconfiguration from blowing the airtime budget | More robust than A; doesn't require global coord | Complex; needs cross-gateway token accounting |
+| D | **Reject cross-layer entirely**: declare it explicitly out-of-scope. Users who need cross-layer messaging use unicast DM (priority unicast for urgent content) | Simplest; honest about the trade-off | Doesn't satisfy "broadcast to the whole metro area" use cases |
+
+**Until a real use case surfaces, design D is in effect** — that's
+the meaning of Principle 11. Test scenarios + analyze.py treat
+channels as layer-local for assertion purposes.
 
 ---
 
