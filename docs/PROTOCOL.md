@@ -2491,23 +2491,27 @@ The C++ port maps Q4 to `int16_t` with no FPU. See ROADMAP §11.2.
 
 ## 15. Known limitations
 
-### 15.1 Address-assignment story unresolved
+### 15.1 ~~Address-assignment story unresolved~~ — RESOLVED
 
-8-bit short node IDs are a **simulator-only convenience**. In a real
-deployment with hardware-derived IDs, two layers or deployments would
-routinely have overlapping short IDs. `leaf_id` filters at the active
-layer prevent the immediate failures, but doesn't solve the underlying
-"how does a new node get a unique short ID at boot" question.
+**Resolved.** Two-tier OTAA-style addressing is implemented:
 
-The intended path: two-tier addressing (LoRaWAN OTAA-style):
+- Permanent identity: 32-bit `key_hash32` (future `public_key` hash
+  from §8 crypto), carried in every BCN (§3.1).
+- Short address: 8-bit `node_id`, assigned via the J-frame state
+  machine (J_DISCOVER → J_OFFER → J_CLAIM → J_DENY → ADOPT, §3.5).
+- Per-observer `id_bind[(layer_id) → node_id → key_hash32]` table,
+  TTL-aged (`PROTOCOL.id_bind_ttl_ms` = 48 h).
+- Partition-merge / address-conflict recovery: `id_bind_set` fires
+  `addr_conflict_observed` on key mismatch; when the conflict
+  involves our own adopted id, own-id defense sends `J_DENY` with
+  reason `J_DENY_REASON_OWN_ID_DEFENSE`; the impostor's J_DENY
+  handler runs `addr_conflict_tie_break` (older lease → higher
+  epoch → lower key) and the loser triggers `forced_rejoin`.
+  Total ordering prevents thrashing. NV-persisted `claim_epoch`
+  provides a "newer boot wins" deterministic tie-break.
 
-- Long EUI (e.g., 32-bit hardware-hash) for join handshake.
-- Short address (8-bit) assigned by the network on join.
-- Conflict resolution on partition merge.
-- Address recycling after long node-absent timeout.
-
-This is its own design phase — see
-`memory/project_address_assignment_unfinished.md`.
+Coverage: t46-t60 exercise the full join wire + state machine +
+conflict-recovery path. See SCENARIOS.md §5.1-§5.8.
 
 ### 15.2 BCN ctr_lo dedup not protected by leaf_id alone
 
