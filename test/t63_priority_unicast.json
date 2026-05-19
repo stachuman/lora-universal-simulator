@@ -1,0 +1,44 @@
+{
+  "_name": "t63_priority_unicast",
+  "_desc": "Verifies the priority-unicast mechanism (ROADMAP §3a): (a) `send_priority` sets DATA_FLAG_PRIORITY on the wire and the tx_enqueue/tx_dequeue events carry priority=true; (b) priority sends successfully reach the destination; (c) originator self-cap fires `priority_send_capped` at the 6th priority send within `originator_priority_window_ms` (default 1 h) when `originator_priority_max_per_window=5`. Topology: alice → bob (direct, 1 hop). Sequence: 5 priority sends at 2-12s succeed; 6th at 14s hits the cap. Debug window 0-30000ms captures the full trace via node_state_snapshot for inspection.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 63,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "node_id": 1, "key_hash32": "0xAAAAAAAA", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 60000, "discovery_beacon_period_ms": 30000, "quiet_threshold_ms": 0,
+        "debug_start_ms": 0, "debug_end_ms": 30000, "state_snapshot_period_ms": 5000 } },
+    { "name": "bob",   "node_id": 2, "key_hash32": "0xBBBBBBBB", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 60000, "discovery_beacon_period_ms": 30000, "quiet_threshold_ms": 0,
+        "debug_start_ms": 0, "debug_end_ms": 30000, "state_snapshot_period_ms": 5000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms":  2000, "node": "alice", "command": "send_priority bob p1" },
+    { "at_ms":  4000, "node": "alice", "command": "send_priority bob p2" },
+    { "at_ms":  6000, "node": "alice", "command": "send_priority bob p3" },
+    { "at_ms":  8000, "node": "alice", "command": "send_priority bob p4" },
+    { "at_ms": 10000, "node": "alice", "command": "send_priority bob p5" },
+    { "at_ms": 14000, "node": "alice", "command": "send_priority bob p6" }
+  ],
+  "expect": [
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_priority bob p1", "value": "priority=true" },
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_priority bob p6", "value": "ERROR: priority cap reached" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "tx_enqueue", "value": "\"priority\":true" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "tx_dequeue", "value": "\"priority\":true" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "priority_send_capped", "value": "\"current_count\":5" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "priority_send_capped", "value": "\"cap\":5" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "priority_send_capped", "value": "\"dst_name\":\"bob\"" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "delivered", "value": "p1" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "delivered", "value": "p5" }
+  ]
+}

@@ -958,6 +958,13 @@ PROTOCOL = {
   originator_airtime_share       = 0.25,       -- backstop
   originator_retry_dedup_ms      = 10000,
 
+  -- ---- Priority unicast (ROADMAP §3a) ----
+  -- Hard cap on priority sends per originator AND per 1st-hop direct
+  -- sender. 5 per hour × ~200 ms airtime × ~6 forwarders = ~17% of g1
+  -- 1% duty budget; leaves 83% for normal traffic.
+  originator_priority_max_per_window = 5,
+  originator_priority_window_ms      = 3600000,  -- 1 h
+
   -- ---- Cascade-requeue (Phase C) ----
   cascade_requeue_max            = 3,
   cascade_requeue_base_ms        = 5000,
@@ -1651,7 +1658,7 @@ end
 -- These replaced the old inner-payload origin header flags in §7.0.1.
 local DATA_FLAG_E2E_ACK_REQ = 0x08   -- bit 3 of byte 1 (E2E_ACK_REQ)
 local DATA_FLAG_E2E_IS_ACK  = 0x04   -- bit 2 of byte 1 (E2E_IS_ACK)
-local DATA_FLAG_IS_MCAST    = 0x02   -- bit 1 of byte 1 (IS_MULTICAST, always 0 this phase)
+local DATA_FLAG_PRIORITY    = 0x02   -- bit 1 of byte 1 (PRIORITY — urgency; was IS_MULTICAST before §3 redesign)
 local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
 local GW_ENV_MAGIC = "\31G1"         -- gateway DATA envelope v1: magic + layer + key_hash32 + body
 
@@ -2145,7 +2152,7 @@ local function parse_data(frame)
     flags         = flags,
     e2e_ack_req   = (flags & DATA_FLAG_E2E_ACK_REQ) ~= 0,
     e2e_is_ack    = (flags & DATA_FLAG_E2E_IS_ACK) ~= 0,
-    is_multicast  = (flags & DATA_FLAG_IS_MCAST) ~= 0,
+    priority      = (flags & DATA_FLAG_PRIORITY) ~= 0,
     next          = next_hop,
     dst           = dst,
     hop_remaining = hb_remaining,
@@ -2500,6 +2507,78 @@ local function self_originate_count(self)
     if t >= cutoff then n = n + 1 end
   end
   return n
+end
+
+-- ============================================================================
+-- Priority unicast budgeting (ROADMAP §3a)
+--
+-- Two parallel ledgers, separate from the normal anti-spam counters:
+--   * priority_send_events[]: our OWN priority originations
+--   * peer_priority_observations[sender]: priority frames observed from
+--     each direct sender at the 1st-hop. Used to throttle abusive
+--     priority traffic that bypasses the originator self-cap.
+-- Both ledgers are sliding windows of `originator_priority_window_ms`.
+-- ============================================================================
+
+-- Returns (ok, current_count). ok=false if recording would push us over
+-- originator_priority_max_per_window. Does NOT mutate; caller records
+-- on success. **Global** (not local) to avoid the 200-locals-per-main-
+-- function limit; same trick as addr_conflict_tie_break.
+function check_priority_budget(self, now)
+  if not self.priority_send_events then return true, 0 end
+  local cutoff = now - (self.originator_priority_window_ms or 0)
+  local n = 0
+  for _, t in ipairs(self.priority_send_events) do
+    if t >= cutoff then n = n + 1 end
+  end
+  local cap = self.originator_priority_max_per_window or 0
+  if cap <= 0 then return true, n end
+  return n < cap, n
+end
+
+-- Append + prune. Call ONLY after check_priority_budget succeeded.
+-- Global, see check_priority_budget.
+function record_priority_origination(self, now)
+  if not self.priority_send_events then self.priority_send_events = {} end
+  local cutoff = now - (self.originator_priority_window_ms or 0)
+  local kept = {}
+  for _, t in ipairs(self.priority_send_events) do
+    if t >= cutoff then table.insert(kept, t) end
+  end
+  table.insert(kept, now)
+  self.priority_send_events = kept
+end
+
+-- 1st-hop peer-priority ledger. Returns (ok, current_count) where ok=false
+-- means this sender has exceeded the per-direct-sender priority cap; the
+-- caller should silently drop the forwarding (we already RX'd the frame).
+-- Global, see check_priority_budget.
+function check_peer_priority_budget(self, sender_id, now)
+  if not self.peer_priority_observations then return true, 0 end
+  local obs = self.peer_priority_observations[sender_id]
+  if obs == nil then return true, 0 end
+  local cutoff = now - (self.originator_priority_window_ms or 0)
+  local n = 0
+  for _, t in ipairs(obs.events or {}) do
+    if t >= cutoff then n = n + 1 end
+  end
+  local cap = self.originator_priority_max_per_window or 0
+  if cap <= 0 then return true, n end
+  return n < cap, n
+end
+
+function record_peer_priority_observation(self, sender_id, now)
+  if not self.peer_priority_observations then self.peer_priority_observations = {} end
+  local obs = self.peer_priority_observations[sender_id]
+  if obs == nil then obs = {events = {}} end
+  local cutoff = now - (self.originator_priority_window_ms or 0)
+  local kept = {}
+  for _, t in ipairs(obs.events or {}) do
+    if t >= cutoff then table.insert(kept, t) end
+  end
+  table.insert(kept, now)
+  obs.events = kept
+  self.peer_priority_observations[sender_id] = obs
 end
 
 -- Duty-cycle pre-check. Returns (ok, wait_ms). When ok=true, the TX may
@@ -5666,20 +5745,32 @@ become_free = function(self)
   -- next_attempt_ms) (ties broken by FIFO via iteration order). Also
   -- remember the earliest not-yet-ready item so we can arm a wakeup
   -- if nothing is ready.
+  -- Priority-aware selection (ROADMAP §3a). Among ready items, prefer:
+  --   (1) DATA_FLAG_PRIORITY items over non-priority (queue precedence)
+  --   (2) lower requeue_count (less-retried first)
+  --   (3) lower next_attempt_ms (FIFO within tier)
   local best_idx          = nil
   local best_rcnt         = nil
   local best_next         = nil
+  local best_priority     = nil
   local earliest_unready  = nil
   for i, it in ipairs(self.tx_queue) do
     local nxt = it.next_attempt_ms or 0
     if nxt <= now then
       local rcnt = it.requeue_count or 0
-      if best_idx == nil
-         or rcnt < best_rcnt
-         or (rcnt == best_rcnt and nxt < best_next) then
-        best_idx  = i
-        best_rcnt = rcnt
-        best_next = nxt
+      local pri  = ((it.flags or 0) & DATA_FLAG_PRIORITY) ~= 0
+      local replace = false
+      if best_idx == nil then
+        replace = true
+      elseif pri ~= best_priority then
+        replace = pri               -- priority always beats non-priority
+      elseif rcnt < best_rcnt then
+        replace = true
+      elseif rcnt == best_rcnt and nxt < best_next then
+        replace = true
+      end
+      if replace then
+        best_idx, best_rcnt, best_next, best_priority = i, rcnt, nxt, pri
       end
     else
       if earliest_unready == nil or nxt < earliest_unready then
@@ -5713,6 +5804,7 @@ become_free = function(self)
   self:emit("tx_dequeue", {
     origin = item.origin, payload = item.user_text, ctr = item.ctr,
     dst = item.dst_id, depth = #self.tx_queue,
+    priority = ((item.flags or 0) & DATA_FLAG_PRIORITY) ~= 0,
   })
   issue_send(self, item.origin, item.dst_id, item.dst_name,
              item.payload, item.user_text, item.ctr, item.flags or 0, item.previous_hop,
@@ -6709,6 +6801,19 @@ function on_init(self, config)
   self.own_origination_events       = {}
   self.originator_max_per_window    = config.originator_max_per_window    or 6
   self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5
+  -- Priority unicast (ROADMAP §3a): two parallel ledgers, keyed on the
+  -- sender's role at this node.
+  --   * priority_send_events[]: timestamps of our own priority originations
+  --   * peer_priority_observations[meta.src]: per-direct-sender priority
+  --     observations (for 1st-hop throttle). Pruned to the window at
+  --     check time.
+  self.priority_send_events         = {}
+  self.peer_priority_observations   = {}
+  -- Priority-aware TX queue: tx_queue items carry `flags` already (for
+  -- E2E etc.); become_free's selection comparator prefers items with
+  -- DATA_FLAG_PRIORITY set over non-priority items at any given
+  -- requeue_count. No separate queue needed; ordering is purely
+  -- comparator-based.
   -- Proactive tier-aware routing: route_strictly_better applies a
   -- dynamic score penalty on top of raw SNR margin. The penalty scales
   -- with the peer's known budget tier and with how many viable
@@ -7271,6 +7376,15 @@ function on_init(self, config)
           local used = self:airtime_used_ms(self.duty_cycle_window_ms)
           pct_used = 100.0 * used / self.duty_cycle_budget_ms
         end
+        -- Priority counters (ROADMAP §3a) — for debug-window tracing.
+        local now_snap = self:now()
+        local _, priority_self_count = check_priority_budget(self, now_snap)
+        local queue_priority_n = 0
+        for _, it in ipairs(self.tx_queue) do
+          if ((it.flags or 0) & DATA_FLAG_PRIORITY) ~= 0 then
+            queue_priority_n = queue_priority_n + 1
+          end
+        end
         self:emit("node_state_snapshot", {
           node_id             = self.id,
           layer_id            = self.layer_id,
@@ -7280,6 +7394,7 @@ function on_init(self, config)
           is_mobile           = self.is_mobile == true,
           blind_count         = blind_n,
           queue_depth         = #self.tx_queue,
+          queue_priority_n    = queue_priority_n,
           deferred_count      = #self.deferred_sends,
           has_pending_tx      = self.pending_tx ~= nil,
           has_pending_rx      = self.pending_rx ~= nil,
@@ -7287,6 +7402,7 @@ function on_init(self, config)
           rt_total_candidates = rt_cands,
           budget_tier         = compute_budget_tier(self),
           pct_used            = pct_used,
+          priority_self_count = priority_self_count,
         })
         emit_rt_quality_snapshots(self)
       end
@@ -9186,6 +9302,34 @@ function on_recv(self, frame, meta)
         become_free(self)
         return
       end
+      -- 1st-hop priority throttle (ROADMAP §3a). When forwarding a
+      -- DATA frame with DATA_FLAG_PRIORITY set, count it against the
+      -- direct sender's priority budget (keyed on meta.src, the
+      -- physical sender — defeats persona-rotation). Over cap: drop
+      -- the forward silently. We've already RX'd + ACK'd the hop, so
+      -- the immediate cost is sunk; this saves the next-hop RTS+CTS+
+      -- DATA+ACK chain.
+      if (d_flags & DATA_FLAG_PRIORITY) ~= 0 then
+        local now_p = self:now()
+        local ok, current = check_peer_priority_budget(self, d_src, now_p)
+        local ctr_lo = d_ctr & 0xf
+        if not ok then
+          self:emit("rts_drop_originator_priority_throttle", {
+            from = d_src, ctr_lo = ctr_lo,
+            apparent_origination = current,
+            window_ms = self.originator_priority_window_ms,
+            cap = self.originator_priority_max_per_window,
+          })
+          self:log(string.format(
+            "rts_drop_originator_priority_throttle: from=%s ctr_lo=%d count=%d cap=%d window=%dms — forward dropped",
+            name_of(self, d_src), ctr_lo, current,
+            self.originator_priority_max_per_window,
+            self.originator_priority_window_ms))
+          become_free(self)
+          return
+        end
+        record_peer_priority_observation(self, d_src, now_p)
+      end
       -- Forward path. If we picked up a new flight during the ack-air
       -- window (or the queue advanced via some other event), enqueue
       -- the forward instead of stomping on the in-progress flight.
@@ -9528,30 +9672,72 @@ function on_command(self, cmd_str)
       #self.tx_queue, ctr)
   end
 
-  local dst_name, text = cmd_str:match("^send_e2e (%S+) (.+)$")
+  -- Priority variants tried first (most specific match wins):
+  --   send_e2e_priority <dst> <text>  → priority + E2E ACK
+  --   send_priority     <dst> <text>  → priority, best-effort
+  --   send_e2e          <dst> <text>  → E2E ACK
+  --   send              <dst> <text>  → best-effort
+  local want_priority = false
+  local dst_name, text = cmd_str:match("^send_e2e_priority (%S+) (.+)$")
   if dst_name then
-    want_e2e = true
+    want_e2e, want_priority = true, true
   else
-    dst_name, text = cmd_str:match("^send (%S+) (.+)$")
+    dst_name, text = cmd_str:match("^send_priority (%S+) (.+)$")
+    if dst_name then
+      want_priority = true
+    else
+      dst_name, text = cmd_str:match("^send_e2e (%S+) (.+)$")
+      if dst_name then
+        want_e2e = true
+      else
+        dst_name, text = cmd_str:match("^send (%S+) (.+)$")
+      end
+    end
   end
   if not dst_name then
-    return "ERROR: usage: send <dst_name> <text>  or  send_e2e <dst_name> <text>"
+    return "ERROR: usage: send|send_priority|send_e2e|send_e2e_priority <dst_name> <text>"
   end
   local dst_id = self.name_to_id[dst_name]
   if dst_id == nil then return "ERROR: unknown dst: " .. dst_name end
   if #text > self.max_payload_bytes then
     self:emit("send_oversized", {
       dst = dst_id, dst_name = dst_name, len = #text,
-      max = self.max_payload_bytes, e2e = want_e2e,
+      max = self.max_payload_bytes, e2e = want_e2e, priority = want_priority,
     })
     return string.format("ERROR: payload too large (%d > max %d bytes)",
                          #text, self.max_payload_bytes)
+  end
+  -- Priority self-cap (ROADMAP §3a). Originator drops own priority sends
+  -- silently once over `originator_priority_max_per_window`. Cap applies
+  -- BEFORE counter allocation so a capped send doesn't burn a ctr slot
+  -- or pending_e2e entry.
+  if want_priority then
+    local now = self:now()
+    local ok, current_count = check_priority_budget(self, now)
+    if not ok then
+      self:emit("priority_send_capped", {
+        dst = dst_id, dst_name = dst_name,
+        window_ms = self.originator_priority_window_ms,
+        cap = self.originator_priority_max_per_window,
+        current_count = current_count,
+      })
+      self:log(string.format(
+        "priority_send_capped dst=%s (count %d ≥ cap %d in last %dms)",
+        dst_name, current_count, self.originator_priority_max_per_window,
+        self.originator_priority_window_ms))
+      return string.format("ERROR: priority cap reached (%d/%d in last %dms)",
+                           current_count, self.originator_priority_max_per_window,
+                           self.originator_priority_window_ms)
+    end
+    record_priority_origination(self, now)
   end
   -- Stamp this user-message with a per-(self,dst) 16-bit outbound counter.
   -- The pair (origin_id, ctr) is the globally-unique e2e message id used
   -- by every receiving node for dedup. Replaces the old flat next_origin_seq.
   local ctr = self:next_ctr(dst_id)
-  local wire_flags = want_e2e and DATA_FLAG_E2E_ACK_REQ or 0
+  local wire_flags = 0
+  if want_e2e      then wire_flags = wire_flags | DATA_FLAG_E2E_ACK_REQ end
+  if want_priority then wire_flags = wire_flags | DATA_FLAG_PRIORITY    end
   -- inner = src_addr_len(1) | src_addr(1) | body
   local inner = string.char(0) .. string.char(self.id) .. text
   if want_e2e then
@@ -9589,12 +9775,13 @@ function on_command(self, cmd_str)
     origin = self.id, payload = text, ctr = ctr,
     dst = dst_id, depth = #self.tx_queue,
     e2e_ack_requested = want_e2e,
+    priority = want_priority,
   })
-  self:log(string.format("send: queued dst=%s payload=%q ctr=%d e2e=%s (queue depth=%d)",
-    dst_name, text, ctr, tostring(want_e2e), #self.tx_queue))
+  self:log(string.format("send: queued dst=%s payload=%q ctr=%d e2e=%s priority=%s (queue depth=%d)",
+    dst_name, text, ctr, tostring(want_e2e), tostring(want_priority), #self.tx_queue))
   become_free(self)
-  return string.format("queued (depth=%d, ctr=%d, e2e=%s)",
-    #self.tx_queue, ctr, tostring(want_e2e))
+  return string.format("queued (depth=%d, ctr=%d, e2e=%s, priority=%s)",
+    #self.tx_queue, ctr, tostring(want_e2e), tostring(want_priority))
 end
 
 -- on_radio_busy fires when the runtime defers a TX (LBT channel_busy or
