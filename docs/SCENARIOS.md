@@ -52,11 +52,11 @@ note calls it out.
 | 5.4 | Join — DENY response | Existing owner defends; joiner retries with new id |
 | 5.5 | Join — GUARD-window late conflict | Defense-in-depth check before adopting |
 | 5.6 | Join — cold-boot storm | 8-node mass-boot; jitter layers explained |
-| 5.7 | Join — silent node returns with reused ID | Detection works now (BCN carries key_hash); recovery still missing |
-| 5.8 | Join — partition merge | Design-only; requires unimplemented mechanisms |
-| 6.1 | Gateway — two-layer scheduled smoke | Passing s09: JOIN learners, different layer SFs, gateway schedule, cross-layer delivery |
-| 6.2 | Gateway — full layer separation workbench | s10: next-step scenario for route/bind state scoped by `(layer_id,node_id)` |
-| 6.3 | Gateway — three-layer stress | s11: two target layers, same-SF foreign traffic, JOIN learners, gateway-picker and schedule-defer checks |
+| 5.7 | Join — silent node returns with reused ID | Detection + recovery (defense → tie-break → forced rejoin) both implemented; t60 |
+| 5.8 | Join — partition merge | Mechanisms implemented (claim_epoch NV, lease_age, recovery); pair-wise tie-break generalizes to N-node merge |
+| 6.1 | Gateway — two-layer scheduled smoke | s09: JOIN learners, different layer SFs, gateway schedule, cross-layer delivery |
+| 6.2 | Gateway — full layer separation workbench | s10: route/bind state scoped by `(layer_id,node_id)` |
+| 6.3 | Gateway — three-layer stress | s11 (moved to `scenarios/deprecated/`): gateway-picker filtering + schedule-defer across three layers |
 | 6.4 | Gateway sweep cycle (mechanism) | offset → activate upper-layer → emit BCN there → return after duration → re-arm |
 | 6.5 | Cross-layer envelope handoff (mechanism) | sender packs envelope → gateway resolves binding (or defers and emits `Q:HASH_QUERY` if unknown) → retunes via `tx_layer_id` → forwards in target layer |
 | 6.6 | Layer-15 active-avoidance (mechanism) | non-gateway peer defers RTS while a direct gateway is scheduled away |
@@ -1446,9 +1446,10 @@ upper bound is what keeps a 100+ node boot from saturating routing_sf.
 
 **This is the load-bearing scenario for identity-aware BCN.** Since
 every BCN now carries `key_hash32` and the BCN receive path calls
-`id_bind_set`, conflict **detection** works automatically. **Recovery**
-when a node observes its own id taken over by a different key is still
-missing.
+`id_bind_set`, conflict **detection** works automatically. Recovery
+when a node observes its own id taken over by a different key is now
+implemented via own-id defense → deterministic tie-break →
+`forced_rejoin`; see §5.7c and t60.
 
 ### 7a — Silent node returns, observers still remember the binding
 
@@ -1573,14 +1574,19 @@ charlie joins as id=5, alice returns" scenario (uses t60's mechanism
 but in a less synthetic setup). t60 already proves the underlying
 machinery works end-to-end.
 
-### 7c — Future: with recovery action in place
+### 7c — Recovery action (IMPLEMENTED)
 
-(Pending design choice from item 1 above.) Once the recovery action
-lands, the conflict observation triggers a deterministic tie-break and
-one side rejoins, restoring uniqueness within minutes of alice's
-return.
+When `id_bind_set` observes a conflict for a node_id we currently own
+(`node_id == self.id` and `prev.key_hash32 == self.key_hash32`), we
+fire `addr_conflict_recovery_send_deny`: a defensive `J_DENY` with
+reason `J_DENY_REASON_OWN_ID_DEFENSE`. The impostor's `J_DENY` handler
+runs `addr_conflict_tie_break` (older lease wins → higher epoch wins →
+lower key wins), and the loser triggers `forced_rejoin`, releasing its
+short ID and re-running `join_start_claim`. Total ordering prevents
+thrashing. Within ~one beacon period both nodes converge to unique
+short IDs. Test: **t60**.
 
-## 5.8 Join — partition merge (design-only)
+## 5.8 Join — partition merge (mechanisms implemented)
 
 **Setup.** Two partitions, P1 and P2, each with a node owning id=5
 independently. The partitions merge after a long RF outage. Both
@@ -1726,8 +1732,14 @@ short ID.
 
 ## 6.3 Gateway — three-layer stress
 
-**Status.** Implemented in
-`scenarios/s11_three_layer_gateway_stress.json`.
+**Status.** Mechanism implemented; stress scenario moved to
+`scenarios/deprecated/s11_three_layer_gateway_stress.json` after the
+realism pass. The scenario's `sim_end` is clean but early cross-layer
+flight assertions don't hold under realistic simultaneous-join +
+gateway-discovery transient timing. Mechanisms exercised here (gateway
+picker filtering, schedule defer across three layers) remain active
+and are covered by `s09_two_layer_gateway_debug` (acceptance gate) and
+`s10_two_layer_gateway_separation` (workbench).
 
 **Purpose.** This scenario keeps the normal JOIN flow for all non-seed nodes
 while making gateway selection harder than s09/s10. Layer 4 has two gateways:
@@ -2135,7 +2147,13 @@ Cross-reference of mechanisms each scenario depends on:
   catalogue).
 - **Design and known gaps:** `docs/ROADMAP.md`.
 - **Tests:**
-  - Data plane: `test/t40_*`–`t45_*`.
+  - Data plane: `test/t42_seen_bitmap_wire.json`,
+    `test/t45_mobile_path_loss_overrides_static_links.json` (regression
+    frontier — t46+ is the gold standard). Earlier data-plane tests
+    (t11/t15/t26/t31/t33/t39–t44, plus `s11`) live under
+    `test/deprecated/` and `scenarios/deprecated/`; their assertions
+    pre-date the realism pass and are not regressions — see
+    `test/deprecated/README.md`.
   - Node id / join wire: `test/t46_node_id_split.json`,
     `test/t47_j_frame_wire.json`.
   - Join autonomous: `test/t48_join_autonomous_fourth_node.json`.
