@@ -3273,13 +3273,35 @@ so they convert exactly.
 Regression: all 16 t46-t61 tests pass; s09/s10/s11 sim-end cleanly
 with no observable behavior change beyond ≤1/16 dB rounding.
 
-### 11.3 RNG-seed contract (PENDING)
+### 11.3 RNG-seed contract (IMPLEMENTED 2026-05-19, Lua side)
 
-Cross-implementation tests need the Lua model and C++ port to produce
-identical event sequences for a given seed. The Lua side currently
-calls `math.random` directly in ~15 places (jitter, backoff, claim
-tie-break). Wrap behind a single `self:rng()` and document the per-call
-intent so the C++ port can reproduce the stream.
+**Lua side — done.** Audit confirms 0 `math.random` calls, 0
+`math.randomseed`, 0 `os.time` / `os.clock`. Every random decision
+flows through `self:rand(lo, hi)` (20 callsites), provided by the
+runtime as a draw from a simulation-wide `std::mt19937` PRNG seeded
+by `simulation.seed`. The contract is documented in a comment block
+at the top of `scenarios/dv_dual_sf.lua` (just above the PROTOCOL
+table) with a per-callsite intent audit so the C++ port maintainer
+has a checklist for one-to-one stream alignment.
+
+**Pending — C++ port side.** The port must:
+
+- Use `std::mt19937` seeded by the same `simulation.seed`.
+- Use `std::uniform_int_distribution<int>` with bounds `(lo, hi - 1)`
+  to match the Lua model's `[lo, hi)` semantics.
+- Issue draws in the same call-site order. The runtime steps events
+  deterministically, so this falls out of a one-to-one state-machine
+  port — but is brittle if event ordering shifts.
+
+**Related determinism gotcha — iteration order.** The Lua model uses
+`pairs()` over `self.rt`, `self.id_bind`, `self.gateway_remote_bind`,
+`self.seen_origins`, `self.pending_e2e`, etc. in ~17 sites. Lua's
+`pairs()` order is implementation-defined but deterministic for a
+fixed (Lua version, table contents) — it's NOT portable across
+implementations. The C++ port must use ordered containers
+(`std::map`) OR sort keys before iterating wherever the iteration
+has observable effects (event emission order, decision sequencing).
+This is a port-time concern; the Lua side does not need changes.
 
 ### 11.4 Cryptography
 

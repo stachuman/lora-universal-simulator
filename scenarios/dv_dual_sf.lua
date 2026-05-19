@@ -850,6 +850,42 @@ local function snr_of_bucket_2b(bucket)
 end
 
 -- ============================================================================
+-- RNG CONTRACT (ROADMAP §11.3)
+--
+-- All script-level randomness flows through `self:rand(lo, hi)`, provided
+-- by the runtime (orchestrator/runtime/ScriptedNode.cpp::api_rand):
+--
+--   self:rand(lo, hi) → int in [lo, hi), drawn from the simulation-wide
+--                       std::mt19937 PRNG seeded by simulation.seed.
+--
+-- The script makes ZERO calls to math.random / math.randomseed /
+-- os.time / os.clock. Every random decision goes through self:rand.
+--
+-- For bit-identical cross-implementation tests the C++ port MUST:
+--   * Use std::mt19937 seeded by the same simulation.seed.
+--   * Use std::uniform_int_distribution<int> with bounds (lo, hi - 1).
+--   * Issue draws in the same call-site order as the Lua model when
+--     processing the same scenario timeline. The runtime steps events
+--     deterministically (single-tick scheduler with stable event order),
+--     so order falls out naturally given a one-to-one state-machine port.
+--
+-- Audit of current callsites (20 total, 2026-05-19):
+--   * Jitter (collision decorrelation): LBT defer backoff (×3),
+--     RTS retry (×2), NACK busy-retry (×1), beacon silence jitter,
+--     gateway TX retry guard.
+--   * Periodic-fire spread: beacon-fire delay (×4 — periodic / triggered
+--     / overrides), first-beacon initial period.
+--   * Backoff: join_retry, join_offer responder jitter.
+--   * Discover jitter: join_discover_jitter.
+--   * Nonce: J_CLAIM nonce (×2, uniform 0..255).
+--   * Slot picker: choose-free-id during join (uniform over free set).
+--
+-- If a new RNG call is added: use self:rand (never math.random) and add
+-- the intent to the audit list above so the C++ port maintainer has a
+-- checklist for one-to-one stream alignment.
+-- ============================================================================
+
+-- ============================================================================
 -- PROTOCOL — production-fixed constants (audit class "P", see CONFIG_AUDIT.md)
 --
 -- These are not runtime-tunable. In the C++ port they become a
