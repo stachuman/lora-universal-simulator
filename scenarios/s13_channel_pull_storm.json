@@ -1,0 +1,1320 @@
+{
+  "_name": "s13_channel_pull_storm",
+  "_desc": "Minimal repro for the channel-gossip pull-on-BCN-digest contention storm uncovered in s12 (analyzer commits 1cf3a41 / 9671c72). 12 nodes in mutual radio range, 1 poster + 11 candidates. BCN period 30 s; hub posts a single channel msg at t=60 s. Next BCN carries CHANNEL_DIGEST \u2192 all 11 candidates schedule Q_CHANNEL_PULL within [0, 500] ms jitter. The resulting RTS+pull-response storm collides with itself. Run analyzer; section (30) peak_pull_burst should show 11 channel_pull_sent + multiple rx_collision / tx_deferred_LBT in <500 ms \u2014 that's the symptom any pull-scheduling fix needs to drive down.",
+  "simulation": {
+    "duration_ms": 300000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 1213,
+    "node_startup_jitter_ms": 0,
+    "radio": {
+      "sf": 8,
+      "bw": 62.5,
+      "cr": 5,
+      "max_packet_bytes": 255,
+      "snr_coherence_ms": 0,
+      "duty_cycle": 0.1
+    }
+  },
+  "config": {
+    "debug_start_ms": 0,
+    "debug_end_ms": 300000
+  },
+  "nodes": [
+    {
+      "name": "hub",
+      "node_id": 1,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull01",
+      "node_id": 2,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull02",
+      "node_id": 3,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull03",
+      "node_id": 4,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull04",
+      "node_id": 5,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull05",
+      "node_id": 6,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull06",
+      "node_id": 7,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull07",
+      "node_id": 8,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull08",
+      "node_id": 9,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull09",
+      "node_id": 10,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull10",
+      "node_id": 11,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "pull11",
+      "node_id": 12,
+      "key_hash32": "0xCAFE1213",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 30000,
+        "quiet_threshold_ms": 0
+      }
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "hub",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "hub",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull01",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull02",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull03",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull04",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull05",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull06",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull07",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull08",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull09",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull10",
+        "to": "pull11",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "hub",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull01",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull02",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull03",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull04",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull05",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull06",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull07",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull08",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull09",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      },
+      {
+        "from": "pull11",
+        "to": "pull10",
+        "snr": 20.0,
+        "rssi": -68.0,
+        "snr_std_dev": 0,
+        "bidir": false
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at_ms": 60000,
+      "node": "hub",
+      "command": "send_channel 7 storm-msg"
+    }
+  ]
+}
