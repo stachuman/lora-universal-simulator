@@ -1,0 +1,49 @@
+{
+  "_name": "t67_channel_pull_peer_q_cancel",
+  "_desc": "Verifies the peer-Q pull-storm dedupe (ROADMAP §3 Package A, the Fix 1 from the s12/s13 pull-storm analysis). Setup: alice posts a channel msg; bob and carol both see alice's BCN digest. bob has a short pull jitter (100 ms); carol has a long pull jitter (3000 ms). carol's pending pull is scheduled at t≈BCN+3000ms; bob fires his Q at t≈BCN+100ms. carol's radio decodes bob's Q (carol is in radio range of bob) and the new pull-cancellation path in on_recv 'Q' fires: carol's channel_pull_pending[id] is cleared and a channel_pull_suppressed event is emitted with overheard_from=peer_q. carol then receives the msg via promiscuous overhear of alice's M-response to bob (source=overheard). Net: only ONE pull is sent in the network for one originated msg, across two listeners.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 67,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "config": { "debug_start_ms": 0, "debug_end_ms": 30000 },
+  "nodes": [
+    { "name": "alice", "node_id": 1, "key_hash32": "0xAAAAAAAA", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 8000, "discovery_beacon_period_ms": 4000, "quiet_threshold_ms": 0,
+        "channel_pull_jitter_ms": 100,
+        "state_snapshot_period_ms": 5000 } },
+    { "name": "bob",   "node_id": 2, "key_hash32": "0xBBBBBBBB", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 8000, "discovery_beacon_period_ms": 4000, "quiet_threshold_ms": 0,
+        "channel_pull_jitter_ms": 100,
+        "state_snapshot_period_ms": 5000 } },
+    { "name": "carol", "node_id": 3, "key_hash32": "0xCCCCCCCC", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 8000, "discovery_beacon_period_ms": 4000, "quiet_threshold_ms": 0,
+        "channel_pull_jitter_ms": 3000,
+        "state_snapshot_period_ms": 5000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "alice", "to": "carol", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 5000, "node": "alice", "command": "send_channel 7 storm-dedupe" }
+  ],
+  "expect": [
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 storm-dedupe", "value": "channel msg queued" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_msg_received", "value": "\"source\":\"self_originate\"" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx",            "value": "\"channel_digest_ids\":1" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "beacon_rx",            "value": "\"channel_digest_ids\":1" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "channel_pull_sent",    "value": "\"trigger\":\"bcn_digest\"" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "channel_pull_suppressed", "value": "\"overheard_from\":\"peer_q\"" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "channel_pull_suppressed", "value": "\"peer\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_pull_received", "value": "\"from\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "channel_msg_received",  "value": "\"source\":\"pull_target\"" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "channel_msg_received",  "value": "\"source\":\"overheard\"" }
+  ]
+}

@@ -977,10 +977,16 @@ PROTOCOL = {
   -- Pull rate-limit: ignore same-ID pull requests within this window
   -- (avoids requesting from multiple neighbours simultaneously).
   channel_pull_window_ms        = 5000,
-  -- Random delay before sending a scheduled pull. If we overhear someone
-  -- else's pull-response carrying the same ID before this expires, we
-  -- cancel our own (the promiscuous-reception piggyback).
-  channel_pull_jitter_ms        = 500,
+  -- Random delay before sending a scheduled pull. With N candidates
+  -- behind the same BCN digest the only way the herd avoids a collision
+  -- storm is by having enough time for ONE of them to fire first and
+  -- have the others overhear-cancel via the peer-Q sniff path (see
+  -- on_recv 'Q') or the M-payload promiscuous-receive path. Widened
+  -- from 500 ms to 5000 ms after s12 / s13 showed the pre-widening
+  -- value left ~zero room for cancellation: by the time the first
+  -- pull's M-response arrived (~250 ms), most peers had already fired
+  -- their own pulls.
+  channel_pull_jitter_ms        = 5000,
   -- Per-BCN-cycle cap on pulls scheduled at this node (prevents pull
   -- storms when a new joiner sees many missing IDs in neighbour digests).
   cap_channel_pulls_per_bcn_cycle = 3,
@@ -9852,10 +9858,31 @@ function on_recv(self, frame, meta)
 
     -- ROADMAP §3: channel-pull request. Q_CHANNEL_PULL is unicast
     -- (dest = specific target the requester wants to pull from).
-    -- Non-target nodes that decoded the frame must silently ignore —
-    -- they MAY look at the response (M-payload DATA) for promiscuous
-    -- merge, but they must NOT try to answer the pull themselves.
+    -- Non-target nodes that decoded the frame must silently ignore the
+    -- request itself (don't answer on someone else's behalf). They
+    -- DO get one useful signal from it though: a peer is already
+    -- pulling these IDs from somewhere, so any pending pull I had
+    -- queued for the same ID is now redundant — I'll get the M-payload
+    -- via promiscuous overhear of the response, or pick it up from
+    -- the eventual digest cycle. Cancel my pending pulls BEFORE the
+    -- not-for-me short-circuit; this is the cheapest pull-storm
+    -- dedupe path because it fires at the very start of the burst,
+    -- before most peer jitters have expired.
     if q.opcode == Q_OP_CHANNEL_PULL then
+      if self.channel_pull_pending and q.channel_ids then
+        local cancelled = {}
+        for _, id in ipairs(q.channel_ids) do
+          if self.channel_pull_pending[id] then
+            self.channel_pull_pending[id] = nil
+            table.insert(cancelled, id)
+          end
+        end
+        if #cancelled > 0 then
+          self:emit("channel_pull_suppressed", {
+            ids = cancelled, overheard_from = "peer_q", peer = q.src,
+          })
+        end
+      end
       if q.dest ~= self.id then return end
       local have_ids = {}
       local missing_ids = {}

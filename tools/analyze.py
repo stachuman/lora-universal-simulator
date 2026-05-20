@@ -4271,10 +4271,18 @@ def print_section_channel_gossip(r: dict) -> None:
         hit = r["pulled_ids"] / r["pull_requested_ids"]
         print(f"  pull hit rate (responder):    "
               f"{100*hit:.1f}% ({r['pulled_ids']}/{r['pull_requested_ids']} ids served)")
-    if r["pulls_sent"]:
-        sup = r["pulls_suppressed"] / r["pulls_sent"]
+    # Suppression rate = cancellations / (sent + cancellations). Each
+    # channel_pull_suppressed event represents one peer cancelling one
+    # pending pull after overhearing a Q or M frame; with N candidates
+    # the metric naturally ranges 0-N. Compute as a share of the total
+    # pull-decision count so 0-100% always holds.
+    if r["pulls_sent"] or r["pulls_suppressed"]:
+        denom = r["pulls_sent"] + r["pulls_suppressed"]
+        sup = r["pulls_suppressed"] / denom if denom else 0.0
         print(f"  pull suppression rate:        "
-              f"{100*sup:.1f}% (overheard before send)")
+              f"{100*sup:.1f}% "
+              f"({r['pulls_suppressed']} cancelled / "
+              f"{denom} sched. observations)")
 
     if r["evicted_events"] or r["oversized_events"]:
         print(f"  buffer pressure:")
