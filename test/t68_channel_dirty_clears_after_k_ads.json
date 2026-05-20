@@ -1,0 +1,39 @@
+{
+  "_name": "t68_channel_dirty_clears_after_k_ads",
+  "_desc": "Verifies the secondary-holder load-bounding fix (s12 6h Fix 4 / Approach A). After alice posts a channel msg the entry is dirty and gets included in her next K=2 BCN digests; on the 2nd advertisement she emits channel_dirty_cleared and the 3rd BCN omits the channel_digest_ids. Test sets channel_dirty_max_advertisements=2 to keep the test short. bob is an isolated observer (no pull) — we count beacon_rx digest sizes and the dirty-cleared emit.",
+  "simulation": {
+    "duration_ms": 25000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 68,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "config": { "debug_start_ms": 0, "debug_end_ms": 25000 },
+  "nodes": [
+    { "name": "alice", "node_id": 1, "key_hash32": "0xAAAAAAAA", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 5000, "discovery_beacon_period_ms": 4000, "quiet_threshold_ms": 0,
+        "channel_dirty_max_advertisements": 2,
+        "state_snapshot_period_ms": 5000 } },
+    { "name": "bob",   "node_id": 2, "key_hash32": "0xBBBBBBBB", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 5000, "discovery_beacon_period_ms": 4000, "quiet_threshold_ms": 0,
+        "channel_dirty_max_advertisements": 2,
+        "channel_pull_jitter_ms": 100000,
+        "state_snapshot_period_ms": 5000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 3000, "node": "alice", "command": "send_channel 7 retire-after-K" }
+  ],
+  "expect": [
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 retire-after-K", "value": "channel msg queued" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_msg_received", "value": "\"source\":\"self_originate\"" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_dirty_cleared", "value": "\"ad_count\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_dirty_cleared", "value": "\"threshold\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx",            "value": "\"channel_digest_ids\":1" }
+  ]
+}

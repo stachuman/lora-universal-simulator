@@ -990,6 +990,18 @@ PROTOCOL = {
   -- Per-BCN-cycle cap on pulls scheduled at this node (prevents pull
   -- storms when a new joiner sees many missing IDs in neighbour digests).
   cap_channel_pulls_per_bcn_cycle = 3,
+  -- After K advertisements of the same dirty entry in our BCN, clear the
+  -- dirty bit. Two compounding effects motivated this in s12: Fix 1
+  -- (peer-Q cancel) funnels round-1 pulls to a few "winners", and those
+  -- winners would otherwise advertise the dirty entry forever (the
+  -- original code never cleared dirty on the channel buffer). Result was
+  -- a small set of secondary holders saturating their duty cycle serving
+  -- 30+ M-frames each, starving DM forwarding. With K=3 and BCN period
+  -- 30 s, a holder advertises for ~90 s. Other holders (who pulled it
+  -- during that window, or received via overhear) keep their own dirty
+  -- bit and carry the gossip forward. Net effect is a wave of advertisers
+  -- moving through the mesh instead of a permanent few.
+  channel_dirty_max_advertisements = 3,
 
   -- ---- Cascade-requeue (Phase C) ----
   cascade_requeue_max            = 3,
@@ -1273,14 +1285,45 @@ function build_channel_digest_ext(node)
   -- Walk buffer newest-first (we appended chronologically, so the tail is
   -- newest). Collect up to max_ids entries with `dirty == true`.
   local picked = {}
+  local picked_entries = {}
   for i = #node.channel_buffer, 1, -1 do
     local e = node.channel_buffer[i]
     if e.dirty then
       table.insert(picked, e.id)
+      table.insert(picked_entries, e)
       if #picked >= max_ids then break end
     end
   end
   if #picked == 0 then return nil, 0 end
+  -- After picking, account each entry one advertisement. When the count
+  -- reaches channel_dirty_max_advertisements (K=3 by default) the entry
+  -- retires from advertising: dirty cleared, no longer included in our
+  -- BCN digest. The entry stays in the buffer so we can still RESPOND
+  -- to incoming Q_CHANNEL_PULL requests, but other holders (who have
+  -- the same msg with their own dirty bit) carry the gossip forward.
+  -- This is the s12 secondary-holder load-bounding fix; see the
+  -- channel_dirty_max_advertisements constant in PROTOCOL for full
+  -- background.
+  --
+  -- A note on accuracy: this fires from inside pack_beacon, so a BCN
+  -- that's built but then deferred at the radio level (duty cycle,
+  -- channel busy) still increments the count. That's a small
+  -- overcount — but the alternative (post-tx callback) would require
+  -- threading the entry list through to the tx-complete handler. We
+  -- accept the small inaccuracy.
+  local k_max = node.channel_dirty_max_advertisements or 3
+  for _, e in ipairs(picked_entries) do
+    e.bcn_ad_count = (e.bcn_ad_count or 0) + 1
+    if e.bcn_ad_count >= k_max then
+      e.dirty = false
+      if debug_emit_allowed(node) then
+        node:emit("channel_dirty_cleared", {
+          id = e.id, channel_id = e.channel_id,
+          ad_count = e.bcn_ad_count, threshold = k_max,
+        })
+      end
+    end
+  end
   local body = string.char(#picked & 0xff)
   for _, id in ipairs(picked) do
     body = body .. channel_msg_id_to_bytes(id)
