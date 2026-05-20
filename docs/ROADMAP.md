@@ -823,7 +823,14 @@ REQ_SYNC/sync-BCN pattern reused by `J_DISCOVER`.
 
 ---
 
-## 3. Channels — gossip-based delivery (DESIGN LOCKED 2026-05-19)
+## 3. Channels — gossip-based delivery (OPERATIONAL since 2026-05-20)
+
+**Status.** Design locked 2026-05-19; v1 implementation shipped and
+stabilized 2026-05-20 across commits `ed00d37`..`23b8978` after
+s12 6h stress-testing surfaced a self-DoS pull-storm pathology
+(see "Pull-storm hardening" below). Public-channel happy path is
+green (t65/t66/t67/t68); group + private crypto layers (PSK / Ed25519)
+remain on the implementation-phase list below.
 
 **Problem.** Mesh networks need multi-recipient communication beyond
 per-pair DM (§7.1, §8.1): public alerts, friend group chats,
@@ -972,9 +979,10 @@ EVICTION
 |---|---|---|
 | `cap_channel_buffer` | 128 | Ring-buffer entry count; shared across all channels |
 | `channel_msg_max_payload_bytes` | 200 | Per-message body cap (fits within `max_payload_bytes_hard_cap` — 41 bytes of headroom for inner crypto framing) |
-| `channel_dirty_max_per_bcn` | 6 | Max IDs in a single BCN's digest TLV (24 B + framing) |
+| `channel_dirty_max_per_bcn` | 3 | Max IDs in a single BCN's digest TLV (12 B + framing) |
+| `channel_dirty_max_advertisements` | 3 | After K=3 BCN advertisements of the same dirty entry, retire from advertising. Bounds per-holder load when dedupe funnels round-1 pulls to a few "winners" (s12 6h: secondary holders were otherwise serving 30+ M-frames each, saturating duty cycle). Entry stays in the buffer and still responds to incoming pulls; other holders carry the gossip wave forward. |
 | `channel_pull_window_ms` | 5000 | Per-ID dedup at requester (don't pull same ID twice within window) |
-| `channel_pull_jitter_ms` | 500 | Random delay before sending pull; lets neighbours coordinate by overhearing |
+| `channel_pull_jitter_ms` | 5000 | Random delay before sending pull. Wide enough that the first puller's Q frame has time to fly + decode + cancel pending pulls at peers (the peer-Q cancel path, §3.3) before they fire their own. |
 | `cap_channel_pulls_per_bcn_cycle` | 3 | Cap pulls scheduled per received BCN — prevents new-joiner / partition-merge pull storms |
 
 ### Open problems (deferred, app-layer or v2)
@@ -997,15 +1005,53 @@ EVICTION
 
 ### Implementation phases
 
-1. Wire format: BCN extension TLV encode/decode + Q_CHANNEL_PULL opcode + DATA payload-type M.
-2. `channel_buffer` state + dirty-bit set/clear on origination/receive.
-3. Pull request + response paths; pull rate-limit + overhearing-cancellation logic.
-4. Promiscuous reception of M-type DATA (parse + merge regardless of `to=`).
-5. Eviction policy + cap-hit telemetry.
-6. Public channel happy path (no crypto), tests t63+.
-7. Group channel: PSK + MAC verify on receive.
-8. Private channel: Ed25519 sig verify on receive.
-9. Cross-leaf bridging at gateways (operator-configured).
+1. ✅ Wire format: BCN extension TLV encode/decode + Q_CHANNEL_PULL opcode + DATA payload-type M.
+2. ✅ `channel_buffer` state + dirty-bit set/clear on origination/receive. (Dirty-clear added 2026-05-20 — see §3.3.)
+3. ✅ Pull request + response paths; pull rate-limit + overhearing-cancellation logic. Hardened against pull-storm 2026-05-20 — see §3.3.
+4. ✅ Promiscuous reception of M-type DATA (parse + merge regardless of `to=`).
+5. ✅ Eviction policy + cap-hit telemetry.
+6. ✅ Public channel happy path (no crypto), tests t65/t66/t67/t68.
+7. Group channel: PSK + MAC verify on receive. **TODO**
+8. Private channel: Ed25519 sig verify on receive. **TODO**
+9. Cross-leaf bridging at gateways (operator-configured). **TODO** (parked, see §3.1)
+
+### 3.3 Pull-storm hardening (2026-05-20)
+
+s12 6h stress-testing surfaced a self-DoS pathology in the original
+v1 pull mechanism. With many candidates behind a single BCN digest,
+pull amplification was 28× (8486 pulls for 300 originated messages),
+peak bursts hit 44 pulls in 4 s with 139 RX collisions in that
+window, and one extreme channel message took 14366 s (~4 h) to
+fully propagate. Three pathologies + their fixes:
+
+| Pathology | Fix | Commit |
+|---|---|---|
+| **Synchronized pulls**: all N candidates fired Q frames within the original 500 ms jitter window before any could overhear the first M-response. Promiscuous-overhear cancellation literally never fired (0 events in 24 h combined simulation). | (a) On receiving a peer's `Q_CHANNEL_PULL` for an ID I have pending, clear my pending and emit `channel_pull_suppressed{overheard_from="peer_q"}`. Narrows the cancellation race window from "M-frame arrival" (~150-300 ms) to "Q-frame decode" (~10-30 ms). (b) Widen `channel_pull_jitter_ms` 500 → 5000 ms to give peer-Q cancellation time to work. | `30cc9d9` |
+| **Permanent advertisers**: the channel-entry `dirty` bit was never cleared. Every node that received a message advertised it in BCN forever. After the dedupe fix funneled round-1 pulls to a small set of "winners", those winners accumulated 30+ M-frame service obligations each, saturating their 1% duty cycle and starving DM forwarding. | After K=3 BCN advertisements of the same dirty entry, retire it from advertising (clear dirty). The entry stays in the buffer to respond to incoming pulls; other holders (who acquired the msg during the K=3 window) carry the gossip wave forward. K=3 chosen by sweep on s12 (K=2 over-cascades, K≥5 leaves load on early holders too long). | `f3971ac` |
+| **Indefinite defer-retry on saturated routes**: when all K=3 alternates were duty-saturated and silent on CTS, the message deferred with reason `all_candidates_silent`. The drain loop's defer-TTL was gated on `rt[dst] == nil` — so as long as ANY route entry existed (even to a silent peer), the TTL never fired. One s12 message saw 477 deferrals over 5.7 h. | Check TTL FIRST in the drain loop, unconditionally. If `(now - queued_at_ms) >= send_defer_ttl_ms`, give up regardless of route presence. | `23b8978` |
+
+s12 6h with full fix chain vs pre-fix baseline:
+
+| Metric | Pre-fix | Full fix chain |
+|---|---|---|
+| DM delivered | 34% (230) | 31% (211) |
+| Channel pull amplification | 28.29× | 12.29× |
+| Peak burst pulls | 44 in 4.3 s | 21 in 4.8 s |
+| Burst rx_collisions | 139 | 25 |
+| Channel coverage mean | 2.3 | 3.0 |
+| Pulls suppressed | 0 | 877 |
+| Slowest propagation | 14366 s | 10225 s |
+
+The 3-point DM gap from baseline is acceptable v1 cost. The
+defer-TTL fix is a **latent bug fix** — would have helped any
+scenario where routes existed but were transiently unusable, just
+rarely triggered before Fix 1+2+4 pumped traffic onto popular relays.
+
+**Regression sensor:** `scenarios/s13_channel_pull_storm.json`
+(commit `581592a`). 12-node fully-meshed cluster, 5 min runtime,
+single channel post. Pre-fix: 11 pulls/0.4 s burst with 10 collisions;
+post-fix: 3 pulls in the burst window, 0 collisions, 75% pull
+suppression rate. Use s13 as a fast loop before re-running s12 6 h.
 
 ### Composition with other principles
 

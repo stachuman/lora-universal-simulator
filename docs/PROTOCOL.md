@@ -2385,7 +2385,8 @@ expectations) subscribe by event_type.
 | `channel_msg_evicted` | Channel buffer reached `cap_channel_buffer`; oldest entry was dropped | `id`, `channel_id`, `seen_by_all_neighbours` (bool) |
 | `channel_pull_sent` | We emitted a `Q_CHANNEL_PULL` to a neighbour | `to`, `ids[]`, `trigger` (`new_dirty_in_bcn` / `digest_gap`) |
 | `channel_pull_received` | Inbound `Q_CHANNEL_PULL`; will trigger one or more `channel_msg_pulled` responses | `from`, `ids[]` |
-| `channel_pull_suppressed` | A scheduled pull was cancelled because we overheard the response carrying the requested IDs before our jitter expired | `ids[]`, `overheard_from` |
+| `channel_pull_suppressed` | A scheduled pull was cancelled. Three trigger paths (distinguished by `overheard_from`): `promiscuous_receive` — the M-payload arrived via overhear before our jitter fired; `peer_q` — we decoded a peer's `Q_CHANNEL_PULL` for the same ID (ROADMAP §3.3, dedupe path that fires at peer-Q decode time instead of M-frame arrival time); `<src>` — early M-handler overhear from a specific neighbour | `ids[]`, `overheard_from`, optionally `peer` (when `overheard_from=peer_q`) |
+| `channel_dirty_cleared` | Channel-buffer entry retired from advertising after `channel_dirty_max_advertisements` BCN inclusions. Entry stays in the buffer (still responds to pulls) but is no longer included in the dirty-page of outgoing BCN digests. Bounds per-holder M-frame load (ROADMAP §3.3) | `id`, `channel_id`, `ad_count`, `threshold` |
 | `channel_digest_emitted` | Our outgoing BCN included a `BCN_EXT_TYPE_CHANNEL_DIGEST` extension with N dirty IDs | `dirty_ids[]`, `total_buffer_size` |
 | `priority_send_capped` | Originator hit `originator_priority_max_per_window` — own PRIORITY send dropped silently. UX hint for "wait before next priority send" | `dst`, `dst_name`, `window_ms`, `cap`, `current_count` |
 | `rts_drop_originator_priority_throttle` | 1st-hop neighbour detected a direct sender exceeding the per-hour priority cap; silently dropped the RTS | `from`, `ctr_lo`, `apparent_origination`, `window_ms`, `cap` |
@@ -2552,10 +2553,17 @@ block for current values):
   `join_discover_max_attempts`, `join_offer_backoff_{min,max}_ms`,
   `join_claim_guard_ms`, `join_retry_backoff_ms`,
   `join_j_rate_limit_window_ms`, `join_j_max_per_window`
-- **Channel gossip (ROADMAP §3, deferred)**: `cap_channel_buffer = 128`,
+- **Channel gossip (ROADMAP §3, operational since 2026-05-20)**:
+  `cap_channel_buffer = 128`,
   `channel_msg_max_payload_bytes = 200`,
-  `channel_dirty_max_per_bcn = 6`, `channel_pull_window_ms = 5000`,
-  `channel_pull_jitter_ms = 500`, `cap_channel_pulls_per_bcn_cycle = 3`
+  `channel_dirty_max_per_bcn = 3`,
+  `channel_dirty_max_advertisements = 3` (after K BCN ads, retire
+  the dirty entry — bounds per-holder load when dedupe funnels pulls
+  to round-1 winners; see ROADMAP §3.3),
+  `channel_pull_window_ms = 5000`,
+  `channel_pull_jitter_ms = 5000` (wide enough that the first puller's
+  Q frame cancels peer pendings before they fire — see ROADMAP §3.3),
+  `cap_channel_pulls_per_bcn_cycle = 3`
 - **Priority unicast (ROADMAP §3a, deferred)**:
   `originator_priority_max_per_window = 5`,
   `originator_priority_window_ms = 3600000` (1 h)

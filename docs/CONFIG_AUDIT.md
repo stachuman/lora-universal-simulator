@@ -44,7 +44,7 @@ Headline: **of 121 knobs, only 20 stay user-tunable in the C++ port.**
   `gateway_remote_bind_ttl_ms` → **D** (t55 needs it for accelerated
   TTL aging) and `req_sync_min_routes` → **T** (s07/s08 set it to 2
   for low-route-density meshes).
-- Step C (hardcode P + add F gates) — **done**. All 82 P-class knobs
+- Step C (hardcode P + add F gates) — **done**. All 83 P-class knobs
   moved into a top-of-file `PROTOCOL = { ... }` table that the C++
   port can copy verbatim into a `protocol_constants.h` header. Lua
   `apply_protocol_constants(self, config)` honors per-scenario
@@ -56,7 +56,7 @@ Headline: **of 121 knobs, only 20 stay user-tunable in the C++ port.**
 - Step D (rewrite PROTOCOL.md §14) — **done**. §14 now shows only the
   20 T + 5 F + 8 D knobs in dedicated sub-sections (§14.1–§14.4),
   with §14.5 referencing the PROTOCOL block as the read-only source
-  of truth for the 82 P-class constants. Section row count dropped
+  of truth for the 83 P-class constants. Section row count dropped
   from ~115 to ~56 (-51%). Scenario authors now see only what they
   can actually configure in deployment.
 

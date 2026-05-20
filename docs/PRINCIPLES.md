@@ -126,7 +126,7 @@ If a value doesn't vary by deployment, it's a `constexpr`, not a
 config field. Keeps the deployment surface small and the C++ port
 mechanical. Per `docs/CONFIG_AUDIT.md`: 20 T-class tunables, 82
 P-class compile-time constants, 5 F-class feature flags, 8 D-class
-debug-only. The 82 P-class live in one `PROTOCOL = {...}` table at
+debug-only. The 83 P-class live in one `PROTOCOL = {...}` table at
 the top of the Lua model and become a single
 `protocol_constants.h` header in C++.
 
