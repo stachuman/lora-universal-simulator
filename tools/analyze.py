@@ -3893,6 +3893,80 @@ def print_section_27_inter_layer(r: dict) -> None:
         print(f"  gateway_schedule_received:     {r['gateway_schedule_received']}")
 
 
+# Events that signal channel contention / failed delivery attempts. Each key
+# is either "type:<top-level-type>" (raw RF events like collisions) or
+# "emit:<emit_type>" (script_emit). The value is the human-readable label
+# printed under the matching investigation window.
+#
+# Curated for the s12-style symptom set: RF contention + duty-cycle blocks +
+# RTS/CTS failures + routing churn + the channel-gossip subset itself. The
+# named subset is intentionally narrow — a wider set tends to produce noisy
+# output where the actually-actionable signals get buried under e.g.
+# beacon_diff_breakdown spam.
+CONTENTION_EVENTS: dict[str, str] = {
+    # Top-level RF events (orchestrator-emitted, not script_emit).
+    "type:collision":                "rx_collision",
+    "type:tx_deferred":              "tx_deferred_LBT",
+    "type:drop_halfduplex":          "drop_halfduplex",
+    "type:drop_rx_blind":            "drop_rx_blind",
+    # Script emits — duty cycle.
+    "emit:duty_cycle_blocked":       "duty_cycle_blocked",
+    # Script emits — RTS/CTS failure family.
+    "emit:rts_attempt_timeout":      "rts_attempt_timeout",
+    "emit:rts_retry":                "rts_retry",
+    "emit:rts_giveup":               "rts_giveup",
+    "emit:rts_tx_blocked":           "rts_tx_blocked",
+    "emit:data_tx_blocked":          "data_tx_blocked",
+    "emit:data_ack_giveup":          "data_ack_giveup",
+    # Script emits — routing churn / sender giving up.
+    "emit:peer_suspect_mark":        "peer_suspect_mark",
+    "emit:send_deferred":            "send_deferred",
+    "emit:send_drained":             "send_drained",
+    "emit:send_giveup":              "send_giveup",
+    "emit:send_no_route":            "send_no_route",
+    "emit:tx_giveup":                "tx_giveup",
+    # Script emits — channel-gossip self-load.
+    "emit:channel_pull_sent":        "channel_pull_sent",
+    "emit:channel_pull_suppressed":  "channel_pull_suppressed",
+    "emit:channel_msg_evicted":      "channel_msg_evicted",
+}
+
+
+def _count_contention_in_windows(
+    events_path: str,
+    windows: list[tuple[str, int, int]],
+    since_ms: int = 0,
+) -> dict[str, dict[str, int]]:
+    """Single-pass scan: for each (label, start_ms, end_ms) window count
+    matches against CONTENTION_EVENTS. Returns {label: {pretty_name: count}}.
+
+    Windows may overlap; each event is checked against every window. The
+    expected n_windows is 1-3, so per-event overhead stays linear in the
+    file size. Returns empty Counters for windows with no matches.
+    """
+    result: dict[str, Counter] = {label: Counter() for label, _, _ in windows}
+    if not windows:
+        return {k: dict(v) for k, v in result.items()}
+
+    # Filtering windows by since_ms here would silently drop a window that
+    # ends after since_ms but starts before — callers should already pass
+    # post-warmup windows, so we keep the per-event since_ms test cheap.
+    for e in iter_events(events_path, since_ms):
+        t = e.get("time_ms", 0)
+        etype = e.get("type", "")
+        if etype == "script_emit":
+            key = f"emit:{e.get('emit_type', '')}"
+        else:
+            key = f"type:{etype}"
+        pretty = CONTENTION_EVENTS.get(key)
+        if pretty is None:
+            continue
+        for label, start, end in windows:
+            if start <= t <= end:
+                result[label][pretty] += 1
+    return {k: dict(v) for k, v in result.items()}
+
+
 def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> dict:
     """Channel-gossip metrics (ROADMAP §3 Package A).
 
@@ -4065,6 +4139,30 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
             if cnt > peak_burst["count"]:
                 peak_burst = {"count": cnt, "start_ms": pts[j], "end_ms": pts[i]}
 
+    # Second pass: count contention events in the windows we just surfaced.
+    # We only ever care about a couple of narrow windows, so one extra pass
+    # over the file is cheap (~1-2 s on a 1 M-event file). The result lets
+    # print_section_channel_gossip annotate each window with "here's what
+    # else was happening at that time" — the manual diagnostic the operator
+    # would otherwise grep out of the NDJSON.
+    SLOWEST_TAIL_MS = 30_000  # last 30 s before delivery — short enough to
+                              # spotlight the contention burst, long enough
+                              # to capture multi-RTS retry cascades.
+    contention_windows: list[tuple[str, int, int]] = []
+    contention_window_bounds: dict[str, tuple[int, int]] = {}
+    if peak_burst["count"] > 0:
+        w = (peak_burst["start_ms"], peak_burst["end_ms"])
+        contention_windows.append(("peak_pull_burst", w[0], w[1]))
+        contention_window_bounds["peak_pull_burst"] = w
+    if slowest["id"] is not None:
+        tail_end = slowest["last_recipient_t"]
+        tail_start = max(slowest["origin_t"], tail_end - SLOWEST_TAIL_MS)
+        contention_windows.append(("slowest_delivery_tail", tail_start, tail_end))
+        contention_window_bounds["slowest_delivery_tail"] = (tail_start, tail_end)
+    contention = (_count_contention_in_windows(events_path, contention_windows,
+                                               since_ms=since_ms)
+                  if contention_windows else {})
+
     return {
         "n_originated":         len(origin_t),
         "source_counts":        dict(source_counts),
@@ -4111,6 +4209,12 @@ def section_channel_gossip(events_path: str, cfg: dict, since_ms: int = 0) -> di
         # section signature consistent.
         "pull_sent_first_ms":   (pull_sent_ts[0] if pull_sent_ts else None),
         "pull_sent_last_ms":    (pull_sent_ts[-1] if pull_sent_ts else None),
+        # --- Contention context for the investigation windows ---------------
+        # Per-window counts of RF + protocol contention events. The print
+        # function turns each into a "what else was going on at this time"
+        # breakdown so the operator doesn't have to grep the NDJSON.
+        "contention":           contention,
+        "contention_window_bounds": contention_window_bounds,
     }
 
 
@@ -4218,6 +4322,28 @@ def print_section_channel_gossip(r: dict) -> None:
         return
     print(f"  investigation windows (jump-to-here):")
 
+    contention = r.get("contention", {})
+    bounds = r.get("contention_window_bounds", {})
+
+    def _print_contention(label: str, indent: str = "      ") -> None:
+        c = contention.get(label) or {}
+        if not c:
+            return
+        wb = bounds.get(label)
+        if wb is None:
+            return
+        win_ms = max(1, wb[1] - wb[0])
+        print(f"{indent}contention in this window "
+              f"[{fmt_t(wb[0])} – {fmt_t(wb[1])}, {win_ms/1000:.1f}s]:")
+        # Sort by descending count, drop zeros, cap at 10 rows.
+        rows = sorted(((n, v) for n, v in c.items() if v > 0),
+                      key=lambda kv: -kv[1])[:10]
+        if not rows:
+            print(f"{indent}  (none)")
+            return
+        for name, n in rows:
+            print(f"{indent}  {name:<26} {n}")
+
     sl = r["slowest"]
     if sl["id"] is not None:
         print(f"    slowest propagation: msg 0x{sl['id']:08x} "
@@ -4225,6 +4351,7 @@ def print_section_channel_gossip(r: dict) -> None:
               f"posted {fmt_t(sl['origin_t'])} → last hop "
               f"{fmt_t(sl['last_recipient_t'])} (Δ {sl['delay_ms']/1000:.1f}s, "
               f"reached {sl['n_recipients']} nodes)")
+        _print_contention("slowest_delivery_tail")
 
     pb = r["peak_pull_burst"]
     if pb["count"] > 0 and r["pull_sent_first_ms"] is not None:
@@ -4235,6 +4362,7 @@ def print_section_channel_gossip(r: dict) -> None:
         print(f"    peak pull burst:     {pb['count']} pulls in "
               f"[{fmt_t(pb['start_ms'])} – {fmt_t(pb['end_ms'])}]  "
               f"({mult:.1f}× steady-state)")
+        _print_contention("peak_pull_burst")
 
     if r["first_eviction_ms"] is not None:
         if r["evicted_events"] == 1:

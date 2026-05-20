@@ -871,5 +871,102 @@ def test_channel_gossip_investigation_windows():
         os.unlink(path)
 
 
+def test_channel_gossip_contention_per_window():
+    """For each investigation window the section must do a second pass and
+       count contention events in that interval. Slowest-delivery tail uses
+       last 30 s before the final reception; peak-pull-burst uses its own
+       5 s span."""
+    cfg = {
+        "nodes": [
+            {"name": "n0", "config": {"layer_id": 1}},
+            {"name": "n1", "config": {"layer_id": 1}},
+            {"name": "n2", "config": {"layer_id": 1}},
+        ]
+    }
+    events = [
+        # Slow msg: posted at t=0, last received at t=120000.
+        _emit(0, 0, "channel_msg_received",
+              id=11, channel_id=7, flavor=0, source="self_originate",
+              buffer_depth=1),
+        _emit(2, 120_000, "channel_msg_received",
+              id=11, channel_id=7, flavor=0, source="forwarder",
+              buffer_depth=1),
+
+        # Contention 25 s before final delivery (inside the 30-s tail).
+        {"type": "collision", "time_ms": 95_000},
+        {"type": "collision", "time_ms": 96_000},
+        {"type": "tx_deferred", "time_ms": 97_000},
+        _emit(1, 98_000, "rts_retry"),
+        _emit(1, 99_000, "duty_cycle_blocked"),
+        # Earlier contention (50 s before delivery) — should NOT count.
+        {"type": "collision", "time_ms": 60_000},
+
+        # Pull burst at 30-31 s (4 pulls in 1 s).
+        _emit(0, 30_000, "channel_pull_sent", to=2, ids=[11]),
+        _emit(1, 30_300, "channel_pull_sent", to=2, ids=[11]),
+        _emit(2, 30_600, "channel_pull_sent", to=0, ids=[11]),
+        _emit(0, 31_000, "channel_pull_sent", to=2, ids=[11]),
+        # Contention inside the pull-burst window.
+        {"type": "collision", "time_ms": 30_500},
+        _emit(2, 30_700, "rts_attempt_timeout"),
+    ]
+    path = _write_ndjson(events)
+    try:
+        r = analyze.section_channel_gossip(path, cfg)
+
+        # Both investigation windows must have a contention block.
+        cont = r["contention"]
+        assert "slowest_delivery_tail" in cont
+        assert "peak_pull_burst" in cont
+
+        tail = cont["slowest_delivery_tail"]
+        # Five contention events inside the 30 s tail (90-120 s).
+        assert tail.get("rx_collision") == 2, tail
+        assert tail.get("tx_deferred_LBT") == 1, tail
+        assert tail.get("rts_retry") == 1, tail
+        assert tail.get("duty_cycle_blocked") == 1, tail
+        # The early collision (t=60s) MUST NOT be counted.
+        assert sum(tail.values()) == 5, tail
+
+        burst = cont["peak_pull_burst"]
+        # Burst window includes 4 channel_pull_sent + 1 collision + 1 timeout.
+        assert burst.get("rx_collision") == 1
+        assert burst.get("channel_pull_sent") == 4
+        assert burst.get("rts_attempt_timeout") == 1
+
+        analyze.print_section_channel_gossip(r)   # must not crash
+    finally:
+        os.unlink(path)
+
+
+def test_count_contention_in_windows_handles_overlap_and_unknown_types():
+    """The helper is the building block — overlapping windows should both
+       see the same matching event, and unrecognised event types should be
+       silently ignored (not crash)."""
+    events = [
+        {"type": "collision", "time_ms": 1_000},
+        {"type": "noise",     "time_ms": 1_500},   # unknown — ignored
+        _emit(0, 2_000, "duty_cycle_blocked"),
+        _emit(0, 2_500, "foo_bar_baz"),            # unknown emit — ignored
+        {"type": "collision", "time_ms": 5_000},
+    ]
+    path = _write_ndjson(events)
+    try:
+        windows = [
+            ("first",   500,  2_500),    # contains 1 collision + 1 dcb
+            ("overlap", 1_500, 5_500),   # contains 1 dcb + 1 collision
+            ("late",    4_000, 6_000),   # contains 1 collision
+        ]
+        r = analyze._count_contention_in_windows(path, windows)
+        assert r["first"]["rx_collision"] == 1
+        assert r["first"]["duty_cycle_blocked"] == 1
+        assert r["overlap"]["rx_collision"] == 1
+        assert r["overlap"]["duty_cycle_blocked"] == 1
+        assert r["late"]["rx_collision"] == 1
+        assert r["late"].get("duty_cycle_blocked", 0) == 0
+    finally:
+        os.unlink(path)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
