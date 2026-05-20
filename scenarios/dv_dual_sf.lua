@@ -5646,9 +5646,15 @@ try_drain_deferred = function(self)
     if d.tx_layer_id ~= nil then
       d_rt = ensure_layer_state(self, d.tx_layer_id).rt
     end
-    if d_rt[d.dst_id] ~= nil then
-      table.insert(drained, d)
-    elseif (now - d.queued_at_ms) >= self.send_defer_ttl_ms then
+    -- TTL check must come BEFORE the route-exists branch. Previously
+    -- the TTL was gated on "route absent", which meant a message that
+    -- kept getting deferred with reason=all_candidates_silent (route
+    -- exists, but every K=3 alt next-hop was duty-saturated and refused
+    -- CTS) would cycle forever — each drain attempt found the route
+    -- present, redrained, redeferred, with no TTL exit. s12 6h showed
+    -- one message accumulating 477 deferrals over 5.7 hours, consuming
+    -- airtime for futile retries while DMs queued behind it.
+    if (now - d.queued_at_ms) >= self.send_defer_ttl_ms then
       self:emit("send_giveup", {
         origin     = d.origin, dst = d.dst_id, dst_name = d.dst_name,
         payload    = d.user_text, ctr = d.ctr,
@@ -5656,8 +5662,10 @@ try_drain_deferred = function(self)
         reason     = "defer_ttl",
       })
       self:log(string.format(
-        "send_giveup dst=%s waited=%dms (defer TTL %dms expired without route)",
+        "send_giveup dst=%s waited=%dms (defer TTL %dms expired)",
         d.dst_name, now - d.queued_at_ms, self.send_defer_ttl_ms))
+    elseif d_rt[d.dst_id] ~= nil then
+      table.insert(drained, d)
     else
       local q_at, q_sent = emit_route_query(self, d.dst_id, d.dst_name,
                                             d.reason or "deferred_no_route")
