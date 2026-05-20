@@ -5990,6 +5990,19 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     tx_routing_sf = tx_layer_rec and tx_layer_rec.routing_sf or active_routing_sf(self)
     tx_sf_bitmap = tx_layer_rec and tx_layer_rec.allowed_sf_bitmap or active_allowed_sf_bitmap(self)
   end
+  -- M-payload (channel gossip) is restricted to the routing SF so peers
+  -- already tuned there can promiscuously overhear the DATA frame.
+  -- The dual-SF protocol's normal data SF is faster per frame, but
+  -- non-target peers stay on routing SF and drop the DATA with
+  -- drop_sf_mismatch — the design's "one M-frame benefits N hearers"
+  -- promise (PROTOCOL.md §3.4.1) can't fire without this constraint.
+  -- We trade ~2× per-frame airtime (SF8 vs SF7) for ~N× fewer M-frames
+  -- in dense clusters: one broadcast benefits N hearers instead of N
+  -- unicasts. Eventually consistent + slower-but-amortized is the
+  -- correct shape for channel traffic. See ROADMAP §3.3.
+  if ((flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0 then
+    tx_sf_bitmap = sf_set_to_bitmap({tx_routing_sf})
+  end
   if tx_on_primary_layer then
     activate_primary_layer(self, "tx")
   elseif tx_layer_rec then
@@ -9745,6 +9758,25 @@ function on_recv(self, frame, meta)
 
     self:after(self.ack_air_ms + 1, function()
       if is_delivered then
+        become_free(self)
+        return
+      end
+      -- Principle 11 enforcement for the routing-SF M-payload (ROADMAP
+      -- §3.4.1, post-2A). With M-payload now broadcast at routing SF
+      -- so all peers can promiscuously overhear it, a gateway acting as
+      -- a forwarding hop would re-TX the M-frame on its own routing-SF
+      -- airwaves — heard by BOTH the source layer AND any other layer
+      -- whose nodes are tuned to the same SF. That's a cross-layer
+      -- channel leak. Drop here: gateway has ACK'd upstream so they
+      -- don't retry, but does NOT forward. The pull-requester misses
+      -- this delivery and re-pulls in the cascade (eventually-consistent
+      -- by design). Same-layer M-payload propagation is unaffected
+      -- because gateways are never on a same-layer intra-mesh route.
+      if self.self_gateway and (d_flags & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0 then
+        self:emit("channel_gateway_drop", {
+          origin = d_origin, dst = d_dst, ctr = d_ctr,
+          reason = "principle_11_no_cross_layer_M",
+        })
         become_free(self)
         return
       end
