@@ -7279,7 +7279,7 @@ function on_init(self, config)
   self.lbt_enabled        = config.lbt_enabled
   if self.lbt_enabled == nil then self.lbt_enabled = true end
   self.retry_jitter_ms    = config.retry_jitter_ms    or
-    airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN)
+    (3 * airtime_ms(self.routing_sf, self.bw_hz, self.cr, self.preamble_sym, RTS_LEN))
   self.lbt_backoff_ms     = config.lbt_backoff_ms     or
     math.max(1, math.floor(self.retry_jitter_ms / 2))
   self.flood_lbt_max_defer_ms = config.flood_lbt_max_defer_ms or
