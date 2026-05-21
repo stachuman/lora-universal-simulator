@@ -1,6 +1,10 @@
 {
   "_name": "s12_channels_dense_two_layer",
-  "_desc": "Realistic stress test for gossip channels (ROADMAP S3 Package A). Derived from s07_seattle_mobile_realistic: dropped 3 mobiles, kept the 33 stationary Seattle nodes + their explicit static-static topology (224 directed links with realistic SNRs). Added a separate 25-node Layer-2 cluster with synthesized chain-topology links (4 neighbours/node, uniform 22 dB SNR). Capitol_Hill_Prime acts as the L1<->L2 gateway with explicit links to 5 L2 entry-point nodes. Total: 33 L1 + 25 L2 = 58 nodes; 384 topology links. Duration: 6 h simulated. 5 channel posters (3 L1 + 2 L2) on channel 7 every ~5 min. Intra-layer DM at one per node per ~30 min. Per Principle 11, channels are local \u2014 L1 messages do NOT reach L2 and vice versa. state_snapshot_period_ms widened to 5 min. Debug window OFF.",
+  "_desc": "Realistic stress test for gossip channels (ROADMAP S3 Package A). Derived from s07_seattle_mobile_realistic: dropped 3 mobiles, kept the 33 stationary Seattle nodes + their explicit static-static topology (224 directed links with realistic SNRs). Added a separate 25-node Layer-2 cluster with synthesized chain-topology links (4 neighbours/node, uniform 22 dB SNR). Capitol_Hill_Prime acts as the L1<->L2 gateway with explicit links to 5 L2 entry-point nodes. Total: 33 L1 + 25 L2 = 58 nodes; 384 topology links. Duration: 6 h simulated. 5 channel posters (3 L1 + 2 L2) on channel 7 every ~5 min. Intra-layer DM at one per node per ~30 min. Per Principle 11, channels are local \u2014 L1 messages do NOT reach L2 and vice versa. state_snapshot_period_ms widened to 5 min. Debug window enabled for 213:10-213:40 around slow channel propagation. PRIORITY INJECTION: 68 of 684 `send` commands converted to `send_priority` (seed=12) \u2014 tests priority queue precedence + 5/hour cap interaction under storm.",
+  "config": {
+    "debug_start_ms": 12790000,
+    "debug_end_ms": 12820000
+  },
   "simulation": {
     "duration_ms": 21600000,
     "step_ms": 1,
@@ -26,7 +30,7 @@
     {
       "at_ms": 7396,
       "node": "RavennaPark",
-      "command": "send Fremont01_Greenwood3 dm-RavennaPark-0"
+      "command": "send_priority Fremont01_Greenwood3 prio-dm-RavennaPark-0"
     },
     {
       "at_ms": 7408,
@@ -76,7 +80,7 @@
     {
       "at_ms": 34903,
       "node": "L2_node_09",
-      "command": "send L2_node_07 dm-L2_node_09-0"
+      "command": "send_priority L2_node_07 prio-dm-L2_node_09-0"
     },
     {
       "at_ms": 36575,
@@ -116,7 +120,7 @@
     {
       "at_ms": 42703,
       "node": "L2_node_06",
-      "command": "send L2_node_23 dm-L2_node_06-0"
+      "command": "send_priority L2_node_23 prio-dm-L2_node_06-0"
     },
     {
       "at_ms": 43018,
@@ -176,7 +180,7 @@
     {
       "at_ms": 59605,
       "node": "L2_node_18",
-      "command": "send L2_node_20 dm-L2_node_18-0"
+      "command": "send_priority L2_node_20 prio-dm-L2_node_18-0"
     },
     {
       "at_ms": 61564,
@@ -281,7 +285,7 @@
     {
       "at_ms": 109925,
       "node": "Stevens",
-      "command": "send KG6GXY_Greenwood dm-Stevens-0"
+      "command": "send_priority KG6GXY_Greenwood prio-dm-Stevens-0"
     },
     {
       "at_ms": 115577,
@@ -471,7 +475,7 @@
     {
       "at_ms": 1807427,
       "node": "Fremont01_KF7EGZ_Sol",
-      "command": "send University_District dm-Fremont01_KF7EGZ_Sol-1"
+      "command": "send_priority University_District prio-dm-Fremont01_KF7EGZ_Sol-1"
     },
     {
       "at_ms": 1807819,
@@ -481,7 +485,7 @@
     {
       "at_ms": 1809740,
       "node": "N7GRN5_Portage_Bay_r",
-      "command": "send Fremont01_KF7EGZ_Sol dm-N7GRN5_Portage_Bay_r-1"
+      "command": "send_priority Fremont01_KF7EGZ_Sol prio-dm-N7GRN5_Portage_Bay_r-1"
     },
     {
       "at_ms": 1813504,
@@ -551,7 +555,7 @@
     {
       "at_ms": 1826709,
       "node": "bob",
-      "command": "send CrossNet_RPT1 dm-bob-1"
+      "command": "send_priority CrossNet_RPT1 prio-dm-bob-1"
     },
     {
       "at_ms": 1827013,
@@ -591,12 +595,12 @@
     {
       "at_ms": 1846290,
       "node": "Fremont01_Greenwood3",
-      "command": "send CrossNet_RPT1 dm-Fremont01_Greenwood3-1"
+      "command": "send_priority CrossNet_RPT1 prio-dm-Fremont01_Greenwood3-1"
     },
     {
       "at_ms": 1849799,
       "node": "Stevens",
-      "command": "send 2CBA_Repeater_v4 dm-Stevens-1"
+      "command": "send_priority 2CBA_Repeater_v4 prio-dm-Stevens-1"
     },
     {
       "at_ms": 1859077,
@@ -616,7 +620,7 @@
     {
       "at_ms": 1863645,
       "node": "CrossNet_Room",
-      "command": "send Central_District dm-CrossNet_Room-1"
+      "command": "send_priority Central_District prio-dm-CrossNet_Room-1"
     },
     {
       "at_ms": 1863749,
@@ -636,7 +640,7 @@
     {
       "at_ms": 1867598,
       "node": "Maple_Leaf_Manor",
-      "command": "send dmatestbednode0 dm-Maple_Leaf_Manor-1"
+      "command": "send_priority dmatestbednode0 prio-dm-Maple_Leaf_Manor-1"
     },
     {
       "at_ms": 1869172,
@@ -896,7 +900,7 @@
     {
       "at_ms": 3608126,
       "node": "L2_node_11",
-      "command": "send L2_node_03 dm-L2_node_11-2"
+      "command": "send_priority L2_node_03 prio-dm-L2_node_11-2"
     },
     {
       "at_ms": 3610755,
@@ -1011,7 +1015,7 @@
     {
       "at_ms": 3644135,
       "node": "Licton_Springs_Chat",
-      "command": "send repeather dm-Licton_Springs_Chat-2"
+      "command": "send_priority repeather prio-dm-Licton_Springs_Chat-2"
     },
     {
       "at_ms": 3654223,
@@ -1051,7 +1055,7 @@
     {
       "at_ms": 3666923,
       "node": "L2_node_04",
-      "command": "send L2_node_02 dm-L2_node_04-2"
+      "command": "send_priority L2_node_02 prio-dm-L2_node_04-2"
     },
     {
       "at_ms": 3668342,
@@ -1061,7 +1065,7 @@
     {
       "at_ms": 3668762,
       "node": "L2_node_02",
-      "command": "send L2_node_08 dm-L2_node_02-2"
+      "command": "send_priority L2_node_08 prio-dm-L2_node_02-2"
     },
     {
       "at_ms": 3669309,
@@ -1156,12 +1160,12 @@
     {
       "at_ms": 3710531,
       "node": "usa_narrow_bridge",
-      "command": "send dave dm-usa_narrow_bridge-2"
+      "command": "send_priority dave prio-dm-usa_narrow_bridge-2"
     },
     {
       "at_ms": 3710867,
       "node": "L2_node_12",
-      "command": "send L2_node_16 dm-L2_node_12-2"
+      "command": "send_priority L2_node_16 prio-dm-L2_node_12-2"
     },
     {
       "at_ms": 3713413,
@@ -1346,7 +1350,7 @@
     {
       "at_ms": 5408841,
       "node": "bob",
-      "command": "send N7GRN5_Portage_Bay_r dm-bob-3"
+      "command": "send_priority N7GRN5_Portage_Bay_r prio-dm-bob-3"
     },
     {
       "at_ms": 5409656,
@@ -1451,7 +1455,7 @@
     {
       "at_ms": 5446648,
       "node": "Wedgwood_Solar",
-      "command": "send devhackchat dm-Wedgwood_Solar-3"
+      "command": "send_priority devhackchat prio-dm-Wedgwood_Solar-3"
     },
     {
       "at_ms": 5449031,
@@ -1491,7 +1495,7 @@
     {
       "at_ms": 5462987,
       "node": "L2_node_23",
-      "command": "send L2_node_13 dm-L2_node_23-3"
+      "command": "send_priority L2_node_13 prio-dm-L2_node_23-3"
     },
     {
       "at_ms": 5465628,
@@ -1546,7 +1550,7 @@
     {
       "at_ms": 5481562,
       "node": "RavennaEckstein_CC",
-      "command": "send bob dm-RavennaEckstein_CC-3"
+      "command": "send_priority bob prio-dm-RavennaEckstein_CC-3"
     },
     {
       "at_ms": 5481846,
@@ -1761,7 +1765,7 @@
     {
       "at_ms": 7202847,
       "node": "2CBA_Repeater_v4",
-      "command": "send CrossNet_RPT1 dm-2CBA_Repeater_v4-4"
+      "command": "send_priority CrossNet_RPT1 prio-dm-2CBA_Repeater_v4-4"
     },
     {
       "at_ms": 7205572,
@@ -1786,7 +1790,7 @@
     {
       "at_ms": 7209052,
       "node": "L2_node_04",
-      "command": "send L2_node_10 dm-L2_node_04-4"
+      "command": "send_priority L2_node_10 prio-dm-L2_node_04-4"
     },
     {
       "at_ms": 7210362,
@@ -1956,7 +1960,7 @@
     {
       "at_ms": 7281049,
       "node": "L2_node_20",
-      "command": "send L2_node_00 dm-L2_node_20-4"
+      "command": "send_priority L2_node_00 prio-dm-L2_node_20-4"
     },
     {
       "at_ms": 7282819,
@@ -1996,7 +2000,7 @@
     {
       "at_ms": 7297185,
       "node": "L2_node_01",
-      "command": "send L2_node_16 dm-L2_node_01-4"
+      "command": "send_priority L2_node_16 prio-dm-L2_node_01-4"
     },
     {
       "at_ms": 7297600,
@@ -2021,7 +2025,7 @@
     {
       "at_ms": 7308847,
       "node": "Licton_Springs_Chat",
-      "command": "send WedgBreadMesh dm-Licton_Springs_Chat-4"
+      "command": "send_priority WedgBreadMesh prio-dm-Licton_Springs_Chat-4"
     },
     {
       "at_ms": 7310149,
@@ -2371,7 +2375,7 @@
     {
       "at_ms": 9060041,
       "node": "Fremont01_Greenwood3",
-      "command": "send usa_narrow_bridge dm-Fremont01_Greenwood3-5"
+      "command": "send_priority usa_narrow_bridge prio-dm-Fremont01_Greenwood3-5"
     },
     {
       "at_ms": 9061811,
@@ -2646,7 +2650,7 @@
     {
       "at_ms": 10808392,
       "node": "repeather",
-      "command": "send KG6GXY_Greenwood dm-repeather-6"
+      "command": "send_priority KG6GXY_Greenwood prio-dm-repeather-6"
     },
     {
       "at_ms": 10823362,
@@ -2656,7 +2660,7 @@
     {
       "at_ms": 10823991,
       "node": "DMASpaceMesh",
-      "command": "send N7GRN5_Portage_Bay_r dm-DMASpaceMesh-6"
+      "command": "send_priority N7GRN5_Portage_Bay_r prio-dm-DMASpaceMesh-6"
     },
     {
       "at_ms": 10824251,
@@ -2711,7 +2715,7 @@
     {
       "at_ms": 10835630,
       "node": "L2_node_02",
-      "command": "send L2_node_18 dm-L2_node_02-6"
+      "command": "send_priority L2_node_18 prio-dm-L2_node_02-6"
     },
     {
       "at_ms": 10837993,
@@ -2801,7 +2805,7 @@
     {
       "at_ms": 10863563,
       "node": "WedgBreadMesh",
-      "command": "send SEA_Bryant_KM7ECH dm-WedgBreadMesh-6"
+      "command": "send_priority SEA_Bryant_KM7ECH prio-dm-WedgBreadMesh-6"
     },
     {
       "at_ms": 10864233,
@@ -2836,7 +2840,7 @@
     {
       "at_ms": 10885207,
       "node": "L2_node_00",
-      "command": "send L2_node_19 dm-L2_node_00-6"
+      "command": "send_priority L2_node_19 prio-dm-L2_node_00-6"
     },
     {
       "at_ms": 10889231,
@@ -2871,7 +2875,7 @@
     {
       "at_ms": 10902143,
       "node": "Washington_Park",
-      "command": "send Central_District dm-Washington_Park-6"
+      "command": "send_priority Central_District prio-dm-Washington_Park-6"
     },
     {
       "at_ms": 10903724,
@@ -2886,7 +2890,7 @@
     {
       "at_ms": 10910003,
       "node": "Martin_Room",
-      "command": "send WedgBreadMesh dm-Martin_Room-6"
+      "command": "send_priority WedgBreadMesh prio-dm-Martin_Room-6"
     },
     {
       "at_ms": 10910393,
@@ -3121,7 +3125,7 @@
     {
       "at_ms": 12640424,
       "node": "University_District",
-      "command": "send WedgBreadMesh dm-University_District-7"
+      "command": "send_priority WedgBreadMesh prio-dm-University_District-7"
     },
     {
       "at_ms": 12642752,
@@ -3141,7 +3145,7 @@
     {
       "at_ms": 12646591,
       "node": "L2_node_08",
-      "command": "send L2_node_09 dm-L2_node_08-7"
+      "command": "send_priority L2_node_09 prio-dm-L2_node_08-7"
     },
     {
       "at_ms": 12647226,
@@ -3211,7 +3215,7 @@
     {
       "at_ms": 12665304,
       "node": "2CBA_Repeater_v4",
-      "command": "send Martin_Room dm-2CBA_Repeater_v4-7"
+      "command": "send_priority Martin_Room prio-dm-2CBA_Repeater_v4-7"
     },
     {
       "at_ms": 12665389,
@@ -3236,7 +3240,7 @@
     {
       "at_ms": 12672313,
       "node": "Washington_Park",
-      "command": "send RavennaEckstein_CC dm-Washington_Park-7"
+      "command": "send_priority RavennaEckstein_CC prio-dm-Washington_Park-7"
     },
     {
       "at_ms": 12678099,
@@ -3321,7 +3325,7 @@
     {
       "at_ms": 12706138,
       "node": "Maple_Leaf_Manor",
-      "command": "send Hankest_Extendus dm-Maple_Leaf_Manor-7"
+      "command": "send_priority Hankest_Extendus prio-dm-Maple_Leaf_Manor-7"
     },
     {
       "at_ms": 12709975,
@@ -3341,7 +3345,7 @@
     {
       "at_ms": 12716980,
       "node": "L2_node_14",
-      "command": "send L2_node_22 dm-L2_node_14-7"
+      "command": "send_priority L2_node_22 prio-dm-L2_node_14-7"
     },
     {
       "at_ms": 12719357,
@@ -3576,7 +3580,7 @@
     {
       "at_ms": 14440628,
       "node": "L2_node_08",
-      "command": "send L2_node_02 dm-L2_node_08-8"
+      "command": "send_priority L2_node_02 prio-dm-L2_node_08-8"
     },
     {
       "at_ms": 14440647,
@@ -3621,7 +3625,7 @@
     {
       "at_ms": 14453127,
       "node": "CrossNet_Room",
-      "command": "send RavennaEckstein_CC dm-CrossNet_Room-8"
+      "command": "send_priority RavennaEckstein_CC prio-dm-CrossNet_Room-8"
     },
     {
       "at_ms": 14455062,
@@ -3646,7 +3650,7 @@
     {
       "at_ms": 14465267,
       "node": "L2_node_12",
-      "command": "send L2_node_16 dm-L2_node_12-8"
+      "command": "send_priority L2_node_16 prio-dm-L2_node_12-8"
     },
     {
       "at_ms": 14466167,
@@ -3661,7 +3665,7 @@
     {
       "at_ms": 14468199,
       "node": "N7GRN5_Portage_Bay_r",
-      "command": "send RavennaEckstein_CC dm-N7GRN5_Portage_Bay_r-8"
+      "command": "send_priority RavennaEckstein_CC prio-dm-N7GRN5_Portage_Bay_r-8"
     },
     {
       "at_ms": 14470408,
@@ -3691,7 +3695,7 @@
     {
       "at_ms": 14485200,
       "node": "dave",
-      "command": "send University_District dm-dave-8"
+      "command": "send_priority University_District prio-dm-dave-8"
     },
     {
       "at_ms": 14485363,
@@ -3966,7 +3970,7 @@
     {
       "at_ms": 16207697,
       "node": "Licton_Springs_Chat",
-      "command": "send dave dm-Licton_Springs_Chat-9"
+      "command": "send_priority dave prio-dm-Licton_Springs_Chat-9"
     },
     {
       "at_ms": 16208177,
@@ -3976,7 +3980,7 @@
     {
       "at_ms": 16212862,
       "node": "2CBA_Repeater_v4",
-      "command": "send devhackchat dm-2CBA_Repeater_v4-9"
+      "command": "send_priority devhackchat prio-dm-2CBA_Repeater_v4-9"
     },
     {
       "at_ms": 16214232,
@@ -3996,7 +4000,7 @@
     {
       "at_ms": 16217361,
       "node": "DMASpaceMesh",
-      "command": "send Portage_Bay_G2_2 dm-DMASpaceMesh-9"
+      "command": "send_priority Portage_Bay_G2_2 prio-dm-DMASpaceMesh-9"
     },
     {
       "at_ms": 16218592,
@@ -4076,7 +4080,7 @@
     {
       "at_ms": 16245046,
       "node": "L2_node_08",
-      "command": "send L2_node_11 dm-L2_node_08-9"
+      "command": "send_priority L2_node_11 prio-dm-L2_node_08-9"
     },
     {
       "at_ms": 16248830,
@@ -4131,7 +4135,7 @@
     {
       "at_ms": 16275649,
       "node": "N7GRN5_Portage_Bay_r",
-      "command": "send Crow_Repeater dm-N7GRN5_Portage_Bay_r-9"
+      "command": "send_priority Crow_Repeater prio-dm-N7GRN5_Portage_Bay_r-9"
     },
     {
       "at_ms": 16275806,
@@ -4141,7 +4145,7 @@
     {
       "at_ms": 16278542,
       "node": "L2_node_18",
-      "command": "send L2_node_12 dm-L2_node_18-9"
+      "command": "send_priority L2_node_12 prio-dm-L2_node_18-9"
     },
     {
       "at_ms": 16280550,
@@ -4216,7 +4220,7 @@
     {
       "at_ms": 16317093,
       "node": "CrossNet_RPT1",
-      "command": "send Martin_Room dm-CrossNet_RPT1-9"
+      "command": "send_priority Martin_Room prio-dm-CrossNet_RPT1-9"
     },
     {
       "at_ms": 16318582,
@@ -4376,7 +4380,7 @@
     {
       "at_ms": 18000813,
       "node": "2CBA_Repeater_v4",
-      "command": "send DMASpaceMesh dm-2CBA_Repeater_v4-10"
+      "command": "send_priority DMASpaceMesh prio-dm-2CBA_Repeater_v4-10"
     },
     {
       "at_ms": 18001354,
@@ -4471,7 +4475,7 @@
     {
       "at_ms": 18027226,
       "node": "L2_node_17",
-      "command": "send L2_node_05 dm-L2_node_17-10"
+      "command": "send_priority L2_node_05 prio-dm-L2_node_17-10"
     },
     {
       "at_ms": 18029876,
@@ -4571,7 +4575,7 @@
     {
       "at_ms": 18077861,
       "node": "CrossNet_Room",
-      "command": "send RavennaPark dm-CrossNet_Room-10"
+      "command": "send_priority RavennaPark prio-dm-CrossNet_Room-10"
     },
     {
       "at_ms": 18082247,
@@ -4596,7 +4600,7 @@
     {
       "at_ms": 18099582,
       "node": "L2_node_04",
-      "command": "send L2_node_09 dm-L2_node_04-10"
+      "command": "send_priority L2_node_09 prio-dm-L2_node_04-10"
     },
     {
       "at_ms": 18100299,
@@ -4631,12 +4635,12 @@
     {
       "at_ms": 18106551,
       "node": "Central_District",
-      "command": "send Crow_Repeater dm-Central_District-10"
+      "command": "send_priority Crow_Repeater prio-dm-Central_District-10"
     },
     {
       "at_ms": 18108553,
       "node": "L2_node_13",
-      "command": "send L2_node_05 dm-L2_node_13-10"
+      "command": "send_priority L2_node_05 prio-dm-L2_node_13-10"
     },
     {
       "at_ms": 18115499,
@@ -4701,7 +4705,7 @@
     {
       "at_ms": 19828885,
       "node": "Fremont01_KF7EGZ_Sol",
-      "command": "send RavennaPark dm-Fremont01_KF7EGZ_Sol-11"
+      "command": "send_priority RavennaPark prio-dm-Fremont01_KF7EGZ_Sol-11"
     },
     {
       "at_ms": 19829955,
@@ -4716,7 +4720,7 @@
     {
       "at_ms": 19834173,
       "node": "Stevens",
-      "command": "send 2CBA_Repeater_v4 dm-Stevens-11"
+      "command": "send_priority 2CBA_Repeater_v4 prio-dm-Stevens-11"
     },
     {
       "at_ms": 19834488,
@@ -4801,7 +4805,7 @@
     {
       "at_ms": 19856675,
       "node": "Fremont01_Greenwood3",
-      "command": "send usa_narrow_bridge dm-Fremont01_Greenwood3-11"
+      "command": "send_priority usa_narrow_bridge prio-dm-Fremont01_Greenwood3-11"
     },
     {
       "at_ms": 19857375,
@@ -4811,7 +4815,7 @@
     {
       "at_ms": 19857527,
       "node": "L2_node_03",
-      "command": "send L2_node_02 dm-L2_node_03-11"
+      "command": "send_priority L2_node_02 prio-dm-L2_node_03-11"
     },
     {
       "at_ms": 19857717,
@@ -4886,7 +4890,7 @@
     {
       "at_ms": 19893825,
       "node": "University_District",
-      "command": "send 2CBA_Repeater_v4 dm-University_District-11"
+      "command": "send_priority 2CBA_Repeater_v4 prio-dm-University_District-11"
     },
     {
       "at_ms": 19896291,
@@ -4901,12 +4905,12 @@
     {
       "at_ms": 19899236,
       "node": "Wedgwood_Solar",
-      "command": "send Maple_Leaf_Manor dm-Wedgwood_Solar-11"
+      "command": "send_priority Maple_Leaf_Manor prio-dm-Wedgwood_Solar-11"
     },
     {
       "at_ms": 19900302,
       "node": "CrossNet_Room",
-      "command": "send Crow_Repeater dm-CrossNet_Room-11"
+      "command": "send_priority Crow_Repeater prio-dm-CrossNet_Room-11"
     },
     {
       "at_ms": 19903471,
@@ -4916,7 +4920,7 @@
     {
       "at_ms": 19905300,
       "node": "RavennaPark",
-      "command": "send N7GRN5_Portage_Bay_r dm-RavennaPark-11"
+      "command": "send_priority N7GRN5_Portage_Bay_r prio-dm-RavennaPark-11"
     },
     {
       "at_ms": 19908990,
@@ -4931,7 +4935,7 @@
     {
       "at_ms": 19913205,
       "node": "L2_node_11",
-      "command": "send L2_node_14 dm-L2_node_11-11"
+      "command": "send_priority L2_node_14 prio-dm-L2_node_11-11"
     },
     {
       "at_ms": 19917126,
