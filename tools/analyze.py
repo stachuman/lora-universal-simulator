@@ -4396,25 +4396,129 @@ def print_section_channel_gossip(r: dict) -> None:
 # ---- Headline -------------------------------------------------------------
 
 def print_headline(cfg: dict, events_path: str, ctrl: dict, since_ms: int = 0) -> None:
-    # `sent` counts user commands whose timestamp falls in the analyzed window.
-    # Pre-warmup commands are unusual (most scenarios shift commands past
-    # warmup) but we filter defensively so the delivery ratio matches the
-    # window the rest of the report describes.
-    sent = 0
-    delivered = 0
+    """Headline summary — split by traffic class.
+
+    Pre-fix this single-counted ALL `delivered` emits (which fire at every
+    addressed-receiver hop, including channel M-payload pull_target arrivals
+    and DM cascade hops) against the much smaller `send`-class command count.
+    Result: 1474/616 = 239% on s12, which is nonsense. The fix below splits
+    DM from channel deliveries and matches each unique (origin, payload)
+    pair so retries/cascades don't double-count.
+    """
+    nodes = cfg.get("nodes", [])
+    names_by_id = {i: n["name"] for i, n in enumerate(nodes)}
+    name_to_id  = {v: k for k, v in names_by_id.items()}
+    layer_of    = {i: int(n.get("config", {}).get("layer_id", 0) or 0)
+                   for i, n in enumerate(nodes)}
+
+    # ---- DM accounting -----------------------------------------------------
+    # Track each DM command by (origin_id, payload_text). The delivered
+    # event also carries (origin, payload) so we can match without
+    # double-counting cascade retries or hop-level deliveries.
+    DM_VERBS = {"send", "send_e2e", "send_priority", "send_e2e_priority"}
+    dm_sent: set[tuple[int, str]] = set()
+    dm_sent_by_class: Counter = Counter()
     for c in cfg.get("commands", []):
-        cmd = c.get("command", "")
+        cmd = c.get("command", "") or ""
         at_ms = int(c.get("at_ms", 0))
-        # Match both `send <dst> <text>` and `send_e2e <dst> <text>` — each
-        # enqueues exactly one originator-side message.
-        verb = cmd.split(maxsplit=1)[0] if cmd else ""
-        if verb in ("send", "send_e2e") and at_ms >= since_ms:
-            sent += 1
+        if at_ms < since_ms:
+            continue
+        parts = cmd.split(maxsplit=2)
+        if len(parts) < 3:
+            continue
+        verb, _dst, text = parts[0], parts[1], parts[2]
+        if verb in DM_VERBS:
+            origin_id = name_to_id.get(c.get("node"))
+            if origin_id is None:
+                continue
+            dm_sent.add((origin_id, text))
+            dm_sent_by_class[verb] += 1
+
+    # ---- Channel accounting -----------------------------------------------
+    # Channel posts: count send_channel commands. For each posted msg
+    # collect the set of distinct non-originator recipients (any node that
+    # got the M-payload into its buffer, via pull_target / forwarder /
+    # overheard). The max-possible-recipient count is "same-layer nodes
+    # minus 1" since channels are local-by-design (Principle 11).
+    ch_sent_total = 0
+    for c in cfg.get("commands", []):
+        if c.get("command", "").startswith("send_channel ") and int(c.get("at_ms", 0)) >= since_ms:
+            ch_sent_total += 1
+    # Headcount per layer for the "max recipients" denominator.
+    layer_size: Counter = Counter()
+    for li in layer_of.values():
+        layer_size[li] += 1
+
+    # ---- Single pass: deliveries + channel receptions ---------------------
+    dm_delivered: set[tuple[int, str]] = set()
+    ch_recipients: dict[int, set[int]] = {}      # msg_id → set of recipient node ids
+    ch_origin: dict[int, int] = {}                # msg_id → originator node id
     for e in iter_events(events_path, since_ms):
-        if e.get("type") == "script_emit" and e.get("emit_type") == "delivered":
-            delivered += 1
+        if e.get("type") != "script_emit":
+            continue
+        et = e.get("emit_type")
+        d = e.get("data") or {}
+        if et == "delivered":
+            o = d.get("origin")
+            p = d.get("payload", "")
+            if isinstance(o, int):
+                dm_delivered.add((o, p))
+        elif et == "channel_msg_received":
+            mid = d.get("id")
+            src = d.get("source", "")
+            n = e.get("node")
+            if mid is None:
+                continue
+            if src == "self_originate":
+                if mid not in ch_origin and isinstance(n, int):
+                    ch_origin[mid] = n
+            else:
+                if isinstance(n, int):
+                    ch_recipients.setdefault(mid, set()).add(n)
+
+    dm_delivered_count = len(dm_delivered & dm_sent)
+    dm_sent_count      = len(dm_sent)
+
+    # Channel: per-msg coverage as a fraction of "max possible same-layer
+    # recipients". Average across all posts.
+    ch_post_count = max(ch_sent_total, len(ch_origin))
+    coverages: list[float] = []
+    abs_coverages: list[int] = []
+    for mid, origin_id in ch_origin.items():
+        recipients = ch_recipients.get(mid, set())
+        ol = layer_of.get(origin_id, 0)
+        max_possible = max(1, layer_size.get(ol, 1) - 1)
+        n_same_layer = sum(1 for r in recipients if layer_of.get(r, -1) == ol)
+        coverages.append(n_same_layer / max_possible)
+        abs_coverages.append(n_same_layer)
+
     print("\n=== headline ===")
-    print(f"  delivered: {delivered}/{sent} = {100*delivered/sent:.0f}%" if sent else f"  delivered: {delivered}")
+
+    # DM line
+    if dm_sent_count:
+        print(f"  DM delivered:       {dm_delivered_count}/{dm_sent_count} = "
+              f"{100*dm_delivered_count/dm_sent_count:.0f}%")
+        if len(dm_sent_by_class) > 1:
+            class_parts = ", ".join(f"{k}={v}" for k, v in dm_sent_by_class.most_common())
+            print(f"    by send-class:    {class_parts}")
+    else:
+        print(f"  DM delivered:       (no DM commands in window)")
+
+    # Channel line
+    if ch_post_count:
+        avg_coverage = sum(coverages) / len(coverages) if coverages else 0.0
+        avg_abs      = sum(abs_coverages) / len(abs_coverages) if abs_coverages else 0.0
+        zero_reach   = sum(1 for x in abs_coverages if x == 0)
+        print(f"  Channel posts:      {ch_post_count} (across {len({layer_of.get(o,0) for o in ch_origin.values()})} layers)")
+        print(f"    avg reach:        {avg_abs:.1f} same-layer recipients/post = "
+              f"{100*avg_coverage:.0f}% of max-possible")
+        if zero_reach:
+            print(f"    zero-reach posts: {zero_reach}/{len(abs_coverages)} "
+                  f"(originator-only, no other node got it)")
+    else:
+        print(f"  Channel posts:      (none in window)")
+
+    # Airtime efficiency line (unchanged semantic)
     total = ctrl["total_air_ms"]
     data = ctrl["air_by_class"].get("data", 0)
     if total:
