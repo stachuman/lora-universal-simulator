@@ -1022,30 +1022,46 @@ v1 pull mechanism. With many candidates behind a single BCN digest,
 pull amplification was 28× (8486 pulls for 300 originated messages),
 peak bursts hit 44 pulls in 4 s with 139 RX collisions in that
 window, and one extreme channel message took 14366 s (~4 h) to
-fully propagate. Three pathologies + their fixes:
+fully propagate. Five pathologies + their fixes:
 
-| Pathology | Fix | Commit |
-|---|---|---|
-| **Synchronized pulls**: all N candidates fired Q frames within the original 500 ms jitter window before any could overhear the first M-response. Promiscuous-overhear cancellation literally never fired (0 events in 24 h combined simulation). | (a) On receiving a peer's `Q_CHANNEL_PULL` for an ID I have pending, clear my pending and emit `channel_pull_suppressed{overheard_from="peer_q"}`. Narrows the cancellation race window from "M-frame arrival" (~150-300 ms) to "Q-frame decode" (~10-30 ms). (b) Widen `channel_pull_jitter_ms` 500 → 5000 ms to give peer-Q cancellation time to work. | `30cc9d9` |
-| **Permanent advertisers**: the channel-entry `dirty` bit was never cleared. Every node that received a message advertised it in BCN forever. After the dedupe fix funneled round-1 pulls to a small set of "winners", those winners accumulated 30+ M-frame service obligations each, saturating their 1% duty cycle and starving DM forwarding. | After K=3 BCN advertisements of the same dirty entry, retire it from advertising (clear dirty). The entry stays in the buffer to respond to incoming pulls; other holders (who acquired the msg during the K=3 window) carry the gossip wave forward. K=3 chosen by sweep on s12 (K=2 over-cascades, K≥5 leaves load on early holders too long). | `f3971ac` |
-| **Indefinite defer-retry on saturated routes**: when all K=3 alternates were duty-saturated and silent on CTS, the message deferred with reason `all_candidates_silent`. The drain loop's defer-TTL was gated on `rt[dst] == nil` — so as long as ANY route entry existed (even to a silent peer), the TTL never fired. One s12 message saw 477 deferrals over 5.7 h. | Check TTL FIRST in the drain loop, unconditionally. If `(now - queued_at_ms) >= send_defer_ttl_ms`, give up regardless of route presence. | `23b8978` |
+| # | Pathology | Fix | Commit |
+|---|---|---|---|
+| 1 | **Synchronized pulls**: all N candidates fired Q frames within the original 500 ms jitter window before any could overhear the first M-response. Promiscuous-overhear cancellation literally never fired (0 events in 24 h combined simulation). | (a) On receiving a peer's `Q_CHANNEL_PULL` for an ID I have pending, clear my pending and emit `channel_pull_suppressed{overheard_from="peer_q"}`. Narrows the cancellation race window from "M-frame arrival" (~150-300 ms) to "Q-frame decode" (~10-30 ms). (b) Widen `channel_pull_jitter_ms` 500 → 5000 ms to give peer-Q cancellation time to work. | `30cc9d9` |
+| 2 | **Permanent advertisers**: the channel-entry `dirty` bit was never cleared. Every node that received a message advertised it in BCN forever. After the dedupe fix funneled round-1 pulls to a small set of "winners", those winners accumulated 30+ M-frame service obligations each, saturating their 1% duty cycle and starving DM forwarding. | After K=3 BCN advertisements of the same dirty entry, retire it from advertising (clear dirty). The entry stays in the buffer to respond to incoming pulls; other holders (who acquired the msg during the K=3 window) carry the gossip wave forward. K=3 chosen by sweep on s12 (K=2 over-cascades, K≥5 leaves load on early holders too long). | `f3971ac` |
+| 3 | **Indefinite defer-retry on saturated routes**: when all K=3 alternates were duty-saturated and silent on CTS, the message deferred with reason `all_candidates_silent`. The drain loop's defer-TTL was gated on `rt[dst] == nil` — so as long as ANY route entry existed (even to a silent peer), the TTL never fired. One s12 message saw 477 deferrals over 5.7 h. | Check TTL FIRST in the drain loop, unconditionally. If `(now - queued_at_ms) >= send_defer_ttl_ms`, give up regardless of route presence. | `23b8978` |
+| 4 | **SF-mismatch dead-overhear**: the design's "M-payload is promiscuously overheard by every node in radio range" (PROTOCOL.md §3.4.1) was a dead promise. M-payload DATA was emitted at the chosen data SF (e.g. SF7) while non-target peers stayed on routing SF (e.g. SF8) listening for BCN/control. They dropped the DATA with `drop_sf_mismatch`. **0 `channel_msg_overheard` events** across 24 h combined simulation. | Restrict M-payload's outgoing RTS to `sf_bitmap = {routing_sf}` only. The receiver's `select_data_sf()` then has exactly one choice; the DATA frame ships at routing SF where all in-range peers are already tuned. Cost: ~2× per-frame airtime (SF8 ≈ 325 ms vs SF7 ≈ 180 ms for 200 B). Benefit: one broadcast satisfies N hearers instead of N unicasts. | `f6b5164` (PART 1, the "2A" change) |
+| 5 | **Cross-layer leak via gateway forwarding**: pathology #4's fix exposed a structural hazard. When a node's `rt[dst]` happens to point through a multi-layer gateway for an intra-layer M-payload, the gateway's forwarded TX at routing SF is heard by BOTH layers whose nodes share that SF — Principle 11 violation. s12 6h with #4 alone leaked 482 cross-layer receptions across 19 messages. | When an addressed forwarder is a gateway AND the DATA frame is M-payload, ACK upstream (so they don't retry) then DROP — do not forward. Pull-requester misses this delivery; cascade fills it in via the next BCN/pull cycle (eventually-consistent, by design). Same-layer M-payload is unaffected because gateways are never on a same-layer intra-mesh route. Emits `channel_gateway_drop`. | `f6b5164` (PART 2) |
 
 s12 6h with full fix chain vs pre-fix baseline:
 
-| Metric | Pre-fix | Full fix chain |
-|---|---|---|
-| DM delivered | 34% (230) | 31% (211) |
-| Channel pull amplification | 28.29× | 12.29× |
-| Peak burst pulls | 44 in 4.3 s | 21 in 4.8 s |
-| Burst rx_collisions | 139 | 25 |
-| Channel coverage mean | 2.3 | 3.0 |
-| Pulls suppressed | 0 | 877 |
-| Slowest propagation | 14366 s | 10225 s |
+| Metric | Pre-fix | After #1-#3 | After #1-#5 |
+|---|---|---|---|
+| DM delivered | 34% (230) | 31% (211) | **44% (304)** |
+| Channel pull amplification | 28.29× | 12.29× | ~5× |
+| Peak burst pulls | 44 in 4.3 s | 21 in 4.8 s | 21 in 4.8 s |
+| Burst rx_collisions | 139 | 25 | 25 |
+| Channel coverage mean (recipients/msg) | 2.3 | 3.0 | **9.9** |
+| `channel_msg_overheard` events | 0 | 0 | **2191** |
+| Pulls suppressed | 0 | 877 | ~1200 |
+| Principle 11 cross-layer | 0 | 0 | 0 ✓ |
+| Slowest propagation | 14366 s | 10225 s | ~16991 s |
+| Duty max | ~85% | 89.9% | **81.2%** |
+| `channel_gateway_drop` events | — | — | 43 |
 
-The 3-point DM gap from baseline is acceptable v1 cost. The
-defer-TTL fix is a **latent bug fix** — would have helped any
-scenario where routes existed but were transiently unusable, just
-rarely triggered before Fix 1+2+4 pumped traffic onto popular relays.
+The full fix chain (#1-#5) lands at **44% DM delivery, exceeding
+the pre-fix baseline of 34% for the first time**, while finally
+making promiscuous-overhear functional (2191 events vs 0). The
+remaining open item is the slowest-propagation outlier (~16991 s),
+which reflects how long it takes a message to reach the
+LAST candidate via cascade when the early pulls' M-frames were
+dropped at a gateway boundary. Acceptable: median propagation
+is ~7 minutes and coverage saturates well before the long tail.
+
+The defer-TTL fix (#3) is a **latent bug fix** — would have helped
+any scenario where routes existed but were transiently unusable,
+just rarely triggered before #1+#2 pumped traffic onto popular
+relays. The gateway no-forward fix (#5) only matters when #4 is
+in effect (it exists to plug the leak that #4 introduces).
 
 **Regression sensor:** `scenarios/s13_channel_pull_storm.json`
 (commit `581592a`). 12-node fully-meshed cluster, 5 min runtime,

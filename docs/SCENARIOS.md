@@ -60,6 +60,9 @@ note calls it out.
 | 6.4 | Gateway sweep cycle (mechanism) | offset → activate upper-layer → emit BCN there → return after duration → re-arm |
 | 6.5 | Cross-layer envelope handoff (mechanism) | sender packs envelope → gateway resolves binding (or defers and emits `Q:HASH_QUERY` if unknown) → retunes via `tx_layer_id` → forwards in target layer |
 | 6.6 | Layer-15 active-avoidance (mechanism) | non-gateway peer defers RTS while a direct gateway is scheduled away |
+| 7.1 | Channel gossip — pull cycle (mechanism) | BCN digest → Q_CHANNEL_PULL → DATA(PAYLOAD_TYPE_M) at routing SF → promiscuous overhear by all in-range peers (§3.4.1) |
+| 7.2 | Channel gossip — pull-storm dedupe (mechanism) | peer-Q overhear cancels pending pulls; K=3 BCN ads then dirty bit retires the holder. See ROADMAP §3.3 for the full pathology+fix table |
+| 7.3 | Channel gossip — Principle 11 gateway guard (mechanism) | gateway addressed as forwarder for M-payload: ACK upstream, DROP forward (cascade rule fills missed delivery). Emits `channel_gateway_drop` |
 
 ---
 
@@ -2089,11 +2092,110 @@ A retry that would land inside the sweep window gets deferred with
 
 ---
 
+# 7. Channel plane (gossip)
+
+ROADMAP §3 lays out the full design rationale and §3.3 documents the
+pull-storm hardening fix chain. This section captures the at-a-glance
+walk-throughs for cross-reference.
+
+## 7.1 Channel gossip — pull cycle (mechanism)
+
+```
+holder       puller       overhearer (in radio range of holder)
+  │ ┐ self_originate channel msg X → buffer[X].dirty=true
+  │ ┤
+  │ ┘
+  │ B ──────────────────────────────► (BCN with CHANNEL_DIGEST{X})
+  │                  │ process_channel_digest(B):
+  │                  │  buffer[X] absent → schedule pull
+  │                  │  in [0, channel_pull_jitter_ms]
+  │                  │
+  │ ◄──────── R ──── │  (Q_CHANNEL_PULL RTS at routing_sf)
+  │ ── C ──────────► │  (CTS, chosen_data_sf = routing_sf;
+  │                  │   sf_bitmap was restricted to {routing_sf}
+  │                  │   because flags & PAYLOAD_TYPE_M)
+  │ ◄──────── Q ──── │  (Q frame: requested IDs)
+  │ ── K ──────────► │  (hop ACK at routing_sf)
+  │
+  │ Q-handler: have buffer[X] → enqueue M-payload DATA frame
+  │  with dst=puller, flags |= PAYLOAD_TYPE_M
+  │
+  │ ── R ──────────► │  (RTS for M-payload at routing_sf)
+  │ ◄──────── C ──── │  (CTS, chosen_data_sf = routing_sf)
+  │ ── D ──────────► │  (DATA at routing_sf — the key change in
+  │ ── D ───────────────► overhearer
+  │                  │   commit f6b5164. Pre-fix this went on
+  │                  │   data_sf and overhearers dropped with
+  │                  │   drop_sf_mismatch.)
+  │                                    │ on_recv 'D' + payload_type_m:
+  │                                    │  buffer[X] absent → add, source=overheard
+  │                                    │  emit channel_msg_overheard
+  │                                    │  channel_pull_pending[X] = nil
+  │                                    │  emit channel_pull_suppressed
+  │                                    │  if d.next != self.id then return
+  │                  │ on_recv 'D':
+  │                  │   buffer[X] absent → add, source=pull_target
+  │                  │   ACK back to holder
+  │ ◄──────── K ──── │
+```
+
+t65/t66/t67/t68/t69 are the dedicated regression tests.
+
+## 7.2 Channel gossip — pull-storm dedupe (mechanism)
+
+Three layered dedupe paths fire on different timescales:
+
+| Path | When it fires | Effect |
+|---|---|---|
+| **peer-Q overhear** (commit `30cc9d9`) | Within ~30 ms of seeing a peer's Q_CHANNEL_PULL for an ID I have pending | Cancel my pending, emit `channel_pull_suppressed{overheard_from="peer_q"}`. Earliest dedupe — fires before most peer jitters expire. |
+| **M-payload promiscuous overhear** (commit `f6b5164`, requires M at routing SF) | When the holder responds with the M-frame; any in-range peer with a pending pull cancels it | Cancel my pending, emit `channel_pull_suppressed{overheard_from=<holder>}`. Catches anyone who missed the peer-Q (decode collision, etc.). |
+| **`channel_pull_recent` window** (always was there) | After I send a Q, won't pull the same ID for `channel_pull_window_ms` (5 s) | Prevents pull retries when my own Q is in flight |
+
+Holder side: after `channel_dirty_max_advertisements` (K=3) BCN cycles
+including the entry, the dirty bit retires (commit `f3971ac`). Other
+holders that acquired the msg in that window have their own dirty bit
+and carry the gossip forward — a wave of advertisers, not a permanent
+few. See ROADMAP §3.3 pathology #2 for the failure mode this prevents.
+
+## 7.3 Channel gossip — Principle 11 gateway guard (mechanism)
+
+```
+L1_holder         gateway (multi-layer)         L1_other_node       L2_other_node
+  │
+  │ DATA-M(dst=L2_puller, next=gateway) ────►│   (gateway is on the route to L2_puller)
+  │                                            │
+  │ ◄──────── K (ACK) ─────────────────────────│   (gateway ACKs — upstream done)
+  │                                            │
+  │                                            │  Gateway's M-handler:
+  │                                            │   d.payload_type_m + self.self_gateway
+  │                                            │   AND d.next == self.id:
+  │                                            │   → emit channel_gateway_drop
+  │                                            │   → become_free, NO forward
+  │                                            │
+  │                                            │  Result: no cross-layer TX from
+  │                                            │  gateway. L1 nodes don't overhear
+  │                                            │  an L2 message; L2 nodes do not
+  │                                            │  receive this delivery via the
+  │                                            │  gateway path. The pull-requester
+  │                                            │  (L2_puller) re-pulls in the next
+  │                                            │  BCN cycle (eventually-consistent
+  │                                            │  by design).
+```
+
+The drop only applies when `self.self_gateway` AND the inbound frame is
+PAYLOAD_TYPE_M. Same-layer M-payload from L1 holder to L1 puller never
+hits this branch because non-gateway forwarders aren't subject to it.
+Cross-layer DM (the actual purpose of gateways) is unaffected — DM
+frames don't carry PAYLOAD_TYPE_M and use the gateway envelope path
+(§6.5).
+
+---
+
 # Implementation status reference
 
 Cross-reference of mechanisms each scenario depends on:
 
-| Mechanism | Status (2026-05-17) | Used by |
+| Mechanism | Status (2026-05-20) | Used by |
 |---|---|---|
 | BCN periodic / triggered emission, throttle gate, aging loop | Implemented | 1.1, 1.2, 1.3, 1.4 |
 | BCN `key_hash32` mandatory in every header (bytes 4-7) | **Implemented** (newly) | 1.1, 5.7 (detection mechanism) |
@@ -2139,6 +2241,15 @@ Cross-reference of mechanisms each scenario depends on:
 | Original-origin propagation through gateway handoff | **Not implemented** | 6.5 |
 | Envelope dedup at gateway (replay protection) | Implemented via standard DATA dedup before envelope handling | 6.5 |
 | Retry across alternate gateways on `gateway_no_binding` | **Not implemented** | 6.3, 6.5 |
+| BCN_EXT_TYPE_CHANNEL_DIGEST emit + parse | Implemented | 7.1, 7.2 |
+| Q_OP_CHANNEL_PULL + scheduled-pull-with-jitter | Implemented | 7.1 |
+| PAYLOAD_TYPE_M DATA frame + promiscuous overhear | Implemented (working since `f6b5164`: M-payload forced to routing SF) | 7.1, 7.2 |
+| peer-Q pull cancellation | Implemented (`30cc9d9`) | 7.2 |
+| K=3 dirty-advertisement cap | Implemented (`f3971ac`) | 7.2 |
+| Defer-TTL fires regardless of route presence | Implemented (`23b8978`) | drain loop (affects DM + channel) |
+| Gateway no-forward of PAYLOAD_TYPE_M | Implemented (`f6b5164`, Principle 11 guard under 2A) | 7.3 |
+| Group/private channel crypto (PSK+MAC, Ed25519 sig) | **Not implemented** | — |
+| Cross-leaf channel bridging at gateways | **Not implemented** (parked, ROADMAP §3.1) | — |
 
 # Pointers
 

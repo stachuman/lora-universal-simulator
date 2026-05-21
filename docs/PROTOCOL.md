@@ -429,6 +429,28 @@ regardless of `to=`. This **promiscuous reception** is the gossip
 mechanism's core efficiency: one pull-response exchange benefits up to N
 overhearing neighbours.
 
+**Routing SF for M-payload (operational since 2026-05-20).** Unlike normal
+DATA frames (which ride the chosen data SF for higher throughput), an
+M-payload DATA frame is forced to the **routing SF** by restricting the
+outgoing RTS's `sf_bitmap` to `{routing_sf}`. This is what makes
+promiscuous reception actually fire: non-target peers stay on routing SF
+listening for BCN/control, so they decode the M-payload too. Pre-fix the
+DATA frame went on the data SF and overhearers dropped it with
+`drop_sf_mismatch` (0 overheard events across 24 h combined simulation).
+Cost: ~2× per-frame airtime (SF8 ≈ 325 ms vs SF7 ≈ 180 ms for 200 B).
+Benefit: one broadcast satisfies N hearers instead of N unicasts —
+massive net savings in dense clusters. See ROADMAP §3.3 pathology #4.
+
+**Gateways do not forward M-payload (Principle 11 guard).** Because
+M-payload now rides routing SF, a multi-layer gateway forwarding an
+intra-layer M-frame would have its TX heard by BOTH layers whose nodes
+share that SF — a cross-layer leak. The forwarder code path therefore
+short-circuits: when an addressed forwarder is a gateway and the DATA
+flag has `PAYLOAD_TYPE_M`, ACK upstream (so they don't retry) and DROP
+the forward. The pull-requester misses this delivery; cascade fills it
+in via the next BCN cycle. Emits `channel_gateway_drop`. See ROADMAP §3.3
+pathology #5.
+
 Forwarders carry M frames at the **lowest tx_queue priority** — they
 yield to normal DM, hop-level control, and PRIORITY traffic. Channels
 are eventually-consistent best-effort; if a frame is dropped at the
@@ -2387,6 +2409,7 @@ expectations) subscribe by event_type.
 | `channel_pull_received` | Inbound `Q_CHANNEL_PULL`; will trigger one or more `channel_msg_pulled` responses | `from`, `ids[]` |
 | `channel_pull_suppressed` | A scheduled pull was cancelled. Three trigger paths (distinguished by `overheard_from`): `promiscuous_receive` — the M-payload arrived via overhear before our jitter fired; `peer_q` — we decoded a peer's `Q_CHANNEL_PULL` for the same ID (ROADMAP §3.3, dedupe path that fires at peer-Q decode time instead of M-frame arrival time); `<src>` — early M-handler overhear from a specific neighbour | `ids[]`, `overheard_from`, optionally `peer` (when `overheard_from=peer_q`) |
 | `channel_dirty_cleared` | Channel-buffer entry retired from advertising after `channel_dirty_max_advertisements` BCN inclusions. Entry stays in the buffer (still responds to pulls) but is no longer included in the dirty-page of outgoing BCN digests. Bounds per-holder M-frame load (ROADMAP §3.3) | `id`, `channel_id`, `ad_count`, `threshold` |
+| `channel_gateway_drop` | Gateway received a PAYLOAD_TYPE_M DATA frame as an addressed forwarder; ACKed upstream but did NOT forward — Principle 11 guard (M-payload at routing SF would otherwise leak across layers via gateway's broadcast TX). Cascade fills in the missed delivery. ROADMAP §3.3 pathology #5 | `origin`, `dst`, `ctr`, `reason` (e.g. `principle_11_no_cross_layer_M`) |
 | `channel_digest_emitted` | Our outgoing BCN included a `BCN_EXT_TYPE_CHANNEL_DIGEST` extension with N dirty IDs | `dirty_ids[]`, `total_buffer_size` |
 | `priority_send_capped` | Originator hit `originator_priority_max_per_window` — own PRIORITY send dropped silently. UX hint for "wait before next priority send" | `dst`, `dst_name`, `window_ms`, `cap`, `current_count` |
 | `rts_drop_originator_priority_throttle` | 1st-hop neighbour detected a direct sender exceeding the per-hour priority cap; silently dropped the RTS | `from`, `ctr_lo`, `apparent_origination`, `window_ms`, `cap` |
