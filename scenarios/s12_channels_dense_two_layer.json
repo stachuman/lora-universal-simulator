@@ -1,6 +1,6 @@
 {
   "_name": "s12_channels_dense_two_layer",
-  "_desc": "Realistic stress test for gossip channels (ROADMAP S3 Package A). Derived from s07_seattle_mobile_realistic: dropped 3 mobiles, kept the 33 stationary Seattle nodes + their explicit static-static topology (224 directed links with realistic SNRs). Added a separate 25-node Layer-2 cluster with synthesized chain-topology links (4 neighbours/node, uniform 22 dB SNR). Capitol_Hill_Prime acts as the L1<->L2 gateway with explicit links to 5 L2 entry-point nodes. Total: 33 L1 + 25 L2 = 58 nodes; 384 topology links. Duration: 6 h simulated. 5 channel posters (3 L1 + 2 L2) on channel 7 every ~5 min. Intra-layer DM at one per node per ~30 min. Per Principle 11, channels are local \u2014 L1 messages do NOT reach L2 and vice versa. state_snapshot_period_ms widened to 5 min. Debug window enabled for 213:10-213:40 around slow channel propagation. PRIORITY INJECTION: 68 of 684 `send` commands converted to `send_priority` (seed=12) \u2014 tests priority queue precedence + 5/hour cap interaction under storm.",
+  "_desc": "Realistic stress test for gossip channels (ROADMAP S3 Package A). Derived from s07_seattle_mobile_realistic: dropped 3 mobiles, kept the 33 stationary Seattle nodes + their explicit static-static topology (224 directed links with realistic SNRs). Added a separate 25-node Layer-2 cluster with synthesized chain-topology links (4 neighbours/node, uniform 22 dB SNR). Capitol_Hill_Prime acts as the L1<->L2 gateway with explicit links to 5 L2 entry-point nodes. Total: 33 L1 + 25 L2 = 58 nodes; 384 topology links. Duration: 6 h simulated. 5 channel posters (3 L1 + 2 L2) on channel 7 every ~5 min. Intra-layer DM at one per node per ~30 min. Per Principle 11, channels are local \u2014 L1 messages do NOT reach L2 and vice versa. state_snapshot_period_ms widened to 5 min. Debug window enabled for 213:10-213:40 around slow channel propagation. PRIORITY INJECTION: 68 of 684 `send` commands converted to `send_priority` (seed=12) \u2014 tests priority queue precedence + 5/hour cap interaction under storm. ABUSE INJECTION: 20 send_priority from Cafe\u2192Fremont01_KF7EGZ_Sol at 90s intervals starting at t=300000ms. Tests originator_priority_max_per_window=5/h cap and 1st-hop throttle response.",
   "config": {
     "debug_start_ms": 12790000,
     "debug_end_ms": 12820000
@@ -333,6 +333,16 @@
       "command": "send_channel 7 Stevens-msg0"
     },
     {
+      "at_ms": 300000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-0"
+    },
+    {
+      "at_ms": 390000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-1"
+    },
+    {
       "at_ms": 443662,
       "node": "Cafe",
       "command": "send_channel 7 Cafe-msg1"
@@ -341,6 +351,11 @@
       "at_ms": 468238,
       "node": "L2_node_06",
       "command": "send_channel 7 L2_node_06-msg1"
+    },
+    {
+      "at_ms": 480000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-2"
     },
     {
       "at_ms": 506762,
@@ -358,9 +373,24 @@
       "command": "send_channel 7 L2_node_01-msg1"
     },
     {
+      "at_ms": 570000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-3"
+    },
+    {
+      "at_ms": 660000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-4"
+    },
+    {
       "at_ms": 703083,
       "node": "Cafe",
       "command": "send_channel 7 Cafe-msg2"
+    },
+    {
+      "at_ms": 750000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-5"
     },
     {
       "at_ms": 771626,
@@ -383,9 +413,24 @@
       "command": "send_channel 7 Stevens-msg2"
     },
     {
+      "at_ms": 840000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-6"
+    },
+    {
+      "at_ms": 930000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-7"
+    },
+    {
       "at_ms": 994889,
       "node": "Cafe",
       "command": "send_channel 7 Cafe-msg3"
+    },
+    {
+      "at_ms": 1020000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-8"
     },
     {
       "at_ms": 1075270,
@@ -398,6 +443,11 @@
       "command": "send_channel 7 L2_node_06-msg3"
     },
     {
+      "at_ms": 1110000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-9"
+    },
+    {
       "at_ms": 1120981,
       "node": "Stevens",
       "command": "send_channel 7 Stevens-msg3"
@@ -408,9 +458,24 @@
       "command": "send_channel 7 L2_node_01-msg3"
     },
     {
+      "at_ms": 1200000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-10"
+    },
+    {
+      "at_ms": 1290000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-11"
+    },
+    {
       "at_ms": 1323654,
       "node": "Cafe",
       "command": "send_channel 7 Cafe-msg4"
+    },
+    {
+      "at_ms": 1380000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-12"
     },
     {
       "at_ms": 1383762,
@@ -433,9 +498,24 @@
       "command": "send_channel 7 Stevens-msg4"
     },
     {
+      "at_ms": 1470000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-13"
+    },
+    {
+      "at_ms": 1560000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-14"
+    },
+    {
       "at_ms": 1635019,
       "node": "Cafe",
       "command": "send_channel 7 Cafe-msg5"
+    },
+    {
+      "at_ms": 1650000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-15"
     },
     {
       "at_ms": 1670309,
@@ -446,6 +526,11 @@
       "at_ms": 1691958,
       "node": "L2_node_06",
       "command": "send_channel 7 L2_node_06-msg5"
+    },
+    {
+      "at_ms": 1740000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-16"
     },
     {
       "at_ms": 1745969,
@@ -566,6 +651,11 @@
       "at_ms": 1829032,
       "node": "L2_node_19",
       "command": "send L2_node_22 dm-L2_node_19-1"
+    },
+    {
+      "at_ms": 1830000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-17"
     },
     {
       "at_ms": 1834721,
@@ -743,6 +833,11 @@
       "command": "send DMASpaceMesh dm-Martin_Room-1"
     },
     {
+      "at_ms": 1920000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-18"
+    },
+    {
       "at_ms": 1943690,
       "node": "Cafe",
       "command": "send_channel 7 Cafe-msg6"
@@ -756,6 +851,11 @@
       "at_ms": 1995611,
       "node": "L2_node_06",
       "command": "send_channel 7 L2_node_06-msg6"
+    },
+    {
+      "at_ms": 2010000,
+      "node": "Cafe",
+      "command": "send_priority Fremont01_KF7EGZ_Sol abuse-msg-19"
     },
     {
       "at_ms": 2033867,
@@ -4950,9 +5050,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -4967,9 +5066,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -4984,9 +5082,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5001,9 +5098,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5018,9 +5114,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5035,9 +5130,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5052,9 +5146,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5069,9 +5162,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5086,9 +5178,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5103,9 +5194,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5120,9 +5210,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "is_gateway": true,
@@ -5152,9 +5241,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5169,9 +5257,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5186,9 +5273,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5203,9 +5289,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5220,9 +5305,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5237,9 +5321,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5254,9 +5337,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5271,9 +5353,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5288,9 +5369,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5305,9 +5385,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5322,9 +5401,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5339,9 +5417,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5356,9 +5433,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5373,9 +5449,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5390,9 +5465,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5407,9 +5481,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5424,9 +5497,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5441,9 +5513,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5458,9 +5529,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5475,9 +5545,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5492,9 +5561,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5509,9 +5577,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 1,
         "state_snapshot_period_ms": 300000
@@ -5526,9 +5593,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5541,9 +5607,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5556,9 +5621,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5571,9 +5635,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5586,9 +5649,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5601,9 +5663,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5616,9 +5677,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5631,9 +5691,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5646,9 +5705,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5661,9 +5719,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5676,9 +5733,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5691,9 +5747,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5706,9 +5761,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5721,9 +5775,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5736,9 +5789,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5751,9 +5803,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5766,9 +5817,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5781,9 +5831,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5796,9 +5845,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5811,9 +5859,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5826,9 +5873,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5841,9 +5887,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5856,9 +5901,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5871,9 +5915,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
@@ -5886,9 +5929,8 @@
       "config": {
         "routing_sf": 8,
         "allowed_data_sfs": [
-          7,
-          9,
-          10
+          6,
+          9
         ],
         "layer_id": 2,
         "state_snapshot_period_ms": 300000
