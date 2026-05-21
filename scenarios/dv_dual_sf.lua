@@ -974,9 +974,14 @@ PROTOCOL = {
   -- BCN extension TLV body cap is 15 bytes (4-bit length field). With
   -- 1-byte count + 4-byte IDs that's max 3 IDs per BCN digest.
   channel_dirty_max_per_bcn     = 3,
-  -- Pull rate-limit: ignore same-ID pull requests within this window
-  -- (avoids requesting from multiple neighbours simultaneously).
-  channel_pull_window_ms        = 5000,
+  -- Pull rate-limit at requester: after sending a pull for an id, don't
+  -- re-pull the same id for this window. Pairs with the holder-side
+  -- broadcast-dedup (Q handler): if the holder's broadcast collides or
+  -- we miss it (half-duplex blind), recovery happens via the NEXT BCN
+  -- digest cycle (~30 s) — and the window prevents the same node from
+  -- flooding pulls in the meantime. Was 5000 ms; widened to 60000 ms
+  -- (2 BCN cycles) so the natural cascade timing matches.
+  channel_pull_window_ms        = 60000,
   -- Random delay before sending a scheduled pull. With N candidates
   -- behind the same BCN digest the only way the herd avoids a collision
   -- storm is by having enough time for ONE of them to fire first and
@@ -1659,10 +1664,16 @@ end
 --   byte 5 : ctr_lo(4 hi) | rsv(4 lo)
 --   byte 6 : sf_bitmap (8)
 --   byte 7 : payload_len (8)
-local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len)
+-- RTS byte 6 layout: [ctr_lo(4) | flags(4)]. The low nibble was reserved
+-- pre-2B. RTS_FLAG_M_BROADCAST tells non-target receivers "this DATA is
+-- M-payload — arm an overhear retune to the receiver-picked chosen_data_sf".
+-- ROADMAP §3.3 pathology #4, the "2B" approach.
+RTS_FLAG_M_BROADCAST = 0x01
+
+local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len, rts_flags)
   local addr_len = 0
   local b3 = ((addr_len & 0x07) << 5) | (leaf_id & 0x0f)
-  local b5 = (ctr_lo & 0x0f) << 4
+  local b5 = ((ctr_lo & 0x0f) << 4) | ((rts_flags or 0) & 0x0f)
   return "R" .. string.char(src)
               .. string.char(next_hop)
               .. string.char(b3)
@@ -1680,13 +1691,15 @@ local function parse_rts(frame)
   local leaf_id = b3 & 0x0f
   local b5 = frame:byte(6)
   return {
-    leaf_id     = leaf_id,
-    src         = frame:byte(2),
-    next        = frame:byte(3),
-    dst         = frame:byte(5),
-    ctr_lo      = (b5 >> 4) & 0x0f,
-    sf_bitmap   = frame:byte(7),
-    payload_len = frame:byte(8),
+    leaf_id      = leaf_id,
+    src          = frame:byte(2),
+    next         = frame:byte(3),
+    dst          = frame:byte(5),
+    ctr_lo       = (b5 >> 4) & 0x0f,
+    rts_flags    = b5 & 0x0f,
+    m_broadcast  = (b5 & RTS_FLAG_M_BROADCAST) ~= 0,
+    sf_bitmap    = frame:byte(7),
+    payload_len  = frame:byte(8),
   }
 end
 
@@ -5035,8 +5048,10 @@ local function tx_rts_retry(self, reason)
     local rec = gateway_layer_record(self, px.tx_layer_id)
     if rec then activate_gateway_layer(self, rec, "tx_retry") end
   end
+  local _rts_flags = (((px.flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0) and RTS_FLAG_M_BROADCAST or 0
   local rts = pack_rts(px.tx_leaf_id or active_leaf_id(self), self.id, px.dst, px.next, px.ctr_lo,
-                       px.tx_sf_bitmap or active_allowed_sf_bitmap(self), #px.payload + MAC_LEN)
+                       px.tx_sf_bitmap or active_allowed_sf_bitmap(self), #px.payload + MAC_LEN,
+                       _rts_flags)
   px.retry_reason = reason
   local attempt_seq = emit_rts_attempt_detail(self, "retry", px)
   px.retry_reason = nil
@@ -5736,6 +5751,69 @@ try_drain_deferred = function(self)
   end
 end
 
+-- 2B-broadcast DATA-tx for M-payload. Mirrors the CTS-rx → DATA-tx flow
+-- but skips the CTS wait (sender announced chosen_data_sf in the RTS's
+-- M_BROADCAST encoding) and the ACK wait (broadcast is fire-and-forget;
+-- failures recover via the next BCN-digest cascade, eventually-
+-- consistent). Receivers retune to chosen_data_sf when they see the
+-- M_BROADCAST RTS — no CTS needed to communicate the SF choice.
+-- Triggered as opts.on_handed on the RTS-tx (which fires on actual TX
+-- even after duty-cycle deferral, unlike tx_initiating's after_tx).
+function start_data_tx_for_broadcast(self, px)
+  -- on_handed fires when the RTS is HANDED to the radio (start of TX),
+  -- not when it completes. We need to wait for the full RTS airtime
+  -- before TXing the DATA-M frame, otherwise the radio rejects the
+  -- DATA-tx with self_tx_in_flight. Total delay = RTS airtime +
+  -- cts_to_data_gap_ms (SF settle time, mirrors the normal CTS-rx →
+  -- DATA-tx gap).
+  local rts_sf = px.tx_routing_sf or active_routing_sf(self)
+  local rts_air = airtime_ms(rts_sf, self.bw_hz, self.cr,
+                              self.preamble_sym, RTS_LEN)
+  local gap = rts_air + (self.cts_to_data_gap_ms or 5)
+  local captured_ctr_lo = px.ctr_lo
+  self:after(gap, function()
+    if self.pending_tx == nil or self.pending_tx.ctr_lo ~= captured_ctr_lo then
+      return
+    end
+    local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0,
+                         px.payload, px.hop_budget)
+    self:emit("data_tx", {
+      origin = px.origin, payload = px.user_text, ctr = px.ctr,
+      dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
+      sf = px.chosen_data_sf, data_sf = px.chosen_data_sf,
+      tx_layer_id = px.tx_layer_id, tx_leaf_id = px.tx_leaf_id,
+      tx_routing_sf = px.tx_routing_sf or active_routing_sf(self),
+      m_broadcast = true,
+    })
+    self:log(string.format(
+      "data_tx (M-broadcast) ctr_lo=%d ctr=%d payload=%q on SF%d (no ACK expected)",
+      px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf))
+    local data_air = airtime_ms(px.chosen_data_sf, self.bw_hz, self.cr,
+                                  self.preamble_sym, #d)
+    local handed = tx_with_retry(self, d, {
+      sf    = px.chosen_data_sf,
+      label = "DATA-M",
+      info  = string.format("origin=%s m_broadcast=1 ctr=%d sf=%d payload=%q",
+        name_of(self, px.origin), px.ctr, px.chosen_data_sf, px.user_text),
+      on_handed = function()
+        self:after(data_air + 5, function()
+          if self.pending_tx ~= nil
+             and self.pending_tx.ctr_lo == captured_ctr_lo
+             and self.pending_tx.m_broadcast == true then
+            self.pending_tx = nil
+            become_free(self)
+          end
+        end)
+      end,
+    })
+    if not handed and self.pending_tx ~= nil
+       and self.pending_tx.ctr_lo == captured_ctr_lo then
+      self.pending_tx = nil
+      become_free(self)
+    end
+  end)
+end
+
 -- payload here is the inner bytes (src_addr_len | src_addr | body) that go into the
 -- DATA frame's ciphertext slot. user_text is what the user / visualizer sees in
 -- emit data. ctr is the full 16-bit per-(origin,dst) outbound counter (set at
@@ -5990,18 +6068,27 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     tx_routing_sf = tx_layer_rec and tx_layer_rec.routing_sf or active_routing_sf(self)
     tx_sf_bitmap = tx_layer_rec and tx_layer_rec.allowed_sf_bitmap or active_allowed_sf_bitmap(self)
   end
-  -- M-payload (channel gossip) is restricted to the routing SF so peers
-  -- already tuned there can promiscuously overhear the DATA frame.
-  -- The dual-SF protocol's normal data SF is faster per frame, but
-  -- non-target peers stay on routing SF and drop the DATA with
-  -- drop_sf_mismatch — the design's "one M-frame benefits N hearers"
-  -- promise (PROTOCOL.md §3.4.1) can't fire without this constraint.
-  -- We trade ~2× per-frame airtime (SF8 vs SF7) for ~N× fewer M-frames
-  -- in dense clusters: one broadcast benefits N hearers instead of N
-  -- unicasts. Eventually consistent + slower-but-amortized is the
-  -- correct shape for channel traffic. See ROADMAP §3.3.
-  if ((flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0 then
-    tx_sf_bitmap = sf_set_to_bitmap({tx_routing_sf})
+  -- M-payload (channel gossip): broadcast variant. The RTS carries an
+  -- M_BROADCAST flag PLUS the chosen_data_sf encoded in sf_bitmap (only
+  -- one bit set = the SF the DATA will use). No CTS is expected — the
+  -- sender announces, all in-range peers retune to chosen_data_sf and
+  -- listen for the DATA. No ACK is expected either — fire-and-forget;
+  -- failures recover via cascade BCN-digest re-advertisement.
+  -- chosen_data_sf = max(allowed_data_sfs) for the originator's layer
+  -- (largest = most robust = most receivers can decode). See ROADMAP
+  -- §3.3 pathology #4, the "broadcast" variant of 2B.
+  local m_broadcast = ((flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0
+  local m_chosen_data_sf = nil
+  if m_broadcast then
+    local sf_set = sf_bitmap_to_set(tx_sf_bitmap)
+    if #sf_set > 0 then
+      m_chosen_data_sf = sf_set[#sf_set]   -- list is ascending, last = max
+      tx_sf_bitmap = sf_set_to_bitmap({m_chosen_data_sf})
+    else
+      -- Empty bitmap (shouldn't happen) — fall back to routing SF
+      m_chosen_data_sf = tx_routing_sf
+      tx_sf_bitmap = sf_set_to_bitmap({m_chosen_data_sf})
+    end
   end
   if tx_on_primary_layer then
     activate_primary_layer(self, "tx")
@@ -6024,7 +6111,8 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     retries_left = effective_rts_max_retries(self,
       (queue_meta and queue_meta.requeue_count) or 0),
     alts_tried   = initial_alts_tried,
-    chosen_data_sf = nil,        -- set when CTS arrives carrying the receiver's pick
+    chosen_data_sf = m_chosen_data_sf,  -- set immediately for M-broadcast; otherwise CTS fills it in
+    m_broadcast  = m_broadcast,         -- triggers the no-CTS / no-ACK fire-and-forget DATA-tx path
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
     -- Cascade-requeue accounting: enqueue_time_ms is the original tx_queue
     -- enqueue time (preserved across requeues); requeue_count is how many
@@ -6062,8 +6150,9 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   -- Body size = #payload - 2 (stripping the 2-byte inner header from inner bytes).
   -- Equivalently: #payload + MAC_LEN (since payload already has 2-byte inner hdr).
   local payload_len = #payload + MAC_LEN
+  local rts_flags = (((flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0) and RTS_FLAG_M_BROADCAST or 0
   local rts = pack_rts(tx_leaf_id, self.id, dst_id, primary_next, mid,
-                       tx_sf_bitmap, payload_len)
+                       tx_sf_bitmap, payload_len, rts_flags)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   local attempt_seq = emit_rts_attempt_detail(self, "initial", self.pending_tx)
   self:emit("rts_tx", {
@@ -6078,13 +6167,28 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s ctr=%d (sf_bitmap=0x%02x)",
     name_of(self, primary_next), mid, name_of(self, origin), ctr,
     tx_sf_bitmap))
-  tx_initiating(self, rts, {
-    sf    = tx_routing_sf,
-    label = label,
-    info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x attempt_seq=%d payload=%q",
-      name_of(self, origin), dst_name, name_of(self, primary_next),
-      mid, ctr, tx_sf_bitmap, attempt_seq, user_text),
-  }, function() start_rts_timeout(self) end)
+  if m_broadcast then
+    local px_for_broadcast = self.pending_tx
+    -- For M-broadcast use opts.on_handed (which fires on actual TX, even
+    -- after duty-cycle deferral) instead of tx_initiating's after_tx
+    -- parameter (which is lost if the first tx_with_retry returns false).
+    tx_initiating(self, rts, {
+      sf    = tx_routing_sf,
+      label = label,
+      info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x attempt_seq=%d payload=%q m_broadcast=1",
+        name_of(self, origin), dst_name, name_of(self, primary_next),
+        mid, ctr, tx_sf_bitmap, attempt_seq, user_text),
+      on_handed = function() start_data_tx_for_broadcast(self, px_for_broadcast) end,
+    })
+  else
+    tx_initiating(self, rts, {
+      sf    = tx_routing_sf,
+      label = label,
+      info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x attempt_seq=%d payload=%q",
+        name_of(self, origin), dst_name, name_of(self, primary_next),
+        mid, ctr, tx_sf_bitmap, attempt_seq, user_text),
+    }, function() start_rts_timeout(self) end)
+  end
   -- RX stays on routing_sf — CTS and NACK both ride on routing_sf now.
 end
 
@@ -8372,6 +8476,45 @@ function on_recv(self, frame, meta)
       become_free(self)
       return
     end
+    -- 2B-broadcast: M_BROADCAST RTS announces chosen_data_sf via the
+    -- sf_bitmap byte (only one bit set). EVERY decoder of this RTS —
+    -- including the "addressed" target r.next — must retune to
+    -- chosen_data_sf for the DATA window. No CTS is expected (no
+    -- channel-reservation handshake under broadcast) so the addressed
+    -- target must NOT fall through to the normal CTS-response path.
+    -- Eligibility: not a gateway (Principle 11), currently idle. Busy
+    -- nodes silently skip — they can't retune mid-flight, and cascade
+    -- BCN-digest will re-advertise the dirty id for a later pull.
+    if r.m_broadcast then
+      if not self.self_gateway
+         and self.pending_tx == nil and self.pending_rx == nil then
+        local sf_set = sf_bitmap_to_set(r.sf_bitmap)
+        local chosen_sf = sf_set[#sf_set] or self.routing_sf
+        local data_air = airtime_ms(chosen_sf, self.bw_hz, self.cr,
+          self.preamble_sym,
+          DATA_HDR_LEN + r.payload_len + DATA_INNER_OVERHEAD)
+        local guard_ms = (self.cts_to_data_gap_ms or 5) + data_air + 50
+        self:emit("channel_overhear_armed", {
+          ctr_lo = r.ctr_lo, sender = r.src, target = r.next,
+          chosen_data_sf = chosen_sf, guard_ms = guard_ms,
+          addressed = (r.next == self.id),
+        })
+        self:set_rx_sf(chosen_sf)
+        self.overhearing_until_ms = self:now() + guard_ms
+        self:after(guard_ms, function()
+          if self.overhearing_until_ms ~= nil
+             and self:now() >= self.overhearing_until_ms - 5 then
+            self.overhearing_until_ms = nil
+            self:set_rx_sf(self.routing_sf)
+          end
+        end)
+      end
+      -- Whether or not we armed, an M_BROADCAST RTS terminates the
+      -- normal addressed-receiver flow. No CTS, no pending_rx, no ACK.
+      -- If we missed the retune window (busy/gateway), the M-frame
+      -- arrives later via cascade.
+      return
+    end
     if r.next ~= self.id then return end  -- not for us; silent discard
     self:emit("rts_receiver_state", {
       from = r.src,
@@ -9761,25 +9904,6 @@ function on_recv(self, frame, meta)
         become_free(self)
         return
       end
-      -- Principle 11 enforcement for the routing-SF M-payload (ROADMAP
-      -- §3.4.1, post-2A). With M-payload now broadcast at routing SF
-      -- so all peers can promiscuously overhear it, a gateway acting as
-      -- a forwarding hop would re-TX the M-frame on its own routing-SF
-      -- airwaves — heard by BOTH the source layer AND any other layer
-      -- whose nodes are tuned to the same SF. That's a cross-layer
-      -- channel leak. Drop here: gateway has ACK'd upstream so they
-      -- don't retry, but does NOT forward. The pull-requester misses
-      -- this delivery and re-pulls in the cascade (eventually-consistent
-      -- by design). Same-layer M-payload propagation is unaffected
-      -- because gateways are never on a same-layer intra-mesh route.
-      if self.self_gateway and (d_flags & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0 then
-        self:emit("channel_gateway_drop", {
-          origin = d_origin, dst = d_dst, ctr = d_ctr,
-          reason = "principle_11_no_cross_layer_M",
-        })
-        become_free(self)
-        return
-      end
       -- 1st-hop priority throttle (ROADMAP §3a). When forwarding a
       -- DATA frame with DATA_FLAG_PRIORITY set, count it against the
       -- direct sender's priority budget (keyed on meta.src, the
@@ -9973,28 +10097,63 @@ function on_recv(self, frame, meta)
         local entry = channel_buffer_find(self, id)
         if entry ~= nil then
           table.insert(have_ids, id)
-          -- Build M-payload-type DATA frame body. Inner layout is:
-          --   id(4B) | channel_id(1B) | flavor(1B) | body(N) | mac(4B placeholder)
-          local m_inner = channel_msg_id_to_bytes(id)
-                        .. string.char(entry.channel_id & 0xff)
-                        .. string.char(entry.flavor & 0xff)
-                        .. (entry.payload or "")
-          local return_ctr = self:next_ctr(q.src)
-          table.insert(self.tx_queue, {
-            origin       = self.id,
-            dst_id       = q.src,
-            dst_name     = name_of(self, q.src),
-            payload      = m_inner,
-            user_text    = string.format("[CH_M ch=%d id=0x%08x]",
-                                          entry.channel_id, id),
-            ctr          = return_ctr,
-            flags        = DATA_FLAG_PAYLOAD_TYPE_M,
-            enqueue_time_ms = self:now(),
-            requeue_count   = 0,
-            next_attempt_ms = 0,
-          })
+          -- Dedup: if we already have an M-payload tx in-flight (pending_tx)
+          -- OR queued (tx_queue) for this same id, skip enqueueing another.
+          -- The existing broadcast will satisfy this requester (it'll
+          -- decode the DATA on chosen_data_sf along with everyone else
+          -- in radio range). Saves the 6-7× per-msg broadcast amplification
+          -- we observed on s12 6h. Still mark seen_by — we know this
+          -- requester pulled, so they expect to get the msg via overhear.
+          local existing_in_flight = false
+          if self.pending_tx ~= nil
+             and ((self.pending_tx.flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0
+             and self.pending_tx.payload
+             and #self.pending_tx.payload >= 4
+             and channel_msg_id_from_bytes(self.pending_tx.payload, 1) == id then
+            existing_in_flight = true
+          end
+          if not existing_in_flight then
+            for _, tq in ipairs(self.tx_queue) do
+              if ((tq.flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0
+                 and tq.payload and #tq.payload >= 4
+                 and channel_msg_id_from_bytes(tq.payload, 1) == id then
+                existing_in_flight = true
+                break
+              end
+            end
+          end
+          if existing_in_flight then
+            if debug_emit_allowed(self) then
+              self:emit("channel_broadcast_deduped", {
+                id = id, requester = q.src,
+              })
+            end
+          else
+            -- Build M-payload-type DATA frame body. Inner layout is:
+            --   id(4B) | channel_id(1B) | flavor(1B) | body(N) | mac(4B placeholder)
+            local m_inner = channel_msg_id_to_bytes(id)
+                          .. string.char(entry.channel_id & 0xff)
+                          .. string.char(entry.flavor & 0xff)
+                          .. (entry.payload or "")
+            local return_ctr = self:next_ctr(q.src)
+            table.insert(self.tx_queue, {
+              origin       = self.id,
+              dst_id       = q.src,
+              dst_name     = name_of(self, q.src),
+              payload      = m_inner,
+              user_text    = string.format("[CH_M ch=%d id=0x%08x]",
+                                            entry.channel_id, id),
+              ctr          = return_ctr,
+              flags        = DATA_FLAG_PAYLOAD_TYPE_M,
+              enqueue_time_ms = self:now(),
+              requeue_count   = 0,
+              next_attempt_ms = 0,
+            })
+          end
           -- Mark requester as having received it (will be confirmed once
-          -- the M-frame is ACK'd, but we record optimistically).
+          -- the M-frame is ACK'd, but we record optimistically). Done
+          -- regardless of whether we enqueued — the existing broadcast
+          -- (if dedup fired) is for the same id.
           channel_buffer_mark_seen_by(self, id, q.src)
         else
           table.insert(missing_ids, id)
