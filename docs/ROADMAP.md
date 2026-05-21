@@ -1063,6 +1063,46 @@ just rarely triggered before #1+#2 pumped traffic onto popular
 relays. The gateway no-forward fix (#5) only matters when #4 is
 in effect (it exists to plug the leak that #4 introduces).
 
+### 3.4 Channel-post survival (2026-05-21 investigation, no fix)
+
+Headline `zero-reach posts: 132/300 (44%)` on s12 6 h flagged a
+bimodality: channel posts either reach 21+ same-layer nodes (54 %
+of posts) or reach 0 (44 %), with essentially no posts in between.
+Traced: 121 of 132 zero-reach posts had **no holder TX attempt** —
+the holder never enqueued an M-payload because no peer ever sent
+a pull for the id (109/132 = 83 % of zero-reach cases). The dirty
+digest never made it to a neighbour who could pull. Sample case:
+post at t=153 s, holder's next BCN-with-extension at t=994 s — the
+post sat un-advertised for 841 s.
+
+Root cause: `channel_dirty_max_per_bcn = 3` × 30 s BCN period is
+insufficient throughput when multiple posters share a holder's
+buffer. The newest-first picker pushes older un-K-advertised entries
+out before they reach their K=3 advertisement quota.
+
+Tested fix: extend the wire format to multi-TLV (parser already
+loops) and bump the cap. K-sweep on s12:
+
+| `channel_dirty_max_per_bcn` | DM | Channel avg reach | Zero-reach |
+|---|---|---|---|
+| **3** (current) | **60 %** | 53 % (15.0/post) | 132 |
+| 6 | 59 % | **39 %** (10.8/post) | **181** ← worse |
+| 9 | 40 % | 63 % (17.5/post) | 106 |
+
+K=6 is dominated (same DM, worse channel — bigger BCN frames are
+more collision-exposed without enough extra advertisements to
+overcome it). K=9 gets the channel win but at -20 pp DM cost. The
+airtime budget is finite; pumping more dirty IDs per BCN trades
+linearly against DM. **K=3 is the local optimum** on this
+scenario. The 44 % zero-reach is a real limitation but the
+mechanism's airtime tax doesn't make it cheap to address.
+
+Open: a smarter dirty-selection (age-weighted, not strict newest-
+first) might close some of the gap without the airtime tax —
+parked, not implemented. The multi-TLV emit path was reverted
+since K=3 doesn't need it; can be revived if a different fix
+needs >3 ids/BCN.
+
 **Regression sensor:** `scenarios/s13_channel_pull_storm.json`
 (commit `581592a`). 12-node fully-meshed cluster, 5 min runtime,
 single channel post. Pre-fix: 11 pulls/0.4 s burst with 10 collisions;
