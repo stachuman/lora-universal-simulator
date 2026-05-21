@@ -1670,17 +1670,32 @@ end
 -- ROADMAP §3.3 pathology #4, the "2B" approach.
 RTS_FLAG_M_BROADCAST = 0x01
 
-local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len, rts_flags)
+local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len, rts_flags, m_payload_id)
   local addr_len = 0
   local b3 = ((addr_len & 0x07) << 5) | (leaf_id & 0x0f)
   local b5 = ((ctr_lo & 0x0f) << 4) | ((rts_flags or 0) & 0x0f)
-  return "R" .. string.char(src)
-              .. string.char(next_hop)
-              .. string.char(b3)
-              .. string.char(dst)
-              .. string.char(b5)
-              .. string.char(sf_bitmap)
-              .. string.char(payload_len % 256)
+  local base = "R" .. string.char(src)
+                   .. string.char(next_hop)
+                   .. string.char(b3)
+                   .. string.char(dst)
+                   .. string.char(b5)
+                   .. string.char(sf_bitmap)
+                   .. string.char(payload_len % 256)
+  -- Extension: when M_BROADCAST flag is set, append the low 16 bits of
+  -- the channel msg id (2 bytes BE). Receivers use this to check their
+  -- channel buffer BEFORE retuning to chosen_data_sf — if they already
+  -- have a msg with matching id_lo16 they skip the arm entirely,
+  -- saving ~2 s of routing-SF blindness. id_lo16 collision space is
+  -- 65 k; simultaneously-active msgs in any realistic scenario are
+  -- well under that, so false-positive skips are negligible.
+  -- Worst case false positive: receiver wrongly assumes it has the
+  -- msg and skips, doesn't decode — cascade recovery via other
+  -- holders kicks in.
+  if ((rts_flags or 0) & RTS_FLAG_M_BROADCAST) ~= 0 and m_payload_id ~= nil then
+    local id_lo16 = m_payload_id & 0xFFFF
+    base = base .. string.char((id_lo16 >> 8) & 0xff) .. string.char(id_lo16 & 0xff)
+  end
+  return base
 end
 
 local function parse_rts(frame)
@@ -1690,7 +1705,7 @@ local function parse_rts(frame)
   if addr_len ~= 0 then return nil end          -- hierarchy support deferred
   local leaf_id = b3 & 0x0f
   local b5 = frame:byte(6)
-  return {
+  local out = {
     leaf_id      = leaf_id,
     src          = frame:byte(2),
     next         = frame:byte(3),
@@ -1701,6 +1716,11 @@ local function parse_rts(frame)
     sf_bitmap    = frame:byte(7),
     payload_len  = frame:byte(8),
   }
+  if out.m_broadcast and #frame >= 10 then
+    -- 2-byte id_lo16 BE
+    out.m_payload_id_lo16 = (frame:byte(9) << 8) | frame:byte(10)
+  end
+  return out
 end
 
 -- CTS — 3 bytes, addressed response:
@@ -5049,9 +5069,13 @@ local function tx_rts_retry(self, reason)
     if rec then activate_gateway_layer(self, rec, "tx_retry") end
   end
   local _rts_flags = (((px.flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0) and RTS_FLAG_M_BROADCAST or 0
+  local _m_id = nil
+  if _rts_flags ~= 0 and px.payload and #px.payload >= 4 then
+    _m_id = channel_msg_id_from_bytes(px.payload, 1)
+  end
   local rts = pack_rts(px.tx_leaf_id or active_leaf_id(self), self.id, px.dst, px.next, px.ctr_lo,
                        px.tx_sf_bitmap or active_allowed_sf_bitmap(self), #px.payload + MAC_LEN,
-                       _rts_flags)
+                       _rts_flags, _m_id)
   px.retry_reason = reason
   local attempt_seq = emit_rts_attempt_detail(self, "retry", px)
   px.retry_reason = nil
@@ -5767,8 +5791,12 @@ function start_data_tx_for_broadcast(self, px)
   -- cts_to_data_gap_ms (SF settle time, mirrors the normal CTS-rx →
   -- DATA-tx gap).
   local rts_sf = px.tx_routing_sf or active_routing_sf(self)
+  -- M_BROADCAST RTS carries 2 bytes id_lo16 extension (8 base + 2);
+  -- regular RTS is 8 bytes. Use the larger for broadcast so we don't
+  -- start DATA-M tx while RTS is still on air.
+  local rts_len_eff = RTS_LEN + 2  -- broadcast always carries id_lo16
   local rts_air = airtime_ms(rts_sf, self.bw_hz, self.cr,
-                              self.preamble_sym, RTS_LEN)
+                              self.preamble_sym, rts_len_eff)
   local gap = rts_air + (self.cts_to_data_gap_ms or 5)
   local captured_ctr_lo = px.ctr_lo
   self:after(gap, function()
@@ -6151,8 +6179,12 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   -- Equivalently: #payload + MAC_LEN (since payload already has 2-byte inner hdr).
   local payload_len = #payload + MAC_LEN
   local rts_flags = (((flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0) and RTS_FLAG_M_BROADCAST or 0
+  local m_id = nil
+  if rts_flags ~= 0 and payload and #payload >= 4 then
+    m_id = channel_msg_id_from_bytes(payload, 1)
+  end
   local rts = pack_rts(tx_leaf_id, self.id, dst_id, primary_next, mid,
-                       tx_sf_bitmap, payload_len, rts_flags)
+                       tx_sf_bitmap, payload_len, rts_flags, m_id)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   local attempt_seq = emit_rts_attempt_detail(self, "initial", self.pending_tx)
   self:emit("rts_tx", {
@@ -8486,6 +8518,25 @@ function on_recv(self, frame, meta)
     -- nodes silently skip — they can't retune mid-flight, and cascade
     -- BCN-digest will re-advertise the dirty id for a later pull.
     if r.m_broadcast then
+      -- id_lo16 pre-arm check: if the RTS announced 16 bits of the msg
+      -- id and any entry in our buffer matches, skip the arm — no
+      -- retune to data SF, no ~2 s routing-SF blindness, no decode of
+      -- a duplicate. Saves the bulk of the "already_present" overhead.
+      -- 16-bit collisions: bounded by simultaneous-active msg count
+      -- (<< 65 k), so false positives are negligible. Worst-case false
+      -- positive: receiver skips a NEW msg whose id_lo16 happens to
+      -- collide with a held entry; cascade recovers via other holders.
+      if r.m_payload_id_lo16 ~= nil and self.channel_buffer ~= nil then
+        for _, e in ipairs(self.channel_buffer) do
+          if (e.id & 0xFFFF) == r.m_payload_id_lo16 then
+            self:emit("channel_overhear_skipped_already_have", {
+              ctr_lo = r.ctr_lo, sender = r.src,
+              id_lo16 = r.m_payload_id_lo16,
+            })
+            return
+          end
+        end
+      end
       if not self.self_gateway
          and self.pending_tx == nil and self.pending_rx == nil then
         local sf_set = sf_bitmap_to_set(r.sf_bitmap)
@@ -8499,13 +8550,37 @@ function on_recv(self, frame, meta)
           chosen_data_sf = chosen_sf, guard_ms = guard_ms,
           addressed = (r.next == self.id),
         })
+        -- Track per-arm so the retune-back timer can emit a
+        -- channel_overhear_missed if the DATA-M didn't decode during
+        -- the window. Key by (sender, ctr_lo) which uniquely
+        -- identifies the broadcast attempt for this RTS.
+        self.pending_overhear_arms = self.pending_overhear_arms or {}
+        local arm_key = (r.src or 0) * 256 + (r.ctr_lo or 0)
+        self.pending_overhear_arms[arm_key] = {
+          sender = r.src, ctr_lo = r.ctr_lo, chosen_data_sf = chosen_sf,
+          armed_at = self:now(),
+        }
         self:set_rx_sf(chosen_sf)
         self.overhearing_until_ms = self:now() + guard_ms
+        local captured_arm_key = arm_key
         self:after(guard_ms, function()
           if self.overhearing_until_ms ~= nil
              and self:now() >= self.overhearing_until_ms - 5 then
             self.overhearing_until_ms = nil
             self:set_rx_sf(self.routing_sf)
+          end
+          -- Check if we actually decoded the DATA-M during the window.
+          -- The M-handler clears the arm entry on successful decode.
+          -- If still present here, the decode never happened.
+          if self.pending_overhear_arms ~= nil
+             and self.pending_overhear_arms[captured_arm_key] ~= nil then
+            local arm = self.pending_overhear_arms[captured_arm_key]
+            self.pending_overhear_arms[captured_arm_key] = nil
+            self:emit("channel_overhear_missed", {
+              sender = arm.sender, ctr_lo = arm.ctr_lo,
+              chosen_data_sf = arm.chosen_data_sf,
+              elapsed_ms = self:now() - arm.armed_at,
+            })
           end
         end)
       end
@@ -9494,7 +9569,27 @@ function on_recv(self, frame, meta)
             })
           end
         else
+          -- We already have this msg — the incoming broadcast reached us
+          -- but we'd previously seen it (from earlier broadcast, or our
+          -- own self_originate). Emit so the analyzer can count "broadcast
+          -- reached a node that already had it" = wasted-for-this-node
+          -- broadcast (still useful for cascade redundancy, just not new
+          -- delivery). Useful for understanding cascade overlap.
+          self:emit("channel_msg_already_present", {
+            id = id, channel_id = d.channel_id,
+            from = meta.src, intended_to = d.next,
+          })
           channel_buffer_mark_seen_by(self, id, meta.src)
+        end
+      end
+
+      -- Mark the per-arm overhear as decoded (if we armed for this
+      -- sender/ctr_lo). Used by the retune-back timer to distinguish
+      -- successful overhear from a missed one.
+      if self.pending_overhear_arms ~= nil then
+        local key = (meta.src or 0) * 256 + (d.ctr_lo or 0)
+        if self.pending_overhear_arms[key] ~= nil then
+          self.pending_overhear_arms[key] = nil
         end
       end
 
