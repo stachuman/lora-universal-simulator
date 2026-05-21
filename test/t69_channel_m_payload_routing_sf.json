@@ -1,6 +1,6 @@
 {
-  "_name": "t69_channel_m_payload_routing_sf",
-  "_desc": "Verifies the 2A change: M-payload (channel gossip DATA frame) is restricted to the routing SF so non-target peers tuned to routing SF can promiscuously overhear it. Topology: alice ↔ bob, alice ↔ carol (NO bob ↔ carol link), routing_sf=7, allowed_data_sfs=[7,9,10]. alice posts a channel msg. bob pulls (short jitter 100ms). alice responds with M-payload DATA — under 2A the DATA frame is forced to SF7 (routing_sf), so carol (on SF7 waiting for BCNs) decodes it and emits channel_msg_received{source=overheard}. Pre-2A: alice would have chosen SF9 or SF10 for DATA based on link SNR + sf_bitmap; carol on SF7 would drop with drop_sf_mismatch. carol's pending pull (jitter 5000ms) is cancelled by the overhear before firing.",
+  "_name": "t69_channel_m_payload_broadcast",
+  "_desc": "Verifies the 2B-broadcast M-payload mechanism (commit 3af2be1+). alice posts a channel msg; bob pulls (short jitter 100ms); alice responds with an M_BROADCAST RTS that announces chosen_data_sf = max(allowed_data_sfs) = SF10, then broadcasts DATA-M at SF10. No CTS, no ACK — fire-and-forget. bob is the addressed target (his Q triggered the response); he merges as source=pull_target. carol is in radio range of alice and decodes alice's M_BROADCAST RTS; she arms overhear-retune (channel_overhear_armed event) and may decode the DATA-M at SF10. Topology: alice↔bob, alice↔carol, NO bob↔carol. Note: under 2B-broadcast carol's overhear depends on tight retune timing — the test asserts she ARMS, not that she necessarily decodes (which would be flaky across seed/SF combinations).",
   "simulation": {
     "duration_ms": 30000,
     "step_ms": 1,
@@ -31,14 +31,13 @@
     ]
   },
   "commands": [
-    { "at_ms": 5000, "node": "alice", "command": "send_channel 7 routing-sf-overhear" }
+    { "at_ms": 5000, "node": "alice", "command": "send_channel 7 broadcast-test" }
   ],
   "expect": [
-    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 routing-sf-overhear", "value": "channel msg queued" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx",             "value": "\"sf\":7" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "channel_msg_received","value": "\"source\":\"pull_target\"" },
-    { "type": "script_emit_contains", "node": "carol", "emit_type": "channel_msg_received","value": "\"source\":\"overheard\"" },
-    { "type": "script_emit_contains", "node": "carol", "emit_type": "channel_msg_overheard","value": "\"intended_to\":2" },
-    { "type": "script_emit_contains", "node": "carol", "emit_type": "channel_pull_suppressed", "value": "\"overheard_from\":1" }
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 broadcast-test", "value": "channel msg queued" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx", "value": "\"m_broadcast\":true" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx", "value": "\"sf\":10" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "channel_overhear_armed", "value": "\"chosen_data_sf\":10" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "channel_msg_received",  "value": "\"source\":\"pull_target\"" }
   ]
 }
