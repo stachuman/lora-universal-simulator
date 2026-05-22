@@ -2,8 +2,8 @@
   "_name": "s12_channels_dense_two_layer",
   "_desc": "Realistic stress test for gossip channels (ROADMAP S3 Package A). Derived from s07_seattle_mobile_realistic: dropped 3 mobiles, kept the 33 stationary Seattle nodes + their explicit static-static topology (224 directed links with realistic SNRs). Added a separate 25-node Layer-2 cluster with synthesized chain-topology links (4 neighbours/node, uniform 22 dB SNR). Capitol_Hill_Prime acts as the L1<->L2 gateway with explicit links to 5 L2 entry-point nodes. Total: 33 L1 + 25 L2 = 58 nodes; 384 topology links. Duration: 6 h simulated. 5 channel posters (3 L1 + 2 L2) on channel 7 every ~5 min. Intra-layer DM at one per node per ~30 min. Per Principle 11, channels are local \u2014 L1 messages do NOT reach L2 and vice versa. state_snapshot_period_ms widened to 5 min. Debug window enabled for 213:10-213:40 around slow channel propagation. PRIORITY INJECTION: 68 of 684 `send` commands converted to `send_priority` (seed=12) \u2014 tests priority queue precedence + 5/hour cap interaction under storm. ABUSE INJECTION: 20 send_priority from Cafe\u2192Fremont01_KF7EGZ_Sol at 90s intervals starting at t=300000ms. Tests originator_priority_max_per_window=5/h cap and 1st-hop throttle response.",
   "config": {
-    "debug_start_ms": 12790000,
-    "debug_end_ms": 12820000
+    "debug_start_ms": 0,
+    "debug_end_ms": 21600000
   },
   "simulation": {
     "duration_ms": 21600000,

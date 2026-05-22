@@ -421,41 +421,84 @@ ciphertext slot for PAYLOAD_TYPE_M:
                                    under §8 crypto
 ```
 
-**Routing semantics.** PAYLOAD_TYPE_M frames are emitted as the response
-to a `Q_CHANNEL_PULL` request (Q opcode in §3.7). The DATA frame's `next`
-and `dst` fields point at the pull requester for ACK purposes, BUT every
-node within radio range merges the message into its own `channel_buffer`
-regardless of `to=`. This **promiscuous reception** is the gossip
-mechanism's core efficiency: one pull-response exchange benefits up to N
-overhearing neighbours.
+**Routing semantics (2B-broadcast, operational since 2026-05-21).**
+PAYLOAD_TYPE_M frames are emitted as the response to a `Q_CHANNEL_PULL`
+request (Q opcode in §3.7). The DATA frame's `next` and `dst` fields
+point at the pull requester for diagnostic identification (the
+"originally requested-by" tag), BUT the frame is a **broadcast**:
 
-**Routing SF for M-payload (operational since 2026-05-20).** Unlike normal
-DATA frames (which ride the chosen data SF for higher throughput), an
-M-payload DATA frame is forced to the **routing SF** by restricting the
-outgoing RTS's `sf_bitmap` to `{routing_sf}`. This is what makes
-promiscuous reception actually fire: non-target peers stay on routing SF
-listening for BCN/control, so they decode the M-payload too. Pre-fix the
-DATA frame went on the data SF and overhearers dropped it with
-`drop_sf_mismatch` (0 overheard events across 24 h combined simulation).
-Cost: ~2× per-frame airtime (SF8 ≈ 325 ms vs SF7 ≈ 180 ms for 200 B).
-Benefit: one broadcast satisfies N hearers instead of N unicasts —
-massive net savings in dense clusters. See ROADMAP §3.3 pathology #4.
+- The preceding RTS carries the `M_BROADCAST` flag bit (in the low
+  nibble of the ctr_lo byte — see §3.4.2 below for the wire format
+  extension) AND announces the receiver-picked `chosen_data_sf` in the
+  `sf_bitmap` byte (exactly one bit set = the SF the DATA will use).
+  Holder picks `max(allowed_data_sfs)` for the originator's layer —
+  largest SF = most robust = most receivers can decode.
+- **No CTS, no ACK.** Sender fires RTS, waits `cts_to_data_gap_ms`,
+  then transmits DATA at the announced SF. No flow-control feedback
+  loop; failures recover via the cascade BCN-digest re-advertisement
+  on the next BCN cycle.
+- Receivers (any in-range node that decodes the M_BROADCAST RTS —
+  including the "addressed target" whose Q triggered this response)
+  retune to chosen_data_sf, listen for DATA, retune back to routing_sf
+  after the guard window. Gateways and busy nodes (pending_tx /
+  pending_rx) silently skip — cascade fills in via other holders.
+- Each in-range decoder merges the M-payload into its own
+  `channel_buffer` regardless of `to=`. This is the gossip mechanism's
+  core efficiency: one broadcast satisfies N hearers instead of N
+  unicasts.
 
-**Gateways do not forward M-payload (Principle 11 guard).** Because
-M-payload now rides routing SF, a multi-layer gateway forwarding an
-intra-layer M-frame would have its TX heard by BOTH layers whose nodes
-share that SF — a cross-layer leak. The forwarder code path therefore
-short-circuits: when an addressed forwarder is a gateway and the DATA
-flag has `PAYLOAD_TYPE_M`, ACK upstream (so they don't retry) and DROP
-the forward. The pull-requester misses this delivery; cascade fills it
-in via the next BCN cycle. Emits `channel_gateway_drop`. See ROADMAP §3.3
-pathology #5.
+**id_lo16 RTS extension (operational since 2026-05-21).** The
+M_BROADCAST RTS appends 2 bytes after `payload_len` carrying the low
+16 bits of the channel msg id (BE). Receivers check their
+`channel_buffer` for any entry whose `id & 0xFFFF` matches BEFORE
+arming the retune. If found, they skip the arm entirely — no retune,
+no ~2 s of routing-SF blindness, no decode of a duplicate. Emits
+`channel_overhear_skipped_already_have`. Collision space is 65 k;
+simultaneously-active msgs are far below that, so false-positive
+skips are negligible. False-positive worst case: receiver wrongly
+assumes it has the msg and skips a NEW msg; cascade recovers via
+other holders. See ROADMAP §3.6.
+
+**Gateways are not part of channel gossip.** Per Principle 11
+(channels are local-by-design), gateways skip both the buffer-merge
+on M-payload receive AND the overhear-arm on M_BROADCAST RTS. They're
+transparent to channel traffic. Under 2B-broadcast no special
+forwarder-drop code is needed — gateways simply don't participate in
+the broadcast retune cycle. (Phase 1 / 2A had an Option A
+gateway-drop path; removed in the 2B pivot since broadcast at data
+SF doesn't structurally leak across layers like routing-SF broadcast
+did.)
 
 Forwarders carry M frames at the **lowest tx_queue priority** — they
 yield to normal DM, hop-level control, and PRIORITY traffic. Channels
 are eventually-consistent best-effort; if a frame is dropped at the
 forwarder, the next BCN digest re-advertises the dirty ID and the
 recipient pulls again.
+
+#### 3.4.1a RTS wire format extension for M_BROADCAST
+
+Standard RTS is 8 bytes (see §3 table). For M_BROADCAST it is **10
+bytes**:
+
+```
+byte 0   : tag 'R'
+byte 1   : src
+byte 2   : next
+byte 3   : [addr_len(3) | rsv(1) | leaf_id(4)]
+byte 4   : dst
+byte 5   : [ctr_lo(4) | rts_flags(4)]    ← rts_flags bit 0 = M_BROADCAST
+byte 6   : sf_bitmap                     ← when M_BROADCAST: exactly one bit
+                                            set = chosen_data_sf (encoded as
+                                            1 << (sf - 5))
+byte 7   : payload_len                   ← DATA-M ciphertext-slot length
+byte 8-9 : id_lo16 (BE)                  ← present iff M_BROADCAST flag set;
+                                            low 16 bits of channel msg id
+                                            (see §3.4.1 id encoding)
+```
+
+`id_lo16` lets receivers do a pre-arm check against `channel_buffer`
+without retuning to data SF. Wire airtime delta: +2 bytes vs standard
+RTS (≈ +10 ms at SF8 / BW62.5 / CR5). See ROADMAP §3.6.
 
 #### 3.4.2 PRIORITY flag
 
@@ -2409,7 +2452,11 @@ expectations) subscribe by event_type.
 | `channel_pull_received` | Inbound `Q_CHANNEL_PULL`; will trigger one or more `channel_msg_pulled` responses | `from`, `ids[]` |
 | `channel_pull_suppressed` | A scheduled pull was cancelled. Three trigger paths (distinguished by `overheard_from`): `promiscuous_receive` — the M-payload arrived via overhear before our jitter fired; `peer_q` — we decoded a peer's `Q_CHANNEL_PULL` for the same ID (ROADMAP §3.3, dedupe path that fires at peer-Q decode time instead of M-frame arrival time); `<src>` — early M-handler overhear from a specific neighbour | `ids[]`, `overheard_from`, optionally `peer` (when `overheard_from=peer_q`) |
 | `channel_dirty_cleared` | Channel-buffer entry retired from advertising after `channel_dirty_max_advertisements` BCN inclusions. Entry stays in the buffer (still responds to pulls) but is no longer included in the dirty-page of outgoing BCN digests. Bounds per-holder M-frame load (ROADMAP §3.3) | `id`, `channel_id`, `ad_count`, `threshold` |
-| `channel_gateway_drop` | Gateway received a PAYLOAD_TYPE_M DATA frame as an addressed forwarder; ACKed upstream but did NOT forward — Principle 11 guard (M-payload at routing SF would otherwise leak across layers via gateway's broadcast TX). Cascade fills in the missed delivery. ROADMAP §3.3 pathology #5 | `origin`, `dst`, `ctr`, `reason` (e.g. `principle_11_no_cross_layer_M`) |
+| `channel_overhear_armed` | Receiver decoded an `M_BROADCAST` RTS and retuned to the announced `chosen_data_sf` for the DATA-M window. ROADMAP §3.5 | `ctr_lo`, `sender`, `target`, `chosen_data_sf`, `guard_ms`, `addressed` (whether `r.next == self.id`) |
+| `channel_overhear_skipped_already_have` | Receiver decoded an `M_BROADCAST` RTS, the announced `id_lo16` matched an entry in our `channel_buffer`, so we did NOT retune to data SF. Saves ~2 s of routing-SF blindness per duplicate decode. ROADMAP §3.6 | `ctr_lo`, `sender`, `id_lo16` |
+| `channel_overhear_missed` | Armed receiver's retune window (`guard_ms`) expired without decoding the DATA-M frame (collision / half-duplex blind / RTS-DATA timing slipped). ROADMAP §3.5 | `sender`, `ctr_lo`, `chosen_data_sf`, `elapsed_ms` |
+| `channel_msg_already_present` | DATA-M decoded but `channel_buffer` already contained this msg. Fires for the rare cases the `id_lo16` pre-arm check missed (e.g. RTS itself dropped at the radio layer but DATA-M arrived clean). Useful as cascade-overlap signal | `id`, `channel_id`, `from`, `intended_to` |
+| `channel_broadcast_deduped` | Holder skipped enqueueing an M-payload for `id` because one is already in `pending_tx` or `tx_queue` (concurrent-pull dedup). ROADMAP §3.5 | `id`, `requester`, `reason` |
 | `channel_digest_emitted` | Our outgoing BCN included a `BCN_EXT_TYPE_CHANNEL_DIGEST` extension with N dirty IDs | `dirty_ids[]`, `total_buffer_size` |
 | `priority_send_capped` | Originator hit `originator_priority_max_per_window` — own PRIORITY send dropped silently. UX hint for "wait before next priority send" | `dst`, `dst_name`, `window_ms`, `cap`, `current_count` |
 | `rts_drop_originator_priority_throttle` | 1st-hop neighbour detected a direct sender exceeding the per-hour priority cap; silently dropped the RTS | `from`, `ctr_lo`, `apparent_origination`, `window_ms`, `cap` |
@@ -2576,14 +2623,15 @@ block for current values):
   `join_discover_max_attempts`, `join_offer_backoff_{min,max}_ms`,
   `join_claim_guard_ms`, `join_retry_backoff_ms`,
   `join_j_rate_limit_window_ms`, `join_j_max_per_window`
-- **Channel gossip (ROADMAP §3, operational since 2026-05-20)**:
+- **Channel gossip (ROADMAP §3, operational since 2026-05-20; broadcast-pivot 2026-05-21)**:
   `cap_channel_buffer = 128`,
   `channel_msg_max_payload_bytes = 200`,
   `channel_dirty_max_per_bcn = 3`,
   `channel_dirty_max_advertisements = 3` (after K BCN ads, retire
-  the dirty entry — bounds per-holder load when dedupe funnels pulls
-  to round-1 winners; see ROADMAP §3.3),
-  `channel_pull_window_ms = 5000`,
+  the dirty entry — bounds per-holder load; see ROADMAP §3.3),
+  `channel_pull_window_ms = 60000` (widened 5 s → 60 s with the
+  2B-broadcast pivot; matches the natural BCN-cycle cadence —
+  ROADMAP §3.5),
   `channel_pull_jitter_ms = 5000` (wide enough that the first puller's
   Q frame cancels peer pendings before they fire — see ROADMAP §3.3),
   `cap_channel_pulls_per_bcn_cycle = 3`

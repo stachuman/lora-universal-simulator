@@ -823,14 +823,16 @@ REQ_SYNC/sync-BCN pattern reused by `J_DISCOVER`.
 
 ---
 
-## 3. Channels — gossip-based delivery (OPERATIONAL since 2026-05-20)
+## 3. Channels — gossip-based delivery (OPERATIONAL since 2026-05-20, broadcast-pivot 2026-05-21)
 
 **Status.** Design locked 2026-05-19; v1 implementation shipped and
-stabilized 2026-05-20 across commits `ed00d37`..`23b8978` after
-s12 6h stress-testing surfaced a self-DoS pull-storm pathology
-(see "Pull-storm hardening" below). Public-channel happy path is
-green (t65/t66/t67/t68); group + private crypto layers (PSK / Ed25519)
-remain on the implementation-phase list below.
+stabilized 2026-05-20 across commits `ed00d37`..`23b8978`. Pivoted
+2026-05-21 from negotiated unicast M-payload (2A) to broadcast
+M-payload without CTS/ACK (2B-broadcast), commits `3af2be1` +
+`f2bcd1f`. See §3.3 (Phase 1: stabilization) and §3.5 (Phase 2:
+broadcast pivot) for the design narrative. Public-channel happy
+path is green (t65/t66/t67/t68/t69); group + private crypto layers
+(PSK / Ed25519) remain on the implementation-phase list below.
 
 **Problem.** Mesh networks need multi-recipient communication beyond
 per-pair DM (§7.1, §8.1): public alerts, friend group chats,
@@ -981,7 +983,7 @@ EVICTION
 | `channel_msg_max_payload_bytes` | 200 | Per-message body cap (fits within `max_payload_bytes_hard_cap` — 41 bytes of headroom for inner crypto framing) |
 | `channel_dirty_max_per_bcn` | 3 | Max IDs in a single BCN's digest TLV (12 B + framing) |
 | `channel_dirty_max_advertisements` | 3 | After K=3 BCN advertisements of the same dirty entry, retire from advertising. Bounds per-holder load when dedupe funnels round-1 pulls to a few "winners" (s12 6h: secondary holders were otherwise serving 30+ M-frames each, saturating duty cycle). Entry stays in the buffer and still responds to incoming pulls; other holders carry the gossip wave forward. |
-| `channel_pull_window_ms` | 5000 | Per-ID dedup at requester (don't pull same ID twice within window) |
+| `channel_pull_window_ms` | 60000 | Per-ID dedup at requester (don't pull same ID twice within window). Widened 5 s → 60 s with the 2B-broadcast pivot (§3.5) — matches the natural BCN-cycle cadence for recovery and prevents same-node pull-floods. |
 | `channel_pull_jitter_ms` | 5000 | Random delay before sending pull. Wide enough that the first puller's Q frame has time to fly + decode + cancel pending pulls at peers (the peer-Q cancel path, §3.3) before they fire their own. |
 | `cap_channel_pulls_per_bcn_cycle` | 3 | Cap pulls scheduled per received BCN — prevents new-joiner / partition-merge pull storms |
 
@@ -1108,6 +1110,128 @@ needs >3 ids/BCN.
 single channel post. Pre-fix: 11 pulls/0.4 s burst with 10 collisions;
 post-fix: 3 pulls in the burst window, 0 collisions, 75% pull
 suppression rate. Use s13 as a fast loop before re-running s12 6 h.
+
+### 3.5 Broadcast pivot (Phase 2, 2026-05-21)
+
+Phase 1 (§3.3) shipped 2A: M-payload forced to routing SF so non-target
+peers could promiscuously overhear without retuning. That worked
+(2191 `channel_msg_overheard` events vs 0 pre-fix on s12 6 h) but
+required Option A's gateway no-forward (Fix #5) to plug a structural
+cross-layer leak.
+
+Phase 2 replaced 2A with **2B-broadcast**, a fundamentally different
+M-payload delivery model:
+
+- The RTS carries a new `M_BROADCAST` flag bit (in the previously
+  reserved low nibble of byte 5). It also encodes the receiver-
+  picked `chosen_data_sf` in the `sf_bitmap` byte (exactly one bit
+  set = the SF the DATA will use). Holder picks `max(allowed_data_sfs)`
+  for the originator's layer (largest SF = most robust = most
+  receivers can decode).
+- Sender **skips the CTS wait** and **skips the ACK wait**.
+  Fire-and-forget. After `rts_air + cts_to_data_gap_ms`, broadcasts
+  DATA-M at the announced SF, then clears `pending_tx` after the
+  DATA airtime + a small settle margin.
+- Receivers (any in-range node — addressed target OR overhearer,
+  except gateways and busy nodes) decode the M_BROADCAST RTS,
+  retune to chosen_data_sf, listen for DATA, retune back to
+  routing_sf after the window. No CTS to send, no ACK to send.
+- Gateways are excluded by the existing `self.self_gateway` check
+  — they never participate in channel gossip, preserving
+  Principle 11 by construction (no special gateway-drop branch
+  needed). Option A from Phase 1 was reverted.
+
+Holder-side dedup:
+
+- **Queue dedup**: in the Q_CHANNEL_PULL handler, before
+  enqueueing M-payload for id X, scan `pending_tx` and `tx_queue`
+  for an existing M-payload with the same id. If found, skip
+  enqueueing (the existing broadcast satisfies this requester too).
+  Emits `channel_broadcast_deduped`.
+- **60 s requester window** (§3.3 table tunables): once a node
+  pulls for id X, won't re-pull for 60 s. Prevents same-node pull
+  floods after a missed broadcast; recovery via next BCN cycle.
+
+s12 6h results (Phase 1 baseline → 2B-broadcast):
+
+| Metric | Phase 1 (2A) | **2B-broadcast** |
+|---|---|---|
+| DM delivered | 64 % (309) | **81 % (572)** |
+| Channel coverage mean | 64 % | 45 % |
+| Channel zero-reach | 132 | 136 |
+| Total network events | 1.18 M | **593 k** (-50 %) |
+| Principle 11 cross-layer | 0 | 0 |
+| `channel_gateway_drop` events | 43 | — (path removed) |
+
+DM jumped +17 pp because removing CTS+ACK per M-frame freed up
+huge routing-SF airtime budget — even though each M-frame stays
+on data SF, the entire flight is RTS+DATA only (vs RTS+CTS+DATA+
+ACK previously). Channel coverage regressed (-19 pp) because
+broadcast at data SF requires receivers to actually retune; some
+miss the window (half-duplex blind, ~4 % `channel_overhear_missed`
+rate). The trade-off is intentional: DM is the primary user-
+visible metric; channel propagation is eventually-consistent.
+
+### 3.6 id_lo16 RTS extension + observability (2026-05-21)
+
+Investigation of cascade overlap (`channel_msg_already_present`
+events at 5528/9756 ≈ 57 % of all retunes) showed receivers were
+wasting ~2 s of routing-SF blindness retuning to data SF and then
+decoding M-payloads for msgs they already had.
+
+Fix: M_BROADCAST RTS appends 2 extra bytes — the low 16 bits of
+the channel msg id. Receivers check their channel_buffer for any
+entry with matching `id & 0xFFFF` BEFORE arming. If found, skip
+the arm entirely. id_lo16 collision space is 65 k; simultaneously-
+active msg count is well under that, so false-positive skips are
+negligible. False positive worst case: receiver wrongly assumes
+it has the msg and skips a NEW msg; cascade recovers via other
+holders.
+
+s12 6h with id_lo16 (vs 2B-broadcast baseline):
+
+| Metric | 2B-broadcast | **+ id_lo16** |
+|---|---|---|
+| DM delivered | 81 % | 77 % (-4 pp) |
+| Channel coverage mean | 45 % | 45 % |
+| Channel zero-reach | 136 | 135 |
+| `channel_overhear_armed` events | 9756 | 4054 (-58 %) |
+| `channel_overhear_skipped_already_have` | — | 6129 (new) |
+| `channel_msg_already_present` (full-decode dup) | 5528 | 0 |
+| `channel_overhear_missed` | 430 | 237 |
+| Productive receptions | 4098 | 4117 |
+
+The architectural improvement is correct — receivers shouldn't
+waste retunes on known msgs. But there's a measured 2nd-order
+effect: with receivers staying on routing SF more, they hear MORE
+BCN digests, schedule MORE pulls for new IDs, and the cascade
+becomes chattier. That extra Q+DATA-M+BCN traffic competes with
+DM forwarding, costing 4 pp DM. Tested lowering
+`cap_channel_pulls_per_bcn_cycle` 3 → 2 to throttle the chatter
+— made it strictly worse (DM -3 pp more, channel -4 pp). The
+cascade and the chatter are coupled.
+
+77 % DM is still ~+43 pp over the original pre-channel-storm
+baseline (34 %). The 4 pp DM cost is the unmasked second-order
+effect; future channel-side optimizations may close the gap.
+
+Observability traces emitted (always, not debug-gated):
+
+- `channel_overhear_armed{ctr_lo, sender, target, chosen_data_sf, guard_ms, addressed}`
+  — receiver decoded M_BROADCAST RTS, retuned to data SF for the
+    DATA-M window.
+- `channel_overhear_skipped_already_have{ctr_lo, sender, id_lo16}`
+  — receiver decoded RTS, id_lo16 matched a buffered entry, did
+    NOT retune.
+- `channel_overhear_missed{sender, ctr_lo, chosen_data_sf, elapsed_ms}`
+  — retune window expired without successful DATA-M decode
+    (collision / half-duplex blind).
+- `channel_msg_already_present{id, channel_id, from, intended_to}`
+  — DATA-M decoded but channel_buffer already had this msg (the
+    rare cases the id_lo16 check missed, e.g. RTS itself dropped).
+- `channel_broadcast_deduped{id, requester, reason}` — holder
+  skipped enqueueing M-payload because one for the same id was
+  already in queue / pending_tx.
 
 ### Composition with other principles
 

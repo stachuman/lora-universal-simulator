@@ -60,9 +60,9 @@ note calls it out.
 | 6.4 | Gateway sweep cycle (mechanism) | offset → activate upper-layer → emit BCN there → return after duration → re-arm |
 | 6.5 | Cross-layer envelope handoff (mechanism) | sender packs envelope → gateway resolves binding (or defers and emits `Q:HASH_QUERY` if unknown) → retunes via `tx_layer_id` → forwards in target layer |
 | 6.6 | Layer-15 active-avoidance (mechanism) | non-gateway peer defers RTS while a direct gateway is scheduled away |
-| 7.1 | Channel gossip — pull cycle (mechanism) | BCN digest → Q_CHANNEL_PULL → DATA(PAYLOAD_TYPE_M) at routing SF → promiscuous overhear by all in-range peers (§3.4.1) |
-| 7.2 | Channel gossip — pull-storm dedupe (mechanism) | peer-Q overhear cancels pending pulls; K=3 BCN ads then dirty bit retires the holder. See ROADMAP §3.3 for the full pathology+fix table |
-| 7.3 | Channel gossip — Principle 11 gateway guard (mechanism) | gateway addressed as forwarder for M-payload: ACK upstream, DROP forward (cascade rule fills missed delivery). Emits `channel_gateway_drop` |
+| 7.1 | Channel gossip — broadcast pull cycle (mechanism) | BCN digest → Q_CHANNEL_PULL → M_BROADCAST RTS (announces chosen_data_sf + id_lo16) → DATA-M broadcast at chosen_data_sf → in-range peers decode (or skip via id_lo16 pre-arm check). No CTS, no ACK. 2B-broadcast since `3af2be1` |
+| 7.2 | Channel gossip — pull-storm dedupe (mechanism) | Five layered dedupe paths: peer-Q overhear, id_lo16 pre-arm skip, M-payload promiscuous overhear, holder queue-dedup, channel_pull_recent window (60s). K=3 BCN ad cap. See ROADMAP §3.3 / §3.5 / §3.6 |
+| 7.3 | Channel gossip — Principle 11 (mechanism) | Channels stay within a layer structurally: gateways skip both buffer-merge and overhear-arm; leaf_id filter excludes cross-layer RTS at parse. No special gateway-drop path needed under 2B-broadcast |
 
 ---
 
@@ -2098,58 +2098,89 @@ ROADMAP §3 lays out the full design rationale and §3.3 documents the
 pull-storm hardening fix chain. This section captures the at-a-glance
 walk-throughs for cross-reference.
 
-## 7.1 Channel gossip — pull cycle (mechanism)
+## 7.1 Channel gossip — broadcast pull cycle (mechanism)
+
+The current (2B-broadcast, since commit `3af2be1` / `f2bcd1f`) flow.
+M-payload is broadcast at the holder-announced data SF; receivers
+retune to decode, no CTS, no ACK.
 
 ```
-holder       puller       overhearer (in radio range of holder)
+holder       puller         overhearer
   │ ┐ self_originate channel msg X → buffer[X].dirty=true
-  │ ┤
   │ ┘
   │ B ──────────────────────────────► (BCN with CHANNEL_DIGEST{X})
   │                  │ process_channel_digest(B):
   │                  │  buffer[X] absent → schedule pull
   │                  │  in [0, channel_pull_jitter_ms]
   │                  │
-  │ ◄──────── R ──── │  (Q_CHANNEL_PULL RTS at routing_sf)
-  │ ── C ──────────► │  (CTS, chosen_data_sf = routing_sf;
-  │                  │   sf_bitmap was restricted to {routing_sf}
-  │                  │   because flags & PAYLOAD_TYPE_M)
-  │ ◄──────── Q ──── │  (Q frame: requested IDs)
-  │ ── K ──────────► │  (hop ACK at routing_sf)
+  │ ◄──────── Q ──── │  (Q_CHANNEL_PULL — single-frame request,
+  │                  │   no RTS/CTS preamble for Q)
   │
-  │ Q-handler: have buffer[X] → enqueue M-payload DATA frame
-  │  with dst=puller, flags |= PAYLOAD_TYPE_M
+  │ Q-handler: have buffer[X], no pending tx for X in queue/pending_tx
+  │  → enqueue M-payload DATA frame, flags |= PAYLOAD_TYPE_M
+  │  → mark_seen_by[X][puller] = true
   │
-  │ ── R ──────────► │  (RTS for M-payload at routing_sf)
-  │ ◄──────── C ──── │  (CTS, chosen_data_sf = routing_sf)
-  │ ── D ──────────► │  (DATA at routing_sf — the key change in
-  │ ── D ───────────────► overhearer
-  │                  │   commit f6b5164. Pre-fix this went on
-  │                  │   data_sf and overhearers dropped with
-  │                  │   drop_sf_mismatch.)
-  │                                    │ on_recv 'D' + payload_type_m:
-  │                                    │  buffer[X] absent → add, source=overheard
-  │                                    │  emit channel_msg_overheard
-  │                                    │  channel_pull_pending[X] = nil
-  │                                    │  emit channel_pull_suppressed
-  │                                    │  if d.next != self.id then return
-  │                  │ on_recv 'D':
-  │                  │   buffer[X] absent → add, source=pull_target
-  │                  │   ACK back to holder
-  │ ◄──────── K ──── │
+  │ Compute chosen_data_sf = max(allowed_data_sfs)
+  │ Build RTS with M_BROADCAST flag + sf_bitmap = {chosen_data_sf}
+  │  + id_lo16 of X (2-byte extension after payload_len)
+  │
+  │ ── R(M_BCAST,id_lo16) ───────────► (everyone in range decodes)
+  │ ── R ─────────────────────────────► overhearer
+  │
+  │                  │  on_recv 'R' with M_BROADCAST:
+  │                  │   check buffer for id matching id_lo16
+  │                  │   not found → arm overhear:
+  │                  │    self.set_rx_sf(chosen_data_sf)
+  │                  │    schedule retune-back after data_air + guard
+  │                  │   emit channel_overhear_armed
+  │                  │                     │
+  │                  │                     │  overhearer same logic:
+  │                  │                     │   matching id_lo16 → SKIP arm
+  │                  │                     │   emit channel_overhear_skipped_already_have
+  │                  │                     │   OR not match → arm + retune
+  │
+  │ Wait rts_air + cts_to_data_gap_ms (no CTS to wait for)
+  │
+  │ ── D-M (broadcast at chosen_data_sf) ──► puller decodes
+  │ ── D-M ───────────────────────────────► overhearer decodes (if armed)
+  │
+  │                  │  M-handler:
+  │                  │   buffer[X] absent → add, source=pull_target (d.next==self.id)
+  │                  │   emit channel_msg_received
+  │                  │   channel_pull_pending[X] = nil
+  │                  │   NO ACK sent
+  │                  │
+  │                  │                     │  M-handler at overhearer:
+  │                  │                     │   buffer[X] absent → add, source=overheard
+  │                  │                     │   OR already present → channel_msg_already_present
+  │                  │                     │
+  │                  │                     │  retune-back fires (or earlier on decode)
+  │                  │                     │   set_rx_sf(routing_sf)
+  │                  │                     │   if not decoded: emit channel_overhear_missed
+  │
+  │ Holder pending_tx auto-clears after data_air + 5 ms (fire-and-forget)
 ```
 
-t65/t66/t67/t68/t69 are the dedicated regression tests.
+Key differences from the original (2A) negotiated path:
+- No CTS exchange — sender announces SF in RTS.
+- No ACK — holder doesn't wait for confirmation.
+- RTS is 10 bytes (8 base + 2 byte id_lo16) when M_BROADCAST set.
+- Receivers do a pre-arm check on id_lo16; skip retune for known msgs.
+
+t65/t66/t67/t68/t69 are the dedicated regression tests. t69 was
+updated for 2B-broadcast in commit `f3bd5aa`.
 
 ## 7.2 Channel gossip — pull-storm dedupe (mechanism)
 
-Three layered dedupe paths fire on different timescales:
+Layered dedupe paths fire on different timescales:
 
 | Path | When it fires | Effect |
 |---|---|---|
 | **peer-Q overhear** (commit `30cc9d9`) | Within ~30 ms of seeing a peer's Q_CHANNEL_PULL for an ID I have pending | Cancel my pending, emit `channel_pull_suppressed{overheard_from="peer_q"}`. Earliest dedupe — fires before most peer jitters expire. |
-| **M-payload promiscuous overhear** (commit `f6b5164`, requires M at routing SF) | When the holder responds with the M-frame; any in-range peer with a pending pull cancels it | Cancel my pending, emit `channel_pull_suppressed{overheard_from=<holder>}`. Catches anyone who missed the peer-Q (decode collision, etc.). |
-| **`channel_pull_recent` window** (always was there) | After I send a Q, won't pull the same ID for `channel_pull_window_ms` (5 s) | Prevents pull retries when my own Q is in flight |
+| **id_lo16 pre-arm skip** (commit `f2bcd1f`) | On decoding an M_BROADCAST RTS, the announced id_lo16 matches an entry already in our channel_buffer | We do NOT retune to data SF — emit `channel_overhear_skipped_already_have`. Saves ~2 s of routing-SF blindness per duplicate. |
+| **M-payload promiscuous overhear** | When the holder broadcasts DATA-M; any in-range peer with a pending pull cancels it | Cancel my pending, emit `channel_pull_suppressed`. Catches anyone who missed the peer-Q. |
+| **Holder queue-dedup** (commit `3af2be1`) | Q for id X arrives, but pending_tx or tx_queue already holds an M-payload for X | Skip enqueueing; emit `channel_broadcast_deduped`. Prevents concurrent-pull-burst broadcast amplification. |
+| **`channel_pull_recent` window** | After I send a Q, won't pull the same ID for `channel_pull_window_ms` (60 s, widened from 5 s in 2B-broadcast) | Prevents pull retries when my own Q is in flight or recently sent. |
 
 Holder side: after `channel_dirty_max_advertisements` (K=3) BCN cycles
 including the entry, the dirty bit retires (commit `f3971ac`). Other
@@ -2157,37 +2188,24 @@ holders that acquired the msg in that window have their own dirty bit
 and carry the gossip forward — a wave of advertisers, not a permanent
 few. See ROADMAP §3.3 pathology #2 for the failure mode this prevents.
 
-## 7.3 Channel gossip — Principle 11 gateway guard (mechanism)
+## 7.3 Channel gossip — Principle 11 (mechanism)
 
-```
-L1_holder         gateway (multi-layer)         L1_other_node       L2_other_node
-  │
-  │ DATA-M(dst=L2_puller, next=gateway) ────►│   (gateway is on the route to L2_puller)
-  │                                            │
-  │ ◄──────── K (ACK) ─────────────────────────│   (gateway ACKs — upstream done)
-  │                                            │
-  │                                            │  Gateway's M-handler:
-  │                                            │   d.payload_type_m + self.self_gateway
-  │                                            │   AND d.next == self.id:
-  │                                            │   → emit channel_gateway_drop
-  │                                            │   → become_free, NO forward
-  │                                            │
-  │                                            │  Result: no cross-layer TX from
-  │                                            │  gateway. L1 nodes don't overhear
-  │                                            │  an L2 message; L2 nodes do not
-  │                                            │  receive this delivery via the
-  │                                            │  gateway path. The pull-requester
-  │                                            │  (L2_puller) re-pulls in the next
-  │                                            │  BCN cycle (eventually-consistent
-  │                                            │  by design).
-```
+Under 2B-broadcast, channels stay within a layer **structurally**:
+- Gateways have `self.self_gateway = true`. The M-handler skips both
+  buffer-merge AND overhear-arm at gateways. Gateways are
+  transparent to channel traffic.
+- M_BROADCAST RTS is filtered by `leaf_id` (existing parse-RTS
+  check). L2 nodes ignore L1 RTS frames at the protocol level.
+- M-payload DATA itself goes on the holder's announced data SF.
+  Non-armed receivers (gateways, busy nodes) stay on routing SF
+  and don't decode the broadcast.
 
-The drop only applies when `self.self_gateway` AND the inbound frame is
-PAYLOAD_TYPE_M. Same-layer M-payload from L1 holder to L1 puller never
-hits this branch because non-gateway forwarders aren't subject to it.
-Cross-layer DM (the actual purpose of gateways) is unaffected — DM
-frames don't carry PAYLOAD_TYPE_M and use the gateway envelope path
-(§6.5).
+The Phase-1 / 2A gateway-drop code path (`channel_gateway_drop`
+event) was removed in the 2B pivot — it existed only to plug a leak
+specific to routing-SF M-payload broadcast. Under 2B that leak
+cannot occur by construction. Cross-layer DM continues to use the
+gateway envelope path (§6.5) as before — DM frames don't carry
+PAYLOAD_TYPE_M.
 
 ---
 
@@ -2195,7 +2213,7 @@ frames don't carry PAYLOAD_TYPE_M and use the gateway envelope path
 
 Cross-reference of mechanisms each scenario depends on:
 
-| Mechanism | Status (2026-05-20) | Used by |
+| Mechanism | Status (2026-05-21) | Used by |
 |---|---|---|
 | BCN periodic / triggered emission, throttle gate, aging loop | Implemented | 1.1, 1.2, 1.3, 1.4 |
 | BCN `key_hash32` mandatory in every header (bytes 4-7) | **Implemented** (newly) | 1.1, 5.7 (detection mechanism) |
@@ -2243,11 +2261,12 @@ Cross-reference of mechanisms each scenario depends on:
 | Retry across alternate gateways on `gateway_no_binding` | **Not implemented** | 6.3, 6.5 |
 | BCN_EXT_TYPE_CHANNEL_DIGEST emit + parse | Implemented | 7.1, 7.2 |
 | Q_OP_CHANNEL_PULL + scheduled-pull-with-jitter | Implemented | 7.1 |
-| PAYLOAD_TYPE_M DATA frame + promiscuous overhear | Implemented (working since `f6b5164`: M-payload forced to routing SF) | 7.1, 7.2 |
+| PAYLOAD_TYPE_M DATA frame + 2B-broadcast (no CTS / no ACK) | Implemented (working since `3af2be1`: RTS announces chosen_data_sf; receivers retune + decode broadcast) | 7.1, 7.2 |
+| id_lo16 RTS extension (skip retune for known msgs) | Implemented (`f2bcd1f`) | 7.2 |
 | peer-Q pull cancellation | Implemented (`30cc9d9`) | 7.2 |
 | K=3 dirty-advertisement cap | Implemented (`f3971ac`) | 7.2 |
 | Defer-TTL fires regardless of route presence | Implemented (`23b8978`) | drain loop (affects DM + channel) |
-| Gateway no-forward of PAYLOAD_TYPE_M | Implemented (`f6b5164`, Principle 11 guard under 2A) | 7.3 |
+| Gateway no-forward of PAYLOAD_TYPE_M | Removed in 2B pivot (`3af2be1`) — gateways don't participate in broadcast retune; no leak possible under 2B | — |
 | Group/private channel crypto (PSK+MAC, Ed25519 sig) | **Not implemented** | — |
 | Cross-leaf channel bridging at gateways | **Not implemented** (parked, ROADMAP §3.1) | — |
 
