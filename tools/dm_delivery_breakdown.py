@@ -25,9 +25,19 @@ Messages are keyed by (origin_node_id, dst_node_id, ctr). In events,
 them via the scenario's node order.
 
 Usage:
-  dm_delivery_breakdown.py CONFIG.json EVENTS.ndjson [opts]
+  dm_delivery_breakdown.py CONFIG.json [EVENTS.ndjson] [opts]
+  dm_delivery_breakdown.py CONFIG.json --run
+
+If EVENTS is omitted, the tool looks for the analyze.py convention
+file /tmp/<config-stem>_analyze.ndjson — which means you can run
+`analyze.py --run` once and then iterate on `dm_delivery_breakdown.py`
+without re-simulating. Pass --run to re-execute lus before analysis.
 
 Options:
+  --run                  Run lus on the config first (writes events
+                         to /tmp/<stem>_analyze.ndjson if EVENTS not
+                         given).
+  --lus PATH             lus binary path (default build/orchestrator/lus).
   --json                 Emit JSON instead of the table.
   --detail               Include per-message timeline (text mode) or
                          per-message event list (JSON mode).
@@ -36,26 +46,38 @@ Options:
   --all                  Include pairs not in scenario commands.
 
 Examples:
-  # Per-pair summary table
-  python3 tools/dm_delivery_breakdown.py CONFIG EVENTS
+  # Run lus + show per-pair summary
+  python3 tools/dm_delivery_breakdown.py CONFIG --run
 
-  # Same data as JSON
-  python3 tools/dm_delivery_breakdown.py CONFIG EVENTS --json
+  # Reuse the events file analyze.py just produced
+  python3 tools/dm_delivery_breakdown.py CONFIG
 
   # Single-pair forensic timeline
-  python3 tools/dm_delivery_breakdown.py CONFIG EVENTS \\
+  python3 tools/dm_delivery_breakdown.py CONFIG \\
       --detail --pair heidi:carol
 
   # JSON with full per-message event lists (for tooling / diff)
-  python3 tools/dm_delivery_breakdown.py CONFIG EVENTS --json --detail
+  python3 tools/dm_delivery_breakdown.py CONFIG --json --detail
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 from collections import defaultdict
+
+
+def maybe_run(cfg_path, events_path, lus_path):
+    print(f"# running {lus_path} {cfg_path} -> {events_path}", file=sys.stderr)
+    res = subprocess.run([lus_path, cfg_path, events_path],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.stderr.write(res.stdout)
+        sys.stderr.write(res.stderr)
+        raise SystemExit(f"lus exited {res.returncode}")
 
 
 # Emit types we include in the per-message timeline. Anything outside
@@ -419,7 +441,14 @@ def render_json(rows, msgs, pair_filter, id_to_name, detail):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
-    p.add_argument("events")
+    p.add_argument("events", nargs="?",
+                   help="events.ndjson path (default: "
+                        "/tmp/<stem>_analyze.ndjson, the analyze.py "
+                        "convention)")
+    p.add_argument("--run", action="store_true",
+                   help="run lus on the config before analysing")
+    p.add_argument("--lus", default="build/orchestrator/lus",
+                   help="lus binary path")
     p.add_argument("--json", action="store_true",
                    help="emit JSON instead of the table")
     p.add_argument("--detail", action="store_true",
@@ -430,6 +459,16 @@ def main():
     p.add_argument("--all", action="store_true",
                    help="include pairs not present in scenario commands")
     args = p.parse_args()
+
+    if args.events is None:
+        stem = os.path.splitext(os.path.basename(args.config))[0]
+        args.events = f"/tmp/{stem}_analyze.ndjson"
+    if args.run:
+        maybe_run(args.config, args.events, args.lus)
+    if not os.path.exists(args.events):
+        sys.exit(f"events file does not exist: {args.events}\n"
+                 f"  (pass --run to generate it, or provide an "
+                 f"explicit EVENTS path)")
 
     cfg, id_to_name, name_to_id, slot_to_id = load_config(args.config)
     msgs = analyse(args.events, slot_to_id)
