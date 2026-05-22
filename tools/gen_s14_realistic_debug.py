@@ -310,10 +310,9 @@ def build_scenario() -> dict:
         },
         "nodes": build_nodes(),
         "topology": {
-            "type":  "static_static",
             "links": build_links(),
         },
-        "inject": PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS,
+        "commands": PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS,
     }
 
 # ---------- Validation ----------
@@ -344,20 +343,22 @@ def validate(scen: dict) -> None:
 
     n_links = len(scen["topology"]["links"])
     assert n_links == 68, f"expected 68 directed links, got {n_links}"
+    asym = sum(1 for a, b, f, r in (L1_LINKS + L2_LINKS) if f != r)
+    assert asym == 6, f"expected 6 asymmetric intra-layer pairs, got {asym}"
 
     # Every link endpoint must be a real node.
     name_set = set(names)
     for l in scen["topology"]["links"]:
         assert l["from"] in name_set and l["to"] in name_set, l
 
-    n_inject = len(scen["inject"])
+    n_inject = len(scen["commands"])
     assert n_inject == 58, f"expected 58 inject events, got {n_inject}"
 
     # Inject timeline: monotonically non-decreasing across the three phases.
     # (Within a phase, bursts can be out of order; across phases, strict.)
-    phase1_max = max(x["at_ms"] for x in scen["inject"] if x["at_ms"] < 1_080_000)
-    phase2_min = min(x["at_ms"] for x in scen["inject"] if 1_080_000 <= x["at_ms"] < 1_680_000)
-    phase3_min = min(x["at_ms"] for x in scen["inject"] if x["at_ms"] >= 1_680_000)
+    phase1_max = max(x["at_ms"] for x in scen["commands"] if x["at_ms"] < 1_080_000)
+    phase2_min = min(x["at_ms"] for x in scen["commands"] if 1_080_000 <= x["at_ms"] < 1_680_000)
+    phase3_min = min(x["at_ms"] for x in scen["commands"] if x["at_ms"] >= 1_680_000)
     assert phase1_max < 1_080_000 <= phase2_min, (phase1_max, phase2_min)
     assert phase2_min < 1_680_000 <= phase3_min, (phase2_min, phase3_min)
 
@@ -373,7 +374,7 @@ def main():
     n = scen["nodes"]
     print(f"wrote {OUT_PATH}: {len(n)} nodes, "
           f"{len(scen['topology']['links'])} directed links, "
-          f"{len(scen['inject'])} inject events")
+          f"{len(scen['commands'])} inject events")
 
 if __name__ == "__main__":
     main()

@@ -415,7 +415,6 @@
     }
   ],
   "topology": {
-    "type": "static_static",
     "links": [
       {
         "from": "alice",
@@ -827,7 +826,7 @@
       }
     ]
   },
-  "inject": [
+  "commands": [
     {
       "at_ms": 600000,
       "node": "alice",
