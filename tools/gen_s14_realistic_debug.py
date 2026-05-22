@@ -54,3 +54,77 @@ BRIDGE_NAME = "bridge"
 ALL_NAMES = L1_NAMES + L2_NAMES + [BRIDGE_NAME]
 
 OUT_PATH = "scenarios/s14_realistic_debug.json"
+
+# ---------- Node builders ----------
+
+def make_l1_node(name: str, node_id: int) -> dict:
+    return {
+        "name":       name,
+        "node_id":    node_id,
+        "key_hash32": "0xCAFE1422",
+        "script":     "scenarios/dv_dual_sf.lua",
+        "config": {
+            "layer_id":                   1,
+            "routing_sf":                 L1_ROUTING_SF,
+            "allowed_data_sfs":           list(L1_DATA_SFS),
+            "beacon_period_ms":           BCN_PERIOD_MS,
+            "discovery_beacon_period_ms": DISCOVERY_BCN_PERIOD_MS,
+            "state_snapshot_period_ms":   STATE_SNAPSHOT_PERIOD_MS,
+            "quiet_threshold_ms":         0,
+        },
+    }
+
+def make_l2_node(name: str, node_id: int) -> dict:
+    return {
+        "name":       name,
+        "node_id":    node_id,
+        "key_hash32": "0xCAFE1422",
+        "script":     "scenarios/dv_dual_sf.lua",
+        "config": {
+            "layer_id":                   2,
+            "routing_sf":                 L2_ROUTING_SF,
+            "allowed_data_sfs":           list(L2_DATA_SFS),
+            "beacon_period_ms":           BCN_PERIOD_MS,
+            "discovery_beacon_period_ms": DISCOVERY_BCN_PERIOD_MS,
+            "state_snapshot_period_ms":   STATE_SNAPSHOT_PERIOD_MS,
+            "quiet_threshold_ms":         0,
+        },
+    }
+
+def make_bridge(name: str, node_id: int) -> dict:
+    return {
+        "name":       name,
+        "node_id":    node_id,
+        "key_hash32": "0xCAFE1422",
+        "script":     "scenarios/dv_dual_sf.lua",
+        "config": {
+            "layer_id":         1,
+            "is_gateway":       True,
+            "routing_sf":       L1_ROUTING_SF,
+            "allowed_data_sfs": list(L1_DATA_SFS),
+            "gateway_layers": [
+                {
+                    "layer_id":         2,
+                    "routing_sf":       L2_ROUTING_SF,
+                    "allowed_data_sfs": list(L2_DATA_SFS),
+                    "period_ms":        BRIDGE_VISIT_PERIOD_MS,
+                    "duration_ms":      BRIDGE_VISIT_DURATION_MS,
+                    "offset_ms":        BRIDGE_VISIT_OFFSET_MS,
+                },
+            ],
+            "beacon_period_ms":           BCN_PERIOD_MS,
+            "discovery_beacon_period_ms": DISCOVERY_BCN_PERIOD_MS,
+            "state_snapshot_period_ms":   STATE_SNAPSHOT_PERIOD_MS,
+            "quiet_threshold_ms":         0,
+        },
+    }
+
+def build_nodes() -> list[dict]:
+    nodes = []
+    nid = 1
+    for n in L1_NAMES:
+        nodes.append(make_l1_node(n, nid)); nid += 1
+    for n in L2_NAMES:
+        nodes.append(make_l2_node(n, nid)); nid += 1
+    nodes.append(make_bridge(BRIDGE_NAME, nid))
+    return nodes
