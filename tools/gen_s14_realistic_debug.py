@@ -242,3 +242,30 @@ PHASE2_INJECTS = [
 
     _inject(1_620_000, "eve",   "send_channel 7 L1-news-4"),
 ]
+
+# Phase 3: Mixed (t=1680s -> 2400s), round-2 DMs interleaved with posts
+PHASE3_INJECTS = [
+    _inject(1_680_000, "alice", "send bob round-2"),
+    _inject(1_690_000, "mia",   "send_channel 7 L2-news-5"),
+    _inject(1_710_000, "bob",   "send alice ack"),
+    _inject(1_730_000, "carol", "send heidi hey-again"),
+    _inject(1_755_000, "grace", "send_channel 7 L1-event-5"),
+    _inject(1_770_000, "heidi", "send carol still-here"),
+    _inject(1_800_000, "leo",   "send rosa second-pass"),
+    _inject(1_830_000, "rosa",  "send leo yep"),
+    _inject(1_860_000, "dave",  "send peter stress-test"),
+    _inject(1_890_000, "eve",   "send_channel 7 L1-news-6"),
+    _inject(1_920_000, "peter", "send dave loud-and-clear"),
+    _inject(1_950_000, "alice", "send bob burst-plus"),
+    _inject(1_980_000, "quinn", "send_channel 7 L2-event-6"),
+    _inject(2_010_000, "carol", "send heidi burst-plus"),
+    _inject(2_050_000, "heidi", "send carol burst-plus"),
+    _inject(2_100_000, "leo",   "send rosa final"),
+    _inject(2_130_000, "mia",   "send_channel 7 L2-news-7"),
+    _inject(2_160_000, "rosa",  "send leo 73"),
+    _inject(2_200_000, "dave",  "send peter final"),
+    _inject(2_230_000, "peter", "send dave out"),
+    _inject(2_260_000, "grace", "send_channel 7 L1-event-7"),
+    _inject(2_300_000, "alice", "send bob out"),
+    _inject(2_330_000, "bob",   "send alice 73-all"),
+]
