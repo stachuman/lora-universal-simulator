@@ -1,0 +1,1122 @@
+{
+  "_name": "s14_realistic_debug",
+  "_desc": "Realistic debug scenario for delivery-rate investigation. 21 nodes (10 L1 alice..judy + 10 L2 kate..tina + 1 bridge), 40 min: 10 min quiet warmup + 30 min active traffic across three phases (DM-only, channel-only, mixed). Per-layer routing SF separation: L1=SF8 routing / SF7,9 data; L2=SF9 routing / SF6,10 data. Bridge dual-layer with 50/50 time-share (30 s period, 15 s home L1 + 15 s visit L2). Explicit asymmetric link plan (6 of 30 intra-layer pairs asymmetric, 14-18 dB forward / 5-8 dB reverse). 40 DMs across 4 conversation pairs (alice<->bob 1-hop, carol<->heidi 3-hop, leo<->rosa 3-hop, dave<->peter cross-layer 4-hop). 19 channel-7 posts from 4 posters (eve+grace on L1, mia+quinn on L2). Clean baseline - no priority, no abuse, no mobility. Spec: docs/superpowers/specs/2026-05-22-s14-realistic-debug-scenario-design.md. Note: SF9 is L1-data and L2-routing - cross-layer airtime collisions on SF9 are expected (Principle 11 semantic isolation still holds).",
+  "simulation": {
+    "duration_ms": 2400000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 1422,
+    "node_startup_jitter_ms": 5000,
+    "radio": {
+      "sf": 8,
+      "bw": 62.5,
+      "cr": 5,
+      "max_packet_bytes": 255,
+      "snr_coherence_ms": 0,
+      "duty_cycle": 0.01
+    }
+  },
+  "config": {
+    "debug_start_ms": 0,
+    "debug_end_ms": 2400000
+  },
+  "nodes": [
+    {
+      "name": "alice",
+      "node_id": 1,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bob",
+      "node_id": 2,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "carol",
+      "node_id": 3,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "dave",
+      "node_id": 4,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "eve",
+      "node_id": 5,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "frank",
+      "node_id": 6,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "grace",
+      "node_id": 7,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "heidi",
+      "node_id": 8,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "ivan",
+      "node_id": 9,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "judy",
+      "node_id": 10,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "kate",
+      "node_id": 11,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "leo",
+      "node_id": 12,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "mia",
+      "node_id": 13,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "ned",
+      "node_id": 14,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "olga",
+      "node_id": 15,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "peter",
+      "node_id": 16,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "quinn",
+      "node_id": 17,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "rosa",
+      "node_id": 18,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "sam",
+      "node_id": 19,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "tina",
+      "node_id": 20,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bridge",
+      "node_id": 21,
+      "key_hash32": "0xCAFE1422",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "is_gateway": true,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "gateway_layers": [
+          {
+            "layer_id": 2,
+            "routing_sf": 9,
+            "allowed_data_sfs": [
+              6,
+              10
+            ],
+            "period_ms": 30000,
+            "duration_ms": 15000,
+            "offset_ms": 15000
+          }
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    }
+  ],
+  "topology": {
+    "type": "static_static",
+    "links": [
+      {
+        "from": "alice",
+        "to": "bob",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "alice",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "alice",
+        "to": "carol",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "carol",
+        "to": "alice",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "alice",
+        "to": "dave",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "alice",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "dave",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "bob",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "carol",
+        "to": "dave",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "carol",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "carol",
+        "to": "frank",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "frank",
+        "to": "carol",
+        "snr": 6.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "eve",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "eve",
+        "to": "dave",
+        "snr": 7.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "grace",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "dave",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "eve",
+        "to": "heidi",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "eve",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "frank",
+        "to": "grace",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "frank",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "heidi",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "grace",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "ivan",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "ivan",
+        "to": "grace",
+        "snr": 8.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "judy",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "judy",
+        "to": "grace",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "judy",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "judy",
+        "to": "heidi",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "ivan",
+        "to": "judy",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "judy",
+        "to": "ivan",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "kate",
+        "to": "leo",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "leo",
+        "to": "kate",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "kate",
+        "to": "mia",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "mia",
+        "to": "kate",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "kate",
+        "to": "ned",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "kate",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "leo",
+        "to": "ned",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "leo",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "mia",
+        "to": "ned",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "mia",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "mia",
+        "to": "peter",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "peter",
+        "to": "mia",
+        "snr": 6.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "olga",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "olga",
+        "to": "ned",
+        "snr": 7.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "quinn",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "ned",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "olga",
+        "to": "rosa",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "rosa",
+        "to": "olga",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "peter",
+        "to": "quinn",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "peter",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "rosa",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "rosa",
+        "to": "quinn",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "sam",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "sam",
+        "to": "quinn",
+        "snr": 8.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "tina",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "tina",
+        "to": "quinn",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "rosa",
+        "to": "tina",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "tina",
+        "to": "rosa",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "sam",
+        "to": "tina",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "tina",
+        "to": "sam",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge",
+        "to": "grace",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "bridge",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge",
+        "to": "ivan",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "ivan",
+        "to": "bridge",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge",
+        "to": "quinn",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "bridge",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge",
+        "to": "sam",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "sam",
+        "to": "bridge",
+        "snr": 14.0,
+        "bidir": false
+      }
+    ]
+  },
+  "inject": [
+    {
+      "at_ms": 600000,
+      "node": "alice",
+      "command": "send bob hi"
+    },
+    {
+      "at_ms": 612000,
+      "node": "bob",
+      "command": "send alice hey"
+    },
+    {
+      "at_ms": 628000,
+      "node": "alice",
+      "command": "send bob any-updates"
+    },
+    {
+      "at_ms": 645000,
+      "node": "bob",
+      "command": "send alice all-green"
+    },
+    {
+      "at_ms": 665000,
+      "node": "alice",
+      "command": "send bob good"
+    },
+    {
+      "at_ms": 685000,
+      "node": "bob",
+      "command": "send alice ttyl"
+    },
+    {
+      "at_ms": 720000,
+      "node": "carol",
+      "command": "send heidi ping"
+    },
+    {
+      "at_ms": 738000,
+      "node": "heidi",
+      "command": "send carol pong"
+    },
+    {
+      "at_ms": 765000,
+      "node": "carol",
+      "command": "send heidi howsignal"
+    },
+    {
+      "at_ms": 792000,
+      "node": "heidi",
+      "command": "send carol weak-north"
+    },
+    {
+      "at_ms": 820000,
+      "node": "carol",
+      "command": "send heidi ack"
+    },
+    {
+      "at_ms": 845000,
+      "node": "heidi",
+      "command": "send carol 73"
+    },
+    {
+      "at_ms": 840000,
+      "node": "leo",
+      "command": "send rosa yo"
+    },
+    {
+      "at_ms": 860000,
+      "node": "rosa",
+      "command": "send leo yo-back"
+    },
+    {
+      "at_ms": 890000,
+      "node": "leo",
+      "command": "send rosa test-test"
+    },
+    {
+      "at_ms": 920000,
+      "node": "rosa",
+      "command": "send leo 5of5"
+    },
+    {
+      "at_ms": 950000,
+      "node": "leo",
+      "command": "send rosa out"
+    },
+    {
+      "at_ms": 975000,
+      "node": "rosa",
+      "command": "send leo 73"
+    },
+    {
+      "at_ms": 960000,
+      "node": "dave",
+      "command": "send peter bridge-test"
+    },
+    {
+      "at_ms": 995000,
+      "node": "peter",
+      "command": "send dave got-it"
+    },
+    {
+      "at_ms": 1030000,
+      "node": "dave",
+      "command": "send peter round-trip-ok"
+    },
+    {
+      "at_ms": 1060000,
+      "node": "peter",
+      "command": "send dave confirmed"
+    },
+    {
+      "at_ms": 1080000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-1"
+    },
+    {
+      "at_ms": 1110000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-1"
+    },
+    {
+      "at_ms": 1140000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-1"
+    },
+    {
+      "at_ms": 1170000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-1"
+    },
+    {
+      "at_ms": 1260000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-2"
+    },
+    {
+      "at_ms": 1290000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-2"
+    },
+    {
+      "at_ms": 1320000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-2"
+    },
+    {
+      "at_ms": 1350000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-2"
+    },
+    {
+      "at_ms": 1440000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-3"
+    },
+    {
+      "at_ms": 1470000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-3"
+    },
+    {
+      "at_ms": 1500000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-3"
+    },
+    {
+      "at_ms": 1530000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-3"
+    },
+    {
+      "at_ms": 1620000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-4"
+    },
+    {
+      "at_ms": 1680000,
+      "node": "alice",
+      "command": "send bob round-2"
+    },
+    {
+      "at_ms": 1690000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-5"
+    },
+    {
+      "at_ms": 1710000,
+      "node": "bob",
+      "command": "send alice ack"
+    },
+    {
+      "at_ms": 1730000,
+      "node": "carol",
+      "command": "send heidi hey-again"
+    },
+    {
+      "at_ms": 1755000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-5"
+    },
+    {
+      "at_ms": 1770000,
+      "node": "heidi",
+      "command": "send carol still-here"
+    },
+    {
+      "at_ms": 1800000,
+      "node": "leo",
+      "command": "send rosa second-pass"
+    },
+    {
+      "at_ms": 1830000,
+      "node": "rosa",
+      "command": "send leo yep"
+    },
+    {
+      "at_ms": 1860000,
+      "node": "dave",
+      "command": "send peter stress-test"
+    },
+    {
+      "at_ms": 1890000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-6"
+    },
+    {
+      "at_ms": 1920000,
+      "node": "peter",
+      "command": "send dave loud-and-clear"
+    },
+    {
+      "at_ms": 1950000,
+      "node": "alice",
+      "command": "send bob burst-plus"
+    },
+    {
+      "at_ms": 1980000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-6"
+    },
+    {
+      "at_ms": 2010000,
+      "node": "carol",
+      "command": "send heidi burst-plus"
+    },
+    {
+      "at_ms": 2050000,
+      "node": "heidi",
+      "command": "send carol burst-plus"
+    },
+    {
+      "at_ms": 2100000,
+      "node": "leo",
+      "command": "send rosa final"
+    },
+    {
+      "at_ms": 2130000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-7"
+    },
+    {
+      "at_ms": 2160000,
+      "node": "rosa",
+      "command": "send leo 73"
+    },
+    {
+      "at_ms": 2200000,
+      "node": "dave",
+      "command": "send peter final"
+    },
+    {
+      "at_ms": 2230000,
+      "node": "peter",
+      "command": "send dave out"
+    },
+    {
+      "at_ms": 2260000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-7"
+    },
+    {
+      "at_ms": 2300000,
+      "node": "alice",
+      "command": "send bob out"
+    },
+    {
+      "at_ms": 2330000,
+      "node": "bob",
+      "command": "send alice 73-all"
+    }
+  ]
+}

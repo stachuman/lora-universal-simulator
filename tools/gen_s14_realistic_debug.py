@@ -269,3 +269,111 @@ PHASE3_INJECTS = [
     _inject(2_300_000, "alice", "send bob out"),
     _inject(2_330_000, "bob",   "send alice 73-all"),
 ]
+
+# ---------- Assembly ----------
+
+DESC = (
+    "Realistic debug scenario for delivery-rate investigation. "
+    "21 nodes (10 L1 alice..judy + 10 L2 kate..tina + 1 bridge), "
+    "40 min: 10 min quiet warmup + 30 min active traffic across "
+    "three phases (DM-only, channel-only, mixed). Per-layer routing "
+    "SF separation: L1=SF8 routing / SF7,9 data; L2=SF9 routing / "
+    "SF6,10 data. Bridge dual-layer with 50/50 time-share (30 s "
+    "period, 15 s home L1 + 15 s visit L2). Explicit asymmetric "
+    "link plan (6 of 30 intra-layer pairs asymmetric, 14-18 dB "
+    "forward / 5-8 dB reverse). 40 DMs across 4 conversation pairs "
+    "(alice<->bob 1-hop, carol<->heidi 3-hop, leo<->rosa 3-hop, "
+    "dave<->peter cross-layer 4-hop). 19 channel-7 posts from "
+    "4 posters (eve+grace on L1, mia+quinn on L2). Clean baseline "
+    "- no priority, no abuse, no mobility. Spec: docs/superpowers/"
+    "specs/2026-05-22-s14-realistic-debug-scenario-design.md. "
+    "Note: SF9 is L1-data and L2-routing - cross-layer airtime "
+    "collisions on SF9 are expected (Principle 11 semantic "
+    "isolation still holds)."
+)
+
+def build_scenario() -> dict:
+    return {
+        "_name": "s14_realistic_debug",
+        "_desc": DESC,
+        "simulation": {
+            "duration_ms":              DURATION_MS,
+            "step_ms":                  1,
+            "warmup_ms":                WARMUP_MS,
+            "seed":                     SEED,
+            "node_startup_jitter_ms":   5_000,
+            "radio":                    dict(RADIO),
+        },
+        "config": {
+            "debug_start_ms": 0,
+            "debug_end_ms":   DURATION_MS,
+        },
+        "nodes": build_nodes(),
+        "topology": {
+            "type":  "static_static",
+            "links": build_links(),
+        },
+        "inject": PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS,
+    }
+
+# ---------- Validation ----------
+
+def validate(scen: dict) -> None:
+    assert len(scen["nodes"]) == 21, f"expected 21 nodes, got {len(scen['nodes'])}"
+    names = [n["name"] for n in scen["nodes"]]
+    assert sorted(names) == sorted(ALL_NAMES), "node name set mismatch"
+
+    l1 = [n for n in scen["nodes"] if n["config"]["layer_id"] == 1 and not n["config"].get("is_gateway")]
+    l2 = [n for n in scen["nodes"] if n["config"]["layer_id"] == 2]
+    br = [n for n in scen["nodes"] if n["config"].get("is_gateway")]
+    assert len(l1) == 10 and len(l2) == 10 and len(br) == 1, (len(l1), len(l2), len(br))
+
+    for n in l1:
+        assert n["config"]["routing_sf"] == L1_ROUTING_SF
+        assert n["config"]["allowed_data_sfs"] == L1_DATA_SFS
+    for n in l2:
+        assert n["config"]["routing_sf"] == L2_ROUTING_SF
+        assert n["config"]["allowed_data_sfs"] == L2_DATA_SFS
+    bridge = br[0]
+    assert bridge["config"]["routing_sf"] == L1_ROUTING_SF
+    visit = bridge["config"]["gateway_layers"][0]
+    assert visit["routing_sf"] == L2_ROUTING_SF
+    assert visit["allowed_data_sfs"] == L2_DATA_SFS
+    assert visit["period_ms"] == BRIDGE_VISIT_PERIOD_MS
+    assert visit["duration_ms"] == BRIDGE_VISIT_DURATION_MS
+
+    n_links = len(scen["topology"]["links"])
+    assert n_links == 68, f"expected 68 directed links, got {n_links}"
+
+    # Every link endpoint must be a real node.
+    name_set = set(names)
+    for l in scen["topology"]["links"]:
+        assert l["from"] in name_set and l["to"] in name_set, l
+
+    n_inject = len(scen["inject"])
+    assert n_inject == 58, f"expected 58 inject events, got {n_inject}"
+
+    # Inject timeline: monotonically non-decreasing across the three phases.
+    # (Within a phase, bursts can be out of order; across phases, strict.)
+    phase1_max = max(x["at_ms"] for x in scen["inject"] if x["at_ms"] < 1_080_000)
+    phase2_min = min(x["at_ms"] for x in scen["inject"] if 1_080_000 <= x["at_ms"] < 1_680_000)
+    phase3_min = min(x["at_ms"] for x in scen["inject"] if x["at_ms"] >= 1_680_000)
+    assert phase1_max < 1_080_000 <= phase2_min, (phase1_max, phase2_min)
+    assert phase2_min < 1_680_000 <= phase3_min, (phase2_min, phase3_min)
+
+# ---------- Main ----------
+
+def main():
+    scen = build_scenario()
+    validate(scen)
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    with open(OUT_PATH, "w") as f:
+        json.dump(scen, f, indent=2)
+        f.write("\n")
+    n = scen["nodes"]
+    print(f"wrote {OUT_PATH}: {len(n)} nodes, "
+          f"{len(scen['topology']['links'])} directed links, "
+          f"{len(scen['inject'])} inject events")
+
+if __name__ == "__main__":
+    main()
