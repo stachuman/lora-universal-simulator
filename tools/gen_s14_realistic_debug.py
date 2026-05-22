@@ -188,3 +188,37 @@ def build_links() -> list[dict]:
     return (_expand_directed(L1_LINKS)
             + _expand_directed(L2_LINKS)
             + _expand_directed(BRIDGE_LINKS))
+
+# ---------- Inject schedule ----------
+
+def _inject(at_ms: int, node: str, command: str) -> dict:
+    return {"at_ms": at_ms, "node": node, "command": command}
+
+# Phase 1: DM-only (t=600s -> 1080s), back-and-forth bursts
+PHASE1_INJECTS = [
+    _inject(600_000,  "alice", "send bob hi"),
+    _inject(612_000,  "bob",   "send alice hey"),
+    _inject(628_000,  "alice", "send bob any-updates"),
+    _inject(645_000,  "bob",   "send alice all-green"),
+    _inject(665_000,  "alice", "send bob good"),
+    _inject(685_000,  "bob",   "send alice ttyl"),
+
+    _inject(720_000,  "carol", "send heidi ping"),
+    _inject(738_000,  "heidi", "send carol pong"),
+    _inject(765_000,  "carol", "send heidi howsignal"),
+    _inject(792_000,  "heidi", "send carol weak-north"),
+    _inject(820_000,  "carol", "send heidi ack"),
+    _inject(845_000,  "heidi", "send carol 73"),
+
+    _inject(840_000,  "leo",   "send rosa yo"),
+    _inject(860_000,  "rosa",  "send leo yo-back"),
+    _inject(890_000,  "leo",   "send rosa test-test"),
+    _inject(920_000,  "rosa",  "send leo 5of5"),
+    _inject(950_000,  "leo",   "send rosa out"),
+    _inject(975_000,  "rosa",  "send leo 73"),
+
+    _inject(960_000,  "dave",  "send peter bridge-test"),
+    _inject(995_000,  "peter", "send dave got-it"),
+    _inject(1030_000, "dave",  "send peter round-trip-ok"),
+    _inject(1060_000, "peter", "send dave confirmed"),
+]
