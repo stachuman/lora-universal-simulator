@@ -222,3 +222,23 @@ PHASE1_INJECTS = [
     _inject(1030_000, "dave",  "send peter round-trip-ok"),
     _inject(1060_000, "peter", "send dave confirmed"),
 ]
+
+# Phase 2: Channel-only (t=1080s -> 1680s), 4 posters on channel 7
+PHASE2_INJECTS = [
+    _inject(1_080_000, "eve",   "send_channel 7 L1-news-1"),
+    _inject(1_110_000, "grace", "send_channel 7 L1-event-1"),
+    _inject(1_140_000, "mia",   "send_channel 7 L2-news-1"),
+    _inject(1_170_000, "quinn", "send_channel 7 L2-event-1"),
+
+    _inject(1_260_000, "eve",   "send_channel 7 L1-news-2"),
+    _inject(1_290_000, "grace", "send_channel 7 L1-event-2"),
+    _inject(1_320_000, "mia",   "send_channel 7 L2-news-2"),
+    _inject(1_350_000, "quinn", "send_channel 7 L2-event-2"),
+
+    _inject(1_440_000, "eve",   "send_channel 7 L1-news-3"),
+    _inject(1_470_000, "grace", "send_channel 7 L1-event-3"),
+    _inject(1_500_000, "mia",   "send_channel 7 L2-news-3"),
+    _inject(1_530_000, "quinn", "send_channel 7 L2-event-3"),
+
+    _inject(1_620_000, "eve",   "send_channel 7 L1-news-4"),
+]
