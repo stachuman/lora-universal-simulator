@@ -128,3 +128,63 @@ def build_nodes() -> list[dict]:
         nodes.append(make_l2_node(n, nid)); nid += 1
     nodes.append(make_bridge(BRIDGE_NAME, nid))
     return nodes
+
+# ---------- Link plan ----------
+#
+# (from, to, snr_fwd, snr_rev). Asymmetric links have snr_fwd != snr_rev.
+# Source of truth: spec Section 8.
+
+L1_LINKS = [
+    ("alice",  "bob",    18, 18),
+    ("alice",  "carol",  16, 16),
+    ("alice",  "dave",   13, 13),
+    ("bob",    "dave",   17, 17),
+    ("carol",  "dave",   15, 15),
+    ("carol",  "frank",  14,  6),   # asymmetric
+    ("dave",   "eve",    16,  7),   # asymmetric
+    ("dave",   "grace",  18, 18),
+    ("eve",    "heidi",  14, 14),
+    ("frank",  "grace",  15, 15),
+    ("grace",  "heidi",  17, 17),
+    ("grace",  "ivan",   16,  8),   # asymmetric
+    ("grace",  "judy",   18, 18),
+    ("heidi",  "judy",   14, 14),
+    ("ivan",   "judy",   15, 15),
+]
+
+L2_LINKS = [
+    ("kate",   "leo",    18, 18),
+    ("kate",   "mia",    16, 16),
+    ("kate",   "ned",    13, 13),
+    ("leo",    "ned",    17, 17),
+    ("mia",    "ned",    15, 15),
+    ("mia",    "peter",  14,  6),   # asymmetric
+    ("ned",    "olga",   16,  7),   # asymmetric
+    ("ned",    "quinn",  18, 18),
+    ("olga",   "rosa",   14, 14),
+    ("peter",  "quinn",  15, 15),
+    ("quinn",  "rosa",   17, 17),
+    ("quinn",  "sam",    16,  8),   # asymmetric
+    ("quinn",  "tina",   18, 18),
+    ("rosa",   "tina",   14, 14),
+    ("sam",    "tina",   15, 15),
+]
+
+BRIDGE_LINKS = [
+    ("bridge", "grace",  16, 16),
+    ("bridge", "ivan",   14, 14),
+    ("bridge", "quinn",  16, 16),
+    ("bridge", "sam",    14, 14),
+]
+
+def _expand_directed(pairs):
+    out = []
+    for a, b, snr_ab, snr_ba in pairs:
+        out.append({"from": a, "to": b, "snr": float(snr_ab), "bidir": False})
+        out.append({"from": b, "to": a, "snr": float(snr_ba), "bidir": False})
+    return out
+
+def build_links() -> list[dict]:
+    return (_expand_directed(L1_LINKS)
+            + _expand_directed(L2_LINKS)
+            + _expand_directed(BRIDGE_LINKS))
