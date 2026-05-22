@@ -63,6 +63,7 @@ note calls it out.
 | 7.1 | Channel gossip — broadcast pull cycle (mechanism) | BCN digest → Q_CHANNEL_PULL → M_BROADCAST RTS (announces chosen_data_sf + id_lo16) → DATA-M broadcast at chosen_data_sf → in-range peers decode (or skip via id_lo16 pre-arm check). No CTS, no ACK. 2B-broadcast since `3af2be1` |
 | 7.2 | Channel gossip — pull-storm dedupe (mechanism) | Five layered dedupe paths: peer-Q overhear, id_lo16 pre-arm skip, M-payload promiscuous overhear, holder queue-dedup, channel_pull_recent window (60s). K=3 BCN ad cap. See ROADMAP §3.3 / §3.5 / §3.6 |
 | 7.3 | Channel gossip — Principle 11 (mechanism) | Channels stay within a layer structurally: gateways skip both buffer-merge and overhear-arm; leaf_id filter excludes cross-layer RTS at parse. No special gateway-drop path needed under 2B-broadcast |
+| 8.1 | s14 — Realistic debug scenario | 21-node two-layer + bridge clean baseline (no priority, no abuse, no mobility); 40 min, 4 phases; asymmetric links; DM/channel/cross-layer coverage for isolating delivery-rate regressions before re-running 6 h s12 |
 
 ---
 
@@ -2206,6 +2207,69 @@ specific to routing-SF M-payload broadcast. Under 2B that leak
 cannot occur by construction. Cross-layer DM continues to use the
 gateway envelope path (§6.5) as before — DM frames don't carry
 PAYLOAD_TYPE_M.
+
+---
+
+# 8. Realistic debug scenarios
+
+## 8.1 s14 — Realistic debug scenario
+
+**Status.** Implemented in `scenarios/s14_realistic_debug.json`;
+generator `tools/gen_s14_realistic_debug.py`. Wall-clock ~30-60 s
+for the full 40-min simulated run.
+
+**Purpose.** A small, debuggable, realistic scenario for isolating
+delivery-rate problems before re-testing against `s12` (6 h dense
+two-layer). Clean baseline — no priority, no abuse, no mobility —
+so any delivery deficit is attributable to routing / channel /
+gateway mechanics rather than load shaping.
+
+**Shape.**
+
+- 21 nodes: 10 L1 (`alice`..`judy`) + 10 L2 (`kate`..`tina`) + 1
+  dual-layer `bridge`.
+- Per-layer routing SF separation: L1 routing SF8, data `[7,9]`;
+  L2 routing SF9, data `[6,10]`.
+- Explicit asymmetric link plan: 6 of 30 intra-layer pairs are
+  asymmetric (forward 14-18 dB / reverse 5-8 dB). This is the
+  project's standing realism principle — symmetric path-loss masks
+  protocol bugs real hardware would expose.
+- Bridge time-shares 50/50 between L1 (home) and L2 (visit) on a
+  30 s period.
+
+**Timeline.**
+
+| Phase | Time      | Activity                                      |
+|-------|-----------|-----------------------------------------------|
+| Quiet | 0-10 min  | BCN exchange under full physics               |
+| 1     | 10-18 min | DM-only, 4 burst pairs, 22 events             |
+| 2     | 18-28 min | Channel-only, 4 posters x 4 waves, 13 events  |
+| 3     | 28-40 min | Mixed: round-2 DMs + posts, 23 events         |
+
+**DM conversation pairs.**
+
+| Pair             | Layer       | Expected hops          |
+|------------------|-------------|------------------------|
+| alice <-> bob    | L1          | 1                      |
+| carol <-> heidi  | L1          | 3 (asym link in path)  |
+| leo <-> rosa     | L2          | 3 (asym link in path)  |
+| dave <-> peter   | cross-layer | 4 (via bridge)         |
+
+**Channel posters.** `eve` + `grace` on L1 channel 7; `mia` +
+`quinn` on L2 channel 7. Per Principle 11, L1 posts stay in L1
+and L2 posts stay in L2 — the bridge does **not** carry channel
+messages across.
+
+**Coexistence note.** SF9 is L1-data **and** L2-routing. L1
+channel broadcasts at SF9 are received-but-discarded by L2 nodes
+(semantic isolation holds), but the airtime collisions are
+cross-layer — a realistic production coexistence issue this
+scenario deliberately exposes.
+
+**Use.** Run, then look at `tools/analyze.py` output for: DM
+delivery rate per pair / per hop / per layer, channel reach %,
+per-phase counters, asymmetric-link route choice, Principle-11
+leak check, SF9 cross-layer airtime contention.
 
 ---
 
