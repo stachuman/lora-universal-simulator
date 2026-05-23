@@ -2695,10 +2695,18 @@ end
 -- there is no other recovery mechanism) get rescheduled. Q also gets a
 -- runtime retry: if the initial route query is blocked before it reaches the
 -- radio, the deferred-send TTL can expire without anyone learning a route.
+--
+-- DATA-M is the channel-gossip 2B broadcast (PROTOCOL §3.4.1). Fire-and-
+-- forget by design: no CTS, no ACK, no rts_timeout. If the radio defers it
+-- (channel_busy / duty_cycle), there is no other recovery path — without
+-- on_radio_busy retry the channel post silently dies even if the dirty
+-- digest keeps advertising it. Add to RETRY_ELIGIBLE so the standard
+-- TX_DEFER_MAX_RETRIES stash mechanism applies.
 local RETRY_ELIGIBLE = {
   ["CTS"]     = true,
   ["CTS-dup"] = true,
   ["DATA"]    = true,
+  ["DATA-M"]  = true,
   ["ACK"]     = true,
   ["K-dup"]   = true,
   ["NACK"]    = true,
