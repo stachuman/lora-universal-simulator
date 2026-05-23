@@ -1049,6 +1049,19 @@ PROTOCOL = {
   -- ---- Gateway scheduling ----
   gateway_schedule_guard_ms      = 100,
 
+  -- ---- Cross-layer routing propagation (BCN TLV type=4) ----
+  -- Lifetime of each (gw_id, dest_layer) entry in `self.bridged_layers`.
+  -- Refreshed on every observation; pruned on access if older. Match the
+  -- BCN-derived state lifetime defaults (= id_bind_ttl_ms = 48 h) so
+  -- gateways that go silent age out at the same cadence as other identity
+  -- bindings. Tests can shorten via config.
+  gateway_bridged_layers_ttl_ms     = 172800000,  -- 48 h
+  -- 4-bit TLV `len` field caps payload at 15 bytes. With the split-list
+  -- form (N gw_ids + ceil(N/2) packed-nibble layer bytes), 9 entries fit
+  -- (9 + 5 = 14 bytes). Larger advertisements need chained TLVs or
+  -- top-K rotation across BCN cycles.
+  gateway_bridged_layers_max_per_tlv = 9,
+
   -- ---- Join state machine (§2a) ----
   join_listen_ms                 = 3000,
   join_discover_jitter_ms        = 3000,
@@ -1110,6 +1123,10 @@ local BCN_EXT_TYPE_LIVENESS_STATE = 2
 -- digest extensions in same BCN) is a future enhancement if propagation
 -- needs more headroom; for v1 the lazy convergence model is fine with 3.
 BCN_EXT_TYPE_CHANNEL_DIGEST = 3   -- global to stay under 200-locals limit
+-- BCN ext TLV type 4: gateway_layer (cross-layer routing propagation).
+-- Split-list: N × gw_id(8) followed by N × dest_layer(4) packed two
+-- nibbles per byte. N = (2 × len) // 3. Max 9 entries per TLV.
+BCN_EXT_TYPE_GATEWAY_LAYER = 4   -- global to stay under 200-locals limit
 local PEER_LEVEL_SUSPECT = 1
 local PEER_LEVEL_SILENT  = 2
 local PEER_LEVEL_DEAD    = 3
@@ -1337,6 +1354,133 @@ function build_channel_digest_ext(node)
          #picked
 end
 
+-- Cross-layer routing TLV: prune aged entries in self.bridged_layers.
+-- Called at pack time and before select_gateway_for_layer reads.
+-- See PROTOCOL §3.1 type 4 (gateway_layer) for the lifetime contract.
+function prune_aged_bridged_layers(self, now)
+  if self.bridged_layers == nil then return end
+  local ttl = self.gateway_bridged_layers_ttl_ms or 0
+  if ttl <= 0 then return end
+  local stale = {}
+  for gw_id, rec in pairs(self.bridged_layers) do
+    if rec ~= nil and rec.last_seen_ms ~= nil
+       and (now - rec.last_seen_ms) > ttl then
+      table.insert(stale, {gw_id = gw_id,
+                          dest_layer = rec.dest_layer,
+                          age_ms = now - rec.last_seen_ms})
+    end
+  end
+  for _, s in ipairs(stale) do
+    self.bridged_layers[s.gw_id] = nil
+    if debug_emit_allowed(self) then
+      self:emit("bridged_layers_aged", {
+        gw_id = s.gw_id, dest_layer = s.dest_layer,
+        age_ms = s.age_ms, ttl_ms = ttl,
+      })
+    end
+  end
+end
+
+-- Build the BCN_EXT_TYPE_GATEWAY_LAYER (type=4) TLV. Combines:
+--   - self-advertisement (gateways only): one entry per visit layer,
+--     where dest_layer is the "other" layer relative to active_leaf
+--   - propagated entries from self.bridged_layers (anyone who's
+--     observed cross-layer info, including non-gateways)
+-- Returns (tlv_bytes, count) or (nil, 0) if nothing to advertise.
+function build_gateway_layer_ext(node)
+  local now = node:now()
+  prune_aged_bridged_layers(node, now)
+  local active_leaf = (node.active_leaf_id or node.leaf_id or 0) & 0xf
+  local seen_in_tlv = {}    -- spec invariant: each gw_id at most once
+  local entries = {}
+  -- Self-advertisement for gateways.
+  if node.self_gateway and node.gateway_layer_list ~= nil then
+    local home_leaf = (node.layer_id or 0) & 0xf
+    for _, visit_layer in ipairs(node.gateway_layer_list) do
+      local visit_leaf = visit_layer & 0xf
+      local dest_layer = nil
+      if active_leaf == home_leaf then
+        dest_layer = visit_leaf
+      elseif active_leaf == visit_leaf then
+        dest_layer = home_leaf
+      end
+      if dest_layer ~= nil and dest_layer ~= active_leaf
+         and not seen_in_tlv[node.id] then
+        seen_in_tlv[node.id] = true
+        table.insert(entries, {
+          gw_id = node.id, dest_layer = dest_layer,
+          last_seen_ms = now,
+        })
+      end
+    end
+  end
+  -- Propagated entries from re-gossip. Skip dest_layer == active_leaf
+  -- (would advertise the receiver's own layer — useless).
+  if node.bridged_layers ~= nil then
+    for gw_id, rec in pairs(node.bridged_layers) do
+      if rec ~= nil and rec.dest_layer ~= nil
+         and not seen_in_tlv[gw_id]
+         and rec.dest_layer ~= active_leaf then
+        seen_in_tlv[gw_id] = true
+        table.insert(entries, {
+          gw_id = gw_id, dest_layer = rec.dest_layer,
+          last_seen_ms = rec.last_seen_ms or 0,
+        })
+      end
+    end
+  end
+  if #entries == 0 then return nil, 0 end
+  -- Top-K by recency. Rotation across BCN cycles can be added later
+  -- if real deployments routinely exceed max_per_tlv.
+  table.sort(entries, function(a, b)
+    if a.last_seen_ms ~= b.last_seen_ms then
+      return a.last_seen_ms > b.last_seen_ms
+    end
+    return a.gw_id < b.gw_id
+  end)
+  local max_per_tlv = node.gateway_bridged_layers_max_per_tlv or 9
+  while #entries > max_per_tlv do table.remove(entries) end
+  -- Pack split-list: N × gw_id(8), then ceil(N/2) bytes of packed
+  -- layer nibbles. Low nibble = even index, high nibble = odd index.
+  local N = #entries
+  local gw_part = {}
+  for i = 1, N do gw_part[i] = string.char(entries[i].gw_id & 0xff) end
+  local nibble_byte_count = math.floor((N + 1) / 2)
+  local nibble_bytes = {}
+  for i = 1, nibble_byte_count do nibble_bytes[i] = 0 end
+  for i = 0, N - 1 do
+    local layer = entries[i + 1].dest_layer & 0xf
+    local pos = math.floor(i / 2) + 1
+    if (i % 2) == 0 then
+      nibble_bytes[pos] = (nibble_bytes[pos] & 0xf0) | layer
+    else
+      nibble_bytes[pos] = (nibble_bytes[pos] & 0x0f) | (layer << 4)
+    end
+  end
+  local nibble_part = {}
+  for i, v in ipairs(nibble_bytes) do
+    nibble_part[i] = string.char(v & 0xff)
+  end
+  local body = table.concat(gw_part) .. table.concat(nibble_part)
+  -- 4-bit `len` caps body at 15 bytes. With max_per_tlv=9 this is
+  -- 9 + 5 = 14 bytes, safely within the cap.
+  if #body > 15 then return nil, 0 end
+  if debug_emit_allowed(node) then
+    local emit_entries = {}
+    for _, e in ipairs(entries) do
+      table.insert(emit_entries, {
+        gw_id = e.gw_id, dest_layer = e.dest_layer,
+        age_ms = math.max(0, now - (e.last_seen_ms or now)),
+      })
+    end
+    node:emit("bridged_layers_advertised", {
+      count = N, entries = emit_entries,
+    })
+  end
+  return string.char((BCN_EXT_TYPE_GATEWAY_LAYER << 4) | (#body & 0x0f)) .. body,
+         N
+end
+
 local function pack_beacon_byte1(node)
   local leaf_id = node.active_leaf_id or node.leaf_id
   local b = (leaf_id & 0xf) << 4
@@ -1420,6 +1564,13 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   local channel_digest_tlv, channel_dirty_n = build_channel_digest_ext(node)
   if channel_digest_tlv then
     ext_payload = (ext_payload or "") .. channel_digest_tlv
+  end
+  -- PROTOCOL §3.1 type 4: gateway_layer TLV. Propagates per-gateway
+  -- cross-layer routing hints so multi-hop nodes can pick the right
+  -- gateway for send_layer.
+  local gw_layer_tlv, gw_layer_n = build_gateway_layer_ext(node)
+  if gw_layer_tlv then
+    ext_payload = (ext_payload or "") .. gw_layer_tlv
   end
   local header = "B"
                  .. string.char(byte1)
@@ -1624,6 +1775,30 @@ local function parse_beacon(frame)
           local id = channel_msg_id_from_bytes(frame, pos + 1 + i * 4)
           table.insert(out.channel_digest_ids, id)
           i = i + 1
+        end
+      elseif typ == BCN_EXT_TYPE_GATEWAY_LAYER then
+        -- PROTOCOL §3.1 type 4: split-list, N × gw_id(8) then N ×
+        -- dest_layer(4) packed 2 nibbles per byte. N inferred from
+        -- len as (2 * len) // 3. Valid lens: 2,3,5,6,8,9,11,12,14.
+        local N = (2 * len) // 3
+        if N <= 0 then return nil end
+        if N + math.floor((N + 1) / 2) ~= len then return nil end
+        out.gateway_layer_entries = out.gateway_layer_entries or {}
+        local seen_gw = {}      -- enforce "each gw_id at most once"
+        local ok = true
+        for i = 0, N - 1 do
+          local gw_id = frame:byte(pos + i)
+          local b = frame:byte(pos + N + math.floor(i / 2))
+          local nibble = (i % 2 == 0) and (b & 0xf) or ((b >> 4) & 0xf)
+          if seen_gw[gw_id] then ok = false; break end
+          seen_gw[gw_id] = true
+          table.insert(out.gateway_layer_entries, {
+            gw_id = gw_id, dest_layer = nibble,
+          })
+        end
+        if not ok then
+          -- Malformed (duplicate gw_id) — discard this TLV entirely.
+          out.gateway_layer_entries = nil
         end
       end
       pos = pos + len
@@ -4165,6 +4340,46 @@ local function gateway_remote_bind_find(self, layer_id, key_hash32)
   return nil
 end
 
+-- Apply observed gateway_layer TLV entries to self.bridged_layers.
+-- Last-write-wins semantics (most-recent observation overrides any
+-- previous dest_layer for that gw_id). Emits bridged_layers_observed
+-- once per BCN and bridged_layers_replaced when an existing entry
+-- changes its dest_layer. See PROTOCOL §3.1 type 4.
+local function ingest_gateway_layer_entries(self, from, entries)
+  if entries == nil or #entries == 0 then return end
+  local now = self:now()
+  self.bridged_layers = self.bridged_layers or {}
+  local emit_observed = {}
+  for _, e in ipairs(entries) do
+    local gw_id = e.gw_id
+    local new_layer = e.dest_layer
+    if gw_id ~= nil and new_layer ~= nil then
+      local prev = self.bridged_layers[gw_id]
+      if prev ~= nil and prev.dest_layer ~= new_layer then
+        if debug_emit_allowed(self) then
+          self:emit("bridged_layers_replaced", {
+            gw_id = gw_id, prev_layer = prev.dest_layer,
+            new_layer = new_layer, from = from,
+            age_ms = now - (prev.last_seen_ms or now),
+          })
+        end
+      end
+      self.bridged_layers[gw_id] = {
+        dest_layer = new_layer, last_seen_ms = now,
+      }
+      table.insert(emit_observed, {
+        gw_id = gw_id, dest_layer = new_layer,
+      })
+    end
+  end
+  if #emit_observed > 0 and debug_emit_allowed(self) then
+    self:emit("bridged_layers_observed", {
+      from = from, count = #emit_observed,
+      entries = emit_observed,
+    })
+  end
+end
+
 local function remember_gateway_schedule(self, gateway_id, b)
   if gateway_id == nil or not b.self_gateway or not b.schedule or #b.schedule == 0 then return end
   self.gateway_neighbor_schedules = self.gateway_neighbor_schedules or {}
@@ -4312,17 +4527,27 @@ end
 
 local function select_gateway_for_layer(self, target_layer_id)
   target_layer_id = math.floor(target_layer_id or -1)
+  -- Prune stale propagated entries before reading. Cheap (table walk).
+  prune_aged_bridged_layers(self, self:now())
   local best_gateway = nil
   local best_hops = nil
   local best_score = nil
   for dest_id, entry in pairs(self.rt or {}) do
     local c = entry.candidates and entry.candidates[1]
     if c ~= nil and dest_id ~= self.id then
+      -- 1-hop path: direct neighbour parsed the schedule TLV.
       local sched = self.gateway_neighbor_schedules
                     and self.gateway_neighbor_schedules[dest_id]
       local bridges_target = sched
                              and sched.bridged_layers
                              and sched.bridged_layers[target_layer_id] == true
+      -- Multi-hop path: PROTOCOL §3.1 type 4 propagated TLV.
+      if not bridges_target and self.bridged_layers ~= nil then
+        local prop = self.bridged_layers[dest_id]
+        if prop ~= nil and prop.dest_layer == target_layer_id then
+          bridges_target = true
+        end
+      end
       if bridges_target then
         local hops = c.hops or 99
         local score = c.score or -999
@@ -7647,6 +7872,11 @@ function on_init(self, config)
   self.gateway_schedule_records = {}
   self.gateway_neighbor_schedules = {}
   self.gateway_remote_bind = {}
+  -- PROTOCOL §3.1 type 4: cross-layer routing propagation. Map of
+  -- gw_id -> { dest_layer, last_seen_ms }. Populated from peer BCNs
+  -- carrying type-4 TLVs (or from our own gateway_layer_list when
+  -- self_gateway, computed at pack time).
+  self.bridged_layers = {}
   for _, layer in ipairs(config.gateway_layers or {}) do
     local layer_id = nil
     local routing_sf = nil
@@ -8217,6 +8447,17 @@ function on_recv(self, frame, meta)
     learn_rx_source("beacon_frame")
     id_bind_set(self, b.src, b.key_hash32, "bcn", "claimed")
     remember_gateway_schedule(self, b.src, b)
+    -- PROTOCOL §3.1 type 4: ingest propagated cross-layer routing.
+    -- Skip self-references (we shouldn't be in our own re-gossip).
+    if b.gateway_layer_entries ~= nil then
+      local filtered = {}
+      for _, e in ipairs(b.gateway_layer_entries) do
+        if e.gw_id ~= self.id then
+          table.insert(filtered, e)
+        end
+      end
+      ingest_gateway_layer_entries(self, b.src, filtered)
+    end
     gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
                                 b.src, b.key_hash32, "bcn")
     try_drain_gateway_handoffs(self)

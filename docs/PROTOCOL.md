@@ -156,7 +156,8 @@ if E == 1:
   type 1: suspect/silent node ids, payload = len × node_id(8)
   type 2: explicit liveness state, payload = repeated {node_id(8), state(8)}
           state: 1=suspect, 2=silent, 3=dead
-  type 3: gateway_layer (cross-layer routing propagation), split-list
+  type 3: channel_digest (§3.4.1), payload = count(8) + count × channel_msg_id(32)
+  type 4: gateway_layer (cross-layer routing propagation), split-list
           form. payload = N × gw_id(8) followed by N × dest_layer(4)
           packed two nibbles per byte:
             byte 0..N-1:           N × gw_id(8)
@@ -255,7 +256,7 @@ becoming a beacon storm. If a node hears itself listed, it emits
 `peer_suspect_self_heard` and schedules a corrective BCN only when its own
 budget tier is below CRITICAL.
 
-Type `3` (`gateway_layer`) propagates per-gateway cross-layer routing
+Type `4` (`gateway_layer`) propagates per-gateway cross-layer routing
 hints so multi-hop nodes can pick the right gateway for a cross-layer
 DM. The schedule block (`has_schedule=1`) is only emitted by gateways
 themselves and is only parsed by direct radio neighbours; this TLV is
@@ -267,14 +268,14 @@ split-list form (all gw_ids first, then all layer nibbles) is chosen
 for parser simplicity and to keep the gw_id slice byte-aligned.
 
 **Propagation:** unlike type 1/2 (no re-gossip of remote reports),
-type 3 *is* re-gossiped. Every node that knows
+type 4 *is* re-gossiped. Every node that knows
 `{gw_id, dest_layer}` SHOULD include it in its own BCN. Direct
 neighbours of a gateway populate this from the schedule records they
 already parse; multi-hop receivers learn from the TLV. This is the
 same gossip pattern as the `is_gateway` bit on route entries.
 
 **Self-advertisement:** a gateway includes itself in its own outbound
-type-3 TLV. Direct neighbours can derive the same information from the
+type-4 TLV. Direct neighbours can derive the same information from the
 attached schedule block, but the uniform redistribution rule keeps
 "who advertises what" simple — every node propagates its full
 `bridged_layers` map.
@@ -2498,7 +2499,7 @@ expectations) subscribe by event_type.
 | `gateway_remote_bind_aged` | Gateway evicted a remote-layer binding after `gateway_remote_bind_ttl_ms` of silence | `key_hash32`, `layer_id`, `node`, `age_ms`, `ttl_ms`, `source`, `ambiguous` |
 | `gateway_no_binding` | Gateway received an envelope but cannot resolve the target hash in that layer | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason` (`not_found` / `ambiguous`) |
 | `gateway_envelope_at_non_gateway` | Non-gateway received gateway envelope DATA; this is treated as routing/gateway misconvergence and dropped | `origin`, `dst`, `target_layer_id`, `dst_key_hash32`, `payload` |
-| `bridged_layers_advertised` | Node included the gateway_layer TLV (type=3) in an outbound BCN | `count`, `entries[]` with `gw_id`, `dest_layer`, `age_ms` |
+| `bridged_layers_advertised` | Node included the gateway_layer TLV (type=4) in an outbound BCN | `count`, `entries[]` with `gw_id`, `dest_layer`, `age_ms` |
 | `bridged_layers_observed` | Node parsed a gateway_layer TLV from a received BCN and updated its bridged_layers table | `from`, `count`, `entries[]` with `gw_id`, `dest_layer` |
 | `bridged_layers_replaced` | Receiving TLV refreshed a known gw_id with a different dest_layer; last-write-wins replaces the old value | `gw_id`, `prev_layer`, `new_layer`, `from`, `age_ms` |
 | `bridged_layers_aged` | Per-(gw_id, dest_layer) entry pruned after `gateway_bridged_layers_ttl_ms` of silence | `gw_id`, `dest_layer`, `age_ms`, `ttl_ms` |
@@ -2682,7 +2683,7 @@ block for current values):
   `cap_gateway_deferred_handoffs`, `cap_id_bind`,
   `cap_channel_buffer` — emit `table_cap_hit` on overflow (§13.6)
 - Identity / gateway: `id_bind_ttl_ms`, `gateway_schedule_guard_ms`,
-  `gateway_bridged_layers_ttl_ms` (TLV type=3 entry lifetime; pruned
+  `gateway_bridged_layers_ttl_ms` (TLV type=4 entry lifetime; pruned
   on access if older), `gateway_bridged_layers_max_per_tlv` (cap on
   entries per TLV, default 9 per the 4-bit `len` field)
 - Join: `join_{listen,discover_jitter,discover_wait}_ms`,

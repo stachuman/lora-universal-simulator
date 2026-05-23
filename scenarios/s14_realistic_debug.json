@@ -13,7 +13,7 @@
       "cr": 5,
       "max_packet_bytes": 255,
       "snr_coherence_ms": 0,
-      "duty_cycle": 0.01
+      "duty_cycle": 0.1
     }
   },
   "config": {
@@ -24,7 +24,7 @@
     {
       "name": "alice",
       "node_id": 1,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010001",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -42,7 +42,7 @@
     {
       "name": "bob",
       "node_id": 2,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010002",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -60,7 +60,7 @@
     {
       "name": "carol",
       "node_id": 3,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010003",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -78,7 +78,7 @@
     {
       "name": "dave",
       "node_id": 4,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010004",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -96,7 +96,7 @@
     {
       "name": "eve",
       "node_id": 5,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010005",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -114,7 +114,7 @@
     {
       "name": "frank",
       "node_id": 6,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010006",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -132,7 +132,7 @@
     {
       "name": "grace",
       "node_id": 7,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010007",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -150,7 +150,7 @@
     {
       "name": "heidi",
       "node_id": 8,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010008",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -168,7 +168,7 @@
     {
       "name": "ivan",
       "node_id": 9,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14010009",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -186,7 +186,7 @@
     {
       "name": "judy",
       "node_id": 10,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x1401000A",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -204,7 +204,7 @@
     {
       "name": "kate",
       "node_id": 11,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020001",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -222,7 +222,7 @@
     {
       "name": "leo",
       "node_id": 12,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020002",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -240,7 +240,7 @@
     {
       "name": "mia",
       "node_id": 13,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020003",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -258,7 +258,7 @@
     {
       "name": "ned",
       "node_id": 14,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020004",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -276,7 +276,7 @@
     {
       "name": "olga",
       "node_id": 15,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020005",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -294,7 +294,7 @@
     {
       "name": "peter",
       "node_id": 16,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020006",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -312,7 +312,7 @@
     {
       "name": "quinn",
       "node_id": 17,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020007",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -330,7 +330,7 @@
     {
       "name": "rosa",
       "node_id": 18,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020008",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -348,7 +348,7 @@
     {
       "name": "sam",
       "node_id": 19,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14020009",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -366,7 +366,7 @@
     {
       "name": "tina",
       "node_id": 20,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x1402000A",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 2,
@@ -384,7 +384,7 @@
     {
       "name": "bridge",
       "node_id": 21,
-      "key_hash32": "0xCAFE1422",
+      "key_hash32": "0x14030001",
       "script": "scenarios/dv_dual_sf.lua",
       "config": {
         "layer_id": 1,
@@ -920,22 +920,22 @@
     {
       "at_ms": 960000,
       "node": "dave",
-      "command": "send peter bridge-test"
+      "command": "send_layer 2 335675398 bridge-test"
     },
     {
       "at_ms": 995000,
       "node": "peter",
-      "command": "send dave got-it"
+      "command": "send_layer 1 335609860 got-it"
     },
     {
       "at_ms": 1030000,
       "node": "dave",
-      "command": "send peter round-trip-ok"
+      "command": "send_layer 2 335675398 round-trip-ok"
     },
     {
       "at_ms": 1060000,
       "node": "peter",
-      "command": "send dave confirmed"
+      "command": "send_layer 1 335609860 confirmed"
     },
     {
       "at_ms": 1080000,
@@ -1045,7 +1045,7 @@
     {
       "at_ms": 1860000,
       "node": "dave",
-      "command": "send peter stress-test"
+      "command": "send_layer 2 335675398 stress-test"
     },
     {
       "at_ms": 1890000,
@@ -1055,7 +1055,7 @@
     {
       "at_ms": 1920000,
       "node": "peter",
-      "command": "send dave loud-and-clear"
+      "command": "send_layer 1 335609860 loud-and-clear"
     },
     {
       "at_ms": 1950000,
@@ -1095,12 +1095,12 @@
     {
       "at_ms": 2200000,
       "node": "dave",
-      "command": "send peter final"
+      "command": "send_layer 2 335675398 final"
     },
     {
       "at_ms": 2230000,
       "node": "peter",
-      "command": "send dave out"
+      "command": "send_layer 1 335609860 out"
     },
     {
       "at_ms": 2260000,

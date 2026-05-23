@@ -31,7 +31,7 @@ STATE_SNAPSHOT_PERIOD_MS = 60_000
 RADIO = {
     "sf": 8, "bw": 62.5, "cr": 5,
     "max_packet_bytes": 255, "snr_coherence_ms": 0,
-    "duty_cycle": 0.01,
+    "duty_cycle": 0.1,
 }
 
 # Per-layer SF separation
@@ -39,6 +39,25 @@ L1_ROUTING_SF       = 8
 L1_DATA_SFS         = [7, 9]
 L2_ROUTING_SF       = 9
 L2_DATA_SFS         = [6, 10]
+
+# Per-node key_hash32: 0x14<layer><0000><index>. Each node needs a
+# UNIQUE hash because (a) cross-layer DM is addressed by key_hash32
+# (gateway envelope), and (b) the gateway's id-binding table uses
+# key_hash32 to map L1 short IDs to L2 short IDs and vice versa.
+# Sharing a single hash across all nodes (as the initial s14 did)
+# caused 100% cross-layer DM failure plus id-bind conflicts.
+KEY_HASH_PREFIX = 0x14000000
+
+def key_hash32_int(layer_nibble: int, layer_index: int) -> int:
+    return KEY_HASH_PREFIX | (layer_nibble << 16) | layer_index
+
+def key_hash32_hex(layer_nibble: int, layer_index: int) -> str:
+    return f"0x{key_hash32_int(layer_nibble, layer_index):08X}"
+
+# Pre-computed identity hashes for the cross-layer DM pair.
+# dave (L1 layer-index 4) <-> peter (L2 layer-index 6).
+DAVE_KEY_HASH_DECIMAL  = key_hash32_int(0x01, 4)
+PETER_KEY_HASH_DECIMAL = key_hash32_int(0x02, 6)
 
 # Bridge time-share: 30 s window, 15 s home (L1) / 15 s visit (L2)
 BRIDGE_VISIT_PERIOD_MS   = 30_000
@@ -61,7 +80,7 @@ def make_l1_node(name: str, node_id: int) -> dict:
     return {
         "name":       name,
         "node_id":    node_id,
-        "key_hash32": "0xCAFE1422",
+        "key_hash32": key_hash32_hex(0x01, node_id),
         "script":     "scenarios/dv_dual_sf.lua",
         "config": {
             "layer_id":                   1,
@@ -78,7 +97,7 @@ def make_l2_node(name: str, node_id: int) -> dict:
     return {
         "name":       name,
         "node_id":    node_id,
-        "key_hash32": "0xCAFE1422",
+        "key_hash32": key_hash32_hex(0x02, node_id - 10),
         "script":     "scenarios/dv_dual_sf.lua",
         "config": {
             "layer_id":                   2,
@@ -95,7 +114,7 @@ def make_bridge(name: str, node_id: int) -> dict:
     return {
         "name":       name,
         "node_id":    node_id,
-        "key_hash32": "0xCAFE1422",
+        "key_hash32": key_hash32_hex(0x03, 1),
         "script":     "scenarios/dv_dual_sf.lua",
         "config": {
             "layer_id":         1,
@@ -217,10 +236,11 @@ PHASE1_INJECTS = [
     _inject(950_000,  "leo",   "send rosa out"),
     _inject(975_000,  "rosa",  "send leo 73"),
 
-    _inject(960_000,  "dave",  "send peter bridge-test"),
-    _inject(995_000,  "peter", "send dave got-it"),
-    _inject(1030_000, "dave",  "send peter round-trip-ok"),
-    _inject(1060_000, "peter", "send dave confirmed"),
+    # Cross-layer DM: send_layer <target_layer_id> <dst_key_hash32_decimal> <text>
+    _inject(960_000,  "dave",  f"send_layer 2 {PETER_KEY_HASH_DECIMAL} bridge-test"),
+    _inject(995_000,  "peter", f"send_layer 1 {DAVE_KEY_HASH_DECIMAL} got-it"),
+    _inject(1030_000, "dave",  f"send_layer 2 {PETER_KEY_HASH_DECIMAL} round-trip-ok"),
+    _inject(1060_000, "peter", f"send_layer 1 {DAVE_KEY_HASH_DECIMAL} confirmed"),
 ]
 
 # Phase 2: Channel-only (t=1080s -> 1680s), 4 posters on channel 7
@@ -253,9 +273,9 @@ PHASE3_INJECTS = [
     _inject(1_770_000, "heidi", "send carol still-here"),
     _inject(1_800_000, "leo",   "send rosa second-pass"),
     _inject(1_830_000, "rosa",  "send leo yep"),
-    _inject(1_860_000, "dave",  "send peter stress-test"),
+    _inject(1_860_000, "dave",  f"send_layer 2 {PETER_KEY_HASH_DECIMAL} stress-test"),
     _inject(1_890_000, "eve",   "send_channel 7 L1-news-6"),
-    _inject(1_920_000, "peter", "send dave loud-and-clear"),
+    _inject(1_920_000, "peter", f"send_layer 1 {DAVE_KEY_HASH_DECIMAL} loud-and-clear"),
     _inject(1_950_000, "alice", "send bob burst-plus"),
     _inject(1_980_000, "quinn", "send_channel 7 L2-event-6"),
     _inject(2_010_000, "carol", "send heidi burst-plus"),
@@ -263,8 +283,8 @@ PHASE3_INJECTS = [
     _inject(2_100_000, "leo",   "send rosa final"),
     _inject(2_130_000, "mia",   "send_channel 7 L2-news-7"),
     _inject(2_160_000, "rosa",  "send leo 73"),
-    _inject(2_200_000, "dave",  "send peter final"),
-    _inject(2_230_000, "peter", "send dave out"),
+    _inject(2_200_000, "dave",  f"send_layer 2 {PETER_KEY_HASH_DECIMAL} final"),
+    _inject(2_230_000, "peter", f"send_layer 1 {DAVE_KEY_HASH_DECIMAL} out"),
     _inject(2_260_000, "grace", "send_channel 7 L1-event-7"),
     _inject(2_300_000, "alice", "send bob out"),
     _inject(2_330_000, "bob",   "send alice 73-all"),
@@ -333,6 +353,10 @@ def validate(scen: dict) -> None:
     for n in l2:
         assert n["config"]["routing_sf"] == L2_ROUTING_SF
         assert n["config"]["allowed_data_sfs"] == L2_DATA_SFS
+    hashes = [n["key_hash32"] for n in scen["nodes"]]
+    assert len(set(hashes)) == 21, \
+        f"key_hash32 must be unique per node (got {len(set(hashes))} unique of 21)"
+
     bridge = br[0]
     assert bridge["config"]["routing_sf"] == L1_ROUTING_SF
     visit = bridge["config"]["gateway_layers"][0]
