@@ -45,8 +45,11 @@ Options:
   --json                 Emit JSON instead of the table.
   --detail               Include per-message timeline (text mode) or
                          per-message event list (JSON mode).
-  --pair PAIR[,PAIR...]  Filter to specific pairs. Form: src:dst,
-                         e.g. "heidi:carol,dave:peter".
+  --pair PAIR[,PAIR...]  Filter DM rows to specific pairs. Form
+                         src:dst, e.g. "heidi:carol,dave:peter".
+  --post SUBSTR          Filter channel rows to posts whose payload
+                         contains SUBSTR (case-insensitive). e.g.
+                         --post news-3 → only the L1-news-3 post.
   --all                  Include pairs not in scenario commands.
 
 Channel mode reports per channel post:
@@ -702,26 +705,57 @@ def render_json(rows, msgs, pair_filter, id_to_name, detail):
     sys.stdout.write("\n")
 
 
-def analyse_channel(events_path, slot_to_id, posts):
-    """Walk events to find each post's msg_id and its recipients.
+CHANNEL_EVENT_TYPES = {
+    "channel_msg_received",
+    "channel_msg_overheard",
+    "channel_msg_pulled",
+    "channel_msg_already_present",
+    "channel_msg_seen_by_neighbour",
+    "channel_pull_sent",
+    "channel_pull_received",
+    "channel_pull_suppressed",
+    "channel_overhear_armed",
+    "channel_overhear_skipped_already_have",
+    "channel_overhear_missed",
+    "channel_broadcast_deduped",
+    "channel_dirty_cleared",
+    "channel_digest_emitted",
+}
 
-    Each `send_channel` command from the scenario gets matched to the
-    originator's `channel_msg_received{source=self_originate}` event by
-    (sender_id, channel_id, payload) — that event carries the 32-bit
-    `id` which uniquely identifies the post network-wide. Subsequent
-    `channel_msg_received` events at other nodes with the same id are
-    the recipients.
+# data fields rendered when present, in channel-detail timeline lines.
+CHANNEL_TIMELINE_FIELDS = (
+    "source", "from", "to", "next", "channel_id",
+    "reason", "overheard_from", "peer", "ad_count", "threshold",
+    "chosen_data_sf", "addressed", "guard_ms",
+)
+
+
+def analyse_channel(events_path, slot_to_id, posts):
+    """Walk events to find each post's msg_id, recipients, and event timeline.
+
+    Each `send_channel` command gets matched to the originator's
+    `channel_msg_received{source=self_originate}` event by
+    (sender_id, channel_id, payload). That event carries the 32-bit
+    `id` which uniquely identifies the post network-wide; every
+    subsequent channel-* event with the same id is part of this
+    post's lifecycle.
+
+    Two-tier matching:
+      - Events with explicit `id` -> matched by id
+      - `channel_pull_received` carries `channel_ids[]` (a Q frame
+        may request multiple ids in one frame); each requested id is
+        added independently to its post's timeline.
+      - `channel_digest_emitted` carries `dirty_ids[]`; same.
     """
     by_key = {}
     for p in posts:
-        # Allow multiple posts from same sender with same channel and
-        # same payload (rare but possible). Stack them in order.
         k = (p["sender_id"], p["channel_id"], p["payload"])
         by_key.setdefault(k, []).append(p)
         p["msg_id"] = None
         p["originated_ms"] = None
-        p["recipients"] = {}    # {receiver_id: {source, t_ms, from}}
-        p["already_present"] = 0    # duplicate decodes after first
+        p["recipients"] = {}
+        p["already_present"] = 0
+        p["events"] = []
 
     # Pass 1: find msg_id from each post's self_originate event.
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
@@ -733,7 +767,6 @@ def analyse_channel(events_path, slot_to_id, posts):
         bucket = by_key.get(k)
         if not bucket:
             continue
-        # Match the next unfilled post in time order.
         for p in bucket:
             if p["msg_id"] is None:
                 p["msg_id"] = d.get("id")
@@ -742,26 +775,64 @@ def analyse_channel(events_path, slot_to_id, posts):
 
     by_msg_id = {p["msg_id"]: p for p in posts if p["msg_id"] is not None}
 
-    # Pass 2: collect recipient events.
+    def _push_event(p, t_ms, fid, et, d, extra_id_field=None):
+        """Append a copy of the event to the post's timeline."""
+        fields = {k: d[k] for k in CHANNEL_TIMELINE_FIELDS if k in d}
+        if extra_id_field is not None:
+            fields["_id_in_list"] = extra_id_field
+        p["events"].append({"t_ms": t_ms, "node": fid,
+                            "type": et, "fields": fields})
+
+    # Pass 2: collect recipient state + per-post event timeline.
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
-        if et not in ("channel_msg_received", "channel_msg_already_present"):
+        if et not in CHANNEL_EVENT_TYPES:
             continue
-        mid = d.get("id")
-        p = by_msg_id.get(mid)
-        if p is None:
-            continue
-        if et == "channel_msg_received":
-            if d.get("source") == "self_originate":
+        # Single-id events
+        if et in ("channel_msg_received", "channel_msg_overheard",
+                  "channel_msg_pulled", "channel_msg_already_present",
+                  "channel_msg_seen_by_neighbour",
+                  "channel_pull_sent", "channel_pull_suppressed",
+                  "channel_overhear_armed",
+                  "channel_overhear_skipped_already_have",
+                  "channel_overhear_missed",
+                  "channel_broadcast_deduped",
+                  "channel_dirty_cleared"):
+            mid = d.get("id")
+            p = by_msg_id.get(mid)
+            if p is None:
                 continue
-            if fid not in p["recipients"]:
-                p["recipients"][fid] = {
-                    "source": d.get("source"),
-                    "from":   d.get("from"),
-                    "t_ms":   t_ms,
-                }
-        else:   # channel_msg_already_present
-            if fid in p["recipients"]:
+            _push_event(p, t_ms, fid, et, d)
+            if et == "channel_msg_received":
+                if d.get("source") == "self_originate":
+                    continue
+                if fid not in p["recipients"]:
+                    p["recipients"][fid] = {
+                        "source": d.get("source"),
+                        "from":   d.get("from"),
+                        "t_ms":   t_ms,
+                    }
+            elif et == "channel_msg_already_present" and fid in p["recipients"]:
                 p["already_present"] += 1
+        elif et == "channel_pull_received":
+            # Q frame at holder; data carries `channel_ids` array.
+            ids = d.get("channel_ids") or []
+            for mid in ids:
+                p = by_msg_id.get(mid)
+                if p is None:
+                    continue
+                _push_event(p, t_ms, fid, et, d, extra_id_field=mid)
+        elif et == "channel_digest_emitted":
+            # Originator's BCN included these dirty ids in its digest.
+            ids = d.get("dirty_ids") or []
+            for mid in ids:
+                p = by_msg_id.get(mid)
+                if p is None:
+                    continue
+                _push_event(p, t_ms, fid, et, d, extra_id_field=mid)
+
+    # Stable ordering for timeline rendering.
+    for p in posts:
+        p["events"].sort(key=lambda x: (x["t_ms"], x["node"]))
     return posts
 
 
@@ -862,6 +933,59 @@ def render_channel_table(rows):
         f"{total_reach}/{total_expected}", pct, "-", "-", total_leaks))
 
 
+def render_channel_detail(rows_meta, id_to_name, post_filter):
+    """Per-post timeline. rows_meta is the list of post records
+    (returned by analyse_channel), each with msg_id, recipients, events.
+    """
+    for p in rows_meta:
+        if post_filter is not None:
+            pat = post_filter.lower()
+            if pat not in (p.get("payload") or "").lower():
+                continue
+        sender_n = fmt_node(p["sender_id"], id_to_name)
+        head_parts = [
+            f"=== {sender_n} -> ch{p['channel_id']} "
+            f'"{p.get("payload","")}"',
+            f"L{p.get('sender_layer')}",
+            f"id=0x{(p.get('msg_id') or 0):08X}",
+            f"reach={len(p['recipients'])}",
+        ]
+        if p.get("originated_ms") is not None:
+            head_parts.append(f"orig={p['originated_ms']}ms")
+        head_parts.append("===")
+        print(" ".join(head_parts))
+        # Quick recipient list with source.
+        if p["recipients"]:
+            grouped = defaultdict(list)
+            for rcv_id, info in p["recipients"].items():
+                grouped[info["source"] or "unknown"].append((info["t_ms"], rcv_id))
+            for source, lst in grouped.items():
+                lst.sort()
+                names = ", ".join(
+                    f"{fmt_node(nid, id_to_name)}@{tm}ms"
+                    for tm, nid in lst
+                )
+                print(f"  recipients via {source:<14} ({len(lst)}): {names}")
+        else:
+            print("  recipients: (none)")
+        if not p["events"]:
+            print("  (no channel-plane events captured for this id)")
+            print()
+            continue
+        for ev in p["events"]:
+            node_n = fmt_node(ev["node"], id_to_name)
+            rendered = []
+            for kk, vv in ev["fields"].items():
+                if kk in NODE_ID_FIELDS and isinstance(vv, int):
+                    rendered.append(f"{kk}={fmt_node(vv, id_to_name)}")
+                else:
+                    rendered.append(f"{kk}={vv}")
+            field_str = " ".join(rendered)
+            print(f"  {ev['t_ms']:>8} ms  {node_n:<12} "
+                  f"{ev['type']:<40} {field_str}")
+        print()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
@@ -884,6 +1008,9 @@ def main():
                    help="include pairs not present in scenario commands")
     p.add_argument("--mode", choices=("dm", "channel", "all"), default="all",
                    help="which view to emit (default: all)")
+    p.add_argument("--post", default=None,
+                   help="filter channel posts: payload substring "
+                        "(case-insensitive), e.g. 'news-3'")
     args = p.parse_args()
 
     if args.events is None:
@@ -934,10 +1061,20 @@ def main():
     rows = summarise(msgs, pair_filter, id_to_name)
 
     channel_rows = None
+    posts_meta = None
     if args.mode in ("channel", "all"):
-        posts = configured_channel_posts(cfg, name_to_id)
-        analyse_channel(args.events, slot_to_id, posts)
-        channel_rows = summarise_channel(posts, cfg, id_to_name)
+        posts_meta = configured_channel_posts(cfg, name_to_id)
+        analyse_channel(args.events, slot_to_id, posts_meta)
+        # Apply --post filter to BOTH the table and the detail view
+        # so they stay consistent (mirrors --pair in DM mode).
+        rows_for_summary = posts_meta
+        if args.post:
+            pat = args.post.lower()
+            rows_for_summary = [
+                p for p in posts_meta
+                if pat in (p.get("payload") or "").lower()
+            ]
+        channel_rows = summarise_channel(rows_for_summary, cfg, id_to_name)
 
     if args.json:
         if args.mode == "channel":
@@ -973,6 +1110,9 @@ def main():
             print()
         print("=== Channels ===")
         render_channel_table(channel_rows)
+        if args.detail:
+            print()
+            render_channel_detail(posts_meta, id_to_name, args.post)
 
 
 if __name__ == "__main__":
