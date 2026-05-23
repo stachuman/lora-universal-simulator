@@ -96,6 +96,48 @@ def maybe_run(cfg_path, events_path, lus_path):
         raise SystemExit(f"lus exited {res.returncode}")
 
 
+# Map a timeline event to the on-wire frame type it corresponds to
+# (the tag the visualizer / wire dump uses): B R C K N D Q H, plus
+# "D-M" for the channel M-broadcast. Events that aren't a frame
+# (queue ops, route decisions, terminal markers) get "".
+EMIT_FRAME_TYPE = {
+    # firmware-level (script_emit) events
+    "rts_tx": "R", "rts_retry": "R", "rts_fwd": "R", "rts_attempt_detail": "R",
+    "cts_rx": "C",
+    "data_tx": "D", "data_rx": "D",
+    "ack_rx": "K", "ack_snr_feedback": "K",
+    "channel_pull_sent": "Q", "channel_pull_received": "Q",
+    "channel_pull_suppressed": "Q", "channel_msg_pulled": "Q",
+    "channel_msg_seen_by_neighbour": "B",   # learned via a peer's BCN digest
+    "channel_dirty_cleared": "B",            # cleared while building a BCN
+    "h_tx": "H", "h_rx": "H", "h_forward": "H", "h_resolved": "H",
+}
+
+
+def frame_type_for(ev):
+    """Return the on-wire frame-type tag for a timeline event, or ''.
+
+    PHY events (`phy_*`) carry the radio's own label (RTS/DATA-M/BCN/H/
+    ...); reduce it to the single-letter tag (DATA-M -> D-M). Firmware
+    events map via EMIT_FRAME_TYPE.
+    """
+    et = ev.get("type", "")
+    if et.startswith("phy_"):
+        lbl = ev.get("fields", {}).get("label")
+        if lbl:
+            return {"RTS": "R", "RTS-fwd": "R", "RTS-rty": "R",
+                    "CTS": "C", "CTS-dup": "C", "ACK": "K", "NACK": "N",
+                    "DATA": "D", "DATA-M": "D-M", "BCN": "B",
+                    "Q": "Q", "H": "H"}.get(lbl, lbl)
+        # phy rx/drop events are keyed by a kind suffix instead of a label.
+        if et.endswith("_data_m"):
+            return "D-M"
+        if et.endswith("_bcn"):
+            return "B"
+        return "?"
+    return EMIT_FRAME_TYPE.get(et, "")
+
+
 # Emit types we include in the per-message timeline. Anything outside
 # this set is filtered out as noise. Keep it focused on path tracking.
 TIMELINE_EMITS = {
@@ -662,7 +704,8 @@ def render_detail_text(msgs, pair_filter, id_to_name):
                 else:
                     rendered.append(f"{kk}={vv}")
             field_str = " ".join(rendered)
-            print(f"  {ev['t_ms']:>8} ms  {node_n:<12} "
+            ftype = frame_type_for(ev)
+            print(f"  {ev['t_ms']:>8} ms  [{ftype:>3}] {node_n:<12} "
                   f"{ev['type']:<22} {field_str}")
         print()
 
@@ -1285,7 +1328,8 @@ def render_channel_detail(rows_meta, id_to_name, post_filter):
                 else:
                     rendered.append(f"{kk}={vv}")
             field_str = " ".join(rendered)
-            print(f"  {ev['t_ms']:>8} ms  {node_n:<12} "
+            ftype = frame_type_for(ev)
+            print(f"  {ev['t_ms']:>8} ms  [{ftype:>3}] {node_n:<12} "
                   f"{ev['type']:<40} {field_str}")
         print()
 
