@@ -47,13 +47,16 @@ RADIO = {
     "duty_cycle": 0.1,
 }
 
-# Per-layer SF separation. SF10 routing for L3 keeps it spaced from
-# L1+L2 routing SFs; the data SFs fan out to give each layer two
-# choices. Some overlap is expected (e.g. SF10 is L3 routing AND L2
-# data) — that's a realistic coexistence pattern the scenario tests.
+# Per-layer SF separation. Routing/control SFs MUST be in SF6..SF9
+# range (long-range SF10..SF12 is data-plane only — using them as
+# routing_sf blows through duty-cycle on small frequent control
+# frames). L3 routing is at SF7, well-spaced from L1=SF8 and
+# L2=SF9 while staying inside the routing-SF budget. L3 data SFs
+# [10, 11] overlap with L2 data (SF10) for a realistic cross-layer
+# airtime-contention pattern the scenario tests.
 L1_ROUTING_SF, L1_DATA_SFS = 8,  [7, 9]
 L2_ROUTING_SF, L2_DATA_SFS = 9,  [6, 10]
-L3_ROUTING_SF, L3_DATA_SFS = 10, [11, 12]
+L3_ROUTING_SF, L3_DATA_SFS = 7,  [10, 11]
 
 # Per-node key_hash32: 0x14<layer><0000><index>. Each node unique.
 # Bridges use 0xF0 marker since they're not "layer N nodes" in the
