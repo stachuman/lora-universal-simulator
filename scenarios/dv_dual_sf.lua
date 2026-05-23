@@ -2696,17 +2696,17 @@ end
 -- runtime retry: if the initial route query is blocked before it reaches the
 -- radio, the deferred-send TTL can expire without anyone learning a route.
 --
--- DATA-M is the channel-gossip 2B broadcast (PROTOCOL §3.4.1). Fire-and-
--- forget by design: no CTS, no ACK, no rts_timeout. If the radio defers it
--- (channel_busy / duty_cycle), there is no other recovery path — without
--- on_radio_busy retry the channel post silently dies even if the dirty
--- digest keeps advertising it. Add to RETRY_ELIGIBLE so the standard
--- TX_DEFER_MAX_RETRIES stash mechanism applies.
+-- DATA-M (channel-gossip 2B broadcast, PROTOCOL §3.4.1) is intentionally
+-- NOT in RETRY_ELIGIBLE. The stash mechanism would re-fire only the DATA-M
+-- leg, not the RTS announce — receivers' overhear-arm windows (sized
+-- around the original RTS) would be expired by the time the deferred
+-- broadcast lands. Instead, DATA-M defer is handled in on_radio_busy:
+-- the full RTS+DATA-M sequence is re-emitted via fire_m_broadcast_rts so
+-- receivers re-arm with fresh guards.
 local RETRY_ELIGIBLE = {
   ["CTS"]     = true,
   ["CTS-dup"] = true,
   ["DATA"]    = true,
-  ["DATA-M"]  = true,
   ["ACK"]     = true,
   ["K-dup"]   = true,
   ["NACK"]    = true,
@@ -6008,6 +6008,52 @@ try_drain_deferred = function(self)
   end
 end
 
+-- 2B-broadcast initial-RTS-emit helper. Same code path runs for the
+-- initial broadcast attempt and for any on_radio_busy retry — receivers
+-- always see a fresh RTS announce before the DATA-M, so their overhear-
+-- arm windows are sized off the actual RTS-receive time, not stale.
+-- Reads everything it needs from `px` (= self.pending_tx). Bumps the
+-- attempt generation so a stale on_handed-scheduled pending_tx clear
+-- from a prior attempt doesn't fire mid-retry.
+function fire_m_broadcast_rts(self, px)
+  px.m_broadcast_attempt_gen = (px.m_broadcast_attempt_gen or 0) + 1
+  local payload_len = #px.payload + MAC_LEN
+  local m_id = nil
+  if px.payload and #px.payload >= 4 then
+    m_id = channel_msg_id_from_bytes(px.payload, 1)
+  end
+  local rts = pack_rts(px.tx_leaf_id, self.id, px.dst, px.next, px.ctr_lo,
+                       px.tx_sf_bitmap, payload_len,
+                       RTS_FLAG_M_BROADCAST, m_id)
+  local label = (px.origin == self.id) and "RTS" or "RTS-fwd"
+  local kind = (px.m_broadcast_attempt_gen == 1) and "initial" or "m_retry"
+  local attempt_seq = emit_rts_attempt_detail(self, kind, px)
+  self:emit("rts_tx", {
+    attempt_seq = attempt_seq,
+    origin = px.origin, payload = px.user_text, ctr = px.ctr,
+    dst = px.dst, next = px.next, ctr_lo = px.ctr_lo,
+    sf_bitmap = px.tx_sf_bitmap,
+    tx_layer_id = px.tx_layer_id,
+    tx_leaf_id = px.tx_leaf_id,
+    tx_routing_sf = px.tx_routing_sf,
+    m_broadcast_attempt_gen = px.m_broadcast_attempt_gen,
+  })
+  self:log(string.format(
+    "rts_tx (m_broadcast gen=%d) -> %s ctr_lo=%d origin=%s ctr=%d",
+    px.m_broadcast_attempt_gen, name_of(self, px.next),
+    px.ctr_lo, name_of(self, px.origin), px.ctr))
+  tx_initiating(self, rts, {
+    sf    = px.tx_routing_sf,
+    label = label,
+    info  = string.format(
+      "origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x attempt_seq=%d payload=%q m_broadcast=1 gen=%d",
+      name_of(self, px.origin), name_of(self, px.dst),
+      name_of(self, px.next), px.ctr_lo, px.ctr, px.tx_sf_bitmap,
+      attempt_seq, px.user_text, px.m_broadcast_attempt_gen),
+    on_handed = function() start_data_tx_for_broadcast(self, px) end,
+  })
+end
+
 -- 2B-broadcast DATA-tx for M-payload. Mirrors the CTS-rx → DATA-tx flow
 -- but skips the CTS wait (sender announced chosen_data_sf in the RTS's
 -- M_BROADCAST encoding) and the ACK wait (broadcast is fire-and-forget;
@@ -6051,6 +6097,7 @@ function start_data_tx_for_broadcast(self, px)
       px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf))
     local data_air = airtime_ms(px.chosen_data_sf, self.bw_hz, self.cr,
                                   self.preamble_sym, #d)
+    local captured_gen = px.m_broadcast_attempt_gen or 0
     local handed = tx_with_retry(self, d, {
       sf    = px.chosen_data_sf,
       label = "DATA-M",
@@ -6058,9 +6105,14 @@ function start_data_tx_for_broadcast(self, px)
         name_of(self, px.origin), px.ctr, px.chosen_data_sf, px.user_text),
       on_handed = function()
         self:after(data_air + 5, function()
+          -- Generation guard: an on_radio_busy retry bumps
+          -- m_broadcast_attempt_gen, so this stale callback from a
+          -- prior attempt must not clear pending_tx while a retry
+          -- is in flight.
           if self.pending_tx ~= nil
              and self.pending_tx.ctr_lo == captured_ctr_lo
-             and self.pending_tx.m_broadcast == true then
+             and self.pending_tx.m_broadcast == true
+             and (self.pending_tx.m_broadcast_attempt_gen or 0) == captured_gen then
             self.pending_tx = nil
             become_free(self)
           end
@@ -6419,33 +6471,25 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   local rts = pack_rts(tx_leaf_id, self.id, dst_id, primary_next, mid,
                        tx_sf_bitmap, payload_len, rts_flags, m_id)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
-  local attempt_seq = emit_rts_attempt_detail(self, "initial", self.pending_tx)
-  self:emit("rts_tx", {
-    attempt_seq = attempt_seq,
-    origin = origin, payload = user_text, ctr = ctr,
-    dst = dst_id, next = primary_next, ctr_lo = mid,
-    sf_bitmap = tx_sf_bitmap,
-    tx_layer_id = self.pending_tx.tx_layer_id,
-    tx_leaf_id = tx_leaf_id,
-    tx_routing_sf = tx_routing_sf,
-  })
-  self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s ctr=%d (sf_bitmap=0x%02x)",
-    name_of(self, primary_next), mid, name_of(self, origin), ctr,
-    tx_sf_bitmap))
   if m_broadcast then
-    local px_for_broadcast = self.pending_tx
-    -- For M-broadcast use opts.on_handed (which fires on actual TX, even
-    -- after duty-cycle deferral) instead of tx_initiating's after_tx
-    -- parameter (which is lost if the first tx_with_retry returns false).
-    tx_initiating(self, rts, {
-      sf    = tx_routing_sf,
-      label = label,
-      info  = string.format("origin=%s dst=%s next=%s msg=%d ctr=%d sf_bitmap=0x%02x attempt_seq=%d payload=%q m_broadcast=1",
-        name_of(self, origin), dst_name, name_of(self, primary_next),
-        mid, ctr, tx_sf_bitmap, attempt_seq, user_text),
-      on_handed = function() start_data_tx_for_broadcast(self, px_for_broadcast) end,
-    })
+    -- Initial broadcast attempt and retries share fire_m_broadcast_rts.
+    -- The helper emits its own rts_attempt_detail + rts_tx so each
+    -- attempt (initial or retry) shows up cleanly in the trace.
+    fire_m_broadcast_rts(self, self.pending_tx)
   else
+    local attempt_seq = emit_rts_attempt_detail(self, "initial", self.pending_tx)
+    self:emit("rts_tx", {
+      attempt_seq = attempt_seq,
+      origin = origin, payload = user_text, ctr = ctr,
+      dst = dst_id, next = primary_next, ctr_lo = mid,
+      sf_bitmap = tx_sf_bitmap,
+      tx_layer_id = self.pending_tx.tx_layer_id,
+      tx_leaf_id = tx_leaf_id,
+      tx_routing_sf = tx_routing_sf,
+    })
+    self:log(string.format("rts_tx -> %s ctr_lo=%d origin=%s ctr=%d (sf_bitmap=0x%02x)",
+      name_of(self, primary_next), mid, name_of(self, origin), ctr,
+      tx_sf_bitmap))
     tx_initiating(self, rts, {
       sf    = tx_routing_sf,
       label = label,
@@ -10946,6 +10990,56 @@ function on_radio_busy(self, info)
       tx_leaf_id = self.pending_tx.tx_leaf_id,
       tx_routing_sf = self.pending_tx.tx_routing_sf or active_routing_sf(self),
     })
+  end
+
+  -- M-broadcast (DATA-M) has its own retry path: re-emit the full
+  -- RTS+DATA-M sequence so receivers re-arm their overhear-arm
+  -- windows from the fresh RTS. The standard stash retry would only
+  -- re-fire DATA-M, which arrives after the original RTS's guard
+  -- already expired.
+  if info.label == "DATA-M" and self.pending_tx ~= nil
+     and self.pending_tx.m_broadcast == true then
+    local px = self.pending_tx
+    local max_retries = self.channel_broadcast_max_retries or 3
+    px.m_broadcast_retries_used = (px.m_broadcast_retries_used or 0) + 1
+    if px.m_broadcast_retries_used > max_retries then
+      self:emit("tx_giveup", {
+        label = "DATA-M", reason = info.reason,
+        origin = px.origin, dst = px.dst, ctr = px.ctr,
+        retries_used = px.m_broadcast_retries_used,
+      })
+      self:log(string.format(
+        "tx_giveup DATA-M reason=%s (m-broadcast retries exhausted: %d > %d)",
+        info.reason, px.m_broadcast_retries_used, max_retries))
+      self.pending_tx = nil
+      become_free(self)
+      return
+    end
+    local now = self:now()
+    local wait_ms = (info.busy_until_ms or now) - now
+    if wait_ms < 0 then wait_ms = 0 end
+    local delay = wait_ms + 2 + self:rand(0, self.lbt_backoff_ms + 1)
+    self:emit("m_broadcast_retry_scheduled", {
+      origin = px.origin, dst = px.dst, ctr = px.ctr,
+      delay_ms = delay,
+      retries_used = px.m_broadcast_retries_used,
+      max_retries = max_retries,
+      reason = info.reason,
+    })
+    self:log(string.format(
+      "m_broadcast_retry %s reason=%s busy_until=%d -> retry in %dms (used=%d/%d)",
+      info.label, info.reason, info.busy_until_ms, delay,
+      px.m_broadcast_retries_used, max_retries))
+    self:after(delay, function()
+      -- Bail if pending_tx changed (e.g. another flow cleared it).
+      if self.pending_tx == nil
+         or self.pending_tx.ctr_lo ~= px.ctr_lo
+         or self.pending_tx.m_broadcast ~= true then
+        return
+      end
+      fire_m_broadcast_rts(self, self.pending_tx)
+    end)
+    return
   end
 
   local stash = self.tx_stash[info.label]
