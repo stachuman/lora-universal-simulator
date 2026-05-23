@@ -1,6 +1,6 @@
 {
   "_name": "t57_gateway_handoff_giveup",
-  "_desc": "l4_sender targets a key in layer 5 that no peer knows. gw_4 has no layer-5 neighbours, so its Q HASH_QUERY gets no response. After gateway_handoff_defer_ttl_ms (set to 5 s for fast test) the drain loop fires gateway_handoff_giveup and removes the deferred entry. The drain loop runs ~every 1 s inside drain_loop, so the giveup fires within ~1 s of the TTL.",
+  "_desc": "l4_sender targets a key in layer 5 that no peer knows. gw_4 has no layer-5 neighbours, so its 'H' hash-locate flood (PROTOCOL §3.7a) reaches no one and gets no binding response. After gateway_handoff_defer_ttl_ms (set to 5 s for fast test) the drain loop fires gateway_handoff_giveup and removes the deferred entry. The drain loop runs ~every 1 s inside drain_loop, so the giveup fires within ~1 s of the TTL.",
   "simulation": {
     "duration_ms": 20000,
     "step_ms": 1,
@@ -30,8 +30,8 @@
     { "type": "script_emit_contains", "node": "l4_sender", "emit_type": "gateway_envelope_enqueued", "value": "\"target_layer_id\":5" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_deferred", "value": "\"dst_key_hash32\":3735928559" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_deferred", "value": "\"q_sent\":true" },
-    { "type": "script_emit_contains", "node": "gw_4", "emit_type": "q_tx", "value": "\"opcode\":2" },
-    { "type": "script_emit_contains", "node": "gw_4", "emit_type": "q_tx", "value": "\"key_hash32\":3735928559" },
+    { "type": "script_emit_contains", "node": "gw_4", "emit_type": "h_tx", "value": "\"key_hash32\":3735928559" },
+    { "type": "script_emit_contains", "node": "gw_4", "emit_type": "h_tx", "value": "\"ttl\":8" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_giveup", "value": "\"dst_key_hash32\":3735928559" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_giveup", "value": "\"target_layer_id\":5" },
     { "type": "event_count", "event_type": "gateway_handoff_enqueued", "node": "gw_4", "min": 0, "max": 0 }

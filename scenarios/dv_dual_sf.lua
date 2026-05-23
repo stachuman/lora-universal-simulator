@@ -12,6 +12,7 @@
 -- | `'K'` | ACK    | `K`, [ctr_lo(4)|snr_bucket(4)](1)  →  2 B                                       |
 -- | `'N'` | NACK   | `N`, [reason(4)|ctr_lo(4)](1), payload(1)  →  3 B  |
 -- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [leaf_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
+-- | `'H'` | hash-locate | `H`, origin(1), [leaf_id(4)|flags(4)](1), key_hash32(4 LE), ttl(1)  →  8 B (multi-hop TTL flood; only forwardable control frame; §3.7a) |
 --
 -- All control frames carry a 4-bit ctr_lo (per-(originator) flight
 -- counter, wraps at 16; dedup tolerated by last_acked_from's 10s TTL).
@@ -1049,6 +1050,16 @@ PROTOCOL = {
   -- ---- Gateway scheduling ----
   gateway_schedule_guard_ms      = 100,
 
+  -- ---- Multi-hop hash-locate ('H' frame flood, PROTOCOL §3.7a) ----
+  -- The gateway floods an 'H' query on the target layer to resolve a
+  -- dst_key_hash32 -> node_id binding it doesn't hold. TTL bounds the
+  -- flood; forwarders dedup on (origin, hash). TTL = 8 to match the
+  -- DV 8-hop routing cap (hops 1..8, combined_hops>8 rejected) — a
+  -- query must be able to reach any node that's routable in the layer.
+  hash_query_max_ttl             = 8,
+  hash_query_seen_ttl_ms         = 10000,   -- ~2× q_query_ttl_ms
+  cap_hash_query_seen            = 64,
+
   -- ---- Cross-layer routing propagation (BCN TLV type=4) ----
   -- Lifetime of each (gw_id, dest_layer) entry in `self.bridged_layers`.
   -- Refreshed on every observation; pruned on access if older. Match the
@@ -2023,6 +2034,13 @@ function channel_msg_id_from_bytes(s, off)
 end
 local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
 local GW_ENV_MAGIC = "\31G1"         -- gateway DATA envelope v1: magic + layer + key_hash32 + body
+-- Hash-bind response body magic (PROTOCOL §3.7a). A resolver answering an
+-- 'H' flood query sends a routed DATA back to the gateway whose body starts
+-- with this magic, then target_layer(8) | node_id(8) | key_hash32(4 LE).
+-- The DATA flag field is full (4 bits, all used) so we identify the response
+-- by body magic — same pattern as GW_ENV_MAGIC, not a new flag bit.
+-- Global (no `local`) to stay under the 200-locals-per-chunk Lua limit.
+HASH_BIND_MAGIC = "\31H1"
 
 local function seen_origin_key(origin_id, dst_id, ctr)
   return string.format("%d|%d|%d", origin_id or -1, dst_id or -1, ctr or -1)
@@ -2115,14 +2133,13 @@ end
 
 local Q_OP_ROUTE_QUERY  = 0
 local Q_OP_REQ_SYNC     = 1
-Q_OP_HASH_QUERY         = 2
+-- Opcode 2 was Q_OP_HASH_QUERY; the 1-hop hash query was replaced by the
+-- multi-hop 'H' flood frame (PROTOCOL §3.7a). Opcode 2 is now free/reserved.
 -- ROADMAP §3 channel gossip pull. Body: count(1B) + ID(4B) × N. Sent
 -- unicast (Q `dest` = target neighbour we want to pull from). The 2-bit
--- opcode field is now exhausted; future Q opcodes will need a sub-code
--- escape inside the body.
+-- opcode field has values 0,1,3 used and 2 free; a future opcode can
+-- reclaim 2 or use a sub-code escape inside the body.
 Q_OP_CHANNEL_PULL = 3   -- global (200-locals limit)
--- Opcode 3 is reserved for a future full-public-key query; v1 has no
--- full-key payload yet.
 local Q_FLAG_MOBILE    = 0x04
 
 -- Q — query/control:
@@ -2161,16 +2178,6 @@ local function pack_q(leaf_id, src, dest, opcode, requester_is_mobile)
   return "Q" .. string.char(src) .. string.char(dest) .. string.char(b3)
 end
 
-function pack_q_hash(leaf_id, src, key_hash32, requester_is_mobile)
-  return pack_q(leaf_id, src, 255, Q_OP_HASH_QUERY, requester_is_mobile)
-         .. q_pack_u32_le(key_hash32 or 0)
-end
-
-function pack_q_hash_response(leaf_id, src, resolved_node_id, key_hash32, requester_is_mobile)
-  return pack_q(leaf_id, src, resolved_node_id, Q_OP_HASH_QUERY, requester_is_mobile)
-         .. q_pack_u32_le(key_hash32 or 0)
-end
-
 -- ROADMAP §3 channel-pull request. Frame: 4-byte Q header + count(1B) + ID(4B) × N.
 -- dest = node we want to pull from (unicast). ids is a Lua array of 32-bit IDs.
 function pack_q_channel_pull(leaf_id, src, target, ids, requester_is_mobile)
@@ -2191,10 +2198,7 @@ local function parse_q(frame)
     opcode              = flags & 0x03,
     requester_is_mobile = (flags & Q_FLAG_MOBILE) ~= 0,
   }
-  if out.opcode == Q_OP_HASH_QUERY then
-    if #frame < 8 then return nil end
-    out.key_hash32 = q_parse_u32_le(frame, 5)
-  elseif out.opcode == Q_OP_CHANNEL_PULL then
+  if out.opcode == Q_OP_CHANNEL_PULL then
     if #frame < 5 then return nil end
     local count = frame:byte(5) & 0xff
     if #frame < 5 + count * 4 then return nil end
@@ -2204,6 +2208,51 @@ local function parse_q(frame)
     end
   end
   return out
+end
+
+-- 'H' — multi-hop hash-locate flood query (PROTOCOL §3.7a).
+--   byte 0 : tag 'H'
+--   byte 1 : origin (8) — the querying gateway's node_id; PRESERVED across
+--            forwards so the resolver can route the binding response home
+--   byte 2 : leaf_id(4 hi) | flags(4 lo) — target layer nibble; flags rsv
+--   bytes 3..6 : key_hash32 (LE) — identity hash to resolve
+--   byte 7 : ttl — decremented per forward; dropped at 0
+-- Unlike Q (strictly 1-hop), 'H' is the one forwardable control frame.
+function pack_h_query(origin, leaf_id, key_hash32, ttl)
+  local b2 = ((leaf_id & 0x0f) << 4)         -- flags nibble reserved (0)
+  return "H" .. string.char(origin & 0xff)
+             .. string.char(b2)
+             .. q_pack_u32_le(key_hash32 or 0)
+             .. string.char(ttl & 0xff)
+end
+
+function parse_h_query(frame)
+  if #frame < 8 or frame:sub(1,1) ~= "H" then return nil end
+  return {
+    origin     = frame:byte(2),
+    leaf_id    = (frame:byte(3) >> 4) & 0xf,
+    key_hash32 = q_parse_u32_le(frame, 4),
+    ttl        = frame:byte(8),
+  }
+end
+
+-- Hash-bind response body (carried inside a routed DATA frame back to the
+-- gateway). magic + target_layer(8) + node_id(8) + key_hash32(4 LE).
+function pack_hash_bind_response(target_layer_id, node_id, key_hash32)
+  return HASH_BIND_MAGIC
+      .. string.char((target_layer_id or 0) & 0xff)
+      .. string.char((node_id or 0) & 0xff)
+      .. q_pack_u32_le(key_hash32 or 0)
+end
+
+function parse_hash_bind_response(body)
+  if type(body) ~= "string" or #body < 9 then return nil end
+  if body:sub(1, #HASH_BIND_MAGIC) ~= HASH_BIND_MAGIC then return nil end
+  return {
+    target_layer_id = body:byte(4),
+    node_id         = body:byte(5),
+    key_hash32      = q_parse_u32_le(body, 6),
+  }
 end
 
 local J_OP_DISCOVER = 0
@@ -4953,25 +5002,25 @@ function emit_hash_route_query(self, target_layer_id, key_hash32, reason)
     return now_q, false
   end
   self.q_queried[q_key] = now_q
-  self:emit("q_tx", {
-    opcode = Q_OP_HASH_QUERY,
-    dst = 255,
+  local ttl0 = self.hash_query_max_ttl or 6
+  self:emit("h_tx", {
+    origin = self.id,
     key_hash32 = key_hash32,
-    requester_mobile = self.is_mobile == true,
+    ttl = ttl0,
     reason = reason or "hash_query",
     tx_layer_id = target_layer_id,
     tx_leaf_id = q_leaf_id,
     tx_routing_sf = q_routing_sf,
   })
   self:log(string.format(
-    "q_tx -> key_hash32=%u layer=%d (hash query, reason=%s)",
-    key_hash32, target_layer_id, reason or "hash_query"))
-  tx_initiating(self, pack_q_hash(q_leaf_id, self.id, key_hash32,
-                                  self.is_mobile == true), {
+    "h_tx -> key_hash32=%u layer=%d ttl=%d (hash-locate flood, reason=%s)",
+    key_hash32, target_layer_id, ttl0, reason or "hash_query"))
+  tx_initiating(self, pack_h_query(self.id, q_leaf_id, key_hash32, ttl0), {
     sf    = q_routing_sf,
-    label = "Q",
-    info  = string.format("hash32=%u layer=%d reason=%s",
-                          key_hash32, target_layer_id, reason or "hash_query"),
+    label = "H",
+    info  = string.format("origin=%s hash32=%u layer=%d ttl=%d reason=%s",
+                          name_of(self, self.id), key_hash32,
+                          target_layer_id, ttl0, reason or "hash_query"),
   })
   return now_q, true
 end
@@ -5067,6 +5116,67 @@ function enqueue_gateway_handoff(self, gw_env, d_origin, binding)
   -- Wake the shared queue after the current RX/TX callback unwinds. The queued
   -- item carries tx_layer_id=target_layer_id, so issue_send() will retune to
   -- the correct gateway layer/window before emitting RTS.
+  self:after(1, function() become_free(self) end)
+end
+
+-- 'H'-frame flood dedup: have we already forwarded/answered this query?
+-- Keyed by (origin, key_hash32) with hash_query_seen_ttl_ms aging.
+-- Global (not `local function`) to stay under the 200-locals-per-chunk
+-- Lua limit — same reason as the other globally-scoped helpers here.
+function hash_query_seen_recently(self, origin, key_hash32)
+  self.hash_query_seen = self.hash_query_seen or {}
+  local key = string.format("%d|%u", origin or -1, key_hash32 & 0xffffffff)
+  local now = self:now()
+  local last = self.hash_query_seen[key]
+  if last ~= nil and (now - last) < (self.hash_query_seen_ttl_ms or 10000) then
+    return true
+  end
+  return false
+end
+
+function mark_hash_query_seen(self, origin, key_hash32)
+  self.hash_query_seen = self.hash_query_seen or {}
+  local key = string.format("%d|%u", origin or -1, key_hash32 & 0xffffffff)
+  if self.hash_query_seen[key] == nil
+     and table_cap_hit(self, "hash_query_seen", count_keys(self.hash_query_seen),
+                       self.cap_hash_query_seen or 0, "refuse", {key = key}) then
+    return
+  end
+  self.hash_query_seen[key] = self:now()
+end
+
+-- Resolver reply to an 'H' query: routed unicast DATA back to the querying
+-- gateway carrying the (target_layer, node_id, key_hash32) binding. Reuses
+-- the normal tx_queue/issue_send path — routing already knows how to reach
+-- the gateway's node_id on this layer.
+function send_hash_bind_response(self, to_gateway_id, target_layer_id, resolved_node_id, key_hash32)
+  local body  = pack_hash_bind_response(target_layer_id, resolved_node_id, key_hash32)
+  local inner = string.char(0) .. string.char(self.id) .. body
+  local ctr   = self:next_ctr(to_gateway_id)
+  -- user_text is the human-readable label emitted in send-path telemetry;
+  -- the binary binding rides in `payload` (inner). Keep user_text safe
+  -- (the body has raw key_hash32 bytes that aren't valid UTF-8).
+  table.insert(self.tx_queue, {
+    origin     = self.id,
+    dst_id     = to_gateway_id,
+    dst_name   = name_of(self, to_gateway_id),
+    payload    = inner,
+    user_text  = "[hash-bind-response]",
+    ctr        = ctr,
+    flags      = 0,
+    enqueue_time_ms = self:now(),
+    requeue_count   = 0,
+    next_attempt_ms = 0,
+    tx_layer_id     = self.active_layer_id or self.layer_id,
+  })
+  self:emit("hash_bind_response_enqueued", {
+    to = to_gateway_id, node = resolved_node_id,
+    key_hash32 = key_hash32, target_layer_id = target_layer_id, ctr = ctr,
+  })
+  self:log(string.format(
+    "hash_bind_response_enqueued -> %s node=%s key_hash32=%u layer=%d ctr=%d",
+    name_of(self, to_gateway_id), name_of(self, resolved_node_id),
+    key_hash32, target_layer_id, ctr))
   self:after(1, function() become_free(self) end)
 end
 
@@ -7852,6 +7962,7 @@ function on_init(self, config)
   -- satisfy a joiner without every nearby node emitting a full BCN.
   self.q_queried       = {}                                  -- {dest_id → t_ms_last_queried}
   self.q_responded_to  = {}                                  -- {key → t_ms_last_responded}
+  self.hash_query_seen = {}                                  -- {"origin|hash" → t_ms} 'H' flood dedup
   -- After a route appears due to Q-driven BCN discovery, hold the
   -- deferred DATA briefly so nearby Q-response BCNs can finish. This
   -- avoids the first RTS colliding with late/deferred beacon responders
@@ -9903,7 +10014,14 @@ function on_recv(self, frame, meta)
     local e2e_ack_req = d.e2e_ack_req
     local user_text   = d.body         -- body = text for normal DATA, or acked-ctr bytes for E2E ACK
     local rx_gw_env   = parse_gateway_envelope(user_text)
-    local event_payload = rx_gw_env and rx_gw_env.body or user_text
+    local rx_hash_bind = parse_hash_bind_response(user_text)
+    -- event_payload is what telemetry emits as the human-readable payload.
+    -- Strip binary headers: gateway-envelope events show the inner body;
+    -- hash-bind responses carry raw key_hash32 bytes (non-UTF-8) so emit a
+    -- safe placeholder rather than the binary body.
+    local event_payload = rx_gw_env and rx_gw_env.body
+                          or (rx_hash_bind and "[hash-bind-response]")
+                          or user_text
     mark_dest_seen(self, d.origin, "data_origin")
     mark_dest_seen(self, d.dst, "data_dst")
 
@@ -10197,7 +10315,32 @@ function on_recv(self, frame, meta)
       else
         local gw_env = rx_gw_env
         local gateway_consumed = false
-        if gw_env ~= nil and self.self_gateway == true then
+        -- Hash-bind response (PROTOCOL §3.7a): a resolver answered our 'H'
+        -- flood. Consume it as a binding update (not user data) and drain
+        -- any handoff that was waiting on it.
+        if rx_hash_bind ~= nil and self.self_gateway == true then
+          gateway_consumed = true
+          -- Cache both: the active-layer id_bind (if we're on the target
+          -- layer now) and the cross-layer gateway_remote_bind table that
+          -- gateway_binding_for_env consults for target != home.
+          id_bind_set(self, rx_hash_bind.node_id, rx_hash_bind.key_hash32,
+                      "h_query", "claimed")
+          gateway_note_remote_binding(self, rx_hash_bind.target_layer_id,
+                                      rx_hash_bind.node_id,
+                                      rx_hash_bind.key_hash32, "h_query")
+          try_drain_gateway_handoffs(self)
+          self:emit("q_hash_binding_rx", {
+            from = d_origin,
+            node = rx_hash_bind.node_id,
+            key_hash32 = rx_hash_bind.key_hash32,
+            layer_id = rx_hash_bind.target_layer_id,
+            source = "h_query",
+          })
+          self:log(string.format(
+            "hash_bind_rx <- %s node=%s key_hash32=%u layer=%d (drain handoffs)",
+            name_of(self, d_origin), name_of(self, rx_hash_bind.node_id),
+            rx_hash_bind.key_hash32, rx_hash_bind.target_layer_id))
+        elseif gw_env ~= nil and self.self_gateway == true then
           gateway_consumed = true
           local target, binding_error = gateway_binding_for_env(self, gw_env)
 
@@ -10364,6 +10507,51 @@ function on_recv(self, frame, meta)
     return
   end
 
+  if tag == "H" then
+    -- Multi-hop hash-locate flood (PROTOCOL §3.7a). The one forwardable
+    -- control frame: a node that knows the hash replies via routed DATA
+    -- to the querying gateway; a node that doesn't decrements TTL and
+    -- rebroadcasts once (deduped on (origin, key_hash32)).
+    local h = parse_h_query(frame)
+    if not h then return end
+    if h.leaf_id ~= active_leaf_id(self) then return end   -- foreign-layer
+    learn_rx_source("h_frame")
+    if h.origin == self.id then return end                  -- our own query
+    self:emit("h_rx", {
+      origin = h.origin, key_hash32 = h.key_hash32, ttl = h.ttl,
+    })
+    local matches_self = (self.key_hash32 ~= nil and h.key_hash32 == self.key_hash32)
+    local node_id = matches_self and self.id
+                    or id_bind_find_by_hash(self, h.key_hash32)
+    if node_id ~= nil then
+      -- Resolver: answer via routed unicast DATA to the gateway (h.origin)
+      -- and suppress our own forward of this query.
+      mark_hash_query_seen(self, h.origin, h.key_hash32)
+      local target_layer = self.active_layer_id or self.layer_id
+      self:emit("h_resolved", {
+        origin = h.origin, key_hash32 = h.key_hash32,
+        node = node_id, target_layer_id = target_layer,
+      })
+      send_hash_bind_response(self, h.origin, target_layer, node_id, h.key_hash32)
+      return
+    end
+    if hash_query_seen_recently(self, h.origin, h.key_hash32) then return end
+    mark_hash_query_seen(self, h.origin, h.key_hash32)
+    if (h.ttl or 0) <= 0 then return end                    -- TTL exhausted
+    local fwd = pack_h_query(h.origin, active_leaf_id(self),
+                             h.key_hash32, h.ttl - 1)
+    self:emit("h_forward", {
+      origin = h.origin, key_hash32 = h.key_hash32, ttl = h.ttl - 1,
+    })
+    tx_initiating(self, fwd, {
+      sf    = active_routing_sf(self),
+      label = "H",
+      info  = string.format("origin=%s hash32=%u ttl=%d forward",
+                            name_of(self, h.origin), h.key_hash32, h.ttl - 1),
+    })
+    return
+  end
+
   if tag == "Q" then
     local q = parse_q(frame)
     if not q then return end
@@ -10404,52 +10592,7 @@ function on_recv(self, frame, meta)
       return
     end
 
-    if q.opcode == Q_OP_HASH_QUERY then
-      if q.dest ~= 255 then
-        id_bind_set(self, q.dest, q.key_hash32, "q_hash", "claimed")
-        gateway_note_remote_binding(self, self.active_layer_id or self.layer_id,
-                                    q.dest, q.key_hash32, "q_hash")
-        try_drain_gateway_handoffs(self)
-        self:emit("q_hash_binding_rx", {
-          from = q.src,
-          node = q.dest,
-          key_hash32 = q.key_hash32,
-          layer_id = self.active_layer_id or self.layer_id,
-        })
-        return
-      end
-      local node_id = id_bind_find_by_hash(self, q.key_hash32)
-      local matches_self = (self.key_hash32 ~= nil and q.key_hash32 == self.key_hash32)
-      if matches_self or node_id ~= nil then
-        local resolved = matches_self and self.id or node_id
-        local q_leaf_id = active_leaf_id(self)
-        local q_routing_sf = active_routing_sf(self)
-        self:emit("q_hash_binding_tx", {
-          to = q.src,
-          node = resolved,
-          key_hash32 = q.key_hash32,
-          tx_layer_id = self.active_layer_id or self.layer_id,
-          tx_leaf_id = q_leaf_id,
-          tx_routing_sf = q_routing_sf,
-        })
-        tx_initiating(self, pack_q_hash_response(q_leaf_id, self.id, resolved,
-                                                 q.key_hash32,
-                                                 self.is_mobile == true), {
-          sf    = q_routing_sf,
-          label = "Q",
-          info  = string.format("hash32=%u node=%d response",
-                                q.key_hash32 or 0, resolved or 255),
-        })
-        self:log(string.format(
-          "q_rx <- %s asking for key_hash32=%u; response node=%s",
-          name_of(self, q.src), q.key_hash32 or 0, name_of(self, resolved)))
-        return
-      end
-      self:log(string.format(
-        "q_rx <- %s asking for key_hash32=%u; no binding, silent",
-        name_of(self, q.src), q.key_hash32 or 0))
-      return
-    end
+    -- (HASH_QUERY removed from Q; see the 'H' flood frame handler below.)
 
     -- ROADMAP §3: channel-pull request. Q_CHANNEL_PULL is unicast
     -- (dest = specific target the requester wants to pull from).

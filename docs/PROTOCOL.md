@@ -634,12 +634,15 @@ byte:  0   1     2      3
 - `leaf_id` (4 bits): active layer nibble, derived from `layer_id & 0x0f`.
   Receivers reject foreign-layer Q frames.
 - low nibble:
-  - bits 0-1: opcode (`0=ROUTE_QUERY`, `1=REQ_SYNC`, `2=HASH_QUERY`,
-    `3=reserved for future full-public-key query`)
+  - bits 0-1: opcode (`0=ROUTE_QUERY`, `1=REQ_SYNC`, `3=CHANNEL_PULL`).
+    Opcode `2` was `HASH_QUERY` (1-hop); it was replaced by the multi-hop
+    `'H'` flood frame (§3.7a) and is now free/reserved.
   - bit 2: requester is mobile
   - bit 3: reserved
 
-One-hop only — receivers don't forward Q frames.
+One-hop only — receivers don't forward Q frames. (The forwardable
+hash-locate query lives in its own `'H'` frame, §3.7a, so `Q` keeps
+this invariant.)
 
 **ROUTE_QUERY sender behaviour:** in `issue_send` for an originator, when
 `rt[dst]` is missing, alongside the defer-queue push (§11a.2) we
@@ -659,17 +662,62 @@ Special cases:
 - `q.dest == self.id`: someone's asking for ME; schedule triggered
   beacon (receivers learn us via the BCN src field, not entries).
 
-**HASH_QUERY behaviour:** when a node knows a stable identity hash but not
-the current layer-local short ID, it sends `Q{opcode=HASH_QUERY,dest=0xff,
-key_hash32=...}` on the target layer's control SF. This is primarily used by
-gateways: if a gateway receives a cross-layer envelope but lacks
-`(target_layer_id,key_hash32)->node_id`, it defers the handoff, emits
-`HASH_QUERY`, and retries the handoff when the binding appears. A receiver
-whose own `key_hash32` matches, or whose local `id_bind` contains the hash,
-answers with `Q{opcode=HASH_QUERY,dest=<resolved_node_id>,key_hash32=...}`.
-Observers treat that response as a weak/claimed identity binding for the active
-layer. The full-public-key query variant is reserved but not implemented in
-this wire slice.
+### 3.7a H (`'H'`) — multi-hop hash-locate flood
+
+```
+byte:  0   1        2                      3..6              7
+       ┌───┬────────┬──────────────────────┬────────────────┬──────┐
+       │'H'│ origin │ leaf_id(4) flags(4)  │ key_hash32(4LE)│ ttl  │
+       └───┴────────┴──────────────────────┴────────────────┴──────┘
+```
+
+Replaces the old 1-hop `Q:HASH_QUERY`. When a gateway receives a cross-
+layer envelope but lacks `(target_layer_id, key_hash32) -> node_id`, it
+floods an `'H'` query on the target layer to find the one node that holds
+the binding (the destination itself, or a direct neighbour of the
+destination that learned it from the destination's BCN). The resolution
+stays local to the destination — the gateway is NOT required to
+accumulate every node's binding, and route entries do NOT carry hashes.
+
+- `origin` (8): the querying gateway's node_id on the target layer.
+  **Preserved across forwards** so the resolver can route its answer home.
+- `leaf_id` (4): target layer nibble; receivers reject foreign-layer `'H'`
+  frames (same filter every frame uses). `flags` (4): reserved.
+- `key_hash32` (4 LE): identity hash to resolve.
+- `ttl` (8): initial `hash_query_max_ttl` (default 8, matching the DV
+  8-hop routing cap so the flood can reach any routable node);
+  decremented per forward; dropped at 0.
+
+**Forwarding** (`'H'` is the one forwardable control frame):
+- a node whose own `key_hash32` matches, or whose `id_bind` holds the hash
+  → resolve to `node_id`, **reply** (below), and stop forwarding this branch
+- otherwise → if `(origin, key_hash32)` not already seen (dedup set,
+  `hash_query_seen_ttl_ms`, capped by `cap_hash_query_seen`) and `ttl > 0`:
+  mark seen, decrement ttl, rebroadcast.
+
+**Binding response — routed DATA, not a Q.** The DATA flag field is full
+(4 bits), so the response is identified by a body magic, mirroring the
+gateway-envelope pattern. The resolver sends a normal **routed unicast
+DATA** to `origin` (reusing the existing routing/RTS/CTS/ACK path — the
+return path is not reinvented) whose inner body is:
+```
+HASH_BIND_MAGIC ("\31H1", 3 B) | target_layer(8) | node_id(8) | key_hash32(4 LE)
+```
+The gateway's DATA delivered-branch parses this (alongside the gateway
+envelope), updates `id_bind` + `gateway_remote_bind` for `target_layer`,
+emits `q_hash_binding_rx{source="h_query"}`, calls
+`try_drain_gateway_handoffs`, and does NOT deliver it as user data. A
+non-gateway that receives it drops it (mirrors
+`gateway_envelope_at_non_gateway`).
+
+**Economics (AODV-style reactive discovery):** the flood is single-layer
+and TTL-bounded; the query is a tiny frame (not the DATA payload); the
+resolved binding is cached for `gateway_remote_bind_ttl_ms` (48 h); and
+cross-layer destinations are few and stable. So the first message to a new
+cross-layer peer pays a bounded one-time flood, and every later message is
+a local lookup. The 30-s handoff-deferral backstop
+(`gateway_handoff_giveup`) still fires when the flood genuinely finds
+nothing (unreachable destination).
 
 **REQ_SYNC behaviour:** during node-local DISCOVERY, a node whose route
 table is still poor may send `Q{opcode=REQ_SYNC,dest=0xff}` after a
@@ -2491,7 +2539,7 @@ expectations) subscribe by event_type.
 | `tx_gateway_schedule_defer` | Sender deferred initial or retry RTS to a direct gateway because the gateway is scheduled away | `origin`, `dst`, `next_hop`, `active_leaf_id`, `delay_ms`, `payload`, optional `ctr`, `ctr_lo`, `source`, `reason` |
 | `gateway_envelope_enqueued` | `send_layer` queued a cross-layer envelope toward a gateway | `origin`, `gateway`, `target_layer_id`, `dst_key_hash32`, `payload` |
 | `gateway_handoff_enqueued` | Gateway consumed a cross-layer envelope and queued an in-target-layer DATA send | `origin`, `via_gateway`, `target_layer_id`, `dst`, `dst_key_hash32`, `binding_source`, `payload` |
-| `gateway_handoff_deferred` | Gateway consumed a cross-layer envelope but does not yet know the target hash binding; it held the handoff and optionally emitted `Q:HASH_QUERY` on the target layer | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason`, `q_sent`, `ttl_ms`, `depth` |
+| `gateway_handoff_deferred` | Gateway consumed a cross-layer envelope but does not yet know the target hash binding; it held the handoff and optionally flooded an `'H'` hash-locate query on the target layer | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason`, `q_sent`, `ttl_ms`, `depth` |
 | `gateway_handoff_drained` | A deferred gateway handoff found a binding and was requeued for in-target-layer DATA send | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `dst`, `binding_source`, `waited_ms` |
 | `gateway_handoff_giveup` | A deferred gateway handoff exceeded its discovery TTL without resolving the target binding | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason`, `waited_ms` |
 | `gateway_remote_bind_set` | Gateway learned `(layer_id,key_hash32) -> node_id` for a remote layer from BCN/JOIN traffic | `key_hash32`, `layer_id`, `node`, `source` |
@@ -2503,8 +2551,12 @@ expectations) subscribe by event_type.
 | `bridged_layers_observed` | Node parsed a gateway_layer TLV from a received BCN and updated its bridged_layers table | `from`, `count`, `entries[]` with `gw_id`, `dest_layer` |
 | `bridged_layers_replaced` | Receiving TLV refreshed a known gw_id with a different dest_layer; last-write-wins replaces the old value | `gw_id`, `prev_layer`, `new_layer`, `from`, `age_ms` |
 | `bridged_layers_aged` | Per-(gw_id, dest_layer) entry pruned after `gateway_bridged_layers_ttl_ms` of silence | `gw_id`, `dest_layer`, `age_ms`, `ttl_ms` |
-| `q_hash_binding_tx` | Node answered `Q:HASH_QUERY` with a resolved `(node_id,key_hash32)` binding | `to`, `node`, `key_hash32`, `tx_layer_id`, `tx_leaf_id`, `tx_routing_sf` |
-| `q_hash_binding_rx` | Node received a `Q:HASH_QUERY` binding response and updated `id_bind`; gateways also update `gateway_remote_bind` | `from`, `node`, `key_hash32`, `layer_id` |
+| `h_tx` | Gateway flooded an `'H'` hash-locate query on the target layer (§3.7a) | `origin`, `key_hash32`, `ttl`, `reason`, `tx_layer_id`, `tx_leaf_id`, `tx_routing_sf` |
+| `h_rx` | Node decoded an `'H'` query on its layer | `origin`, `key_hash32`, `ttl` |
+| `h_forward` | Node did not know the hash and rebroadcast the `'H'` query with `ttl-1` | `origin`, `key_hash32`, `ttl` (post-decrement) |
+| `h_resolved` | Node knew the hash (own or `id_bind`) and is replying with a routed-DATA binding response | `origin`, `key_hash32`, `node`, `target_layer_id` |
+| `hash_bind_response_enqueued` | Resolver queued the routed-DATA binding response back to the querying gateway | `to`, `node`, `key_hash32`, `target_layer_id`, `ctr` |
+| `q_hash_binding_rx` | Gateway received a binding response (routed DATA, `HASH_BIND_MAGIC` body) and updated `id_bind` + `gateway_remote_bind`, then drained handoffs | `from`, `node`, `key_hash32`, `layer_id`, `source` (`h_query`) |
 | `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
 | `max_payload_clamped` | Init-time guard. Configured `max_payload_bytes` exceeds the LoRa PHY 255-byte frame minus fixed overhead (`DATA_HDR_LEN + DATA_INNER_OVERHEAD` = 14); clamped to the hard cap (241) | `requested`, `clamped_to`, `lora_max_frame`, `fixed_overhead` |
 | `send_oversized` | Originator-side rejection of a user payload exceeding `max_payload_bytes`. The send never enters `tx_queue`; runtime `tx_oversized` remains the radio-side backstop for frames built outside this path | `dst`, `dst_name`, `len`, `max`, optional `e2e`, optional `target_layer_id` / `dst_key_hash32` / `envelope_overhead` for `send_layer` |
@@ -2686,6 +2738,10 @@ block for current values):
   `gateway_bridged_layers_ttl_ms` (TLV type=4 entry lifetime; pruned
   on access if older), `gateway_bridged_layers_max_per_tlv` (cap on
   entries per TLV, default 9 per the 4-bit `len` field)
+- Hash-locate `'H'` flood (§3.7a): `hash_query_max_ttl` (initial flood
+  TTL, default 8 = the DV 8-hop routing cap), `hash_query_seen_ttl_ms` (forwarder
+  dedup window, default 10 s), `cap_hash_query_seen` (dedup-set cap,
+  default 64)
 - Join: `join_{listen,discover_jitter,discover_wait}_ms`,
   `join_discover_max_attempts`, `join_offer_backoff_{min,max}_ms`,
   `join_claim_guard_ms`, `join_retry_backoff_ms`,
