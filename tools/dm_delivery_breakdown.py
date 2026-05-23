@@ -307,6 +307,28 @@ def walk_events(events_path, slot_to_id):
                    e.get("emit_type"), e.get("data", {}))
 
 
+def walk_phy_events(events_path, name_to_id):
+    """Yield (time_ms, fid_or_None, phy_type, e) for physical-layer events.
+
+    type in {tx, tx_deferred, rx, drop_halfduplex, drop_collision,
+    drop_off_sf, ...}. These events use string `node`/`from`/`to`
+    fields, so we resolve via name_to_id.
+    """
+    PHY_TYPES = {"tx", "tx_deferred", "rx", "drop_halfduplex",
+                 "drop_collision", "drop_off_sf"}
+    with open(events_path) as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = e.get("type")
+            if t not in PHY_TYPES:
+                continue
+            # `node` for tx/tx_deferred; `from`/`to` for rx/drop.
+            yield e.get("time_ms", 0), t, e
+
+
 def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     hash_layer_to_name = hash_layer_to_name or {}
     name_to_id_local = None
@@ -730,7 +752,7 @@ CHANNEL_TIMELINE_FIELDS = (
 )
 
 
-def analyse_channel(events_path, slot_to_id, posts):
+def analyse_channel(events_path, slot_to_id, posts, name_to_id):
     """Walk events to find each post's msg_id, recipients, and event timeline.
 
     Each `send_channel` command gets matched to the originator's
@@ -858,9 +880,170 @@ def analyse_channel(events_path, slot_to_id, posts):
                     continue
                 _push_event(p, t_ms, fid, et, d, extra_id_field=mid)
 
+    # Pass 3: per-node "dirty window" for each msg — between first
+    # observation (self_originate or channel_msg_received) and the
+    # corresponding channel_dirty_cleared (or run end). Any BCN tx
+    # by that node within that window is a CANDIDATE carrier of the
+    # msg's digest (the digest TLV holds up to K=3 dirty ids; a BCN
+    # may carry zero or one of any given dirty id depending on the
+    # rotation, so this is a heuristic, not proof).
+    by_msg_id = {p["msg_id"]: p for p in posts if p["msg_id"] is not None}
+    node_dirty = defaultdict(dict)   # fid -> msg_id -> [start, end]
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        mid = d.get("id")
+        if mid not in by_msg_id:
+            continue
+        if et == "channel_msg_received":
+            # First observation marks the start; subsequent
+            # already_present events don't reset it.
+            if mid not in node_dirty[fid]:
+                node_dirty[fid][mid] = [t_ms, None]
+        elif et == "channel_dirty_cleared":
+            window = node_dirty[fid].get(mid)
+            if window is not None and window[1] is None:
+                window[1] = t_ms
+
+    # Pass 4: physical-layer events for M-broadcasts + BCN ads.
+    # - DATA-M tx (or tx_deferred) parses `id=0xHEX` from the M-payload
+    #   tag inside `info`/`tx_info`; matches to msg_id directly.
+    # - BCN tx events are attributed to all msgs whose dirty window
+    #   contains this BCN tx's time at this node.
+    # - rx / drop events are matched by `pkt` hash to a known tx.
+    id_hex_re = re.compile(r"id=0x([0-9a-fA-F]+)")
+    pkt_to_posts = {}    # pkt_hash -> {posts...} (BCN can carry multi)
+    pkt_kind = {}        # pkt_hash -> "bcn" | "data_m"
+
+    def _phy_data_extract(rec):
+        """Extract msg id from the event's info string.
+
+        `tx` events use field `info`; `tx_deferred` uses `tx_info`.
+        Both formats embed `id=0xHEX` in the M-broadcast payload.
+        """
+        info = rec.get("info") or rec.get("tx_info") or ""
+        m = id_hex_re.search(info)
+        if m:
+            return int(m.group(1), 16)
+        return None
+
+    # Need a name -> firmware id resolver for BCN attribution (phy
+    # events carry node name strings). Build from posts: sender_id +
+    # whatever is in id_bind in the events stream — but simpler to
+    # rebuild from cfg passed via posts (each post knows its sender_id
+    # but not the name->id map). The caller already has name_to_id;
+    # we re-derive it inside this function from the unique sender_id
+    # values + the events stream's own name<->slot inference is too
+    # noisy. So instead, derive name->id from the script_emit pass:
+    # tx_enqueue events have data.origin (firmware id) and the event's
+    # `node` is the slot (we don't have the name there either).
+    # Cleanest: peek at any phy event with `node` (string) and look up
+    # its firmware id from a `tx_enqueue` script_emit at the same
+    # event index — but that's heavy. Pragmatic shortcut: build name
+    # -> id by reading phy `tx` events' `node` and matching to script
+    # `tx_enqueue` events at the same t_ms.
+    # For now, scan one extra pass over phy events to collect name set,
+    # then look them up against the caller-provided id mapping below.
+    # We accept the cost: walk phy events once to gather names, then
+    # delegate name resolution to main() via a post-hook. Simplest:
+    # store the raw phy events on the post and resolve later. Done in
+    # render_channel_detail via name_to_id_local.
+
+    for t_ms, phy_t, e in walk_phy_events(events_path, None):
+        label = e.get("label")
+        # --- DATA-M (channel broadcast) tx side ---
+        if phy_t in ("tx", "tx_deferred") and label == "DATA-M":
+            mid = _phy_data_extract(e)
+            if mid is None:
+                continue
+            p = by_msg_id.get(mid)
+            if p is None:
+                continue
+            p["events"].append({
+                "t_ms": t_ms,
+                "node_name": e.get("node"),
+                "type": f"phy_{phy_t}",
+                "fields": {
+                    "label": label,
+                    "sf": e.get("sf"),
+                    "reason": e.get("reason"),
+                    "busy_until_ms": e.get("busy_until_ms"),
+                    "airtime_ms": e.get("airtime_ms"),
+                    "pkt": e.get("pkt"),
+                },
+            })
+            if phy_t == "tx" and e.get("pkt"):
+                pkt_to_posts.setdefault(e["pkt"], set()).add(id(p))
+                pkt_kind[e["pkt"]] = "data_m"
+        # --- BCN tx side: attribute to every post whose dirty window
+        #     at this node contains this t_ms ---
+        elif phy_t == "tx" and label == "BCN":
+            tx_name = e.get("node")
+            tx_fid = name_to_id.get(tx_name) if tx_name else None
+            if tx_fid is None:
+                continue
+            relevant_posts = []
+            for mid, window in node_dirty.get(tx_fid, {}).items():
+                start, end = window[0], window[1]
+                if start is None:
+                    continue
+                if start <= t_ms and (end is None or t_ms <= end):
+                    relevant_posts.append(by_msg_id[mid])
+            if not relevant_posts:
+                continue
+            pkt = e.get("pkt")
+            for p in relevant_posts:
+                p["events"].append({
+                    "t_ms": t_ms,
+                    "node_name": tx_name,
+                    "type": "phy_bcn_tx",
+                    "fields": {
+                        "label": "BCN",
+                        "sf": e.get("sf"),
+                        "airtime_ms": e.get("airtime_ms"),
+                        "pkt": pkt,
+                        # Mark heuristic: this BCN's dirty digest MAY
+                        # have carried the msg id; we can't tell from
+                        # the wire dump alone.
+                        "in_dirty_window": True,
+                    },
+                })
+                if pkt:
+                    pkt_to_posts.setdefault(pkt, set()).add(id(p))
+                    pkt_kind[pkt] = "bcn"
+        # --- RX / drop side: match by pkt against either DATA-M or
+        #     BCN known transmissions ---
+        elif phy_t in ("rx", "drop_halfduplex",
+                       "drop_collision", "drop_off_sf"):
+            pkt = e.get("pkt")
+            post_ids = pkt_to_posts.get(pkt)
+            if not post_ids:
+                continue
+            kind = pkt_kind.get(pkt, "?")
+            # Reverse lookup id(p) -> p so we can iterate.
+            id_to_post_obj = {id(p): p for p in posts}
+            for pid in post_ids:
+                p = id_to_post_obj.get(pid)
+                if p is None:
+                    continue
+                p["events"].append({
+                    "t_ms": t_ms,
+                    "node_name": e.get("to") or e.get("node"),
+                    "type": f"phy_{phy_t}_{kind}",
+                    "fields": {
+                        "from": e.get("from"),
+                        "snr": e.get("snr"),
+                        "rssi": e.get("rssi"),
+                        "sf": e.get("sf"),
+                        "pkt": pkt,
+                    },
+                })
+
     # Per-post derived stats.
     for p in posts:
-        p["events"].sort(key=lambda x: (x["t_ms"], x["node"]))
+        # Sort events; mix firmware-id and name-keyed events using
+        # t_ms then a stable string.
+        def sort_key(x):
+            return (x["t_ms"], str(x.get("node", x.get("node_name", ""))))
+        p["events"].sort(key=sort_key)
         # Cascade-depth tree: BFS-style fixed point on the `from` edges.
         # depth(origin)=0; depth(recipient)=depth(from)+1 if `from` is
         # known to have received the msg. Falls back to None for any
@@ -1078,12 +1261,27 @@ def render_channel_detail(rows_meta, id_to_name, post_filter):
             print("  (no channel-plane events captured for this id)")
             print()
             continue
+        # Need a name->id helper for PHY events (which carry name strings).
+        # Build it lazily from id_to_name's reverse.
+        name_to_id_local = {v: k for k, v in id_to_name.items()}
         for ev in p["events"]:
-            node_n = fmt_node(ev["node"], id_to_name)
+            if "node" in ev:
+                node_n = fmt_node(ev["node"], id_to_name)
+            else:
+                nm = ev.get("node_name")
+                node_n = fmt_node(name_to_id_local.get(nm), id_to_name) \
+                         if nm in name_to_id_local else (nm or "?")
             rendered = []
             for kk, vv in ev["fields"].items():
+                if vv is None:
+                    continue
                 if kk in NODE_ID_FIELDS and isinstance(vv, int):
                     rendered.append(f"{kk}={fmt_node(vv, id_to_name)}")
+                elif kk == "from" and isinstance(vv, str):
+                    # PHY rx events carry `from` as a name string.
+                    fid = name_to_id_local.get(vv)
+                    rendered.append(f"{kk}={fmt_node(fid, id_to_name)}"
+                                     if fid is not None else f"{kk}={vv}")
                 else:
                     rendered.append(f"{kk}={vv}")
             field_str = " ".join(rendered)
@@ -1170,7 +1368,7 @@ def main():
     posts_meta = None
     if args.mode in ("channel", "all"):
         posts_meta = configured_channel_posts(cfg, name_to_id)
-        analyse_channel(args.events, slot_to_id, posts_meta)
+        analyse_channel(args.events, slot_to_id, posts_meta, name_to_id)
         # Apply --post filter to BOTH the table and the detail view
         # so they stay consistent (mirrors --pair in DM mode).
         rows_for_summary = posts_meta
