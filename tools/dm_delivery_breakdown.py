@@ -112,6 +112,33 @@ TIMELINE_FIELDS = (
 )
 
 
+# Fields in event data whose value is a firmware node id; we render
+# them as "name(id)" wherever they appear in detail-mode output.
+NODE_ID_FIELDS = ("next", "from", "to", "via_gateway")
+
+
+def fmt_node(fid, id_to_name):
+    """Consistent name(id) rendering. Falls back to #id if no mapping."""
+    if fid is None:
+        return "?"
+    name = id_to_name.get(fid)
+    if name is None:
+        return f"#{fid}"
+    return f"{name}({fid})"
+
+
+def _hash_key_to_int(k):
+    """Config hashes are usually "0xHEX" strings; accept ints too."""
+    if isinstance(k, int):
+        return k
+    if isinstance(k, str):
+        k = k.strip()
+        if k.startswith("0x") or k.startswith("0X"):
+            return int(k, 16)
+        return int(k)
+    return None
+
+
 def load_config(path):
     with open(path) as f:
         cfg = json.load(f)
@@ -119,16 +146,51 @@ def load_config(path):
     id_to_name = {n["node_id"]: n["name"] for n in nodes}
     name_to_id = {n["name"]: n["node_id"] for n in nodes}
     slot_to_id = {i: n["node_id"] for i, n in enumerate(nodes)}
-    return cfg, id_to_name, name_to_id, slot_to_id
+    # Cross-layer destinations are addressed by key_hash32 decimal in the
+    # `send_layer` command; build (target_layer_id, hash) -> name so we
+    # can resolve them. layer_id lives at config.layer_id (regular nodes)
+    # or, for gateways visiting another layer, in gateway_layers[].
+    hash_layer_to_name = {}
+    for n in nodes:
+        h = _hash_key_to_int(n.get("key_hash32"))
+        if h is None:
+            continue
+        cfg_block = n.get("config", {}) or {}
+        layer = cfg_block.get("layer_id")
+        if layer is not None:
+            hash_layer_to_name[(layer, h)] = n["name"]
+    return cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name
 
 
-def configured_pairs(cfg, name_to_id):
+SEND_RE = re.compile(r"^send(?:_priority|_e2e|_e2e_priority)?\s+(\S+)\s+",
+                     re.IGNORECASE)
+SEND_LAYER_RE = re.compile(r"^send_layer\s+(\S+)\s+(\S+)\s+", re.IGNORECASE)
+
+
+def configured_pairs(cfg, name_to_id, hash_layer_to_name):
+    """Return set of (origin_id, dst_id) the scenario *intends* to deliver.
+
+    Recognises both same-layer `send <name>` and cross-layer
+    `send_layer <target_layer> <dst_key_hash32_decimal>`. For
+    `send_layer`, the dst is resolved via (target_layer_id, hash) ->
+    node_name, then to that node's short id.
+    """
     pairs = set()
-    send_re = re.compile(r"^send\s+(\S+)\s+", re.IGNORECASE)
     for c in cfg.get("commands", []):
         node = c.get("node")
         cmd = c.get("command", "")
-        m = send_re.match(cmd)
+        m_layer = SEND_LAYER_RE.match(cmd)
+        if m_layer:
+            target_layer = int(m_layer.group(1))
+            try:
+                target_hash = int(m_layer.group(2))
+            except ValueError:
+                continue
+            dst_name = hash_layer_to_name.get((target_layer, target_hash))
+            if node in name_to_id and dst_name in name_to_id:
+                pairs.add((name_to_id[node], name_to_id[dst_name]))
+            continue
+        m = SEND_RE.match(cmd)
         if not m:
             continue
         dst = m.group(1)
@@ -197,12 +259,19 @@ def walk_events(events_path, slot_to_id):
                    e.get("emit_type"), e.get("data", {}))
 
 
-def analyse(events_path, slot_to_id):
+def analyse(events_path, slot_to_id, hash_layer_to_name=None):
+    hash_layer_to_name = hash_layer_to_name or {}
+    name_to_id_local = None
     msgs = {}
     # First pass: build (origin, ctr) -> dst from events that carry dst.
     # Second pass below applies the index to events that lack dst.
     origin_ctr_to_dst = {}
-    for _, _, _, d in walk_events(events_path, slot_to_id):
+    # Cross-layer arrival index: (receiver_id, payload) -> first t_ms.
+    # Cross-layer messages have their on-wire origin/ctr rewritten by
+    # the gateway, so payload at the target node is the only stable link
+    # back to the originator's user-message.
+    arrival_by_payload = {}
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         o = d.get("origin") or d.get("src")
         c = d.get("ctr")
         if c is None:
@@ -210,8 +279,19 @@ def analyse(events_path, slot_to_id):
         dst = d.get("dst")
         if o is not None and c is not None and dst is not None:
             origin_ctr_to_dst.setdefault((o, c), dst)
+        if et == "data_rx":
+            payload = d.get("payload")
+            if payload is not None:
+                key = (fid, payload)
+                if key not in arrival_by_payload:
+                    arrival_by_payload[key] = t_ms
 
-    def rec(k):
+    # Index for looking up the originator's record from gateway-side
+    # handoff events. (origin, ctr) -> record_key (origin, dst, ctr)
+    # where dst is the gateway short id used as the envelope wire-dst.
+    origin_ctr_to_record_key = {}
+
+    def rec_create(k):
         if k not in msgs:
             msgs[k] = {
                 "origin":      k[0],
@@ -225,10 +305,54 @@ def analyse(events_path, slot_to_id):
                 "payload":     None,
                 "carriers":    set(),
                 "events":      [],
+                # Cross-layer extension. via_gateway flips True when the
+                # originator's tx_enqueue carries it; target_id resolves
+                # to the cross-layer destination (via key_hash32 lookup);
+                # arrival_at_target_ms records data_rx at the resolved
+                # target's slot (via payload matching, not ctr — the
+                # gateway re-issues with a fresh origin/ctr).
+                "via_gateway":             False,
+                "target_layer_id":         None,
+                "dst_key_hash32":          None,
+                "target_id":               None,
+                "arrival_at_target_ms":    None,
+                "handoff_enqueued_ms":     None,
+                "handoff_drained_ms":      None,
+                "handoff_deferred_reason": None,
+                "handoff_giveup_reason":   None,
             }
         return msgs[k]
 
+    def rec_lookup(k):
+        return msgs.get(k)
+
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        # Gateway-side handoff events refer to the originator's record
+        # via origin + ctr + via_gateway (the gateway short id). They
+        # MUST NOT create new records — they only annotate existing
+        # originator records with handoff lifecycle timestamps.
+        if et in ("gateway_handoff_enqueued", "gateway_handoff_drained",
+                  "gateway_handoff_deferred", "gateway_handoff_giveup"):
+            o = d.get("origin")
+            c = d.get("ctr")
+            if c is None:
+                c = d.get("ctr_lo")
+            gw = d.get("via_gateway")
+            if o is None or c is None or gw is None:
+                continue
+            r = rec_lookup((o, gw, c))
+            if r is None:
+                continue
+            if et == "gateway_handoff_enqueued" and r["handoff_enqueued_ms"] is None:
+                r["handoff_enqueued_ms"] = t_ms
+            elif et == "gateway_handoff_drained" and r["handoff_drained_ms"] is None:
+                r["handoff_drained_ms"] = t_ms
+            elif et == "gateway_handoff_deferred":
+                r["handoff_deferred_reason"] = d.get("reason")
+            elif et == "gateway_handoff_giveup":
+                r["handoff_giveup_reason"] = d.get("reason")
+            continue
+
         k = msg_key(d, default_origin=fid,
                     origin_ctr_index=origin_ctr_to_dst)
         if k is None:
@@ -241,13 +365,35 @@ def analyse(events_path, slot_to_id):
         if d.get("flags") is not None and (d["flags"] & 0x80):
             continue
 
-        r = rec(k)
+        # Record creation policy: ONLY tx_enqueue at fid==origin starts
+        # a record. Everything else updates an existing record (and is
+        # silently skipped if no record exists — which happens for the
+        # gateway's re-issued second-leg frames whose `origin` field is
+        # rewritten to the gateway's own id).
+        is_originator_enqueue = (et == "tx_enqueue" and fid == origin)
+        if is_originator_enqueue:
+            r = rec_create(k)
+        else:
+            r = rec_lookup(k)
+            if r is None:
+                continue
         if r["payload"] is None and "payload" in d:
             r["payload"] = d["payload"]
 
         # Outcome timestamps. Only the *first* of each kind is kept.
-        if et == "tx_enqueue" and fid == origin and r["enqueued_ms"] is None:
+        if is_originator_enqueue and r["enqueued_ms"] is None:
             r["enqueued_ms"] = t_ms
+            # Cross-layer detection: originator's tx_enqueue for a
+            # send_layer carries via_gateway=True, target_layer_id,
+            # dst_key_hash32. The wire `dst` is the gateway; the user-
+            # facing target is resolved from the hash.
+            if d.get("via_gateway") is True:
+                r["via_gateway"] = True
+                r["target_layer_id"] = d.get("target_layer_id")
+                r["dst_key_hash32"] = d.get("dst_key_hash32")
+                # Cross-layer target resolution is done in a post-pass
+                # below so we have access to the full name_to_id map.
+            origin_ctr_to_record_key[(origin, ctr)] = k
         elif et == "data_rx" and fid == dst and r["arrived_ms"] is None:
             r["arrived_ms"] = t_ms
         elif et == "ack_rx" and fid == origin and r["ack_ms"] is None:
@@ -269,7 +415,12 @@ def analyse(events_path, slot_to_id):
     # Stable ordering for timeline rendering.
     for r in msgs.values():
         r["events"].sort(key=lambda x: (x["t_ms"], x["node"]))
-    return msgs
+
+    # Post-pass: resolve cross-layer target_id from key_hash + look up
+    # arrival via payload at the target. This is the only honest
+    # delivery signal for send_layer messages — the gateway rewrites
+    # origin/ctr on the second leg.
+    return msgs, arrival_by_payload
 
 
 def outcome(rec):
@@ -277,16 +428,11 @@ def outcome(rec):
 
     NB: `ack_ms` is the FIRST-HOP ACK from the originator's next-hop
     forwarder. It does not mean end-to-end delivery — only `arrived`
-    (destination data_rx) means that. The combinations:
-
-      arrived_and_hop1_acked  msg reached dst AND origin got hop-1 ack
-      arrived_no_hop1_ack     msg reached dst but origin didn't see ack
-      hop1_acked_no_arrival   origin got hop-1 ack but msg didn't arrive
-                              (cascade died downstream)
-      giveup                  origin gave up before delivery
-      in_flight               no terminal event by run end
+    (destination data_rx) means that. For cross-layer (`via_gateway`)
+    messages, arrival is detected at the resolved target via payload
+    matching, since the gateway re-issues with a fresh origin/ctr.
     """
-    arr = rec["arrived_ms"] is not None
+    arr = _arrived(rec)
     ack = rec["ack_ms"] is not None
     if arr and ack:
         return "arrived_and_hop1_acked"
@@ -299,26 +445,46 @@ def outcome(rec):
     return "in_flight"
 
 
+def effective_dst(rec):
+    """User-facing destination id (cross-layer aware)."""
+    if rec.get("via_gateway") and rec.get("target_id") is not None:
+        return rec["target_id"]
+    return rec["dst"]
+
+
+def _arrived(rec):
+    """True if the user-facing destination got the message.
+
+    Cross-layer: arrival is at the resolved target (after gateway
+    handoff), not at the gateway. Same-layer: arrival is at dst.
+    """
+    if rec.get("via_gateway"):
+        return rec["arrival_at_target_ms"] is not None
+    return rec["arrived_ms"] is not None
+
+
 def summarise(msgs, pair_filter, id_to_name):
     by_pair = defaultdict(list)
     for k, r in msgs.items():
-        if pair_filter is not None and (r["origin"], r["dst"]) not in pair_filter:
+        eff_dst = effective_dst(r)
+        if pair_filter is not None and (r["origin"], eff_dst) not in pair_filter:
             continue
-        by_pair[(r["origin"], r["dst"])].append(r)
+        by_pair[(r["origin"], eff_dst)].append(r)
     rows = []
     for (origin, dst), recs in sorted(by_pair.items()):
         n = len(recs)
-        arrived = sum(1 for r in recs if r["arrived_ms"] is not None)
+        arrived = sum(1 for r in recs if _arrived(r))
         acked = sum(1 for r in recs if r["ack_ms"] is not None)
         giveup = sum(1 for r in recs if outcome(r) == "giveup")
         in_flight = sum(1 for r in recs if outcome(r) == "in_flight")
-        hops = [len(r["carriers"]) for r in recs if r["arrived_ms"] is not None]
-        mean_hops = (sum(hops) / len(hops)) if hops else None
+        any_cross = any(r.get("via_gateway") for r in recs)
+        hops_list = [len(r["carriers"]) for r in recs if _arrived(r)]
+        mean_hops = (sum(hops_list) / len(hops_list)) if hops_list else None
         giveup_reasons = [r["giveup_reason"] for r in recs
                           if r["giveup_reason"]]
         rows.append({
-            "origin":     id_to_name.get(origin, f"#{origin}"),
-            "dst":        id_to_name.get(dst, f"#{dst}"),
+            "origin":     fmt_node(origin, id_to_name),
+            "dst":        fmt_node(dst, id_to_name),
             "sent":       n,
             "arrived":    arrived,
             "acked":      acked,
@@ -326,6 +492,7 @@ def summarise(msgs, pair_filter, id_to_name):
             "in_flight":  in_flight,
             "mean_hops":  mean_hops,
             "giveup_reasons": giveup_reasons,
+            "cross_layer": any_cross,
         })
     return rows
 
@@ -336,15 +503,18 @@ def render_table(rows):
         return
     # "h1_ack" = originator got the hop-1 ACK; NOT end-to-end.
     # See outcome() docstring for details.
+    # Pair column is wider now: "alice(1) -> bob(2)" can hit ~22 chars
+    # for two-digit IDs. "*" suffix marks cross-layer rows.
     header = ["pair", "sent", "arr", "arr%", "h1ack", "h1ack%",
               "giveup", "in_flight", "mean_hops"]
-    fmt = "{:<22} {:>4} {:>4} {:>5} {:>5} {:>6} {:>6} {:>9} {:>9}"
+    fmt = "{:<28} {:>4} {:>4} {:>5} {:>5} {:>6} {:>6} {:>9} {:>9}"
     print(fmt.format(*header))
     print("-" * 80)
     tot = {"sent": 0, "arrived": 0, "acked": 0,
            "giveup": 0, "in_flight": 0}
     for r in rows:
-        pair = f"{r['origin']:>10} -> {r['dst']:<8}"
+        tag = " *" if r.get("cross_layer") else ""
+        pair = f"{r['origin']} -> {r['dst']}{tag}"
         arr_pct = f"{100*r['arrived']/r['sent']:.0f}%" if r["sent"] else "-"
         ack_pct = f"{100*r['acked']/r['sent']:.0f}%" if r["sent"] else "-"
         mh = f"{r['mean_hops']:.1f}" if r["mean_hops"] is not None else "-"
@@ -371,24 +541,40 @@ def render_table(rows):
 
 
 def render_detail_text(msgs, pair_filter, id_to_name):
-    keys = [k for k, r in msgs.items()
-            if pair_filter is None or (r["origin"], r["dst"]) in pair_filter]
+    # Filter on effective pair (cross-layer aware) so detail mode and
+    # the summary table stay consistent on which messages appear.
+    keys = []
+    for k, r in msgs.items():
+        eff = effective_dst(r)
+        if pair_filter is None or (r["origin"], eff) in pair_filter:
+            keys.append(k)
     keys.sort(key=lambda k: (k[0], k[1], k[2]))
     for k in keys:
         r = msgs[k]
-        origin_n = id_to_name.get(r["origin"], f"#{r['origin']}")
-        dst_n = id_to_name.get(r["dst"], f"#{r['dst']}")
-        out = outcome(r)
+        # For cross-layer messages, the wire dst is the gateway; the
+        # logical/user-facing target is r["target_id"]. Show "via gw"
+        # in the header so the reader sees where the handoff happened.
+        origin_n = fmt_node(r["origin"], id_to_name)
+        if r.get("via_gateway"):
+            target_n = fmt_node(r.get("target_id"), id_to_name)
+            via_n = fmt_node(r["dst"], id_to_name)
+            head = f"=== {origin_n} -> {target_n} via {via_n} ctr={r['ctr']} ==="
+        else:
+            dst_n = fmt_node(r["dst"], id_to_name)
+            head = f"=== {origin_n} -> {dst_n} ctr={r['ctr']} ==="
+        out_label = outcome(r)
         hop_count = len(r["carriers"])
-        head_parts = [f"=== {origin_n} -> {dst_n} ctr={r['ctr']} ==="]
+        head_parts = [head]
         if r["payload"] is not None:
             head_parts.append(f'payload="{r["payload"]}"')
-        head_parts.append(f"outcome={out}")
+        head_parts.append(f"outcome={out_label}")
         head_parts.append(f"carriers={hop_count}")
         if r["enqueued_ms"] is not None:
             head_parts.append(f"enq={r['enqueued_ms']}ms")
+        if r.get("via_gateway") and r.get("arrival_at_target_ms") is not None:
+            head_parts.append(f"arr_at_target={r['arrival_at_target_ms']}ms")
         if r["arrived_ms"] is not None:
-            head_parts.append(f"arr={r['arrived_ms']}ms")
+            head_parts.append(f"arr_at_dst={r['arrived_ms']}ms")
         if r["ack_ms"] is not None:
             head_parts.append(f"ack={r['ack_ms']}ms")
         if r["giveup_ms"] is not None:
@@ -396,9 +582,17 @@ def render_detail_text(msgs, pair_filter, id_to_name):
                               f"({r['giveup_reason']})")
         print(" ".join(head_parts))
         for ev in r["events"]:
-            node_n = id_to_name.get(ev["node"], f"#{ev['node']}")
-            field_str = " ".join(f"{kk}={vv}" for kk, vv in ev["fields"].items())
-            print(f"  {ev['t_ms']:>8} ms  {node_n:<8} "
+            node_n = fmt_node(ev["node"], id_to_name)
+            # Field values for known node-id fields get the name(id)
+            # treatment so "next=alice(1)" reads cleanly.
+            rendered = []
+            for kk, vv in ev["fields"].items():
+                if kk in NODE_ID_FIELDS and isinstance(vv, int):
+                    rendered.append(f"{kk}={fmt_node(vv, id_to_name)}")
+                else:
+                    rendered.append(f"{kk}={vv}")
+            field_str = " ".join(rendered)
+            print(f"  {ev['t_ms']:>8} ms  {node_n:<12} "
                   f"{ev['type']:<22} {field_str}")
         print()
 
@@ -406,16 +600,27 @@ def render_detail_text(msgs, pair_filter, id_to_name):
 def render_json(rows, msgs, pair_filter, id_to_name, detail):
     out = {"summary": rows}
     if detail:
-        keys = [k for k, r in msgs.items()
-                if pair_filter is None
-                or (r["origin"], r["dst"]) in pair_filter]
+        keys = []
+        for k, r in msgs.items():
+            eff = effective_dst(r)
+            if pair_filter is None or (r["origin"], eff) in pair_filter:
+                keys.append(k)
         keys.sort(key=lambda k: (k[0], k[1], k[2]))
         messages = []
         for k in keys:
             r = msgs[k]
-            messages.append({
-                "origin":      id_to_name.get(r["origin"], f"#{r['origin']}"),
-                "dst":         id_to_name.get(r["dst"], f"#{r['dst']}"),
+            def render_fields(fields):
+                """Convert known node-id fields to name(id) strings."""
+                out_f = {}
+                for kk, vv in fields.items():
+                    if kk in NODE_ID_FIELDS and isinstance(vv, int):
+                        out_f[kk] = fmt_node(vv, id_to_name)
+                    else:
+                        out_f[kk] = vv
+                return out_f
+            entry = {
+                "origin":      fmt_node(r["origin"], id_to_name),
+                "dst":         fmt_node(r["dst"], id_to_name),
                 "ctr":         r["ctr"],
                 "payload":     r["payload"],
                 "outcome":     outcome(r),
@@ -424,15 +629,29 @@ def render_json(rows, msgs, pair_filter, id_to_name, detail):
                 "ack_ms":      r["ack_ms"],
                 "giveup_ms":   r["giveup_ms"],
                 "giveup_reason": r["giveup_reason"],
-                "carriers":    sorted(id_to_name.get(c, f"#{c}")
+                "carriers":    sorted(fmt_node(c, id_to_name)
                                       for c in r["carriers"]),
                 "hops":        len(r["carriers"]),
                 "events":      [
-                    {**ev,
-                     "node": id_to_name.get(ev["node"], f"#{ev['node']}")}
+                    {"t_ms":   ev["t_ms"],
+                     "node":   fmt_node(ev["node"], id_to_name),
+                     "type":   ev["type"],
+                     "fields": render_fields(ev["fields"])}
                     for ev in r["events"]
                 ],
-            })
+            }
+            if r.get("via_gateway"):
+                entry["via_gateway"]            = True
+                entry["target"]                 = fmt_node(r.get("target_id"),
+                                                           id_to_name)
+                entry["target_layer_id"]        = r.get("target_layer_id")
+                entry["dst_key_hash32"]         = r.get("dst_key_hash32")
+                entry["arrival_at_target_ms"]   = r.get("arrival_at_target_ms")
+                entry["handoff_enqueued_ms"]    = r.get("handoff_enqueued_ms")
+                entry["handoff_drained_ms"]     = r.get("handoff_drained_ms")
+                entry["handoff_deferred_reason"]= r.get("handoff_deferred_reason")
+                entry["handoff_giveup_reason"]  = r.get("handoff_giveup_reason")
+            messages.append(entry)
         out["messages"] = messages
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")
@@ -470,8 +689,30 @@ def main():
                  f"  (pass --run to generate it, or provide an "
                  f"explicit EVENTS path)")
 
-    cfg, id_to_name, name_to_id, slot_to_id = load_config(args.config)
-    msgs = analyse(args.events, slot_to_id)
+    cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name \
+        = load_config(args.config)
+    msgs, arrival_by_payload = analyse(args.events, slot_to_id,
+                                       hash_layer_to_name)
+
+    # Post-pass: resolve cross-layer target_id + arrival_at_target_ms.
+    # Done here (not in analyse) because we need name_to_id which the
+    # caller already has.
+    for r in msgs.values():
+        if not r.get("via_gateway"):
+            continue
+        t_layer = r.get("target_layer_id")
+        t_hash = r.get("dst_key_hash32")
+        if t_layer is None or t_hash is None:
+            continue
+        t_name = hash_layer_to_name.get((t_layer, t_hash))
+        if t_name is None:
+            continue
+        t_id = name_to_id.get(t_name)
+        if t_id is None:
+            continue
+        r["target_id"] = t_id
+        if r["payload"] is not None:
+            r["arrival_at_target_ms"] = arrival_by_payload.get((t_id, r["payload"]))
 
     # Pair filter: explicit --pair wins; else configured commands;
     # else (with --all) no filter at all.
@@ -481,7 +722,7 @@ def main():
     elif args.all:
         pair_filter = None
     else:
-        pair_filter = configured_pairs(cfg, name_to_id)
+        pair_filter = configured_pairs(cfg, name_to_id, hash_layer_to_name)
 
     rows = summarise(msgs, pair_filter, id_to_name)
 
