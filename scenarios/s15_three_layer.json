@@ -1,0 +1,1731 @@
+{
+  "_name": "s15_three_layer",
+  "_desc": "Three-layer scenario for testing gateway functionality. 33 nodes (10 L1 alice..judy + 10 L2 kate..tina + 10 L3 ursula..drew + 3 bridges). Each bridge serves one layer-pair: bridge_12 (L1<->L2), bridge_13 (L1<->L3), bridge_23 (L2<->L3). Per-layer routing SF: L1=SF8, L2=SF9, L3=SF10. 45 min: 10 min quiet warmup + 35 min active traffic (Phase 1 DM-only 15 min, Phase 2 channel-only 10 min, Phase 3 mixed 10 min). 7 DM pairs: alice<->bob (L1 1-hop), carol<->heidi (L1 3-hop), leo<->rosa (L2 3-hop), ursula<->yves (L3 3-hop), dave<->peter (cross via bridge_12), frank<->wendy (cross via bridge_13), mia<->zoey (cross via bridge_23). 6 channel posters (2 per layer). Tests multi-gateway TLV propagation (PROTOCOL \u00a73.1 type 4) \u2014 each cross-layer DM must pick the right bridge from the propagated (gw_id, dest_layer) pairs.",
+  "simulation": {
+    "duration_ms": 2700000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 1522,
+    "node_startup_jitter_ms": 5000,
+    "radio": {
+      "sf": 8,
+      "bw": 62.5,
+      "cr": 5,
+      "max_packet_bytes": 255,
+      "snr_coherence_ms": 0,
+      "duty_cycle": 0.1
+    }
+  },
+  "config": {
+    "debug_start_ms": 0,
+    "debug_end_ms": 2700000
+  },
+  "nodes": [
+    {
+      "name": "alice",
+      "node_id": 1,
+      "key_hash32": "0x14010001",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bob",
+      "node_id": 2,
+      "key_hash32": "0x14010002",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "carol",
+      "node_id": 3,
+      "key_hash32": "0x14010003",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "dave",
+      "node_id": 4,
+      "key_hash32": "0x14010004",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "eve",
+      "node_id": 5,
+      "key_hash32": "0x14010005",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "frank",
+      "node_id": 6,
+      "key_hash32": "0x14010006",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "grace",
+      "node_id": 7,
+      "key_hash32": "0x14010007",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "heidi",
+      "node_id": 8,
+      "key_hash32": "0x14010008",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "ivan",
+      "node_id": 9,
+      "key_hash32": "0x14010009",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "judy",
+      "node_id": 10,
+      "key_hash32": "0x1401000A",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "kate",
+      "node_id": 11,
+      "key_hash32": "0x14020001",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "leo",
+      "node_id": 12,
+      "key_hash32": "0x14020002",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "mia",
+      "node_id": 13,
+      "key_hash32": "0x14020003",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "ned",
+      "node_id": 14,
+      "key_hash32": "0x14020004",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "olga",
+      "node_id": 15,
+      "key_hash32": "0x14020005",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "peter",
+      "node_id": 16,
+      "key_hash32": "0x14020006",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "quinn",
+      "node_id": 17,
+      "key_hash32": "0x14020007",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "rosa",
+      "node_id": 18,
+      "key_hash32": "0x14020008",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "sam",
+      "node_id": 19,
+      "key_hash32": "0x14020009",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "tina",
+      "node_id": 20,
+      "key_hash32": "0x1402000A",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "ursula",
+      "node_id": 21,
+      "key_hash32": "0x14030001",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "viktor",
+      "node_id": 22,
+      "key_hash32": "0x14030002",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "wendy",
+      "node_id": 23,
+      "key_hash32": "0x14030003",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "xena",
+      "node_id": 24,
+      "key_hash32": "0x14030004",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "yves",
+      "node_id": 25,
+      "key_hash32": "0x14030005",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "zoey",
+      "node_id": 26,
+      "key_hash32": "0x14030006",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "abel",
+      "node_id": 27,
+      "key_hash32": "0x14030007",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bea",
+      "node_id": 28,
+      "key_hash32": "0x14030008",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "clio",
+      "node_id": 29,
+      "key_hash32": "0x14030009",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "drew",
+      "node_id": 30,
+      "key_hash32": "0x1403000A",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 3,
+        "routing_sf": 10,
+        "allowed_data_sfs": [
+          11,
+          12
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bridge_12",
+      "node_id": 31,
+      "key_hash32": "0x14F00001",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "is_gateway": true,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "gateway_layers": [
+          {
+            "layer_id": 2,
+            "routing_sf": 9,
+            "allowed_data_sfs": [
+              6,
+              10
+            ],
+            "period_ms": 30000,
+            "duration_ms": 15000,
+            "offset_ms": 15000
+          }
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bridge_13",
+      "node_id": 32,
+      "key_hash32": "0x14F00002",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "is_gateway": true,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "gateway_layers": [
+          {
+            "layer_id": 3,
+            "routing_sf": 10,
+            "allowed_data_sfs": [
+              11,
+              12
+            ],
+            "period_ms": 30000,
+            "duration_ms": 15000,
+            "offset_ms": 15000
+          }
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "bridge_23",
+      "node_id": 33,
+      "key_hash32": "0x14F00003",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 2,
+        "is_gateway": true,
+        "routing_sf": 9,
+        "allowed_data_sfs": [
+          6,
+          10
+        ],
+        "gateway_layers": [
+          {
+            "layer_id": 3,
+            "routing_sf": 10,
+            "allowed_data_sfs": [
+              11,
+              12
+            ],
+            "period_ms": 30000,
+            "duration_ms": 15000,
+            "offset_ms": 15000
+          }
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      }
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "alice",
+        "to": "bob",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "alice",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "alice",
+        "to": "carol",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "carol",
+        "to": "alice",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "alice",
+        "to": "dave",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "alice",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "bob",
+        "to": "dave",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "bob",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "carol",
+        "to": "dave",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "carol",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "carol",
+        "to": "frank",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "frank",
+        "to": "carol",
+        "snr": 6.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "eve",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "eve",
+        "to": "dave",
+        "snr": 7.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "grace",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "dave",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "eve",
+        "to": "heidi",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "eve",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "frank",
+        "to": "grace",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "frank",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "heidi",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "grace",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "ivan",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "ivan",
+        "to": "grace",
+        "snr": 8.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "judy",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "judy",
+        "to": "grace",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "judy",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "judy",
+        "to": "heidi",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "ivan",
+        "to": "judy",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "judy",
+        "to": "ivan",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "kate",
+        "to": "leo",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "leo",
+        "to": "kate",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "kate",
+        "to": "mia",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "mia",
+        "to": "kate",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "kate",
+        "to": "ned",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "kate",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "leo",
+        "to": "ned",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "leo",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "mia",
+        "to": "ned",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "mia",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "mia",
+        "to": "peter",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "peter",
+        "to": "mia",
+        "snr": 6.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "olga",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "olga",
+        "to": "ned",
+        "snr": 7.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "quinn",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "ned",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "olga",
+        "to": "rosa",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "rosa",
+        "to": "olga",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "peter",
+        "to": "quinn",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "peter",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "rosa",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "rosa",
+        "to": "quinn",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "sam",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "sam",
+        "to": "quinn",
+        "snr": 8.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "tina",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "tina",
+        "to": "quinn",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "rosa",
+        "to": "tina",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "tina",
+        "to": "rosa",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "sam",
+        "to": "tina",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "tina",
+        "to": "sam",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "ursula",
+        "to": "viktor",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "viktor",
+        "to": "ursula",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "ursula",
+        "to": "wendy",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "wendy",
+        "to": "ursula",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "ursula",
+        "to": "xena",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "xena",
+        "to": "ursula",
+        "snr": 13.0,
+        "bidir": false
+      },
+      {
+        "from": "viktor",
+        "to": "xena",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "xena",
+        "to": "viktor",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "wendy",
+        "to": "xena",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "xena",
+        "to": "wendy",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "wendy",
+        "to": "zoey",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "zoey",
+        "to": "wendy",
+        "snr": 6.0,
+        "bidir": false
+      },
+      {
+        "from": "xena",
+        "to": "yves",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "yves",
+        "to": "xena",
+        "snr": 7.0,
+        "bidir": false
+      },
+      {
+        "from": "xena",
+        "to": "abel",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "abel",
+        "to": "xena",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "yves",
+        "to": "bea",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bea",
+        "to": "yves",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "zoey",
+        "to": "abel",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "abel",
+        "to": "zoey",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "abel",
+        "to": "bea",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "bea",
+        "to": "abel",
+        "snr": 17.0,
+        "bidir": false
+      },
+      {
+        "from": "abel",
+        "to": "clio",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "clio",
+        "to": "abel",
+        "snr": 8.0,
+        "bidir": false
+      },
+      {
+        "from": "abel",
+        "to": "drew",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "drew",
+        "to": "abel",
+        "snr": 18.0,
+        "bidir": false
+      },
+      {
+        "from": "bea",
+        "to": "drew",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "drew",
+        "to": "bea",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "clio",
+        "to": "drew",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "drew",
+        "to": "clio",
+        "snr": 15.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_12",
+        "to": "grace",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "grace",
+        "to": "bridge_12",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_12",
+        "to": "ivan",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "ivan",
+        "to": "bridge_12",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_12",
+        "to": "quinn",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "quinn",
+        "to": "bridge_12",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_12",
+        "to": "sam",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "sam",
+        "to": "bridge_12",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_13",
+        "to": "dave",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "bridge_13",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_13",
+        "to": "heidi",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "heidi",
+        "to": "bridge_13",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_13",
+        "to": "abel",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "abel",
+        "to": "bridge_13",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_13",
+        "to": "bea",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bea",
+        "to": "bridge_13",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_23",
+        "to": "ned",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "ned",
+        "to": "bridge_23",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_23",
+        "to": "olga",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "olga",
+        "to": "bridge_23",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_23",
+        "to": "xena",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "xena",
+        "to": "bridge_23",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "bridge_23",
+        "to": "yves",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "yves",
+        "to": "bridge_23",
+        "snr": 14.0,
+        "bidir": false
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at_ms": 600000,
+      "node": "alice",
+      "command": "send bob hi"
+    },
+    {
+      "at_ms": 612000,
+      "node": "bob",
+      "command": "send alice hey"
+    },
+    {
+      "at_ms": 628000,
+      "node": "alice",
+      "command": "send bob any-updates"
+    },
+    {
+      "at_ms": 645000,
+      "node": "bob",
+      "command": "send alice all-green"
+    },
+    {
+      "at_ms": 665000,
+      "node": "alice",
+      "command": "send bob good"
+    },
+    {
+      "at_ms": 685000,
+      "node": "bob",
+      "command": "send alice ttyl"
+    },
+    {
+      "at_ms": 720000,
+      "node": "carol",
+      "command": "send heidi ping"
+    },
+    {
+      "at_ms": 738000,
+      "node": "heidi",
+      "command": "send carol pong"
+    },
+    {
+      "at_ms": 765000,
+      "node": "carol",
+      "command": "send heidi howsignal"
+    },
+    {
+      "at_ms": 792000,
+      "node": "heidi",
+      "command": "send carol weak-north"
+    },
+    {
+      "at_ms": 820000,
+      "node": "carol",
+      "command": "send heidi ack"
+    },
+    {
+      "at_ms": 845000,
+      "node": "heidi",
+      "command": "send carol 73"
+    },
+    {
+      "at_ms": 840000,
+      "node": "leo",
+      "command": "send rosa yo"
+    },
+    {
+      "at_ms": 860000,
+      "node": "rosa",
+      "command": "send leo yo-back"
+    },
+    {
+      "at_ms": 890000,
+      "node": "leo",
+      "command": "send rosa test-test"
+    },
+    {
+      "at_ms": 920000,
+      "node": "rosa",
+      "command": "send leo 5of5"
+    },
+    {
+      "at_ms": 950000,
+      "node": "leo",
+      "command": "send rosa out"
+    },
+    {
+      "at_ms": 975000,
+      "node": "rosa",
+      "command": "send leo 73"
+    },
+    {
+      "at_ms": 960000,
+      "node": "ursula",
+      "command": "send yves greetings"
+    },
+    {
+      "at_ms": 978000,
+      "node": "yves",
+      "command": "send ursula hi-back"
+    },
+    {
+      "at_ms": 1005000,
+      "node": "ursula",
+      "command": "send yves status"
+    },
+    {
+      "at_ms": 1032000,
+      "node": "yves",
+      "command": "send ursula nominal"
+    },
+    {
+      "at_ms": 1060000,
+      "node": "ursula",
+      "command": "send yves out"
+    },
+    {
+      "at_ms": 1085000,
+      "node": "yves",
+      "command": "send ursula 73"
+    },
+    {
+      "at_ms": 1080000,
+      "node": "dave",
+      "command": "send_layer 2 335675398 bridge-12-test"
+    },
+    {
+      "at_ms": 1115000,
+      "node": "peter",
+      "command": "send_layer 1 335609860 got-it"
+    },
+    {
+      "at_ms": 1150000,
+      "node": "dave",
+      "command": "send_layer 2 335675398 round-trip-ok"
+    },
+    {
+      "at_ms": 1180000,
+      "node": "peter",
+      "command": "send_layer 1 335609860 confirmed"
+    },
+    {
+      "at_ms": 1200000,
+      "node": "frank",
+      "command": "send_layer 3 335740931 bridge-13-test"
+    },
+    {
+      "at_ms": 1235000,
+      "node": "wendy",
+      "command": "send_layer 1 335609862 got-it"
+    },
+    {
+      "at_ms": 1270000,
+      "node": "frank",
+      "command": "send_layer 3 335740931 round-trip-ok"
+    },
+    {
+      "at_ms": 1300000,
+      "node": "wendy",
+      "command": "send_layer 1 335609862 confirmed"
+    },
+    {
+      "at_ms": 1320000,
+      "node": "mia",
+      "command": "send_layer 3 335740934 bridge-23-test"
+    },
+    {
+      "at_ms": 1355000,
+      "node": "zoey",
+      "command": "send_layer 2 335675395 got-it"
+    },
+    {
+      "at_ms": 1390000,
+      "node": "mia",
+      "command": "send_layer 3 335740934 round-trip-ok"
+    },
+    {
+      "at_ms": 1420000,
+      "node": "zoey",
+      "command": "send_layer 2 335675395 confirmed"
+    },
+    {
+      "at_ms": 1500000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-1"
+    },
+    {
+      "at_ms": 1530000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-1"
+    },
+    {
+      "at_ms": 1560000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-1"
+    },
+    {
+      "at_ms": 1590000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-1"
+    },
+    {
+      "at_ms": 1620000,
+      "node": "viktor",
+      "command": "send_channel 7 L3-news-1"
+    },
+    {
+      "at_ms": 1650000,
+      "node": "drew",
+      "command": "send_channel 7 L3-event-1"
+    },
+    {
+      "at_ms": 1680000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-2"
+    },
+    {
+      "at_ms": 1710000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-2"
+    },
+    {
+      "at_ms": 1740000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-2"
+    },
+    {
+      "at_ms": 1770000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-2"
+    },
+    {
+      "at_ms": 1800000,
+      "node": "viktor",
+      "command": "send_channel 7 L3-news-2"
+    },
+    {
+      "at_ms": 1830000,
+      "node": "drew",
+      "command": "send_channel 7 L3-event-2"
+    },
+    {
+      "at_ms": 1860000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-3"
+    },
+    {
+      "at_ms": 1890000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-3"
+    },
+    {
+      "at_ms": 1920000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-3"
+    },
+    {
+      "at_ms": 1950000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-3"
+    },
+    {
+      "at_ms": 1980000,
+      "node": "viktor",
+      "command": "send_channel 7 L3-news-3"
+    },
+    {
+      "at_ms": 2010000,
+      "node": "drew",
+      "command": "send_channel 7 L3-event-3"
+    },
+    {
+      "at_ms": 2100000,
+      "node": "alice",
+      "command": "send bob round-2"
+    },
+    {
+      "at_ms": 2115000,
+      "node": "mia",
+      "command": "send_channel 7 L2-news-5"
+    },
+    {
+      "at_ms": 2135000,
+      "node": "bob",
+      "command": "send alice ack"
+    },
+    {
+      "at_ms": 2160000,
+      "node": "carol",
+      "command": "send heidi hey-again"
+    },
+    {
+      "at_ms": 2185000,
+      "node": "viktor",
+      "command": "send_channel 7 L3-news-5"
+    },
+    {
+      "at_ms": 2200000,
+      "node": "heidi",
+      "command": "send carol still-here"
+    },
+    {
+      "at_ms": 2220000,
+      "node": "leo",
+      "command": "send rosa second-pass"
+    },
+    {
+      "at_ms": 2250000,
+      "node": "rosa",
+      "command": "send leo yep"
+    },
+    {
+      "at_ms": 2270000,
+      "node": "ursula",
+      "command": "send yves second-pass"
+    },
+    {
+      "at_ms": 2300000,
+      "node": "drew",
+      "command": "send_channel 7 L3-event-5"
+    },
+    {
+      "at_ms": 2320000,
+      "node": "yves",
+      "command": "send ursula yep"
+    },
+    {
+      "at_ms": 2350000,
+      "node": "dave",
+      "command": "send_layer 2 335675398 stress-test"
+    },
+    {
+      "at_ms": 2390000,
+      "node": "eve",
+      "command": "send_channel 7 L1-news-5"
+    },
+    {
+      "at_ms": 2420000,
+      "node": "peter",
+      "command": "send_layer 1 335609860 loud-and-clear"
+    },
+    {
+      "at_ms": 2450000,
+      "node": "frank",
+      "command": "send_layer 3 335740931 stress-test"
+    },
+    {
+      "at_ms": 2490000,
+      "node": "grace",
+      "command": "send_channel 7 L1-event-5"
+    },
+    {
+      "at_ms": 2520000,
+      "node": "wendy",
+      "command": "send_layer 1 335609862 loud-and-clear"
+    },
+    {
+      "at_ms": 2550000,
+      "node": "mia",
+      "command": "send_layer 3 335740934 stress-test"
+    },
+    {
+      "at_ms": 2590000,
+      "node": "quinn",
+      "command": "send_channel 7 L2-event-5"
+    },
+    {
+      "at_ms": 2620000,
+      "node": "zoey",
+      "command": "send_layer 2 335675395 loud-and-clear"
+    },
+    {
+      "at_ms": 2650000,
+      "node": "alice",
+      "command": "send bob final"
+    },
+    {
+      "at_ms": 2675000,
+      "node": "bob",
+      "command": "send alice 73-all"
+    }
+  ]
+}
