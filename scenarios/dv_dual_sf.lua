@@ -750,7 +750,9 @@
 --     layer_count × 4-byte schedule records:
 --       byte 0: layer_id(4 hi) | (routing_sf - 5)(3) | period_unit_5s(1)
 --       byte 1: duration_100ms
---       byte 2: offset_100ms
+--       byte 2: countdown_100ms (ms/100 from this beacon's send time until the
+--               next foreign-layer window opens; receiver anchors to its own
+--               BCN-receive time -- not a static boot offset)
 --       byte 3: period units (seconds if unit=0, 5-second units if unit=1)
 --   Mobile endpoints emit identity-only BCN: n_entries=0, no seen bitmap,
 --   no route entries, no liveness extension. This refreshes id_bind without
@@ -1502,18 +1504,29 @@ local function pack_beacon_byte1(node)
   return b
 end
 
-local function pack_schedule_record(rec)
+local function pack_schedule_record(rec, now)
   local layer_id = math.floor(rec.layer_id or rec.layer or 0) & 0x0f
   local sf = math.floor(rec.routing_sf or rec.sf or 7)
   local duration_100ms = math.floor((rec.duration_ms or 0) / 100)
   if duration_100ms < 1 then duration_100ms = 1 end
   if duration_100ms > 255 then duration_100ms = 255 end
-  local offset_100ms = math.floor((rec.offset_ms or 0) / 100)
+  local period_ms = math.floor(rec.period_ms or 0)
+  -- Byte 2 is a LIVE countdown: ms from this beacon's send time until the next
+  -- foreign-layer window opens -- NOT a static boot offset. Receivers anchor it
+  -- to their own BCN-receive time, so neither side needs a shared wall clock
+  -- (boot jitter would otherwise desync sender prediction from gateway reality).
+  -- Falls back to the configured offset before the first window is scheduled.
+  local countdown_ms
+  if rec.next_visit_ms ~= nil and now ~= nil and period_ms > 0 then
+    countdown_ms = (rec.next_visit_ms - now) % period_ms
+  else
+    countdown_ms = rec.offset_ms or 0
+  end
+  local offset_100ms = math.floor(countdown_ms / 100)
   if offset_100ms < 0 then offset_100ms = 0 end
   if offset_100ms > 255 then offset_100ms = 255 end
   -- Period uses seconds for short cadences, and the low bit switches byte 3
   -- to 5-second units for production multi-minute sweeps.
-  local period_ms = math.floor(rec.period_ms or 0)
   local period_unit_5s = 0
   local period_units = math.floor((period_ms + 999) / 1000)
   if period_units > 255 then
@@ -1528,9 +1541,10 @@ end
 
 local function pack_schedule_block(node)
   if not node.self_gateway or not node.gateway_schedule_records then return "" end
+  local now = node:now()
   local records = {}
   for _, rec in ipairs(node.gateway_schedule_records) do
-    table.insert(records, pack_schedule_record(rec))
+    table.insert(records, pack_schedule_record(rec, now))
   end
   if #records == 0 then return "" end
   return string.char(#records & 0xff) .. table.concat(records)
@@ -4490,14 +4504,18 @@ local function gateway_schedule_defer_ms(self, gateway_id)
   local sched = self.gateway_neighbor_schedules[gateway_id]
   if sched == nil or sched.records == nil then return 0 end
   local now = self:now()
+  local heard = sched.heard_ms or now
   local our_leaf = active_leaf_id(self)
   local best_delay = 0
   for _, rec in ipairs(sched.records) do
     if rec.leaf_id ~= our_leaf and rec.period_ms ~= nil and rec.period_ms > 0 then
       local period = rec.period_ms
-      local offset = rec.offset_ms or 0
       local duration = rec.duration_ms or 0
-      local phase = (now - offset) % period
+      -- offset_ms is the countdown to the next foreign window measured from
+      -- the beacon we heard at heard_ms (PROTOCOL: anchored to BCN receive
+      -- time). visit_start + k*period covers every later window.
+      local visit_start = heard + (rec.offset_ms or 0)
+      local phase = (now - visit_start) % period
       if phase >= 0 and phase < duration then
         local delay = duration - phase + (self.gateway_schedule_guard_ms or 100)
         if delay > best_delay then best_delay = delay end
@@ -7521,8 +7539,12 @@ local function schedule_gateway_layer_window(self, rec)
         activate_primary_layer(self, "schedule_return")
       end
     end)
+    -- Record when the next foreign window opens so home-layer beacons can
+    -- advertise a live countdown (see pack_schedule_record). One period out.
+    rec.next_visit_ms = self:now() + rec.period_ms
     self:after(rec.period_ms, fire)
   end
+  rec.next_visit_ms = self:now() + rec.offset_ms
   self:after(rec.offset_ms, fire)
 end
 

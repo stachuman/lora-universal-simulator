@@ -1,0 +1,38 @@
+{
+  "_name": "t70_gateway_schedule_defer_jitter",
+  "_desc": "Regression guard for the beacon-anchored gateway-schedule countdown (PROTOCOL: schedule records 'anchored to the BCN receive time'). With node_startup_jitter_ms>0, gw_4 boots at a jittered offset, so its L5 visit windows are phase-shifted off the wall clock. Each gw_4 home beacon advertises a LIVE countdown (byte 2 of the schedule record) to its next L5 visit; l4_sender anchors that to its own BCN-receive time and so predicts the away windows correctly despite the boot jitter. l4_sender sends two cross-layer DMs to l5_target (key 0xCAFE0000, a direct L5 neighbour of gw_4 whose binding gw_4 already learned 1-hop, so NO 'H' flood is needed -- this isolates the schedule defer). When a send's RTS to gw_4 would land in gw_4's L5 window, l4_sender emits tx_gateway_schedule_defer (next_hop=10) and waits for the home window instead of RTSing into the void; both DMs are delivered. Before the fix (wall-clock-anchored prediction) the boot jitter desynced the prediction and l4_sender RTSed during the real away window -> cts_timeout. Sends fire at 50 s and 80 s, after schedules have propagated; run is 120 s for retry headroom.",
+  "simulation": {
+    "duration_ms": 120000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 58,
+    "node_startup_jitter_ms": 5000,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "l4_sender", "node_id": 1, "key_hash32": "0x44000001", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "gw_4", "node_id": 10, "key_hash32": "0x44000010", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "is_gateway": true,
+        "gateway_layers": [ { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [8], "period_ms": 30000, "duration_ms": 15000, "offset_ms": 15000 } ],
+        "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "l5_target", "node_id": 101, "key_hash32": "0xcafe0000", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "l4_sender", "to": "gw_4", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "gw_4", "to": "l5_target", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 50000, "node": "l4_sender", "command": "send_layer 5 3405643776 jitter-defer-a" },
+    { "at_ms": 80000, "node": "l4_sender", "command": "send_layer 5 3405643776 jitter-defer-b" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "l4_sender", "emit_type": "gateway_envelope_enqueued", "value": "\"target_layer_id\":5" },
+    { "type": "script_emit_contains", "node": "l4_sender", "emit_type": "tx_gateway_schedule_defer", "value": "\"next_hop\":10" },
+    { "type": "script_emit_contains", "node": "l5_target", "emit_type": "delivered", "value": "jitter-defer-a" },
+    { "type": "script_emit_contains", "node": "l5_target", "emit_type": "delivered", "value": "jitter-defer-b" }
+  ]
+}

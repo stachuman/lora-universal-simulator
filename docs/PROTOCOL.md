@@ -131,9 +131,11 @@ if has_schedule == 1 (optional schedule block):
                 schedule records (4 B each)
 
   schedule record (4 bytes):
-       ┌─────────────────────────────┬──────────────────┬──────────────────┬──────────┐
-       │ layer(4) │ (sf-5)(3) │ P5(1) │ duration_100ms(8)│ offset_100ms(8) │ period_units(8) │
-       └─────────────────────────────┴──────────────────┴──────────────────┴──────────┘
+       ┌─────────────────────────────┬──────────────────┬───────────────────┬──────────┐
+       │ layer(4) │ (sf-5)(3) │ P5(1) │ duration_100ms(8)│ countdown_100ms(8) │ period_units(8) │
+       └─────────────────────────────┴──────────────────┴───────────────────┴──────────┘
+  (byte 2 is a live countdown to the next foreign-layer window, measured from
+   this beacon's send time -- see "Gateway schedule records" below)
 
 route entries × n_entries (3 bytes each, start after fixed key_hash32 and
 optional schedule block):
@@ -222,12 +224,20 @@ identity-checkable without advertising them as transit routers.
 The record's layer field is the on-wire layer nibble (`layer_id & 0x0f`),
 not the full administrative layer id. `P5=0` means byte 3 is seconds;
 `P5=1` means byte 3 is 5-second units, so v1 can encode periods up to
-1275 s while keeping duration/offset at 100 ms resolution. Receivers cache
-schedules by direct gateway neighbour and layer nibble, anchored to the BCN
-receive time. If a sender wants to RTS to a direct gateway while that gateway
-is scheduled away from the sender's layer, it defers until the advertised
-foreign-layer window closes plus a small guard. Gateways also emit
-`gateway_schedule_change` when their own radio context switches.
+1275 s while keeping duration/countdown at 100 ms resolution. Byte 2 is a
+**live countdown** (ms/100) from this beacon's send time until the gateway's
+next foreign-layer window opens — recomputed for every beacon — not a static
+boot offset. This is what makes "anchored to the BCN receive time" work: the
+receiver records `heard_ms` when it decodes the beacon and treats
+`visit_start = heard_ms + countdown` (then `+ k·period`) as the foreign-window
+schedule. Because the figure is relative to a received beacon, the sender and
+gateway never need a shared wall clock — node boot jitter (`node_startup_jitter_ms`)
+no longer desyncs the sender's prediction from the gateway's actual visits.
+Receivers cache schedules by direct gateway neighbour and layer nibble. If a
+sender wants to RTS to a direct gateway while that gateway is scheduled away
+from the sender's layer, it defers until the advertised foreign-layer window
+closes plus a small guard. Gateways also emit `gateway_schedule_change` when
+their own radio context switches.
 
 **Destination-seen bitmap:** Set bits mean "the beacon sender has recently
 observed this node id." The bitmap is a freshness hint, not a route
