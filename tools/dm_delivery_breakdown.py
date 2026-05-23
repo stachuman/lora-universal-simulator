@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-DM delivery + path breakdown for a sim run.
+"""Per-DM + per-channel-post delivery breakdown for a sim run.
 
 Walks the events.ndjson and reconstructs the lifecycle of every
 unicast DM (`send <dst> ...`) injected via the scenario's `commands`
@@ -34,6 +34,10 @@ file /tmp/<config-stem>_analyze.ndjson — which means you can run
 without re-simulating. Pass --run to re-execute lus before analysis.
 
 Options:
+  --mode {dm,channel,all}  Which view to emit. Default `all`: prints
+                           both the per-DM table and the per-post
+                           channel table. `dm` and `channel` filter
+                           to one mode (handy when piping to JSON).
   --run                  Run lus on the config first (writes events
                          to /tmp/<stem>_analyze.ndjson if EVENTS not
                          given).
@@ -44,6 +48,15 @@ Options:
   --pair PAIR[,PAIR...]  Filter to specific pairs. Form: src:dst,
                          e.g. "heidi:carol,dave:peter".
   --all                  Include pairs not in scenario commands.
+
+Channel mode reports per channel post:
+  reach        — count of distinct same-layer non-self nodes that
+                 emitted `channel_msg_received` for the post's id
+  expected     — non-gateway nodes in the originator's layer minus 1
+  sources      — breakdown of how each recipient acquired the msg
+                 (pull_target / forwarder / overheard / promiscuous)
+  leaks        — count of recipients on a DIFFERENT layer than the
+                 originator (Principle 11 violations; should be 0)
 
 Examples:
   # Run lus + show per-pair summary
@@ -165,6 +178,38 @@ def load_config(path):
 SEND_RE = re.compile(r"^send(?:_priority|_e2e|_e2e_priority)?\s+(\S+)\s+",
                      re.IGNORECASE)
 SEND_LAYER_RE = re.compile(r"^send_layer\s+(\S+)\s+(\S+)\s+", re.IGNORECASE)
+SEND_CHANNEL_RE = re.compile(r"^send_channel\s+(\S+)\s+(.+)$", re.IGNORECASE)
+
+
+def configured_channel_posts(cfg, name_to_id):
+    """Return list of dicts describing each `send_channel` command:
+    {sender_id, sender_layer, channel_id, payload, sent_at_ms}."""
+    nodes_by_id = {n["node_id"]: n for n in cfg["nodes"]}
+    posts = []
+    for c in cfg.get("commands", []):
+        cmd = c.get("command", "")
+        m = SEND_CHANNEL_RE.match(cmd)
+        if not m:
+            continue
+        sender = c.get("node")
+        sender_id = name_to_id.get(sender)
+        if sender_id is None:
+            continue
+        try:
+            channel_id = int(m.group(1))
+        except ValueError:
+            continue
+        payload = m.group(2).strip()
+        sender_node = nodes_by_id.get(sender_id, {})
+        sender_layer = (sender_node.get("config") or {}).get("layer_id")
+        posts.append({
+            "sender_id":   sender_id,
+            "sender_layer": sender_layer,
+            "channel_id": channel_id,
+            "payload":    payload,
+            "sent_at_ms": c.get("at_ms"),
+        })
+    return posts
 
 
 def configured_pairs(cfg, name_to_id, hash_layer_to_name):
@@ -657,6 +702,166 @@ def render_json(rows, msgs, pair_filter, id_to_name, detail):
     sys.stdout.write("\n")
 
 
+def analyse_channel(events_path, slot_to_id, posts):
+    """Walk events to find each post's msg_id and its recipients.
+
+    Each `send_channel` command from the scenario gets matched to the
+    originator's `channel_msg_received{source=self_originate}` event by
+    (sender_id, channel_id, payload) — that event carries the 32-bit
+    `id` which uniquely identifies the post network-wide. Subsequent
+    `channel_msg_received` events at other nodes with the same id are
+    the recipients.
+    """
+    by_key = {}
+    for p in posts:
+        # Allow multiple posts from same sender with same channel and
+        # same payload (rare but possible). Stack them in order.
+        k = (p["sender_id"], p["channel_id"], p["payload"])
+        by_key.setdefault(k, []).append(p)
+        p["msg_id"] = None
+        p["originated_ms"] = None
+        p["recipients"] = {}    # {receiver_id: {source, t_ms, from}}
+        p["already_present"] = 0    # duplicate decodes after first
+
+    # Pass 1: find msg_id from each post's self_originate event.
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        if et != "channel_msg_received":
+            continue
+        if d.get("source") != "self_originate":
+            continue
+        k = (fid, d.get("channel_id"), d.get("payload"))
+        bucket = by_key.get(k)
+        if not bucket:
+            continue
+        # Match the next unfilled post in time order.
+        for p in bucket:
+            if p["msg_id"] is None:
+                p["msg_id"] = d.get("id")
+                p["originated_ms"] = t_ms
+                break
+
+    by_msg_id = {p["msg_id"]: p for p in posts if p["msg_id"] is not None}
+
+    # Pass 2: collect recipient events.
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        if et not in ("channel_msg_received", "channel_msg_already_present"):
+            continue
+        mid = d.get("id")
+        p = by_msg_id.get(mid)
+        if p is None:
+            continue
+        if et == "channel_msg_received":
+            if d.get("source") == "self_originate":
+                continue
+            if fid not in p["recipients"]:
+                p["recipients"][fid] = {
+                    "source": d.get("source"),
+                    "from":   d.get("from"),
+                    "t_ms":   t_ms,
+                }
+        else:   # channel_msg_already_present
+            if fid in p["recipients"]:
+                p["already_present"] += 1
+    return posts
+
+
+def summarise_channel(posts, cfg, id_to_name):
+    """Per-post rows: reach, expected, sources, leaks."""
+    # Same-layer non-gateway node count per layer.
+    per_layer_nongw = defaultdict(int)
+    node_layer = {}
+    node_is_gw = {}
+    for n in cfg["nodes"]:
+        nid = n["node_id"]
+        cfg_block = n.get("config") or {}
+        layer = cfg_block.get("layer_id")
+        is_gw = bool(cfg_block.get("is_gateway"))
+        node_layer[nid] = layer
+        node_is_gw[nid] = is_gw
+        if not is_gw:
+            per_layer_nongw[layer] += 1
+
+    rows = []
+    for p in posts:
+        same_layer = 0
+        leaks = 0
+        sources = defaultdict(int)
+        first_recv_ms = None
+        last_recv_ms = None
+        for rcv_id, info in p["recipients"].items():
+            rcv_layer = node_layer.get(rcv_id)
+            sources[info["source"] or "unknown"] += 1
+            if rcv_layer == p["sender_layer"]:
+                same_layer += 1
+            else:
+                leaks += 1
+            if first_recv_ms is None or info["t_ms"] < first_recv_ms:
+                first_recv_ms = info["t_ms"]
+            if last_recv_ms is None or info["t_ms"] > last_recv_ms:
+                last_recv_ms = info["t_ms"]
+        expected = max(0, per_layer_nongw.get(p["sender_layer"], 0) - 1)
+        spread_ms = (last_recv_ms - first_recv_ms) \
+                    if (first_recv_ms is not None and last_recv_ms is not None) \
+                    else None
+        first_lat_ms = (first_recv_ms - p["originated_ms"]) \
+                       if (first_recv_ms is not None
+                           and p["originated_ms"] is not None) else None
+        rows.append({
+            "sender":      fmt_node(p["sender_id"], id_to_name),
+            "layer":       p["sender_layer"],
+            "channel_id":  p["channel_id"],
+            "payload":     p["payload"],
+            "sent_at_ms":  p["sent_at_ms"],
+            "msg_id":      p["msg_id"],
+            "reach":       same_layer,
+            "expected":    expected,
+            "leaks":       leaks,
+            "sources":     dict(sources),
+            "already_present": p["already_present"],
+            "first_recv_lat_ms": first_lat_ms,
+            "spread_ms":   spread_ms,
+        })
+    return rows
+
+
+def render_channel_table(rows):
+    if not rows:
+        print("(no channel posts in scenario)")
+        return
+    header = ["post (sender / payload)", "ch", "L",
+              "reach", "reach%", "sources", "lat_ms", "leaks"]
+    fmt = ("{:<38} {:>3} {:>2} {:>7} {:>6} "
+           "{:<22} {:>7} {:>5}")
+    print(fmt.format(*header))
+    print("-" * 96)
+    total_reach = 0
+    total_expected = 0
+    total_leaks = 0
+    for r in rows:
+        reach_str = f"{r['reach']}/{r['expected']}"
+        pct = (f"{100*r['reach']/r['expected']:.0f}%"
+               if r["expected"] else "-")
+        src_str = " ".join(
+            f"{k[:3]}:{v}" for k, v in
+            sorted(r["sources"].items(), key=lambda kv: -kv[1])
+        ) if r["sources"] else "-"
+        lat = (f"{r['first_recv_lat_ms']}"
+               if r["first_recv_lat_ms"] is not None else "-")
+        head = f"{r['sender']:<14} {r['payload'][:22]:<22}"
+        print(fmt.format(head, r["channel_id"], r["layer"],
+                         reach_str, pct, src_str, lat, r["leaks"]))
+        total_reach += r["reach"]
+        total_expected += r["expected"]
+        total_leaks += r["leaks"]
+    print("-" * 96)
+    pct = (f"{100*total_reach/total_expected:.0f}%"
+           if total_expected else "-")
+    print(fmt.format(
+        f"TOTAL ({len(rows)} posts)",
+        "-", "-",
+        f"{total_reach}/{total_expected}", pct, "-", "-", total_leaks))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
@@ -677,6 +882,8 @@ def main():
                    help="filter to pairs, e.g. 'heidi:carol,dave:peter'")
     p.add_argument("--all", action="store_true",
                    help="include pairs not present in scenario commands")
+    p.add_argument("--mode", choices=("dm", "channel", "all"), default="all",
+                   help="which view to emit (default: all)")
     args = p.parse_args()
 
     if args.events is None:
@@ -726,13 +933,46 @@ def main():
 
     rows = summarise(msgs, pair_filter, id_to_name)
 
+    channel_rows = None
+    if args.mode in ("channel", "all"):
+        posts = configured_channel_posts(cfg, name_to_id)
+        analyse_channel(args.events, slot_to_id, posts)
+        channel_rows = summarise_channel(posts, cfg, id_to_name)
+
     if args.json:
-        render_json(rows, msgs, pair_filter, id_to_name, args.detail)
-    else:
+        if args.mode == "channel":
+            payload = {"channels": channel_rows or []}
+        elif args.mode == "dm":
+            render_json(rows, msgs, pair_filter, id_to_name, args.detail)
+            return
+        else:
+            # Inline-render the DM JSON view into a dict so we can pair it
+            # with channels under one top-level structure.
+            from io import StringIO
+            buf = StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = buf
+            try:
+                render_json(rows, msgs, pair_filter, id_to_name, args.detail)
+            finally:
+                sys.stdout = old_stdout
+            dm_payload = json.loads(buf.getvalue())
+            payload = {**dm_payload, "channels": channel_rows or []}
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+
+    if args.mode in ("dm", "all"):
+        print("=== DM ===")
         render_table(rows)
         if args.detail:
             print()
             render_detail_text(msgs, pair_filter, id_to_name)
+    if args.mode in ("channel", "all"):
+        if args.mode == "all":
+            print()
+        print("=== Channels ===")
+        render_channel_table(channel_rows)
 
 
 if __name__ == "__main__":
