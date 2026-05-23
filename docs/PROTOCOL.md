@@ -156,6 +156,15 @@ if E == 1:
   type 1: suspect/silent node ids, payload = len × node_id(8)
   type 2: explicit liveness state, payload = repeated {node_id(8), state(8)}
           state: 1=suspect, 2=silent, 3=dead
+  type 3: gateway_layer (cross-layer routing propagation), split-list
+          form. payload = N × gw_id(8) followed by N × dest_layer(4)
+          packed two nibbles per byte:
+            byte 0..N-1:           N × gw_id(8)
+            byte N..N+ceil(N/2)-1: layer[i] in byte N + i/2;
+                                   low nibble if i even, high nibble if i odd
+                                   odd N: tail high nibble = 0 (unused)
+          N is recovered from len as N = (2 * len) // 3
+          valid len values: 2, 3, 5, 6, 8, 9, 11, 12, 14 (max 9 entries)
 ```
 
 **Byte-1 flag bits:**
@@ -245,6 +254,56 @@ reports. Only local RTS-timeout evidence is advertised, which keeps this from
 becoming a beacon storm. If a node hears itself listed, it emits
 `peer_suspect_self_heard` and schedules a corrective BCN only when its own
 budget tier is below CRITICAL.
+
+Type `3` (`gateway_layer`) propagates per-gateway cross-layer routing
+hints so multi-hop nodes can pick the right gateway for a cross-layer
+DM. The schedule block (`has_schedule=1`) is only emitted by gateways
+themselves and is only parsed by direct radio neighbours; this TLV is
+the multi-hop counterpart. Each entry binds one gateway short id to
+one destination layer nibble (the "other" layer relative to the BCN's
+own `leaf_id`). A gateway is constrained to two layers (home + one
+visit target), so one entry per gateway per BCN is sufficient. The
+split-list form (all gw_ids first, then all layer nibbles) is chosen
+for parser simplicity and to keep the gw_id slice byte-aligned.
+
+**Propagation:** unlike type 1/2 (no re-gossip of remote reports),
+type 3 *is* re-gossiped. Every node that knows
+`{gw_id, dest_layer}` SHOULD include it in its own BCN. Direct
+neighbours of a gateway populate this from the schedule records they
+already parse; multi-hop receivers learn from the TLV. This is the
+same gossip pattern as the `is_gateway` bit on route entries.
+
+**Self-advertisement:** a gateway includes itself in its own outbound
+type-3 TLV. Direct neighbours can derive the same information from the
+attached schedule block, but the uniform redistribution rule keeps
+"who advertises what" simple — every node propagates its full
+`bridged_layers` map.
+
+**Aging:** each `(gw_id, dest_layer)` entry carries an implicit
+`last_seen_ms` (set on receive). Entries older than
+`gateway_bridged_layers_ttl_ms` are pruned on access — same lifetime
+story as `dest_seen_ms` and other BCN-derived state. Pruned entries
+are not re-advertised. Aging out lets gateways shed layers cleanly:
+no positive "remove this entry" signal is needed.
+
+**Conflict (most-recent wins):** if a TLV refreshes a known
+`gw_id` with a *different* `dest_layer`, the new value replaces the
+old, and `last_seen_ms` is bumped. OR-merge is explicitly **not**
+used — a gateway that drops or changes its visit target must be
+reflected truthfully in the table, not accumulated forever.
+
+**Rotation when >9 known:** the 4-bit TLV `len` caps a single TLV at
+9 entries. Nodes that know more than 9 gateways advertise the top-9
+by `last_seen_ms` and rotate across BCN cycles (mirrors the dirty-
+route-entry rotation pattern). 9 is generous for any realistic
+deployment.
+
+**Originator path:** `select_gateway_for_layer(target_layer)` consults
+the propagated `bridged_layers` map (not only the direct-neighbour
+schedule cache), so multi-hop nodes can pick a gateway for the right
+target layer. The last-hop-before-gateway still uses schedule
+knowledge to defer-time the gateway hop; the TLV is for discovery,
+not for scheduling.
 
 **Route entry byte 2 bit fields:**
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
@@ -2439,6 +2498,10 @@ expectations) subscribe by event_type.
 | `gateway_remote_bind_aged` | Gateway evicted a remote-layer binding after `gateway_remote_bind_ttl_ms` of silence | `key_hash32`, `layer_id`, `node`, `age_ms`, `ttl_ms`, `source`, `ambiguous` |
 | `gateway_no_binding` | Gateway received an envelope but cannot resolve the target hash in that layer | `origin`, `via_gateway`, `target_layer_id`, `dst_key_hash32`, `payload`, `reason` (`not_found` / `ambiguous`) |
 | `gateway_envelope_at_non_gateway` | Non-gateway received gateway envelope DATA; this is treated as routing/gateway misconvergence and dropped | `origin`, `dst`, `target_layer_id`, `dst_key_hash32`, `payload` |
+| `bridged_layers_advertised` | Node included the gateway_layer TLV (type=3) in an outbound BCN | `count`, `entries[]` with `gw_id`, `dest_layer`, `age_ms` |
+| `bridged_layers_observed` | Node parsed a gateway_layer TLV from a received BCN and updated its bridged_layers table | `from`, `count`, `entries[]` with `gw_id`, `dest_layer` |
+| `bridged_layers_replaced` | Receiving TLV refreshed a known gw_id with a different dest_layer; last-write-wins replaces the old value | `gw_id`, `prev_layer`, `new_layer`, `from`, `age_ms` |
+| `bridged_layers_aged` | Per-(gw_id, dest_layer) entry pruned after `gateway_bridged_layers_ttl_ms` of silence | `gw_id`, `dest_layer`, `age_ms`, `ttl_ms` |
 | `q_hash_binding_tx` | Node answered `Q:HASH_QUERY` with a resolved `(node_id,key_hash32)` binding | `to`, `node`, `key_hash32`, `tx_layer_id`, `tx_leaf_id`, `tx_routing_sf` |
 | `q_hash_binding_rx` | Node received a `Q:HASH_QUERY` binding response and updated `id_bind`; gateways also update `gateway_remote_bind` | `from`, `node`, `key_hash32`, `layer_id` |
 | `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
@@ -2618,7 +2681,10 @@ block for current values):
   `cap_q_responded_to`, `cap_deferred_sends`,
   `cap_gateway_deferred_handoffs`, `cap_id_bind`,
   `cap_channel_buffer` — emit `table_cap_hit` on overflow (§13.6)
-- Identity / gateway: `id_bind_ttl_ms`, `gateway_schedule_guard_ms`
+- Identity / gateway: `id_bind_ttl_ms`, `gateway_schedule_guard_ms`,
+  `gateway_bridged_layers_ttl_ms` (TLV type=3 entry lifetime; pruned
+  on access if older), `gateway_bridged_layers_max_per_tlv` (cap on
+  entries per TLV, default 9 per the 4-bit `len` field)
 - Join: `join_{listen,discover_jitter,discover_wait}_ms`,
   `join_discover_max_attempts`, `join_offer_backoff_{min,max}_ms`,
   `join_claim_guard_ms`, `join_retry_backoff_ms`,
