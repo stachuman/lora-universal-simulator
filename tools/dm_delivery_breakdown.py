@@ -774,6 +774,14 @@ def analyse_channel(events_path, slot_to_id, posts):
                 break
 
     by_msg_id = {p["msg_id"]: p for p in posts if p["msg_id"] is not None}
+    # Partial-match index for overhear events that carry (sender, ctr_lo)
+    # rather than the full 32-bit id. channel_msg_id_t layout (per
+    # PROTOCOL §3.4.1): id = (origin<<24) | (keyhash_lo16<<8) | ctr_lo.
+    by_sender_ctrlo = {}
+    for mid, p in by_msg_id.items():
+        sender = (mid >> 24) & 0xff
+        ctr_lo = mid & 0xff
+        by_sender_ctrlo[(sender, ctr_lo)] = p
 
     def _push_event(p, t_ms, fid, et, d, extra_id_field=None):
         """Append a copy of the event to the post's timeline."""
@@ -783,22 +791,34 @@ def analyse_channel(events_path, slot_to_id, posts):
         p["events"].append({"t_ms": t_ms, "node": fid,
                             "type": et, "fields": fields})
 
+    # Per-event-type keying — see the keys-by-type table in
+    # CHANNEL_EVENT_TYPES discovery.
+    SINGLE_ID_EVENTS = {
+        "channel_msg_received",
+        "channel_msg_overheard",
+        "channel_msg_already_present",
+        "channel_msg_seen_by_neighbour",
+        "channel_broadcast_deduped",
+        "channel_dirty_cleared",
+    }
+    MULTI_ID_EVENTS = {
+        "channel_pull_sent",
+        "channel_pull_received",
+        "channel_pull_suppressed",
+        "channel_msg_pulled",
+    }
+    SENDER_CTRLO_EVENTS = {
+        "channel_overhear_armed",
+        "channel_overhear_skipped_already_have",
+        "channel_overhear_missed",
+    }
+
     # Pass 2: collect recipient state + per-post event timeline.
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         if et not in CHANNEL_EVENT_TYPES:
             continue
-        # Single-id events
-        if et in ("channel_msg_received", "channel_msg_overheard",
-                  "channel_msg_pulled", "channel_msg_already_present",
-                  "channel_msg_seen_by_neighbour",
-                  "channel_pull_sent", "channel_pull_suppressed",
-                  "channel_overhear_armed",
-                  "channel_overhear_skipped_already_have",
-                  "channel_overhear_missed",
-                  "channel_broadcast_deduped",
-                  "channel_dirty_cleared"):
-            mid = d.get("id")
-            p = by_msg_id.get(mid)
+        if et in SINGLE_ID_EVENTS:
+            p = by_msg_id.get(d.get("id"))
             if p is None:
                 continue
             _push_event(p, t_ms, fid, et, d)
@@ -813,26 +833,78 @@ def analyse_channel(events_path, slot_to_id, posts):
                     }
             elif et == "channel_msg_already_present" and fid in p["recipients"]:
                 p["already_present"] += 1
-        elif et == "channel_pull_received":
-            # Q frame at holder; data carries `channel_ids` array.
-            ids = d.get("channel_ids") or []
+        elif et in MULTI_ID_EVENTS:
+            ids = d.get("ids") or []
             for mid in ids:
                 p = by_msg_id.get(mid)
                 if p is None:
                     continue
                 _push_event(p, t_ms, fid, et, d, extra_id_field=mid)
+        elif et in SENDER_CTRLO_EVENTS:
+            sender = d.get("sender")
+            ctr_lo = d.get("ctr_lo")
+            if sender is None or ctr_lo is None:
+                continue
+            p = by_sender_ctrlo.get((sender, ctr_lo))
+            if p is None:
+                continue
+            _push_event(p, t_ms, fid, et, d)
         elif et == "channel_digest_emitted":
             # Originator's BCN included these dirty ids in its digest.
-            ids = d.get("dirty_ids") or []
+            ids = d.get("dirty_ids") or d.get("ids") or []
             for mid in ids:
                 p = by_msg_id.get(mid)
                 if p is None:
                     continue
                 _push_event(p, t_ms, fid, et, d, extra_id_field=mid)
 
-    # Stable ordering for timeline rendering.
+    # Per-post derived stats.
     for p in posts:
         p["events"].sort(key=lambda x: (x["t_ms"], x["node"]))
+        # Cascade-depth tree: BFS-style fixed point on the `from` edges.
+        # depth(origin)=0; depth(recipient)=depth(from)+1 if `from` is
+        # known to have received the msg. Falls back to None for any
+        # recipient whose `from` is missing or never resolves (e.g.
+        # overhear with no from field, or pre-warmup-state weirdness).
+        depths = {p["sender_id"]: 0}
+        changed = True
+        while changed:
+            changed = False
+            for rcv_id, info in p["recipients"].items():
+                if rcv_id in depths:
+                    continue
+                from_id = info.get("from")
+                if from_id is None:
+                    continue
+                if from_id in depths:
+                    depths[rcv_id] = depths[from_id] + 1
+                    info["depth"] = depths[rcv_id]
+                    changed = True
+        # Track unresolved depths (recipients whose `from` chain never
+        # reaches origin — usually a sign of stale `from` data).
+        for rcv_id, info in p["recipients"].items():
+            if rcv_id not in depths:
+                info["depth"] = None
+        # Count secondary holders that re-broadcast: channel_msg_pulled
+        # events fire at the holder when it sends an M-payload in
+        # response to a Q. Count distinct nodes that fired this for the
+        # post id.
+        broadcasters = set()
+        pulls_sent = 0
+        for ev in p["events"]:
+            if ev["type"] == "channel_msg_pulled":
+                broadcasters.add(ev["node"])
+            elif ev["type"] == "channel_pull_sent":
+                pulls_sent += 1
+        p["depths"] = {rid: depths[rid] for rid in p["recipients"]
+                       if rid in depths}
+        depth_vals = [v for v in p["depths"].values() if v is not None]
+        p["max_depth"] = max(depth_vals) if depth_vals else None
+        p["mean_depth"] = (sum(depth_vals) / len(depth_vals)
+                           if depth_vals else None)
+        p["broadcasters"] = broadcasters         # includes origin if it
+                                                 # also responded to pulls
+        p["pulls_sent"] = pulls_sent
     return posts
 
 
@@ -891,6 +963,10 @@ def summarise_channel(posts, cfg, id_to_name):
             "already_present": p["already_present"],
             "first_recv_lat_ms": first_lat_ms,
             "spread_ms":   spread_ms,
+            "max_depth":   p.get("max_depth"),
+            "mean_depth":  p.get("mean_depth"),
+            "broadcasters": len(p.get("broadcasters") or []),
+            "pulls_sent":  p.get("pulls_sent", 0),
         })
     return rows
 
@@ -900,11 +976,12 @@ def render_channel_table(rows):
         print("(no channel posts in scenario)")
         return
     header = ["post (sender / payload)", "ch", "L",
-              "reach", "reach%", "sources", "lat_ms", "leaks"]
+              "reach", "reach%", "sources", "lat_ms", "depth",
+              "bcst", "pulls", "leaks"]
     fmt = ("{:<38} {:>3} {:>2} {:>7} {:>6} "
-           "{:<22} {:>7} {:>5}")
+           "{:<20} {:>7} {:>6} {:>4} {:>5} {:>5}")
     print(fmt.format(*header))
-    print("-" * 96)
+    print("-" * 112)
     total_reach = 0
     total_expected = 0
     total_leaks = 0
@@ -918,19 +995,24 @@ def render_channel_table(rows):
         ) if r["sources"] else "-"
         lat = (f"{r['first_recv_lat_ms']}"
                if r["first_recv_lat_ms"] is not None else "-")
+        depth_str = (f"{r['max_depth']}"
+                     if r["max_depth"] is not None else "-")
         head = f"{r['sender']:<14} {r['payload'][:22]:<22}"
         print(fmt.format(head, r["channel_id"], r["layer"],
-                         reach_str, pct, src_str, lat, r["leaks"]))
+                         reach_str, pct, src_str, lat,
+                         depth_str, r["broadcasters"],
+                         r["pulls_sent"], r["leaks"]))
         total_reach += r["reach"]
         total_expected += r["expected"]
         total_leaks += r["leaks"]
-    print("-" * 96)
+    print("-" * 112)
     pct = (f"{100*total_reach/total_expected:.0f}%"
            if total_expected else "-")
     print(fmt.format(
         f"TOTAL ({len(rows)} posts)",
         "-", "-",
-        f"{total_reach}/{total_expected}", pct, "-", "-", total_leaks))
+        f"{total_reach}/{total_expected}", pct, "-", "-", "-", "-", "-",
+        total_leaks))
 
 
 def render_channel_detail(rows_meta, id_to_name, post_filter):
@@ -950,22 +1032,46 @@ def render_channel_detail(rows_meta, id_to_name, post_filter):
             f"id=0x{(p.get('msg_id') or 0):08X}",
             f"reach={len(p['recipients'])}",
         ]
+        if p.get("max_depth") is not None:
+            head_parts.append(f"max_depth={p['max_depth']}")
+            head_parts.append(f"mean_depth={p['mean_depth']:.2f}")
+        if p.get("broadcasters"):
+            head_parts.append(f"broadcasters={len(p['broadcasters'])}")
+        head_parts.append(f"pulls_sent={p.get('pulls_sent', 0)}")
         if p.get("originated_ms") is not None:
             head_parts.append(f"orig={p['originated_ms']}ms")
+        # Cascade total time: first->last recipient.
+        if p["recipients"]:
+            first_ms = min(info["t_ms"] for info in p["recipients"].values())
+            last_ms = max(info["t_ms"] for info in p["recipients"].values())
+            head_parts.append(f"first_recv={first_ms}ms")
+            head_parts.append(f"last_recv={last_ms}ms")
+            if p.get("originated_ms") is not None:
+                head_parts.append(f"first_lat={first_ms - p['originated_ms']}ms")
+                head_parts.append(f"cascade={last_ms - first_ms}ms")
         head_parts.append("===")
         print(" ".join(head_parts))
-        # Quick recipient list with source.
+        # Recipients grouped by source + depth.
         if p["recipients"]:
-            grouped = defaultdict(list)
-            for rcv_id, info in p["recipients"].items():
-                grouped[info["source"] or "unknown"].append((info["t_ms"], rcv_id))
-            for source, lst in grouped.items():
-                lst.sort()
-                names = ", ".join(
-                    f"{fmt_node(nid, id_to_name)}@{tm}ms"
-                    for tm, nid in lst
-                )
-                print(f"  recipients via {source:<14} ({len(lst)}): {names}")
+            # Sort all recipients by depth then time so the cascade reads
+            # top-down. Show one line per recipient.
+            rcv_sorted = sorted(
+                p["recipients"].items(),
+                key=lambda kv: (kv[1].get("depth") if kv[1].get("depth") is not None else 99,
+                                kv[1]["t_ms"])
+            )
+            for rcv_id, info in rcv_sorted:
+                lat = (info["t_ms"] - p["originated_ms"]
+                       if p.get("originated_ms") is not None else None)
+                lat_s = f"+{lat}ms" if lat is not None else "?"
+                depth = info.get("depth")
+                depth_s = f"depth={depth}" if depth is not None else "depth=?"
+                from_s = (f"from={fmt_node(info['from'], id_to_name)}"
+                          if info.get("from") is not None else "from=?")
+                src = info.get("source") or "unknown"
+                print(f"  recv {fmt_node(rcv_id, id_to_name):<12} "
+                      f"{depth_s:<9} {src:<14} {from_s:<18} "
+                      f"@ {info['t_ms']:>8}ms ({lat_s})")
         else:
             print("  recipients: (none)")
         if not p["events"]:
