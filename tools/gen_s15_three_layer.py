@@ -72,11 +72,16 @@ def key_hash32_hex(layer_byte: int, idx: int) -> str:
 
 # Bridge time-share. With 3 layers participating (1 home + 2 visits)
 # we can't time-share all three out of one bridge — we use SEPARATE
-# bridges per layer-pair instead. Each bridge has one visit layer,
-# so the schedule is the same as s14's 30s/15s split.
-BRIDGE_VISIT_PERIOD_MS   = 30_000
-BRIDGE_VISIT_DURATION_MS = 15_000
-BRIDGE_VISIT_OFFSET_MS   = 15_000
+# bridges per layer-pair instead. Each bridge has one visit layer.
+# 15s/7.5s (50/50) switching: a 24-seed sweep showed cross-layer delivery
+# 56%->68% vs the old 30s/15s split. The gateway duty-cycle SPLIT is zero-sum
+# (doorstep<->visit loss trade off), but FREQUENCY is a real lever -- shorter
+# periods cut the wait for the gateway to be on the right layer. 10s over-shoots
+# (visit window too short). Stays well within the 10% radio duty budget (peak
+# duty-budget use ~51%, zero beacon_skipped_budget).
+BRIDGE_VISIT_PERIOD_MS   = 15_000
+BRIDGE_VISIT_DURATION_MS = 7_500
+BRIDGE_VISIT_OFFSET_MS   = 7_500
 
 # Names (in node_id order)
 L1_NAMES = ["alice", "bob", "carol", "dave", "eve",

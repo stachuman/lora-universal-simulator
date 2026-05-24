@@ -582,9 +582,9 @@
               6,
               10
             ],
-            "period_ms": 30000,
-            "duration_ms": 15000,
-            "offset_ms": 15000
+            "period_ms": 15000,
+            "duration_ms": 7500,
+            "offset_ms": 7500
           }
         ],
         "beacon_period_ms": 30000,
@@ -614,9 +614,9 @@
               10,
               11
             ],
-            "period_ms": 30000,
-            "duration_ms": 15000,
-            "offset_ms": 15000
+            "period_ms": 15000,
+            "duration_ms": 7500,
+            "offset_ms": 7500
           }
         ],
         "beacon_period_ms": 30000,
@@ -646,9 +646,9 @@
               10,
               11
             ],
-            "period_ms": 30000,
-            "duration_ms": 15000,
-            "offset_ms": 15000
+            "period_ms": 15000,
+            "duration_ms": 7500,
+            "offset_ms": 7500
           }
         ],
         "beacon_period_ms": 30000,
