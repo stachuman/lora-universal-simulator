@@ -387,6 +387,10 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # `delivered` carries dst (the resolved target id) and payload (the body),
     # giving a clean, collision-safe key.
     arrival_by_payload = {}
+    # Cross-layer sends the originator dropped before any envelope/DATA (no
+    # gateway route). These create NO record, so without this they'd be
+    # invisible and the cross-layer denominator would be over-optimistic.
+    drops = []
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         o = d.get("origin") or d.get("src")
         c = d.get("ctr")
@@ -401,6 +405,11 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
                 key = (dst, payload)
                 if key not in arrival_by_payload:
                     arrival_by_payload[key] = t_ms
+        elif et == "gateway_envelope_dropped":
+            drops.append({"origin": d.get("origin", fid),
+                          "target_layer_id": d.get("target_layer_id"),
+                          "dst_key_hash32": d.get("dst_key_hash32"),
+                          "reason": d.get("reason")})
 
     # Index for looking up the originator's record from gateway-side
     # handoff events. (origin, ctr) -> record_key (origin, dst, ctr)
@@ -536,7 +545,7 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # arrival via payload at the target. This is the only honest
     # delivery signal for send_layer messages — the gateway rewrites
     # origin/ctr on the second leg.
-    return msgs, arrival_by_payload
+    return msgs, arrival_by_payload, drops
 
 
 def outcome(rec):
@@ -579,21 +588,31 @@ def _arrived(rec):
     return rec["arrived_ms"] is not None
 
 
-def summarise(msgs, pair_filter, id_to_name):
+def summarise(msgs, pair_filter, id_to_name, no_gw_by_pair=None):
+    no_gw_by_pair = no_gw_by_pair or {}
     by_pair = defaultdict(list)
     for k, r in msgs.items():
         eff_dst = effective_dst(r)
         if pair_filter is not None and (r["origin"], eff_dst) not in pair_filter:
             continue
         by_pair[(r["origin"], eff_dst)].append(r)
+    # Drop-only pairs (every send dropped before enqueue) have no records, so
+    # they're absent from by_pair -- inject them so the loss is counted.
+    all_pairs = set(by_pair) | set(no_gw_by_pair)
     rows = []
-    for (origin, dst), recs in sorted(by_pair.items()):
-        n = len(recs)
+    for (origin, dst) in sorted(all_pairs):
+        if pair_filter is not None and (origin, dst) not in pair_filter:
+            continue
+        recs = by_pair.get((origin, dst), [])
+        no_gw = no_gw_by_pair.get((origin, dst), 0)
+        n = len(recs) + no_gw          # honest denominator: enqueued + dropped
         arrived = sum(1 for r in recs if _arrived(r))
         acked = sum(1 for r in recs if r["ack_ms"] is not None)
         giveup = sum(1 for r in recs if outcome(r) == "giveup")
         in_flight = sum(1 for r in recs if outcome(r) == "in_flight")
-        any_cross = any(r.get("via_gateway") for r in recs)
+        # A pair is cross-layer if any record is via_gateway OR it had drops
+        # (drops only come from send_layer, i.e. cross-layer).
+        any_cross = any(r.get("via_gateway") for r in recs) or no_gw > 0
         hops_list = [len(r["carriers"]) for r in recs if _arrived(r)]
         mean_hops = (sum(hops_list) / len(hops_list)) if hops_list else None
         giveup_reasons = [r["giveup_reason"] for r in recs
@@ -605,6 +624,7 @@ def summarise(msgs, pair_filter, id_to_name):
             "arrived":    arrived,
             "acked":      acked,
             "giveup":     giveup,
+            "no_gw":      no_gw,
             "in_flight":  in_flight,
             "mean_hops":  mean_hops,
             "giveup_reasons": giveup_reasons,
@@ -622,12 +642,12 @@ def render_table(rows):
     # Pair column is wider now: "alice(1) -> bob(2)" can hit ~22 chars
     # for two-digit IDs. "*" suffix marks cross-layer rows.
     header = ["pair", "sent", "arr", "arr%", "h1ack", "h1ack%",
-              "giveup", "in_flight", "mean_hops"]
-    fmt = "{:<28} {:>4} {:>4} {:>5} {:>5} {:>6} {:>6} {:>9} {:>9}"
+              "giveup", "no_gw", "in_flight", "mean_hops"]
+    fmt = "{:<28} {:>4} {:>4} {:>5} {:>5} {:>6} {:>6} {:>5} {:>9} {:>9}"
     print(fmt.format(*header))
-    print("-" * 80)
+    print("-" * 86)
     tot = {"sent": 0, "arrived": 0, "acked": 0,
-           "giveup": 0, "in_flight": 0}
+           "giveup": 0, "no_gw": 0, "in_flight": 0}
     for r in rows:
         tag = " *" if r.get("cross_layer") else ""
         pair = f"{r['origin']} -> {r['dst']}{tag}"
@@ -636,15 +656,15 @@ def render_table(rows):
         mh = f"{r['mean_hops']:.1f}" if r["mean_hops"] is not None else "-"
         print(fmt.format(pair, r["sent"], r["arrived"], arr_pct,
                          r["acked"], ack_pct, r["giveup"],
-                         r["in_flight"], mh))
+                         r.get("no_gw", 0), r["in_flight"], mh))
         for k in tot:
-            tot[k] += r[k]
-    print("-" * 80)
+            tot[k] += r.get(k, 0)
+    print("-" * 86)
     arr_pct = f"{100*tot['arrived']/tot['sent']:.0f}%" if tot["sent"] else "-"
     ack_pct = f"{100*tot['acked']/tot['sent']:.0f}%" if tot["sent"] else "-"
     print(fmt.format("TOTAL", tot["sent"], tot["arrived"], arr_pct,
                      tot["acked"], ack_pct, tot["giveup"],
-                     tot["in_flight"], "-"))
+                     tot["no_gw"], tot["in_flight"], "-"))
     reasons = defaultdict(int)
     for r in rows:
         for x in r["giveup_reasons"]:
@@ -1377,8 +1397,8 @@ def main():
 
     cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name \
         = load_config(args.config)
-    msgs, arrival_by_payload = analyse(args.events, slot_to_id,
-                                       hash_layer_to_name)
+    msgs, arrival_by_payload, drops = analyse(args.events, slot_to_id,
+                                              hash_layer_to_name)
 
     # Post-pass: resolve cross-layer target_id + arrival_at_target_ms.
     # Done here (not in analyse) because we need name_to_id which the
@@ -1400,6 +1420,15 @@ def main():
         if r["payload"] is not None:
             r["arrival_at_target_ms"] = arrival_by_payload.get((t_id, r["payload"]))
 
+    # Resolve dropped cross-layer sends (no gateway route) to (origin, target)
+    # pairs so they count toward the honest cross-layer denominator.
+    no_gw_by_pair = defaultdict(int)
+    for dp in drops:
+        t_name = hash_layer_to_name.get((dp["target_layer_id"], dp["dst_key_hash32"]))
+        t_id = name_to_id.get(t_name) if t_name else None
+        if t_id is not None:
+            no_gw_by_pair[(dp["origin"], t_id)] += 1
+
     # Pair filter: explicit --pair wins; else configured commands;
     # else (with --all) no filter at all.
     explicit = parse_pair_filter(args.pair, name_to_id)
@@ -1410,7 +1439,7 @@ def main():
     else:
         pair_filter = configured_pairs(cfg, name_to_id, hash_layer_to_name)
 
-    rows = summarise(msgs, pair_filter, id_to_name)
+    rows = summarise(msgs, pair_filter, id_to_name, no_gw_by_pair)
 
     channel_rows = None
     posts_meta = None

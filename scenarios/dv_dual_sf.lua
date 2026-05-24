@@ -4651,6 +4651,29 @@ local function select_gateway_for_layer(self, target_layer_id)
   return best_gateway, best_hops, best_score
 end
 
+-- True if we know SOME gateway bridges to target_layer_id (from a direct
+-- neighbour's schedule or a propagated type-4 TLV) -- even if we currently
+-- lack a route to it. Lets the send path distinguish "no gateway known" from
+-- "gateway known but unreachable" (the latter = route to the gateway aged out
+-- during its visit-layer absence; see select_gateway_for_layer). Global to
+-- avoid the 200-local chunk limit.
+function knows_gateway_for_layer(self, target_layer_id)
+  target_layer_id = math.floor(target_layer_id or -1)
+  if self.gateway_neighbor_schedules ~= nil then
+    for _, sched in pairs(self.gateway_neighbor_schedules) do
+      if sched.bridged_layers and sched.bridged_layers[target_layer_id] == true then
+        return true
+      end
+    end
+  end
+  if self.bridged_layers ~= nil then
+    for _, prop in pairs(self.bridged_layers) do
+      if prop.dest_layer == target_layer_id then return true end
+    end
+  end
+  return false
+end
+
 local function age_out_id_bind(self)
   if self.id_bind == nil or next(self.id_bind) == nil then return end
   if (self.id_bind_ttl_ms or 0) <= 0 then return end
@@ -10900,6 +10923,17 @@ function on_command(self, cmd_str)
     else
       dst_id = select_gateway_for_layer(self, target_layer_id)
       if dst_id == nil then
+        -- Silent-failure no more: this send produces no envelope and no DATA.
+        -- reason distinguishes a true gap (no gateway advertised for the layer)
+        -- from the route-convergence case (gateway known via TLV but no rt
+        -- route to it -- typically its route aged out during a visit absence).
+        self:emit("gateway_envelope_dropped", {
+          origin = self.id,
+          target_layer_id = target_layer_id,
+          dst_key_hash32 = dst_key_hash32,
+          reason = knows_gateway_for_layer(self, target_layer_id)
+                   and "gateway_known_no_route" or "no_gateway_known",
+        })
         return string.format("ERROR: no gateway route for layer=%d", target_layer_id)
       end
       dst_name = name_of(self, dst_id)
