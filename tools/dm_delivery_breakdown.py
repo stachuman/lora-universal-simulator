@@ -378,10 +378,14 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # First pass: build (origin, ctr) -> dst from events that carry dst.
     # Second pass below applies the index to events that lack dst.
     origin_ctr_to_dst = {}
-    # Cross-layer arrival index: (receiver_id, payload) -> first t_ms.
-    # Cross-layer messages have their on-wire origin/ctr rewritten by
-    # the gateway, so payload at the target node is the only stable link
-    # back to the originator's user-message.
+    # Cross-layer arrival index: (target_id, payload) -> first t_ms.
+    # The gateway rewrites origin/ctr on the second leg, so we key on the
+    # target's user-facing payload. Source this from `delivered` (the target
+    # firmware surfaced the message to the app), NOT `data_rx` (mere radio
+    # receipt) -- data_rx also fires on relay-forwards, duplicates, and frames
+    # that fail the inner/e2e check, which over-counts cross-layer arrival.
+    # `delivered` carries dst (the resolved target id) and payload (the body),
+    # giving a clean, collision-safe key.
     arrival_by_payload = {}
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         o = d.get("origin") or d.get("src")
@@ -391,10 +395,10 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
         dst = d.get("dst")
         if o is not None and c is not None and dst is not None:
             origin_ctr_to_dst.setdefault((o, c), dst)
-        if et == "data_rx":
+        if et == "delivered":
             payload = d.get("payload")
-            if payload is not None:
-                key = (fid, payload)
+            if payload is not None and dst is not None:
+                key = (dst, payload)
                 if key not in arrival_by_payload:
                     arrival_by_payload[key] = t_ms
 

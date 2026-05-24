@@ -5265,6 +5265,7 @@ function try_drain_gateway_handoffs(self)
         via_gateway = self.id,
         target_layer_id = d.gw_env.target_layer_id,
         dst_key_hash32 = d.gw_env.dst_key_hash32,
+        payload = d.gw_env.body,
         waited_ms = now - d.queued_at_ms,
         dst = binding.node_id,
         binding_source = binding.source,
