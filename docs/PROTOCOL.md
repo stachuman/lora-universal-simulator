@@ -239,6 +239,30 @@ from the sender's layer, it defers until the advertised foreign-layer window
 closes plus a small guard. Gateways also emit `gateway_schedule_change` when
 their own radio context switches.
 
+**Tuning the visit schedule (cross-layer delivery).** A time-shared gateway can
+only be on one layer at a time, so cross-layer traffic loses messages at three
+points: the **doorstep** (a frame reaches a gateway neighbour but the final hop
+fails because the gateway is away or contended), the **visit layer** (the
+gateway forwarded onto its visit layer but the frame never reaches the target),
+and the **originator** (the sender can't even complete its first hop). Two knobs
+control the visit schedule, and only one moves total delivery:
+
+- The **home/visit split is zero-sum.** Rebalancing `duration_ms` relative to
+  `period_ms` (e.g. 50/50 → 75/25 → 33/67) does not raise total cross-layer
+  delivery; loss merely migrates between the doorstep and visit legs. Keep ~50/50.
+- **Switching frequency is the lever.** Shortening `period_ms` (at a fixed 50/50
+  split) cuts the wait for the gateway to be on the right layer, reducing both
+  doorstep and originator-stuck loss. On a 24-seed s15 sweep, **15 s / 7.5 s
+  raised cross-layer delivery 56 % → 68 %** versus the older 30 s / 15 s. Going
+  *too* short (≈10 s) over-shoots: the visit window becomes too brief to deliver
+  onward, so visit-leg loss balloons. ~15 s is the sweet spot for s15-class
+  topologies, and it stays within the 10 % radio duty budget (peak duty-budget
+  use ~51 %, no `beacon_skipped_budget`). The firmware's per-record fallback
+  defaults (`gateway_visit_period_ms` / `_duration_ms` / `_offset_ms`) encode
+  15 s / 7.5 s / 7.5 s; an explicit `gateway_layers[i]` field always overrides.
+  These figures are topology-specific — re-sweep before adopting elsewhere, and
+  always measure with a multi-seed sweep (single s15 runs are noise-dominated).
+
 **Destination-seen bitmap:** Set bits mean "the beacon sender has recently
 observed this node id." The bitmap is a freshness hint, not a route
 advertisement. Receiving it updates `dest_seen_ms[dest]`. If the receiver

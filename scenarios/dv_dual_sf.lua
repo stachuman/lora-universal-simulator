@@ -1051,6 +1051,18 @@ PROTOCOL = {
 
   -- ---- Gateway scheduling ----
   gateway_schedule_guard_ms      = 100,
+  -- Gateway visit-schedule defaults: fallback when a gateway_layers[i] record
+  -- omits the field (the per-record value always wins). Switching FREQUENCY is
+  -- the lever for cross-layer delivery, not the home/visit SPLIT (which is
+  -- zero-sum: doorstep<->visit loss just trade off). A 24-seed s15 sweep put
+  -- 15s/7.5s (50/50) at 56%->68% vs the old 30s/15s -- a shorter period cuts
+  -- the wait for the gateway to be on the right layer (doorstep + originator-
+  -- stuck loss). ~10s over-shoots (visit window too short to deliver onward).
+  -- Stays within the 10% radio duty budget (peak duty-budget use ~51%, zero
+  -- beacon_skipped_budget). See PROTOCOL.md "Gateway schedule records".
+  gateway_visit_period_ms        = 15000,
+  gateway_visit_duration_ms      = 7500,       -- 50/50 split
+  gateway_visit_offset_ms        = 7500,
 
   -- ---- Multi-hop hash-locate ('H' frame flood, PROTOCOL §3.7a) ----
   -- The gateway floods an 'H' query on the target layer to resolve a
@@ -8084,17 +8096,18 @@ function on_init(self, config)
     end
     if layer_id ~= nil then
       layer_id = math.floor(layer_id)
-      -- Schedule defaults if the per-record `gateway_layers[i]` entry
-      -- omits a field. No node-level config fallback — per-record values
-      -- (or these compile-time defaults) are the only sources.
+      -- Schedule defaults if the per-record `gateway_layers[i]` entry omits a
+      -- field. No node-level config fallback — per-record values (or the
+      -- gateway_visit_* PROTOCOL defaults, tuned for cross-layer delivery) are
+      -- the only sources.
       local rec = {
         layer_id = layer_id,
         leaf_id = leaf_id or layer_leaf_id(layer_id),
         routing_sf = routing_sf or self.routing_sf,
         allowed_data_sfs = allowed_data_sfs or self.allowed_data_sfs,
-        duration_ms = duration_ms or 5000,
-        period_ms = period_ms or 30000,
-        offset_ms = offset_ms or 5000,
+        duration_ms = duration_ms or self.gateway_visit_duration_ms,
+        period_ms = period_ms or self.gateway_visit_period_ms,
+        offset_ms = offset_ms or self.gateway_visit_offset_ms,
       }
       rec.allowed_sf_bitmap = sf_set_to_bitmap(rec.allowed_data_sfs)
       self.gateway_layer_set[layer_id] = true
