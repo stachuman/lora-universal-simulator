@@ -91,7 +91,13 @@ L2_NAMES = ["kate", "leo", "mia", "ned", "olga",
 L3_NAMES = ["ursula", "viktor", "wendy", "xena", "yves",
             "zoey", "abel", "bea", "clio", "drew"]
 BRIDGE_NAMES = ["bridge_12", "bridge_13", "bridge_23"]
-ALL_NAMES = L1_NAMES + L2_NAMES + L3_NAMES + BRIDGE_NAMES
+# Late joiner: an L1 node that powers on mid-simulation (start_at_ms) instead
+# of at boot, then must bootstrap + learn routes (including a route to a
+# gateway) from scratch before it can send cross-layer. Tests new-node route
+# learning through the gateway-selection + reactive-query path.
+NEWBIE_NAME = "newbie"
+NEWBIE_JOIN_MS = 600_000          # joins L1 at t=10 min
+ALL_NAMES = L1_NAMES + L2_NAMES + L3_NAMES + BRIDGE_NAMES + [NEWBIE_NAME]
 
 # Cross-layer DM endpoints (resolved key_hash32 decimal for send_layer).
 # L1 layer-index follows node_id; L2 layer-index = node_id-10; L3
@@ -141,6 +147,15 @@ def make_l2_node(name, node_id):
 def make_l3_node(name, node_id):
     return _common_node(name, node_id, 0x03, node_id - 20, 3,
                         L3_ROUTING_SF, L3_DATA_SFS)
+
+
+def make_newbie(name, node_id):
+    # An ordinary L1 node, but dormant until NEWBIE_JOIN_MS (the orchestrator
+    # holds it down until then). On power-on it runs discovery and learns the
+    # mesh from scratch, like a node freshly added to a live network.
+    n = make_l1_node(name, node_id)
+    n["start_at_ms"] = NEWBIE_JOIN_MS
+    return n
 
 
 def _make_bridge(name, node_id, hash_idx, home_layer_id,
@@ -204,6 +219,7 @@ def build_nodes():
     nodes.append(make_bridge_12(BRIDGE_NAMES[0], nid)); nid += 1
     nodes.append(make_bridge_13(BRIDGE_NAMES[1], nid)); nid += 1
     nodes.append(make_bridge_23(BRIDGE_NAMES[2], nid)); nid += 1
+    nodes.append(make_newbie(NEWBIE_NAME, nid)); nid += 1
     return nodes
 
 
@@ -288,6 +304,15 @@ BRIDGE_LINKS = [
 ]
 
 
+# Late joiner links into L1 via dave + eve — ~3 hops from bridge_12
+# (newbie -> dave -> grace -> bridge_12), so it must learn a multi-hop gateway
+# route after joining, not just hear the gateway directly. Symmetric.
+NEWBIE_LINKS = [
+    ("newbie", "dave", 16, 16),
+    ("newbie", "eve",  14, 14),
+]
+
+
 def _expand_directed(pairs):
     out = []
     for a, b, snr_ab, snr_ba in pairs:
@@ -300,7 +325,8 @@ def build_links():
     return (_expand_directed(L1_LINKS)
             + _expand_directed(L2_LINKS)
             + _expand_directed(L3_LINKS)
-            + _expand_directed(BRIDGE_LINKS))
+            + _expand_directed(BRIDGE_LINKS)
+            + _expand_directed(NEWBIE_LINKS))
 
 
 # ---------- Inject schedule ----------
@@ -409,6 +435,17 @@ PHASE3_INJECTS = [
     _inject(2_675_000, "bob",   "send alice 73-all"),
 ]
 
+# Late-joiner test — newbie joins L1 at t=10 min (start_at_ms) and, after time
+# to bootstrap + learn routes (including a route to bridge_12), sends
+# cross-layer to peter (L2). Three attempts spaced ~10 min apart show whether/
+# when a freshly-joined node can learn a gateway route and deliver. Exercises
+# the gateway-selection fallback + reactive ROUTE_QUERY path for a new node.
+JOIN_INJECTS = [
+    _inject(900_000,   "newbie", f"send_layer 2 {PETER_HASH} newbie-hello-1"),
+    _inject(1_500_000, "newbie", f"send_layer 2 {PETER_HASH} newbie-hello-2"),
+    _inject(2_100_000, "newbie", f"send_layer 2 {PETER_HASH} newbie-hello-3"),
+]
+
 
 # ---------- Assembly + validation + main ----------
 
@@ -425,7 +462,11 @@ DESC = (
     "(cross via bridge_13), mia<->zoey (cross via bridge_23). 6 channel "
     "posters (2 per layer). Tests multi-gateway TLV propagation "
     "(PROTOCOL §3.1 type 4) — each cross-layer DM must pick the right "
-    "bridge from the propagated (gw_id, dest_layer) pairs."
+    "bridge from the propagated (gw_id, dest_layer) pairs. Plus a late "
+    "joiner (newbie): an L1 node that powers on at t=10 min (start_at_ms) "
+    "~3 hops from bridge_12 and then sends cross-layer to peter (L2) at "
+    "t=15/25/35 min — testing whether a freshly-joined node can bootstrap, "
+    "learn a multi-hop gateway route, and deliver across layers."
 )
 
 
@@ -449,13 +490,14 @@ def build_scenario():
         "topology": {
             "links": build_links(),
         },
-        "commands": (PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS),
+        "commands": (PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS
+                     + JOIN_INJECTS),
     }
 
 
 def validate(scen):
     nodes = scen["nodes"]
-    assert len(nodes) == 33, f"expected 33 nodes, got {len(nodes)}"
+    assert len(nodes) == 34, f"expected 34 nodes, got {len(nodes)}"
     names = [n["name"] for n in nodes]
     assert sorted(names) == sorted(ALL_NAMES), \
         f"node name set mismatch:\n  got: {sorted(names)}\n  want: {sorted(ALL_NAMES)}"
@@ -464,8 +506,10 @@ def validate(scen):
     l2 = [n for n in nodes if n["config"]["layer_id"] == 2 and not n["config"].get("is_gateway")]
     l3 = [n for n in nodes if n["config"]["layer_id"] == 3 and not n["config"].get("is_gateway")]
     bridges = [n for n in nodes if n["config"].get("is_gateway")]
-    assert (len(l1), len(l2), len(l3), len(bridges)) == (10, 10, 10, 3), \
+    assert (len(l1), len(l2), len(l3), len(bridges)) == (11, 10, 10, 3), \
         f"layer counts: {(len(l1), len(l2), len(l3), len(bridges))}"
+    assert any(n.get("start_at_ms") == NEWBIE_JOIN_MS for n in nodes), \
+        "expected a late-joining node with start_at_ms"
 
     for n in l1:
         assert n["config"]["routing_sf"] == L1_ROUTING_SF
@@ -493,12 +537,12 @@ def validate(scen):
         f"bridge layer-pair coverage: {pairs_seen} vs {expected_pairs}"
 
     hashes = [n["key_hash32"] for n in nodes]
-    assert len(set(hashes)) == 33, \
-        f"key_hash32 not unique: {len(set(hashes))} of 33"
+    assert len(set(hashes)) == 34, \
+        f"key_hash32 not unique: {len(set(hashes))} of 34"
 
     n_links = len(scen["topology"]["links"])
     expected = 2 * (len(L1_LINKS) + len(L2_LINKS) + len(L3_LINKS)
-                    + len(BRIDGE_LINKS))
+                    + len(BRIDGE_LINKS) + len(NEWBIE_LINKS))
     assert n_links == expected, f"links: {n_links} vs {expected}"
 
     asym = sum(1 for a, b, f, r in (L1_LINKS + L2_LINKS + L3_LINKS) if f != r)
@@ -510,7 +554,7 @@ def validate(scen):
 
     n_cmd = len(scen["commands"])
     assert n_cmd == (len(PHASE1_INJECTS) + len(PHASE2_INJECTS)
-                     + len(PHASE3_INJECTS)), \
+                     + len(PHASE3_INJECTS) + len(JOIN_INJECTS)), \
         f"command count mismatch: {n_cmd}"
 
     # Phase ordering.

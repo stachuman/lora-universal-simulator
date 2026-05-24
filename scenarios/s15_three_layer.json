@@ -1,6 +1,6 @@
 {
   "_name": "s15_three_layer",
-  "_desc": "Three-layer scenario for testing gateway functionality. 33 nodes (10 L1 alice..judy + 10 L2 kate..tina + 10 L3 ursula..drew + 3 bridges). Each bridge serves one layer-pair: bridge_12 (L1<->L2), bridge_13 (L1<->L3), bridge_23 (L2<->L3). Per-layer routing SF: L1=SF8, L2=SF9, L3=SF10. 45 min: 10 min quiet warmup + 35 min active traffic (Phase 1 DM-only 15 min, Phase 2 channel-only 10 min, Phase 3 mixed 10 min). 7 DM pairs: alice<->bob (L1 1-hop), carol<->heidi (L1 3-hop), leo<->rosa (L2 3-hop), ursula<->yves (L3 3-hop), dave<->peter (cross via bridge_12), frank<->wendy (cross via bridge_13), mia<->zoey (cross via bridge_23). 6 channel posters (2 per layer). Tests multi-gateway TLV propagation (PROTOCOL \u00a73.1 type 4) \u2014 each cross-layer DM must pick the right bridge from the propagated (gw_id, dest_layer) pairs.",
+  "_desc": "Three-layer scenario for testing gateway functionality. 33 nodes (10 L1 alice..judy + 10 L2 kate..tina + 10 L3 ursula..drew + 3 bridges). Each bridge serves one layer-pair: bridge_12 (L1<->L2), bridge_13 (L1<->L3), bridge_23 (L2<->L3). Per-layer routing SF: L1=SF8, L2=SF9, L3=SF10. 45 min: 10 min quiet warmup + 35 min active traffic (Phase 1 DM-only 15 min, Phase 2 channel-only 10 min, Phase 3 mixed 10 min). 7 DM pairs: alice<->bob (L1 1-hop), carol<->heidi (L1 3-hop), leo<->rosa (L2 3-hop), ursula<->yves (L3 3-hop), dave<->peter (cross via bridge_12), frank<->wendy (cross via bridge_13), mia<->zoey (cross via bridge_23). 6 channel posters (2 per layer). Tests multi-gateway TLV propagation (PROTOCOL \u00a73.1 type 4) \u2014 each cross-layer DM must pick the right bridge from the propagated (gw_id, dest_layer) pairs. Plus a late joiner (newbie): an L1 node that powers on at t=10 min (start_at_ms) ~3 hops from bridge_12 and then sends cross-layer to peter (L2) at t=15/25/35 min \u2014 testing whether a freshly-joined node can bootstrap, learn a multi-hop gateway route, and deliver across layers.",
   "simulation": {
     "duration_ms": 2700000,
     "step_ms": 1,
@@ -656,6 +656,25 @@
         "state_snapshot_period_ms": 60000,
         "quiet_threshold_ms": 0
       }
+    },
+    {
+      "name": "newbie",
+      "node_id": 34,
+      "key_hash32": "0x14010022",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          7,
+          9
+        ],
+        "beacon_period_ms": 30000,
+        "discovery_beacon_period_ms": 4000,
+        "state_snapshot_period_ms": 60000,
+        "quiet_threshold_ms": 0
+      },
+      "start_at_ms": 600000
     }
   ],
   "topology": {
@@ -1343,6 +1362,30 @@
         "to": "bridge_23",
         "snr": 14.0,
         "bidir": false
+      },
+      {
+        "from": "newbie",
+        "to": "dave",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "dave",
+        "to": "newbie",
+        "snr": 16.0,
+        "bidir": false
+      },
+      {
+        "from": "newbie",
+        "to": "eve",
+        "snr": 14.0,
+        "bidir": false
+      },
+      {
+        "from": "eve",
+        "to": "newbie",
+        "snr": 14.0,
+        "bidir": false
       }
     ]
   },
@@ -1726,6 +1769,21 @@
       "at_ms": 2675000,
       "node": "bob",
       "command": "send alice 73-all"
+    },
+    {
+      "at_ms": 900000,
+      "node": "newbie",
+      "command": "send_layer 2 335675398 newbie-hello-1"
+    },
+    {
+      "at_ms": 1500000,
+      "node": "newbie",
+      "command": "send_layer 2 335675398 newbie-hello-2"
+    },
+    {
+      "at_ms": 2100000,
+      "node": "newbie",
+      "command": "send_layer 2 335675398 newbie-hello-3"
     }
   ]
 }
