@@ -340,6 +340,23 @@ target layer. The last-hop-before-gateway still uses schedule
 knowledge to defer-time the gateway hop; the TLV is for discovery,
 not for scheduling.
 
+Selection has two passes. Pass 1 picks the best gateway it has a live
+**routing-table route** to. Pass 2 (fallback, when no routed gateway exists)
+returns a gateway known only from the TLV/schedule — *without* requiring a
+route — and the envelope is enqueued toward it as an ordinary send, so the
+normal no-route recovery (`defer_send_for_route` → `ROUTE_QUERY`) discovers the
+route. This matters because differential (`dirty-only`) beacons don't
+re-advertise stable routes (only the seen-bitmap refreshes them, and the
+seen-bitmap never creates a route candidate), so a node can persistently *know*
+a gateway exists yet never receive a route entry to it; Pass 2 + reactive query
+is the same recovery any same-layer destination already gets, instead of
+silently dropping the cross-layer send. Pass 2 applies an **on-layer guard**:
+the gateway must appear in the (layer-local) seen-bitmap recently, which
+excludes cross-layer TLV leaks — e.g. an L2-home bridge whose `(gw→L2)` TLV
+propagated into L1 via a dual-layer gateway is *not* reachable from L1 and must
+not be addressed. Direct-neighbour gateways skip the guard (heard directly, so
+on-layer by construction).
+
 **Route entry byte 2 bit fields:**
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
   via `bucket_of_snr_4b` (16 buckets, 2 dB resolution, range −20..+10 dB).

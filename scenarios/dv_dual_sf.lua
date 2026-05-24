@@ -4648,7 +4648,44 @@ local function select_gateway_for_layer(self, target_layer_id)
       end
     end
   end
-  return best_gateway, best_hops, best_score
+  if best_gateway ~= nil then
+    return best_gateway, best_hops, best_score
+  end
+  -- Pass 2: no gateway with a live route. Fall back to ANY gateway known to
+  -- bridge this layer (direct-neighbour schedule, or propagated type-4 TLV)
+  -- even without an rt route to it. The caller enqueues toward it as a normal
+  -- send; issue_send's no-route path (defer_send_for_route) then fires a
+  -- ROUTE_QUERY and discovers the route -- the same reactive recovery any
+  -- same-layer dst gets. Without this, a never-learned/aged gateway route
+  -- silently drops the send: differential ("dirty-only") beacons don't
+  -- re-advertise stable routes, so a node can persistently know a gateway
+  -- exists (seen-bitmap + type-4 TLV) yet never receive a route entry to it.
+  if self.gateway_neighbor_schedules ~= nil then
+    for gw_id, sched in pairs(self.gateway_neighbor_schedules) do
+      if gw_id ~= self.id and sched.bridged_layers
+         and sched.bridged_layers[target_layer_id] == true then
+        return gw_id, nil, nil
+      end
+    end
+  end
+  if self.bridged_layers ~= nil then
+    local ttl = self.seen_bitmap_ttl_ms or 0
+    local now2 = self:now()
+    for gw_id, prop in pairs(self.bridged_layers) do
+      if gw_id ~= self.id and prop.dest_layer == target_layer_id then
+        -- On-layer guard: the (layer-local) seen-bitmap must have observed
+        -- this gateway recently. Excludes cross-layer TLV leaks -- e.g. an
+        -- L2-home bridge whose (gw->L2) TLV propagated into L1 via a
+        -- dual-layer gateway: it bridges L2 but is unreachable from L1, so we
+        -- must not address an envelope to it (we'd never route to it).
+        local seen = self.dest_seen_ms and self.dest_seen_ms[gw_id]
+        if seen ~= nil and (ttl <= 0 or (now2 - seen) <= ttl) then
+          return gw_id, nil, nil
+        end
+      end
+    end
+  end
+  return nil
 end
 
 -- True if we know SOME gateway bridges to target_layer_id (from a direct
