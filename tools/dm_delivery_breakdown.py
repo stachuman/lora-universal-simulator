@@ -43,6 +43,9 @@ Options:
                          given).
   --lus PATH             lus binary path (default build/orchestrator/lus).
   --json                 Emit JSON instead of the table.
+  --failures             DM mode: break failed DMs down by routing-layer
+                         mechanism (no-route / next-hop-silent / post-gateway /
+                         no-gateway / in-flight), same vs cross-layer.
   --detail               Include per-message timeline (text mode) or
                          per-message event list (JSON mode).
   --pair PAIR[,PAIR...]  Filter DM rows to specific pairs. Form
@@ -83,7 +86,7 @@ import os
 import re
 import subprocess
 import sys
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 
 def maybe_run(cfg_path, events_path, lus_path):
@@ -391,6 +394,11 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # gateway route). These create NO record, so without this they'd be
     # invisible and the cross-layer denominator would be over-optimistic.
     drops = []
+    # Cross-layer gateway-handoff giveups, keyed (origin, dst_key_hash32) —
+    # the gateway received the envelope but couldn't resolve/route to the
+    # target within its TTL. Distinct from a same-layer no-route giveup (both
+    # surface as giveup_reason=defer_ttl, so they must be told apart here).
+    gw_giveup = set()
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         o = d.get("origin") or d.get("src")
         c = d.get("ctr")
@@ -410,6 +418,10 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
                           "target_layer_id": d.get("target_layer_id"),
                           "dst_key_hash32": d.get("dst_key_hash32"),
                           "reason": d.get("reason")})
+        elif et == "gateway_handoff_giveup":
+            o2, hk = d.get("origin"), d.get("dst_key_hash32")
+            if o2 is not None and hk is not None:
+                gw_giveup.add((o2, hk))
 
     # Index for looking up the originator's record from gateway-side
     # handoff events. (origin, ctr) -> record_key (origin, dst, ctr)
@@ -545,7 +557,7 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # arrival via payload at the target. This is the only honest
     # delivery signal for send_layer messages — the gateway rewrites
     # origin/ctr on the second leg.
-    return msgs, arrival_by_payload, drops
+    return msgs, arrival_by_payload, drops, gw_giveup
 
 
 def outcome(rec):
@@ -674,6 +686,65 @@ def render_table(rows):
         print("giveup reasons:")
         for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print(f"  {k:<40} {v}")
+
+
+def _ev_has(rec, etype, **fields):
+    """True if rec's timeline has an event of etype matching the given fields."""
+    for e in rec["events"]:
+        if e["type"] == etype and all(e["fields"].get(k) == v
+                                      for k, v in fields.items()):
+            return True
+    return False
+
+
+def failure_category(rec, gw_giveup):
+    """Routing-layer failure taxonomy for a DM that did NOT arrive. Distinguishes
+    route non-convergence (no route at all) from next-hop-silent (route exists,
+    next-hop won't answer) from the cross-layer second leg. NB: giveup_reason
+    `defer_ttl` alone is ambiguous (same-layer no-route vs gateway handoff), so
+    we classify by carriers + timeline events + the gateway-giveup set."""
+    car = len(rec["carriers"])
+    if rec.get("via_gateway"):
+        if (rec["origin"], rec.get("dst_key_hash32")) in gw_giveup:
+            return "XL: gateway gave up (resolve/route to target)"
+        if rec["arrived_ms"] is not None:
+            return "XL: reached gateway, lost after forward"
+        if car == 0 and _ev_has(rec, "send_deferred", reason="no_route"):
+            return "XL: origin had no route to gateway"
+        if car >= 1:
+            return "XL: origin->gateway stalled (next-hop silent)"
+        return "XL: other"
+    if outcome(rec) == "in_flight":
+        return "SL: in-flight at end"
+    if car == 0 and _ev_has(rec, "send_deferred", reason="no_route"):
+        return "SL: origin no route (requery failed)"
+    if _ev_has(rec, "send_deferred", reason="all_candidates_silent"):
+        return "SL: next-hop silent (cts/ack timeout)"
+    return f"SL: giveup ({rec.get('giveup_reason')})"
+
+
+def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name):
+    cat = Counter()
+    ok = 0
+    for r in msgs.values():
+        if pair_filter is not None and (r["origin"], effective_dst(r)) not in pair_filter:
+            continue
+        if _arrived(r):
+            ok += 1
+        else:
+            cat[failure_category(r, gw_giveup)] += 1
+    for (origin, dst), n in no_gw_by_pair.items():
+        if pair_filter is not None and (origin, dst) not in pair_filter:
+            continue
+        cat["XL: no gateway known (never enveloped)"] += n
+    fail = sum(cat.values())
+    tot = ok + fail
+    if tot == 0:
+        print("(no matching DM messages)")
+        return
+    print(f"delivered {ok}/{tot} = {100*ok/tot:.1f}%;  {fail} failed, by mechanism:")
+    for k, v in cat.most_common():
+        print(f"  {v:>4} ({100*v/fail:4.1f}% of fails)  {k}")
 
 
 def render_detail_text(msgs, pair_filter, id_to_name):
@@ -1380,6 +1451,9 @@ def main():
                    help="include pairs not present in scenario commands")
     p.add_argument("--mode", choices=("dm", "channel", "all"), default="all",
                    help="which view to emit (default: all)")
+    p.add_argument("--failures", action="store_true",
+                   help="DM mode: print failure breakdown by routing-layer "
+                        "mechanism (no-route / next-hop-silent / post-gateway)")
     p.add_argument("--post", default=None,
                    help="filter channel posts: payload substring "
                         "(case-insensitive), e.g. 'news-3'")
@@ -1397,8 +1471,8 @@ def main():
 
     cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name \
         = load_config(args.config)
-    msgs, arrival_by_payload, drops = analyse(args.events, slot_to_id,
-                                              hash_layer_to_name)
+    msgs, arrival_by_payload, drops, gw_giveup = analyse(
+        args.events, slot_to_id, hash_layer_to_name)
 
     # Post-pass: resolve cross-layer target_id + arrival_at_target_ms.
     # Done here (not in analyse) because we need name_to_id which the
@@ -1483,6 +1557,11 @@ def main():
     if args.mode in ("dm", "all"):
         print("=== DM ===")
         render_table(rows)
+        if args.failures:
+            print()
+            print("=== DM failures (by mechanism) ===")
+            render_dm_failures(msgs, no_gw_by_pair, gw_giveup,
+                               pair_filter, id_to_name)
         if args.detail:
             print()
             render_detail_text(msgs, pair_filter, id_to_name)
