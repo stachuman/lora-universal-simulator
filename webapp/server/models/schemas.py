@@ -165,7 +165,7 @@ class TopologyLink(BaseModel):
     from_: str = Field(alias="from")
     to: str
     snr: float
-    rssi: float
+    rssi: Optional[float] = None
     bidir: bool = True
     snr_std_dev: Optional[float] = None
     snr_coherence_ms: Optional[int] = None

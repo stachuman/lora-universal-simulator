@@ -117,6 +117,11 @@ canvas { display: block; }
     <button id="btn-trace-mode" title="Click packets to trace">Trace</button>
     <button id="btn-rays" title="Show TX→RX propagation lines">Rays</button>
     <div class="sep"></div>
+    <label>Go to:</label>
+    <input id="goto-ms" type="text" placeholder="ms (or 1:30 / 30s)" style="width:140px"
+           title="Jump viewport center to a time. Accepts raw ms (12345), seconds (30s), or m:ss (1:30).">
+    <button id="btn-goto" title="Center viewport on time (Enter)">Go</button>
+    <div class="sep"></div>
     <span id="info-text" class="info"></span>
     <span id="follow-indicator" style="display:none;background:#dc2626;color:#fff;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;animation:pulse-live 1.5s ease infinite">LIVE</span>
     <span style="flex:1"></span>
@@ -941,7 +946,8 @@ function drawTimeAxis(contentW) {
         const x = msToX(t);
         if (x < S.labelW) continue;
         ctx.fillStyle = COLORS.time_text;
-        ctx.fillText(formatTime(t), x, 4);
+        ctx.fillText(formatTime(t), x, 2);
+        ctx.fillText(Math.round(t) + 'ms', x, 15);
     }
 }
 
@@ -2599,6 +2605,49 @@ document.getElementById('btn-rays').addEventListener('click', () => {
     S.raysMode = !S.raysMode;
     document.getElementById('btn-rays').classList.toggle('active', S.raysMode);
     render();
+});
+
+// Parse a time string into milliseconds. Accepts: "12345" (ms),
+// "30s" (seconds), "1:30" or "1:30.5" (m:ss). Returns null on failure.
+function parseGotoTime(raw) {
+    if (!raw) return null;
+    const s = raw.trim();
+    if (!s) return null;
+    let m;
+    if ((m = s.match(/^(\d+):(\d+(?:\.\d+)?)$/))) {
+        return (parseInt(m[1], 10) * 60 + parseFloat(m[2])) * 1000;
+    }
+    if ((m = s.match(/^(\d+(?:\.\d+)?)\s*s$/i))) {
+        return parseFloat(m[1]) * 1000;
+    }
+    if ((m = s.match(/^(\d+(?:\.\d+)?)\s*ms?$/i))) {
+        return parseFloat(m[1]);
+    }
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+}
+
+async function gotoTime() {
+    const input = document.getElementById('goto-ms');
+    const target = parseGotoTime(input.value);
+    if (target === null) {
+        input.style.borderColor = '#dc2626';
+        setTimeout(() => { input.style.borderColor = ''; }, 800);
+        return;
+    }
+    followMode = false; updateFollowIndicator();
+    const span = S.viewTo - S.viewFrom;
+    S.viewFrom = target - span / 2;
+    S.viewTo = target + span / 2;
+    clampViewport();
+    syncScrollbar();
+    await loadViewport();
+    render();
+}
+
+document.getElementById('btn-goto').addEventListener('click', gotoTime);
+document.getElementById('goto-ms').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); gotoTime(); }
 });
 
 window.addEventListener('resize', () => { resize(); render(); });

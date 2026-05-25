@@ -1314,7 +1314,7 @@
     {
       "at_ms": 60000,
       "node": "hub",
-      "command": "send_channel 7 storm-msg"
+      "command": "send_channel 7 storm-msg a little longer than before, to simulate long message"
     }
   ]
 }
