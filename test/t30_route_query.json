@@ -1,6 +1,6 @@
 {
   "_name": "t30_route_query",
-  "_desc": "Verifies Q (RREQ-route) mechanism: when an originator sends to an unknown destination, alongside the defer-queue push it fires a one-hop Q frame asking neighbours for the route. Receiving neighbours with that route mark it dirty + schedule a triggered beacon (which then prioritises the dest in its dirty slots). 5-node line a-b-c-d-e; eve joins past warmup and immediately sends to alice. Verify: q_tx fires from eve, q_rx received at dave, send_drained + delivered.",
+  "_desc": "Verifies the 'R' RREQ/RREP route-discovery flood (PROTOCOL §3.7b) that replaced the old single-hop Q ROUTE_QUERY: when an originator sends to an unknown destination, alongside the defer-queue push it floods an RREQ (expanding ring, first probe ttl=1). Forwarders learn the reverse path to the origin; a node that already has the route (or the dst itself) answers with an RREP that lays the forward path hop-by-hop back to the origin. 5-node line a-b-c-d-e; eve joins past warmup and immediately sends to alice (4 hops). Verify: r_tx fires from eve (dst=alice), rreq_rx received at dave (eve's neighbour), rrep_arrived at eve (forward route installed), send_drained + delivered.",
   "simulation": {
     "duration_ms": 60000,
     "step_ms": 1,
@@ -31,12 +31,13 @@
     ]
   },
   "commands": [
-    { "at_ms": 20100, "node": "eve", "command": "send alice hello-via-Q" }
+    { "at_ms": 20100, "node": "eve", "command": "send alice hello-via-R" }
   ],
   "expect": [
-    { "type": "script_emit_contains", "node": "eve",   "emit_type": "q_tx",          "value": "alice" },
-    { "type": "script_emit_contains", "node": "dave",  "emit_type": "q_rx",          "value": "" },
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "r_tx",          "value": "alice" },
+    { "type": "script_emit_contains", "node": "dave",  "emit_type": "rreq_rx",       "value": "" },
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "rrep_arrived",  "value": "" },
     { "type": "script_emit_contains", "node": "eve",   "emit_type": "send_drained",  "value": "" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "delivered",     "value": "hello-via-Q" }
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "delivered",     "value": "hello-via-R" }
   ]
 }

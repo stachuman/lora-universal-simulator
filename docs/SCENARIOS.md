@@ -44,7 +44,7 @@ note calls it out.
 | 3.3 | Duplicate RTS while mid-flight as receiver | CTS-loss recovery: re-emit CTS with same chosen SF |
 | 3.4 | F1 passive CTS overhearing → blind_until | Peers learn a relay is deaf before wasting RTS attempts |
 | 3.5 | RTS-timeout cascade | No CTS → exponential backoff → K=3 alt walk → give up |
-| 4.1 | Q ROUTE_QUERY / REQ_SYNC | Active route request; BCN is the response |
+| 4.1 | F route-Find (RREQ/RREP) / Q REQ_SYNC | Multi-hop active route discovery; RREP installs the route |
 | 4.2 | Cascade-requeue lifecycle | Stuck flight requeued with backoff so other items can drain |
 | 5.1 | Join — happy path | Autonomous LISTEN → DISCOVER → OFFER → CLAIM → ADOPT |
 | 5.2 | Join — no neighbours → exhaustion | Re-discover with backoff; `join_discover_exhausted` |
@@ -871,62 +871,55 @@ same cascade (`data_ack_giveup` is the legacy giveup event).
 
 # 4. Routing / control
 
-## 4.1 Q ROUTE_QUERY / REQ_SYNC
+## 4.1 F route-Find (RREQ/RREP) / Q REQ_SYNC
 
-`Q` is a one-hop control frame (receivers do NOT forward it). Two
-opcodes:
+Two distinct discovery mechanisms:
 
-- **ROUTE_QUERY** — sender lacks a route for `q.dest`; asks neighbours
-  to advertise it.
-- **REQ_SYNC** — joiner with poor `rt[]` (in DISCOVERY) asks eligible
-  neighbours to send a full sync BCN.
-
-The "response" in both cases is a BCN (not a direct reply frame).
+- **`'F'` route-Find (RREQ/RREP)** — sender lacks a route for `dst`; floods a
+  multi-hop, forwardable RREQ. A node that holds the route (or the dst itself)
+  replies with an RREP routed home along the reverse path. This is the AODV-
+  style discovery that replaced the old one-hop `Q:ROUTE_QUERY` (which could
+  not reach a route known >1 hop away). See PROTOCOL §3.7b.
+- **`Q:REQ_SYNC`** — joiner with poor `rt[]` (in DISCOVERY) asks eligible
+  neighbours to send a full sync BCN. `Q` is one-hop only (not forwarded);
+  the response is a BCN.
 
 ```
-Requester (alice)                          Responder (neighbour N)
+Requester (alice, missing rt[carol])   Intermediate (bob, holds rt[carol])
                                                                   SF
-Case A — ROUTE_QUERY (alice missing rt[bob]):
+Case A — 'F' route-Find (alice missing rt[carol], §3.7b):
 
-issue_send → rt[bob] is nil:
+issue_send → rt[carol] is nil:
   defer_send_for_route() — push send to defer queue
-  if q_queried[bob.id] is absent or expired (5 s TTL):
-    pack_q(leaf_id, src=self.id, dest=bob.id,
-           opcode = Q_OP_ROUTE_QUERY,
-           requester_is_mobile = self.is_mobile)
-    q_queried[bob.id] = now + 5 s
-    tx_initiating 'Q' on routing_sf       routing_sf
-                          ─Q──>
-                                on_recv "Q", leaf_id == self.leaf_id
+  emit_route_request(dst=carol, ttl=1)   -- expanding ring, 1st probe
+    route_request_last[carol] = {t=now, ttl=1}
+    tx_initiating 'F' RREQ on routing_sf      routing_sf
+                          ─F(RREQ)──>
+                                on_recv "F", leaf_id == self.leaf_id, RREQ
                                 ↓
-                                if q.src == self.id: drop (loop guard)
-                                elif q.dest == self.id:
-                                  schedule_triggered_beacon()
-                                  (someone is asking for ME;
-                                   next BCN announces self via src)
-                                  return
-                                elif q.opcode == Q_OP_ROUTE_QUERY:
-                                  key = ("ROUTE_QUERY", q.src, q.dest)
-                                  if q_responded_to[key] not expired:
-                                    drop (per-key dedup, 10 s TTL)
-                                  elif rt[q.dest] does not exist:
-                                    drop silently (let other neighbour
-                                    answer; suppresses Q-storm)
-                                  else:
-                                    q_responded_to[key] = now + 10 s
-                                    schedule_triggered_beacon()
-                                    (jitter 50-500 ms; the BCN
-                                     IS the response — it contains
-                                     the rt[bob] entry alice needs)
-                                                     ... after jitter ...
-                                tx_flood 'B' on routing_sf
-                                  (§6.4 differential: bob is dirty
-                                   if newly-merged here, else rotates
-                                   into a stable page)
-                          <─B──                                  routing_sf
-on_recv "B": rt_merge inserts/updates rt[bob].
-The deferred send for bob now finds rt[bob].primary
+                                REVERSE path: rt_merge(rt[alice] via sender,
+                                                       hops+1)  -- before dedup
+                                if dst == self.id:
+                                  send_route_reply(origin=alice, dst=self, hops=0)
+                                elif rt[carol] exists:      -- intermediate reply
+                                  send_route_reply(origin=alice, dst=carol,
+                                                   hops = rt[carol].hops)
+                                elif not seen(origin,dst) and ttl > 0:
+                                  rebroadcast RREQ (ttl-1, hops+1)
+                                else: drop
+                                                     ... RREP ...
+                                tx_initiating 'F' RREP, addressed to the next
+                                  hop toward alice along rt[alice]
+                          <─F(RREP)──                            routing_sf
+on_recv "F" RREP (next_hop == self.id):
+  FORWARD path: rt_merge(rt[carol] via sender, hops+1)
+  if origin == self.id: rrep_arrived — forward route installed
+  else: relay RREP one hop further toward origin along rt[alice]
+The deferred send for carol now finds rt[carol].primary
 and proceeds via §2.1 swimlane.
+
+(If the 1st probe — ttl=1, radius 2 — finds nothing, the deferred-send
+ requery escalates to route_request_max_ttl=8 and floods the full radius.)
 
 ──────────────────────────────────────────────────────────────────
 
@@ -2292,7 +2285,7 @@ Cross-reference of mechanisms each scenario depends on:
 | Duplicate RTS → re-emit CTS with same SF | Implemented | 3.3 |
 | Passive CTS overhearing → `blind_until` | Implemented | 3.4 |
 | RTS-timeout exponential backoff + K=3 cascade | Implemented | 3.5 |
-| Q ROUTE_QUERY + REQ_SYNC (BCN as response) | Implemented | 4.1 |
+| F route-Find (RREQ/RREP) + Q REQ_SYNC | Implemented | 4.1 |
 | Cascade-requeue lifecycle (Phases C/D3/D4) | Implemented | 4.2 |
 | `J_DISCOVER`/`J_OFFER`/`J_CLAIM`/`J_DENY` wire | Implemented | 5.1-5.6 |
 | Random `join_choose_candidate_id` | Implemented | 5.1-5.6 |

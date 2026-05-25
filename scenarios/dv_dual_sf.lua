@@ -1074,6 +1074,17 @@ PROTOCOL = {
   hash_query_seen_ttl_ms         = 10000,   -- ~2× q_query_ttl_ms
   cap_hash_query_seen            = 64,
 
+  -- ---- Same-layer route discovery ('R' RREQ/RREP flood, PROTOCOL §3.7b) ----
+  -- AODV-style on-demand route discovery. Replaces the old single-hop Q
+  -- ROUTE_QUERY (which couldn't reach a route known >1 hop away). Expanding
+  -- ring: first attempt TTL=1 (cheap, a neighbour may answer like old Q),
+  -- escalate to route_request_max_ttl on the next requery. Reverse path is
+  -- learned as the RREQ floods; the RREP lays the forward path on the way back.
+  route_request_max_ttl          = 8,        -- matches the DV 8-hop cap
+  route_request_seen_ttl_ms      = 10000,    -- RREQ flood dedup window
+  cap_route_request_seen         = 64,       -- relay-side flood-dedup table
+  cap_route_request_last         = 128,      -- origination-side per-dst table (was cap_q_queried)
+
   -- ---- Cross-layer routing propagation (BCN TLV type=4) ----
   -- Lifetime of each (gw_id, dest_layer) entry in `self.bridged_layers`.
   -- Refreshed on every observation; pruned on access if older. Match the
@@ -1881,6 +1892,14 @@ end
 -- M-payload — arm an overhear retune to the receiver-picked chosen_data_sf".
 -- ROADMAP §3.3 pathology #4, the "2B" approach.
 RTS_FLAG_M_BROADCAST = 0x01
+-- RTS_FLAG_RELAY marks a gateway cross-layer FORWARD (PROTOCOL §3.7/§10a). On
+-- the target layer a gateway re-injects with origin=self and no preceding CTS
+-- (its inbound arrived on another layer), so the §10a R−C anti-spam metric
+-- mis-reads it as a runaway originator and throttles legitimate relays. This
+-- flag is set ONLY by enqueue_gateway_handoff forwards; receivers skip the
+-- originator throttle for flagged RTS. A gateway's OWN originations carry no
+-- flag and are throttled normally.
+RTS_FLAG_RELAY = 0x02
 
 local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len, rts_flags, m_payload_id)
   local addr_len = 0
@@ -1925,6 +1944,7 @@ local function parse_rts(frame)
     ctr_lo       = (b5 >> 4) & 0x0f,
     rts_flags    = b5 & 0x0f,
     m_broadcast  = (b5 & RTS_FLAG_M_BROADCAST) ~= 0,
+    relay        = (b5 & RTS_FLAG_RELAY) ~= 0,
     sf_bitmap    = frame:byte(7),
     payload_len  = frame:byte(8),
   }
@@ -2157,10 +2177,12 @@ local function parse_nack(frame)
   return out
 end
 
-local Q_OP_ROUTE_QUERY  = 0
-local Q_OP_REQ_SYNC     = 1
+-- Opcode 0 was Q_OP_ROUTE_QUERY; the 1-hop route query was replaced by the
+-- multi-hop 'R' RREQ/RREP flood frame (PROTOCOL §3.7b). Opcode 0 is now
+-- free/reserved.
 -- Opcode 2 was Q_OP_HASH_QUERY; the 1-hop hash query was replaced by the
 -- multi-hop 'H' flood frame (PROTOCOL §3.7a). Opcode 2 is now free/reserved.
+local Q_OP_REQ_SYNC     = 1
 -- ROADMAP §3 channel gossip pull. Body: count(1B) + ID(4B) × N. Sent
 -- unicast (Q `dest` = target neighbour we want to pull from). The 2-bit
 -- opcode field has values 0,1,3 used and 2 free; a future opcode can
@@ -2198,7 +2220,7 @@ function q_parse_u32_le(frame, off)
 end
 
 local function pack_q(leaf_id, src, dest, opcode, requester_is_mobile)
-  local flags = (opcode or Q_OP_ROUTE_QUERY) & 0x03
+  local flags = (opcode or 0) & 0x03
   if requester_is_mobile then flags = flags | Q_FLAG_MOBILE end
   local b3 = ((leaf_id & 0xf) << 4) | (flags & 0x0f)
   return "Q" .. string.char(src) .. string.char(dest) .. string.char(b3)
@@ -2259,6 +2281,48 @@ function parse_h_query(frame)
     leaf_id    = (frame:byte(3) >> 4) & 0xf,
     key_hash32 = q_parse_u32_le(frame, 4),
     ttl        = frame:byte(8),
+  }
+end
+
+-- 'F' route-Find frame (PROTOCOL §3.7b) — the second forwardable control
+-- frame (alongside 'H'). Same-layer AODV-style route discovery (RREQ/RREP);
+-- replaces the old single-hop Q ROUTE_QUERY opcode. NOTE: wire tag is 'F',
+-- not 'R' — 'R' is the RTS frame. The RREQ/RREP/route_request naming is
+-- retained in code/events (AODV-standard); only the wire byte is 'F'.
+--   byte 0 : tag 'F'
+--   byte 1 : origin (8) — the querier's node_id; PRESERVED across forwards so
+--            the RREP can be routed home along the reverse path
+--   byte 2 : leaf_id(4 hi) | flags(4 lo); flags bit0 = is_reply (0=RREQ,1=RREP)
+--   byte 3 : dst_id (8) — the destination being sought
+--   byte 4 : RREQ → ttl (decremented per forward, dropped at 0)
+--            RREP → next_hop (8) — addressed forward target toward origin
+--   byte 5 : hops (8) — RREQ: hops-from-origin (increments); RREP: hops-to-dst
+function pack_r_request(origin, leaf_id, dst_id, ttl, hops)
+  return "F" .. string.char(origin & 0xff)
+             .. string.char((leaf_id & 0x0f) << 4)        -- flags=0 (request)
+             .. string.char(dst_id & 0xff)
+             .. string.char(ttl & 0xff)
+             .. string.char(hops & 0xff)
+end
+
+function pack_r_reply(origin, leaf_id, dst_id, next_hop, hops)
+  return "F" .. string.char(origin & 0xff)
+             .. string.char(((leaf_id & 0x0f) << 4) | 0x1)  -- flags bit0=reply
+             .. string.char(dst_id & 0xff)
+             .. string.char(next_hop & 0xff)
+             .. string.char(hops & 0xff)
+end
+
+function parse_r(frame)
+  if #frame < 6 or frame:sub(1,1) ~= "F" then return nil end
+  local b2 = frame:byte(3)
+  return {
+    origin   = frame:byte(2),
+    leaf_id  = (b2 >> 4) & 0x0f,
+    is_reply = (b2 & 0x1) ~= 0,
+    dst_id   = frame:byte(4),
+    b4       = frame:byte(5),   -- ttl (RREQ) | next_hop (RREP)
+    hops     = frame:byte(6),
   }
 end
 
@@ -2951,12 +3015,25 @@ local function compute_originator_metric(self, sender_id)
   if entry == nil then return 0, 0, 0, 0 end
   local now = self:now()
   local cutoff = now - self.originator_window_ms
+  -- Count DISTINCT ctr_lo per kind, not raw transmissions. Retrying ONE stuck
+  -- message must not look like a flood of fresh originations: the track-side
+  -- dedup only collapses retries spaced < originator_retry_dedup_ms (10s), but
+  -- a multi-second congestion stall (e.g. a relay hammering a busy next-hop on
+  -- the cross-layer second leg) spaces them past that, so each escaped retry
+  -- used to bump rts. Dedup by ctr_lo across the whole window here instead.
+  -- (ctr_lo is 4-bit on the wire, so this caps at 16 distinct — far above the
+  -- ~6 threshold, so a genuine spammer cycling ctr_lo still trips it.) Airtime
+  -- stays cumulative: retries really do burn channel time, so the airtime
+  -- backstop keeps catching high-volume spam regardless of ctr_lo reuse.
+  local rts_seen, cts_seen = {}, {}
   local rts, cts, air = 0, 0, 0
   for _, ev in ipairs(entry.events) do
     if ev.t >= cutoff then
       air = air + (ev.air or 0)
-      if ev.kind == "rts" then rts = rts + 1
-      elseif ev.kind == "cts" then cts = cts + 1
+      if ev.kind == "rts" then
+        if not rts_seen[ev.ctr_lo] then rts_seen[ev.ctr_lo] = true; rts = rts + 1 end
+      elseif ev.kind == "cts" then
+        if not cts_seen[ev.ctr_lo] then cts_seen[ev.ctr_lo] = true; cts = cts + 1 end
       end
     end
   end
@@ -5024,43 +5101,6 @@ local function candidate_stale_next_counts(self, entry, previous_hop)
   return total, stale
 end
 
-local function emit_route_query(self, dst_id, dst_name, reason)
-  local now_q = self:now()
-  local last_q = self.q_queried[dst_id]
-  if last_q and (now_q - last_q) < self.q_query_ttl_ms then
-    return last_q, false
-  end
-  local q_leaf_id = active_leaf_id(self)
-  local q_routing_sf = active_routing_sf(self)
-  if self.q_queried[dst_id] == nil
-     and table_cap_hit(self, "q_queried", count_keys(self.q_queried),
-                       self.cap_q_queried or 0, "refuse",
-                       {key = "dst:" .. tostring(dst_id)}) then
-    return now_q, false
-  end
-  self.q_queried[dst_id] = now_q
-  self:emit("q_tx", {
-    opcode = Q_OP_ROUTE_QUERY,
-    dst = dst_id,
-    dst_name = dst_name,
-    requester_mobile = self.is_mobile == true,
-    reason = reason or "route_query",
-    tx_layer_id = self.active_layer_id or self.layer_id,
-    tx_leaf_id = q_leaf_id,
-    tx_routing_sf = q_routing_sf,
-  })
-  self:log(string.format(
-    "q_tx -> dst=%s (route query, reason=%s, requester_mobile=%s)",
-    dst_name, reason or "route_query", tostring(self.is_mobile == true)))
-  tx_initiating(self, pack_q(q_leaf_id, self.id, dst_id,
-                             Q_OP_ROUTE_QUERY, self.is_mobile == true), {
-    sf    = q_routing_sf,
-    label = "Q",
-    info  = string.format("dst=%s reason=%s", dst_name, reason or "route_query"),
-  })
-  return now_q, true
-end
-
 function emit_hash_route_query(self, target_layer_id, key_hash32, reason)
   if key_hash32 == nil then return nil, false end
   target_layer_id = math.floor(target_layer_id or (self.active_layer_id or self.layer_id or 0))
@@ -5158,15 +5198,17 @@ local function defer_send_for_route(self, origin, dst_id, dst_name, payload,
       if rec ~= nil then activate_gateway_layer(self, rec, "q_route") end
     end
   end
-  local q_at, q_sent = emit_route_query(self, dst_id, dst_name, reason or "no_route")
+  -- Expanding ring: first probe at ttl=1 (radius 2 — cheap, catches the common
+  -- "dst is 2 hops away via a node that already has the route" case). The
+  -- defer-requery tick escalates to the full flood radius if this fails.
+  local q_at, q_sent = emit_route_request(self, dst_id, dst_name, reason or "no_route", 1)
   deferred.q_sent_at_ms = q_at
   if not q_sent then
-    self:emit("q_suppressed", {
-      opcode = Q_OP_ROUTE_QUERY,
+    self:emit("route_request_suppressed", {
       dst = dst_id,
       dst_name = dst_name,
       reason = reason or "no_route",
-      last_q_ms = q_at,
+      last_r_ms = q_at,
     })
   end
 end
@@ -5183,6 +5225,7 @@ function enqueue_gateway_handoff(self, gw_env, d_origin, binding)
     user_text  = gw_env.body,
     ctr        = forward_ctr,
     flags      = 0,
+    gw_relay   = true,                  -- cross-layer forward → RTS_FLAG_RELAY (§10a exempt)
     enqueue_time_ms = self:now(),
     requeue_count   = 0,
     next_attempt_ms = 0,
@@ -5233,6 +5276,82 @@ function mark_hash_query_seen(self, origin, key_hash32)
     return
   end
   self.hash_query_seen[key] = self:now()
+end
+
+-- 'R' RREQ flood dedup, keyed (origin, dst_id). Mirrors hash_query_seen.
+function route_request_seen_recently(self, origin, dst_id)
+  self.route_request_seen = self.route_request_seen or {}
+  local key = string.format("%d|%d", origin or -1, dst_id or -1)
+  local last = self.route_request_seen[key]
+  return last ~= nil and (self:now() - last) < (self.route_request_seen_ttl_ms or 10000)
+end
+
+function mark_route_request_seen(self, origin, dst_id)
+  self.route_request_seen = self.route_request_seen or {}
+  local key = string.format("%d|%d", origin or -1, dst_id or -1)
+  if self.route_request_seen[key] == nil
+     and table_cap_hit(self, "route_request_seen", count_keys(self.route_request_seen),
+                       self.cap_route_request_seen or 0, "refuse", {key = key}) then
+    return
+  end
+  self.route_request_seen[key] = self:now()
+end
+
+-- Originate a route request ('R' RREQ flood, PROTOCOL §3.7b). Expanding ring:
+-- the first try (issue_send no-route path) passes ttl=1 (cheap, like the old
+-- single-hop Q); the defer-requery escalates to route_request_max_ttl. Per-dst
+-- rate-limit suppresses re-floods at the same-or-lower TTL inside the dedup
+-- window, but allows escalation.
+function emit_route_request(self, dst_id, dst_name, reason, ttl)
+  ttl = ttl or self.route_request_max_ttl or 8
+  self.route_request_last = self.route_request_last or {}
+  local now = self:now()
+  local last = self.route_request_last[dst_id]
+  if last ~= nil and (now - last.t) < (self.route_request_seen_ttl_ms or 10000)
+     and ttl <= last.ttl then
+    return now, false
+  end
+  if last == nil
+     and table_cap_hit(self, "route_request_last", count_keys(self.route_request_last),
+                       self.cap_route_request_last or 0, "refuse",
+                       {key = "dst:" .. tostring(dst_id)}) then
+    return now, false
+  end
+  self.route_request_last[dst_id] = { t = now, ttl = ttl }
+  self:emit("r_tx", {
+    dst = dst_id, dst_name = dst_name, ttl = ttl, reason = reason or "route_query",
+  })
+  self:log(string.format("r_tx -> dst=%s ttl=%d reason=%s (RREQ)",
+    dst_name, ttl, reason or "route_query"))
+  tx_initiating(self, pack_r_request(self.id, active_leaf_id(self), dst_id, ttl, 0), {
+    sf    = active_routing_sf(self),
+    label = "F",
+    info  = string.format("rreq dst=%s ttl=%d", dst_name, ttl),
+  })
+  return now, true
+end
+
+-- Send an RREP toward `origin` for destination `dst_id`, hops_to_dst so far.
+-- Forwarded one hop at a time along the reverse path the RREQ flood laid down
+-- (rt[origin]); each forwarder installs the forward route to dst. Returns false
+-- if we have no reverse route to origin (RREP can't start / continue).
+function send_route_reply(self, origin, dst_id, hops_to_dst)
+  local entry = self.rt[origin]
+  local cand = entry and entry.candidates and entry.candidates[1]
+  if cand == nil then
+    self:emit("rrep_drop_no_reverse", { origin = origin, dst = dst_id })
+    return false
+  end
+  local nh = cand.next_hop
+  self:emit("rrep_tx", { origin = origin, dst = dst_id, next = nh, hops = hops_to_dst })
+  tx_initiating(self, pack_r_reply(origin, active_leaf_id(self), dst_id, nh, hops_to_dst), {
+    sf    = active_routing_sf(self),
+    label = "F",
+    info  = string.format("rrep origin=%s dst=%s next=%s hops=%d",
+                          name_of(self, origin), name_of(self, dst_id),
+                          name_of(self, nh), hops_to_dst),
+  })
+  return true
 end
 
 -- Resolver reply to an 'H' query: routed unicast DATA back to the querying
@@ -5504,9 +5623,10 @@ local function tx_rts_retry(self, reason)
   end
   local _rts_flags = (((px.flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0) and RTS_FLAG_M_BROADCAST or 0
   local _m_id = nil
-  if _rts_flags ~= 0 and px.payload and #px.payload >= 4 then
+  if (_rts_flags & RTS_FLAG_M_BROADCAST) ~= 0 and px.payload and #px.payload >= 4 then
     _m_id = channel_msg_id_from_bytes(px.payload, 1)
   end
+  if px.gw_relay then _rts_flags = _rts_flags | RTS_FLAG_RELAY end   -- gateway forward (§10a exempt)
   local rts = pack_rts(px.tx_leaf_id or active_leaf_id(self), self.id, px.dst, px.next, px.ctr_lo,
                        px.tx_sf_bitmap or active_allowed_sf_bitmap(self), #px.payload + MAC_LEN,
                        _rts_flags, _m_id)
@@ -6140,8 +6260,9 @@ try_drain_deferred = function(self)
     elseif d_rt[d.dst_id] ~= nil then
       table.insert(drained, d)
     else
-      local q_at, q_sent = emit_route_query(self, d.dst_id, d.dst_name,
-                                            d.reason or "deferred_no_route")
+      local q_at, q_sent = emit_route_request(self, d.dst_id, d.dst_name,
+                                            d.reason or "deferred_no_route",
+                                            self.route_request_max_ttl)
       if q_sent then
         d.q_sent_at_ms = q_at
         self:emit("send_defer_requery", {
@@ -6618,6 +6739,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     user_text    = user_text,      -- for emit + log clarity
     ctr          = ctr,            -- full 16-bit per-(origin,dst) counter
     flags        = flags,          -- wire-level DATA_FLAG_* bits
+    gw_relay     = (queue_meta and queue_meta.gw_relay) == true,  -- gateway cross-layer forward → RTS_FLAG_RELAY
     tx_layer_id  = queue_meta and queue_meta.tx_layer_id or (self.active_layer_id or self.layer_id),
     tx_leaf_id   = tx_leaf_id,
     tx_routing_sf = tx_routing_sf,
@@ -6666,8 +6788,11 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   local payload_len = #payload + MAC_LEN
   local rts_flags = (((flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) ~= 0) and RTS_FLAG_M_BROADCAST or 0
   local m_id = nil
-  if rts_flags ~= 0 and payload and #payload >= 4 then
+  if (rts_flags & RTS_FLAG_M_BROADCAST) ~= 0 and payload and #payload >= 4 then
     m_id = channel_msg_id_from_bytes(payload, 1)
+  end
+  if self.pending_tx and self.pending_tx.gw_relay then
+    rts_flags = rts_flags | RTS_FLAG_RELAY        -- gateway cross-layer forward (§10a exempt)
   end
   local rts = pack_rts(tx_leaf_id, self.id, dst_id, primary_next, mid,
                        tx_sf_bitmap, payload_len, rts_flags, m_id)
@@ -6797,7 +6922,8 @@ become_free = function(self)
              item.payload, item.user_text, item.ctr, item.flags or 0, item.previous_hop,
              { enqueue_time_ms = item.enqueue_time_ms,
                requeue_count   = item.requeue_count,
-               tx_layer_id     = item.tx_layer_id },
+               tx_layer_id     = item.tx_layer_id,
+               gw_relay        = item.gw_relay },
              item.forward_hop_budget)
 end
 
@@ -8058,6 +8184,8 @@ function on_init(self, config)
   self.q_queried       = {}                                  -- {dest_id → t_ms_last_queried}
   self.q_responded_to  = {}                                  -- {key → t_ms_last_responded}
   self.hash_query_seen = {}                                  -- {"origin|hash" → t_ms} 'H' flood dedup
+  self.route_request_seen = {}                               -- {"origin|dst" → t_ms} 'R' RREQ flood dedup
+  self.route_request_last = {}                               -- {dst_id → {t,ttl}} 'R' originate rate-limit/escalation
   -- After a route appears due to Q-driven BCN discovery, hold the
   -- deferred DATA briefly so nearby Q-response BCNs can finish. This
   -- avoids the first RTS colliding with late/deferred beacon responders
@@ -8968,9 +9096,18 @@ function on_recv(self, frame, meta)
     -- broadcasts on routing_sf). All 1st-hop neighbours of an originator
     -- accumulate independent evidence this way, so the spammer can't
     -- evade by picking next-hops who don't observe enough.
-    track_originator_observation(self, meta.src, "rts", r.ctr_lo,
-      airtime_ms(active_routing_sf(self), self.bw_hz, self.cr,
-                 self.preamble_sym, #frame))
+    -- EXCEPTION: a gateway cross-layer forward (RTS_FLAG_RELAY) is not a
+    -- 1st-hop origination — on the target layer the gateway re-injects with
+    -- no preceding CTS, so counting it would mis-read the gateway as a
+    -- runaway originator (§10a). Don't observe it; don't throttle it.
+    if not r.relay then
+      track_originator_observation(self, meta.src, "rts", r.ctr_lo,
+        airtime_ms(active_routing_sf(self), self.bw_hz, self.cr,
+                   self.preamble_sym, #frame))
+    else
+      -- Gateway cross-layer forward: exempt from the §10a originator metric.
+      self:emit("rts_relay_exempt", { from = meta.src, ctr_lo = r.ctr_lo })
+    end
     -- If we are waiting for a hop ACK from our selected next-hop and we
     -- overhear that next-hop forwarding the same DATA onward, that RTS-fwd is
     -- an implicit ACK: the next-hop must have decoded our DATA. This prevents
@@ -9241,7 +9378,10 @@ function on_recv(self, frame, meta)
     -- the analyzer can measure activity without the protocol paying
     -- airtime. See header doc block "Anti-spam: 1st-hop statistical
     -- rate-limit" for the full argument.
-    do
+    -- Gateway cross-layer forwards (RTS_FLAG_RELAY) are exempt — they aren't
+    -- 1st-hop originations (the gateway is relaying for the cross-layer origin),
+    -- and their RTS-without-CTS on this layer would otherwise trip the metric.
+    if not r.relay then
       local app_orig, total_air, rts_n, cts_n =
         compute_originator_metric(self, meta.src)
       local airtime_cap_ms = math.floor(
@@ -10648,6 +10788,100 @@ function on_recv(self, frame, meta)
     return
   end
 
+  if tag == "F" then
+    -- Multi-hop route discovery ('F' route-Find frame, PROTOCOL §3.7b). Reuses
+    -- the 'H' flood/dedup machinery, but the reply CANNOT be opaque like 'H' (whose
+    -- RREP is a routed DATA to a known-reachable gateway): here the dst is
+    -- exactly the node nobody has a route to. So the RREQ flood lays a
+    -- REVERSE path (toward origin) at every forwarder, and the RREP walks
+    -- that reverse path one hop at a time, laying the FORWARD path (toward
+    -- dst) as it goes.
+    local r = parse_r(frame)
+    if not r then return end
+    if r.leaf_id ~= active_leaf_id(self) then return end    -- foreign-layer
+    learn_rx_source("r_frame")
+
+    if not r.is_reply then
+      -- ===== RREQ =====
+      if r.origin == self.id then return end                -- our own flood
+      self:emit("rreq_rx", {
+        origin = r.origin, dst = r.dst_id, ttl = r.b4, hops = r.hops,
+      })
+      -- Reverse path: we can reach origin via whoever just forwarded to us.
+      local rev_hops = (r.hops or 0) + 1
+      rt_merge(self, self.rt, r.origin, {
+        next_hop         = meta.src,
+        score            = route_score_from_snr(self, meta_snr_q4),
+        hops             = rev_hops,
+        is_gateway       = false,
+        last_seen_ms     = self:now(),
+        learned_layer_id = self.active_layer_id or self.layer_id,
+      }, self.routing_snr_floor_q4)
+      -- Are we the destination? Reply (hops-to-dst = 0 from our vantage).
+      if r.dst_id == self.id then
+        mark_route_request_seen(self, r.origin, r.dst_id)
+        self:emit("rreq_resolved_self", { origin = r.origin })
+        send_route_reply(self, r.origin, self.id, 0)
+        return
+      end
+      -- Intermediate-node reply (AODV-style): if we already have a route to
+      -- dst, answer on its behalf with our hop-count instead of re-flooding.
+      local de = self.rt[r.dst_id]
+      local dcand = de and de.candidates and de.candidates[1]
+      if dcand ~= nil then
+        mark_route_request_seen(self, r.origin, r.dst_id)
+        self:emit("rreq_resolved_cached", {
+          origin = r.origin, dst = r.dst_id, hops = dcand.hops,
+        })
+        send_route_reply(self, r.origin, r.dst_id, dcand.hops or 1)
+        return
+      end
+      -- Dedup the flood (AFTER reverse-path learning, so every copy still
+      -- refreshes the reverse route even when we don't re-forward).
+      if route_request_seen_recently(self, r.origin, r.dst_id) then return end
+      mark_route_request_seen(self, r.origin, r.dst_id)
+      if (r.b4 or 0) <= 0 then return end                   -- TTL exhausted
+      local fwd = pack_r_request(r.origin, active_leaf_id(self),
+                                 r.dst_id, r.b4 - 1, rev_hops)
+      self:emit("rreq_forward", {
+        origin = r.origin, dst = r.dst_id, ttl = r.b4 - 1, hops = rev_hops,
+      })
+      tx_initiating(self, fwd, {
+        sf    = active_routing_sf(self),
+        label = "F",
+        info  = string.format("rreq origin=%s dst=%s ttl=%d forward",
+                              name_of(self, r.origin), name_of(self, r.dst_id), r.b4 - 1),
+      })
+      return
+    end
+
+    -- ===== RREP =====
+    -- Addressed forward: only the named next_hop (byte 4) acts on it.
+    if r.b4 ~= self.id then return end
+    self:emit("rrep_rx", { origin = r.origin, dst = r.dst_id, hops = r.hops })
+    -- Forward path: we reach dst via whoever just forwarded the RREP to us.
+    local fwd_hops = (r.hops or 0) + 1
+    rt_merge(self, self.rt, r.dst_id, {
+      next_hop         = meta.src,
+      score            = route_score_from_snr(self, meta_snr_q4),
+      hops             = fwd_hops,
+      is_gateway       = false,
+      last_seen_ms     = self:now(),
+      learned_layer_id = self.active_layer_id or self.layer_id,
+    }, self.routing_snr_floor_q4)
+    if r.origin == self.id then
+      -- We originated the query. Forward route is installed; the deferred
+      -- send drains on the next route-check tick.
+      self:emit("rrep_arrived", { dst = r.dst_id, hops = fwd_hops })
+      self:log(string.format("rrep_arrived dst=%s hops=%d — forward route installed",
+        name_of(self, r.dst_id), fwd_hops))
+      return
+    end
+    -- Relay onward toward origin along the reverse path the RREQ laid.
+    send_route_reply(self, r.origin, r.dst_id, fwd_hops)
+    return
+  end
+
   if tag == "Q" then
     local q = parse_q(frame)
     if not q then return end
@@ -10802,44 +11036,12 @@ function on_recv(self, frame, meta)
       return
     end
 
-    if q.opcode ~= Q_OP_ROUTE_QUERY then
-      self:log(string.format(
-        "q_rx <- %s unknown opcode=%d; silent",
-        name_of(self, q.src), q.opcode))
-      return
-    end
-
-    if q.dest == self.id then
-      -- Special case: someone wants a route to us. Mark our own direct-
-      -- entry dirty (which is rt[self.id] if it exists; but rt typically
-      -- doesn't include self). The cleanest signal: just send a triggered
-      -- beacon so they get our identity (direct entry rt[self.id] from
-      -- our point of view doesn't exist; receivers learn us via the BCN
-      -- src field, not entries).
-      schedule_triggered_beacon(self)
-      self:log(string.format(
-        "q_rx <- %s asking for me; triggered beacon scheduled",
-        name_of(self, q.src)))
-      return
-    end
-
-    local entry = self.rt[q.dest]
-    if entry == nil then
-      -- We don't know the route either — silent (someone else might).
-      self:log(string.format(
-        "q_rx <- %s asking for %s; no route, silent",
-        name_of(self, q.src), name_of(self, q.dest)))
-      return
-    end
-
-    -- We have it. Mark dirty + schedule triggered beacon — the
-    -- differential beacon mechanism will prioritise this dest in the
-    -- priority slots of the next emission.
-    entry.dirty = true
-    schedule_triggered_beacon(self)
+    -- REQ_SYNC and CHANNEL_PULL are handled above; ROUTE_QUERY (opcode 0) was
+    -- retired in favour of the 'R' RREQ/RREP flood (PROTOCOL §3.7b). Anything
+    -- reaching here is an unrecognised opcode — stay silent.
     self:log(string.format(
-      "q_rx <- %s asking for %s; marked dirty + triggered beacon",
-      name_of(self, q.src), name_of(self, q.dest)))
+      "q_rx <- %s unknown opcode=%d; silent",
+      name_of(self, q.src), q.opcode))
     return
   end
 end

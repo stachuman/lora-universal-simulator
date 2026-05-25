@@ -1,0 +1,41 @@
+{
+  "_name": "t72_anti_spam_gateway_relay_exempt",
+  "_desc": "Fix-2 regression (gateway cross-layer forwards are exempt from the §10a originator throttle). l4_sender sends THREE cross-layer messages to l5_target (key 0xCAFE0000) via gw_4, which bridges L4->L5. On the target layer gw_4 re-injects each message with origin=self and no preceding CTS, so under the OLD R-C metric its forwards look like fresh originations: l5_helper (the next hop, originator_max_per_window=2) would observe gw_4's 3 distinct forwards and throttle the gateway after 2, dropping the 3rd cross-layer message. The fix marks gw_4's forward RTS with RTS_FLAG_RELAY; l5_helper recognises it, skips the originator metric, and emits rts_relay_exempt instead of throttling. Verify: l5_helper emits rts_relay_exempt naming gw_4 as the source, and l5_target still receives the cross-layer traffic.",
+  "simulation": {
+    "duration_ms": 90000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 72,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "l4_sender", "node_id": 1, "key_hash32": "0x44000001", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 5000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "gw_4", "node_id": 10, "key_hash32": "0x44000010", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 4, "is_gateway": true,
+        "gateway_layers": [ { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [8], "period_ms": 8000, "duration_ms": 5000, "offset_ms": 3000 } ],
+        "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 5000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "l5_target", "node_id": 101, "key_hash32": "0xcafe0000", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "l5_helper", "node_id": 102, "key_hash32": "0x99000000", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 5, "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0,
+        "originator_max_per_window": 2, "originator_retry_dedup_ms": 200 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "l4_sender", "to": "gw_4", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "gw_4", "to": "l5_helper", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "l5_helper", "to": "l5_target", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 3000,  "node": "l4_sender", "command": "send_layer 5 3405643776 xl-msg-one" },
+    { "at_ms": 30000, "node": "l4_sender", "command": "send_layer 5 3405643776 xl-msg-two" },
+    { "at_ms": 55000, "node": "l4_sender", "command": "send_layer 5 3405643776 xl-msg-three" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "l5_helper", "emit_type": "rts_relay_exempt", "value": "\"from\":10" },
+    { "type": "script_emit_contains", "node": "l5_target", "emit_type": "delivered", "value": "xl-msg" }
+  ]
+}

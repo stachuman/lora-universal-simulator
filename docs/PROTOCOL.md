@@ -344,8 +344,8 @@ Selection has two passes. Pass 1 picks the best gateway it has a live
 **routing-table route** to. Pass 2 (fallback, when no routed gateway exists)
 returns a gateway known only from the TLV/schedule — *without* requiring a
 route — and the envelope is enqueued toward it as an ordinary send, so the
-normal no-route recovery (`defer_send_for_route` → `ROUTE_QUERY`) discovers the
-route. This matters because differential (`dirty-only`) beacons don't
+normal no-route recovery (`defer_send_for_route` → `'F'` RREQ flood, §3.7b)
+discovers the route. This matters because differential (`dirty-only`) beacons don't
 re-advertise stable routes (only the seen-bitmap refreshes them, and the
 seen-bitmap never creates a route candidate), so a node can persistently *know*
 a gateway exists yet never receive a route entry to it; Pass 2 + reactive query
@@ -395,7 +395,7 @@ encodes depth.
 byte:  0   1    2    3                        4    5                   6           7
        ┌───┬────┬────┬────────────────────────┬────┬───────────────────┬───────────┬─────────────┐
        │'R'│ src│next│ addr_len (3 hi)        │dst │ ctr_lo (4 hi)     │ sf_bitmap │ payload_len │
-       │   │    │    │ rsv (1)                │    │ rsv (4 lo)        │           │             │
+       │   │    │    │ rsv (1)                │    │ flags (4 lo)      │           │             │
        │   │    │    │ leaf_id (4 lo)         │    │                   │           │             │
        └───┴────┴────┴────────────────────────┴────┴───────────────────┴───────────┴─────────────┘
 ```
@@ -415,7 +415,17 @@ byte:  0   1    2    3                        4    5                   6        
 - `dst` (8 bits): end-to-end destination; single byte when `addr_len=0`.
 - `ctr_lo` (4 bits, hi nibble of byte 5): per-flight counter, wraps at 16.
   Combined with `last_acked_from`'s 10s TTL gives correct hop-level
-  retry dedup at any realistic send rate. Low nibble of byte 5 is reserved.
+  retry dedup at any realistic send rate.
+- `flags` (4 bits, lo nibble of byte 5):
+  - bit 0 `RTS_FLAG_M_BROADCAST` (0x01): the upcoming DATA is an M-payload
+    channel broadcast (§3.4.1a); non-target receivers arm an overhear retune.
+  - bit 1 `RTS_FLAG_RELAY` (0x02): this RTS is a **gateway cross-layer
+    forward**. On the target layer a gateway re-injects with `origin=self`
+    and no preceding CTS, which the §10a anti-spam metric would otherwise
+    mis-read as a runaway origination. Set only by `enqueue_gateway_handoff`
+    forwards; the addressed next-hop skips the originator throttle for it
+    (§10a). A gateway's *own* originations carry no flag and are throttled
+    normally. bits 2-3 reserved.
 - `sf_bitmap` (8 bits): bit `i` set means SF `i+5` is acceptable for
   the data leg. e.g., `0b00001110` = {SF6, SF7, SF8}.
 - `payload_len` (8 bits): byte count of the upcoming DATA inner bytes
@@ -676,42 +686,32 @@ byte:  0   1     2      3
        │'Q'│ src │ dest │ leaf_id (4 hi)                    │
        │   │     │      │ opcode/mobile flags (4 lo)        │
        └───┴─────┴──────┴───────────────────────────────────┘
-       bytes 4..7: key_hash32, LE, only for HASH_QUERY
+       CHANNEL_PULL appends a body after byte 3: count(1) + id(4 LE) × N
 ```
 
 - `src` (8 bits): the requester's node id.
-- `dest` (8 bits): destination for `ROUTE_QUERY`; `0xff` for `REQ_SYNC`
-  and `HASH_QUERY`.
+- `dest` (8 bits): the pull-target neighbour for `CHANNEL_PULL`; `0xff`
+  for `REQ_SYNC`.
 - `leaf_id` (4 bits): active layer nibble, derived from `layer_id & 0x0f`.
   Receivers reject foreign-layer Q frames.
 - low nibble:
-  - bits 0-1: opcode (`0=ROUTE_QUERY`, `1=REQ_SYNC`, `3=CHANNEL_PULL`).
-    Opcode `2` was `HASH_QUERY` (1-hop); it was replaced by the multi-hop
-    `'H'` flood frame (§3.7a) and is now free/reserved.
+  - bits 0-1: opcode (`1=REQ_SYNC`, `3=CHANNEL_PULL`).
+    Opcode `0` was `ROUTE_QUERY` (1-hop); it was replaced by the multi-hop
+    `'F'` route-Find flood (§3.7b) and is now free/reserved. Opcode `2` was
+    `HASH_QUERY` (1-hop); it was replaced by the multi-hop `'H'` flood frame
+    (§3.7a) and is also free/reserved.
   - bit 2: requester is mobile
   - bit 3: reserved
 
-One-hop only — receivers don't forward Q frames. (The forwardable
-hash-locate query lives in its own `'H'` frame, §3.7a, so `Q` keeps
-this invariant.)
+One-hop only — receivers don't forward Q frames. (The two forwardable
+control queries live in their own flood frames: hash-locate in `'H'`
+(§3.7a) and route discovery in `'F'` (§3.7b), so `Q` keeps this invariant.)
 
-**ROUTE_QUERY sender behaviour:** in `issue_send` for an originator, when
-`rt[dst]` is missing, alongside the defer-queue push (§11a.2) we
-also fire a Q to actively request the route from neighbours.
-Whichever brings the route in faster (passive defer wait or active
-Q response) wins. Dedup at sender via `q_queried[dest]` (default
-TTL 5 s) prevents Q-spam for repeated sends to the same unknown.
-
-**ROUTE_QUERY receiver behaviour:** dedup via `q_responded_to[opcode,src,dest]` (default
-TTL 10 s) prevents responding to the same query multiple times — if
-multiple neighbours hear the same Q, the existing triggered-beacon
-jitter (50-500 ms) spreads their responses naturally. Receivers
-without the requested route silent-drop (someone else may respond).
-
-Special cases:
-- `q.src == self.id`: loop guard, drop.
-- `q.dest == self.id`: someone's asking for ME; schedule triggered
-  beacon (receivers learn us via the BCN src field, not entries).
+`Q` now multiplexes only `REQ_SYNC` (discovery sync) and `CHANNEL_PULL`
+(channel-gossip pull). Route discovery — the originator-side "I have no
+route to `dst`" query that used to be `Q:ROUTE_QUERY` — moved to the `'F'`
+RREQ/RREP flood (§3.7b), because a one-hop query cannot reach a route that
+is known more than one hop away.
 
 ### 3.7a H (`'H'`) — multi-hop hash-locate flood
 
@@ -779,7 +779,73 @@ responder suppresses its pending sync response if it hears another
 useful BCN before its timer fires. This lets one good neighbour satisfy
 a joiner without all nearby nodes transmitting full BCNs at once.
 
-**Swimlane:** see `docs/SCENARIOS.md` §4.1 (Q ROUTE_QUERY / REQ_SYNC — BCN as response).
+**Swimlane:** see `docs/SCENARIOS.md` §4.1 (Q REQ_SYNC — BCN as response).
+
+### 3.7b F (`'F'`) — multi-hop route-Find flood (RREQ/RREP)
+
+```
+byte:  0   1        2                      3       4              5
+       ┌───┬────────┬──────────────────────┬───────┬─────────────┬──────┐
+       │'F'│ origin │ leaf_id(4) flags(4)  │ dst   │ ttl|next_hop│ hops │
+       └───┴────────┴──────────────────────┴───────┴─────────────┴──────┘
+       flags bit0 = is_reply (0 = RREQ, 1 = RREP)
+       byte 4 = ttl       (RREQ: decremented per forward, dropped at 0)
+              = next_hop  (RREP: addressed forward target toward origin)
+```
+
+Wire tag is `'F'` (route-**F**ind), **not** `'R'` — `'R'` is the RTS frame.
+The `RREQ`/`RREP`/`route_request` naming is the standard AODV vocabulary and
+is kept in code and events; only the wire byte is `'F'`.
+
+Replaces the old 1-hop `Q:ROUTE_QUERY`, which could not reach a route known
+more than one hop away (the originator's neighbours were silent, even when a
+2-hop node reliably held the route). `'F'` is the second forwardable control
+frame (alongside `'H'`); it reuses the same flood/dedup machinery but the
+reply path differs — see below.
+
+- `origin` (8): the querying node's id. **Preserved across forwards** so the
+  RREP can be routed home along the reverse path the RREQ laid down.
+- `leaf_id` (4): active layer nibble; receivers reject foreign-layer `'F'`
+  frames. `flags` (4): bit 0 = is_reply. Same-layer only — cross-layer
+  discovery is the gateway/`'H'` path, not this.
+- `dst` (8): the destination being sought.
+- `ttl` / `next_hop` (8): RREQ carries `ttl`; RREP carries the addressed
+  `next_hop` (only that node acts on the RREP).
+- `hops` (8): RREQ counts hops-from-origin (increments per forward); RREP
+  counts hops-to-dst (increments back toward origin).
+
+**Why the reply cannot be opaque like `'H'`.** `'H'`'s resolver answers with
+a routed unicast DATA to the querying *gateway*, which is by definition a
+reachable, well-connected node. `'F'` seeks exactly the node nobody has a
+route to, so there is no reachable address to send an opaque reply to.
+Instead the discovery is two-directional:
+
+- **RREQ (flood) lays the reverse path.** Every forwarder installs/refreshes
+  `rt[origin] = via (immediate sender), hops+1` (an `rt_merge` with the RX
+  SNR score) *before* the dedup check, so even duplicate copies keep the
+  reverse route fresh. Dedup is keyed `(origin, dst)` in `route_request_seen`
+  (`route_request_seen_ttl_ms`, capped by `cap_route_request_seen`).
+- **RREP (routed hop-by-hop) lays the forward path.** The destination — or
+  any intermediate node that already holds `rt[dst]` (AODV-style
+  intermediate reply) — emits an RREP addressed to the next hop along the
+  reverse path. Each relay installs `rt[dst] = via (immediate sender),
+  hops+1` and forwards toward `origin` via `rt[origin]`. When the RREP
+  reaches `origin`, the forward route is installed and the deferred send
+  drains on the next route-check tick.
+
+**Expanding ring.** The first probe (from `defer_send_for_route`'s no-route
+path) uses `ttl=1` (radius 2 — cheap, and enough to catch the common "dst is
+2 hops away via a node that already has the route" case). If that fails, the
+deferred-send requery escalates to `route_request_max_ttl` (default 8,
+matching the DV 8-hop cap). Per-dst origination is rate-limited/escalated via
+`route_request_last` (capped by `cap_route_request_last`, the table that
+replaced the old `q_queried` route-query table).
+
+**Events:** `r_tx` (RREQ originated), `rreq_rx` / `rreq_forward`,
+`rreq_resolved_self` / `rreq_resolved_cached` (a reply was generated),
+`rrep_tx` / `rrep_rx`, `rrep_arrived` (forward route installed at origin),
+`rrep_drop_no_reverse` (RREP could not start/continue — no reverse route),
+`route_request_suppressed` (origination rate-limited).
 
 ### 3.8 J (`'J'`) — join/lease control
 
@@ -927,7 +993,8 @@ hears it regardless of which SF it is listening on at that moment.
 | Frame | Bytes | Notes |
 |---|---|---|
 | BCN | 8 + 3n (plain leaf); 8 + [1 + 4L] + 3n (gateway w/ L upper-layer schedule records) | n entries (3 B each, bit-packed) plus fixed `key_hash32`; default 151 B cap fits 47 entries |
-| Q   | 4      | RREQ-route (one-hop) |
+| Q   | 4 (+ 1 + 4×N for CHANNEL_PULL body) | one-hop query/control: REQ_SYNC, CHANNEL_PULL |
+| F   | 6      | route-Find flood (RREQ/RREP); multi-hop, forwardable (§3.7b) |
 | J_DISCOVER | 6 | join discovery; carries `key_hash32` |
 | J_OFFER | 8 | join bootstrap response; carries DATA SF bitmap |
 | J_CLAIM | 11 | short-address claim with lease age, epoch, nonce |
@@ -1213,8 +1280,8 @@ have been directly heard within `next_hop_live_ttl_ms`; otherwise that
 candidate is skipped even if the destination route entry has not aged out.
 This prevents spending RTS attempts on routes whose destination knowledge is
 still fresh but whose relay has disappeared. If all candidates are stale or
-silent, the sender defers the packet and emits `Q:ROUTE_QUERY` instead of
-burning more RTS attempts. BCN/DV route entries whose advertised second hop
+silent, the sender defers the packet and emits an `'F'` RREQ flood (§3.7b)
+instead of burning more RTS attempts. BCN/DV route entries whose advertised second hop
 is locally `silent` are skipped so a neighbour does not reintroduce a
 proposal through a known-dead node.
 
@@ -1971,9 +2038,19 @@ sliding-window counts over `originator_window_ms` (default 5 min):
 - `R[X]` = distinct RTS ctr_los from X.
 - `C[X]` = distinct CTS ctr_los from X.
 
-Same-ctr_lo retries within `originator_retry_dedup_ms` (default 10 s)
-count once each — a legitimate originator's `rts_max_retries × K`
-alts don't inflate R[X].
+`compute_originator_metric` tallies **distinct ctr_lo over the whole
+window**, so same-ctr_lo retries count once each *regardless of spacing*.
+This matters because a node stuck retrying ONE message (e.g. a cross-layer
+relay hammering a momentarily-busy next-hop on the second leg) must not look
+like a flood of fresh originations — under a raw RTS count its retries would
+push `R[X]` past threshold and the receiver would silently throttle a
+legitimate relay, turning transient congestion into a sustained giveup. (The
+track-side `originator_retry_dedup_ms`, default 10 s, only bounds *stored*
+events; the metric dedups across the full window.) ctr_lo is 4-bit on the
+wire, so distinct R caps at 16 — far above the default threshold of 6, so a
+genuine spammer cycling distinct messages still trips it. Airtime
+(`sender_airtime`, below) stays cumulative across retries, so the airtime
+backstop still catches high-volume spam regardless of ctr_lo reuse.
 
 ```
 apparent_origination[X] = max(0, R[X] - C[X])
@@ -2017,6 +2094,20 @@ N can attribute X's traffic to X **only when N hears a frame directly
 from X's radio with `sender == X == origin`**. Forwarded frames (where
 on-wire sender ≠ origin) are skipped — N has no way to distinguish
 legitimate forwarding from origin-fingerprint there.
+
+**Gateway cross-layer exemption.** The `R[X] ≈ C[X]` balance assumes a
+forwarder both receives (CTS out) and forwards (RTS out) *on the same
+layer*. A gateway breaks this: it receives the envelope on the origin's
+layer but re-injects on the *target* layer with `origin=self` and no
+preceding CTS there, so on the target layer it looks like a pure originator
+(`C ≈ 0`, `R` climbs with every distinct cross-layer message it relays) and
+gets throttled — silently dropping legitimate cross-layer traffic. To fix
+this, the gateway marks its forward RTS with `RTS_FLAG_RELAY` (§3.2); the
+addressed next-hop neither records it in the §10a ledger nor throttles it,
+and emits `rts_relay_exempt` for observability. The flag is set *only* by
+`enqueue_gateway_handoff`, so a gateway's own-originated traffic (no flag)
+is still throttled normally. This is the gateway analogue of the
+forwarded-frame skip above: a relay role, not an origination.
 
 **Privacy-compatible.** The classifier observes physical-layer
 `meta.src`, not the wire `origin` field. Composes with §9 T2
@@ -2282,14 +2373,14 @@ Drain happens at:
 - `on_recv 'B'` after rt mutations (fastest, ~hundreds of ms after boot)
 - A periodic 1 s timer (fallback when no routing traffic flows)
 
-If the deferred send was waiting on an active `Q:ROUTE_QUERY`, draining
-does not immediately RTS. The send is moved to `tx_queue` with
+If the deferred send was waiting on an active `'F'` RREQ flood (§3.7b),
+draining does not immediately RTS. The send is moved to `tx_queue` with
 `next_attempt_ms = now + settle`, where settle lasts until
-`q_sent_at_ms + q_response_settle_ms` plus small jitter. This lets most
-nearby Q-response BCNs finish before the first DATA RTS, avoiding the
-hidden-terminal pattern where a requester hears the first useful BCN,
-immediately RTSes, and collides at the chosen next-hop with a late BCN
-from another responder.
+`q_sent_at_ms + q_response_settle_ms` plus small jitter. This lets the RREP
+(or any reverse-path control traffic the flood stirred up) finish before the
+first DATA RTS, avoiding the hidden-terminal pattern where a requester
+installs the forward route, immediately RTSes, and collides at the chosen
+next-hop with a late frame from another responder.
 
 Forwarders (`previous_hop ~= nil`) never defer — a route gone
 mid-flight is a real failure; the originator's app-layer retry is the
@@ -2510,8 +2601,15 @@ expectations) subscribe by event_type.
 | `delivered` | DATA arrived at end-to-end destination | `origin`, `payload`, `ctr` |
 | `dup_drop` | Duplicate `(origin, dst, ctr)` | `origin`, `dst`, `ctr` |
 | `forward_queued` | Forwarder enqueued the relay | `origin`, `dst` |
-| `q_tx` | Q (RREQ-route) emitted by sender (§3.7) | `dst`, `dst_name` |
-| `q_rx` | Q decoded; receiver matches leaf_id | `from`, `dest` |
+| `q_tx` | Q control query emitted by sender — REQ_SYNC / CHANNEL_PULL (§3.7) | `opcode`, `dst`, `reason` |
+| `q_rx` | Q decoded; receiver matches leaf_id | `from`, `dest`, `opcode` |
+| `r_tx` | `'F'` RREQ route-Find flood originated (§3.7b) | `dst`, `dst_name`, `ttl`, `reason` |
+| `rreq_rx` / `rreq_forward` | `'F'` RREQ received / re-flooded (reverse path laid) | `origin`, `dst`, `ttl`, `hops` |
+| `rreq_resolved_self` / `rreq_resolved_cached` | RREQ reached the dst itself / an intermediate node holding `rt[dst]`; an RREP is generated | `origin`, (`dst`, `hops` for cached) |
+| `rrep_tx` / `rrep_rx` | `'F'` RREP sent toward origin / received by the addressed next-hop (forward path laid) | `origin`, `dst`, `next`, `hops` |
+| `rrep_arrived` | RREP reached origin; forward route to `dst` installed, deferred send drains | `dst`, `hops` |
+| `rrep_drop_no_reverse` | RREP could not start/continue — no reverse route to origin | `origin`, `dst` |
+| `route_request_suppressed` | `'F'` RREQ origination rate-limited (recent same-or-lower-TTL flood for this dst) | `dst`, `dst_name`, `reason`, `last_r_ms` |
 | `forward_fail` | Forwarder dropped (no route, no budget, etc.) | `origin`, `dst`, `reason` |
 | `retune_for_data` | RX retuned for DATA reception | `from`, `ctr_lo`, `chosen_data_sf` |
 | `e2e_ack_pending` | Originator registered a `send_e2e` and is waiting for E2E ACK (§7.4) | `dst`, `ctr`, `ttl_ms` |
@@ -2569,6 +2667,7 @@ expectations) subscribe by event_type.
 | Event | Trigger | Key data |
 |---|---|---|
 | `rts_drop_originator_throttle` | RTS silently dropped because direct sender exceeded fair-share quota | `from`, `ctr_lo`, `apparent_origination`, `airtime_share` |
+| `rts_relay_exempt` | RTS carried `RTS_FLAG_RELAY` (gateway cross-layer forward, §3.2); skipped the §10a originator metric/throttle instead of counting it | `from`, `ctr_lo` |
 | `originator_self_over_budget` | On terminal failure, originator's own send count is over half-threshold OR own duty tier ≥ STRAINED — UX hint emitted | `origin_count`, `threshold`, `tier`, `hint` |
 
 ### 13.6 LBT / duty cycle / runtime
@@ -2609,7 +2708,7 @@ expectations) subscribe by event_type.
 | `h_resolved` | Node knew the hash (own or `id_bind`) and is replying with a routed-DATA binding response | `origin`, `key_hash32`, `node`, `target_layer_id` |
 | `hash_bind_response_enqueued` | Resolver queued the routed-DATA binding response back to the querying gateway | `to`, `node`, `key_hash32`, `target_layer_id`, `ctr` |
 | `q_hash_binding_rx` | Gateway received a binding response (routed DATA, `HASH_BIND_MAGIC` body) and updated `id_bind` + `gateway_remote_bind`, then drained handoffs | `from`, `node`, `key_hash32`, `layer_id`, `source` (`h_query`) |
-| `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
+| `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `route_request_seen`, `route_request_last`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
 | `max_payload_clamped` | Init-time guard. Configured `max_payload_bytes` exceeds the LoRa PHY 255-byte frame minus fixed overhead (`DATA_HDR_LEN + DATA_INNER_OVERHEAD` = 14); clamped to the hard cap (241) | `requested`, `clamped_to`, `lora_max_frame`, `fixed_overhead` |
 | `send_oversized` | Originator-side rejection of a user payload exceeding `max_payload_bytes`. The send never enters `tx_queue`; runtime `tx_oversized` remains the radio-side backstop for frames built outside this path | `dst`, `dst_name`, `len`, `max`, optional `e2e`, optional `target_layer_id` / `dst_key_hash32` / `envelope_overhead` for `send_layer` |
 | `channel_msg_received` | A `PAYLOAD_TYPE_M` DATA frame was merged into our `channel_buffer` (either because we were the `to=` target of a pull response, or via promiscuous overhearing of someone else's pull response) | `id`, `channel_id`, `flavor`, `source` (`pull_target` / `overheard`), `from` (immediate radio sender) |
@@ -2643,7 +2742,7 @@ for the full classification (20 T / 82 P / 5 F / 8 D, post-audit).
 In the Lua model, **`apply_protocol_constants(self, config)` honors
 config overrides** as an escape hatch for dedicated tests (e.g. t55
 shrinks `gateway_remote_bind_ttl_ms` from 48 h to 8 s, t61 shrinks
-`cap_q_queried` from 128 to 2). The C++ port has no such escape: P-
+`cap_route_request_last` from 128 to 2). The C++ port has no such escape: P-
 class values are `constexpr` and tests run against them with a longer
 wallclock. Knobs documented below are the only ones intended to be
 set in production scenario JSON.
@@ -2776,6 +2875,8 @@ block for current values):
   `cascade_requeue_backoff_cap_ms`, `cascade_requeue_total_max_ms`,
   `cascade_requeue_load_threshold`
 - Q frames: `q_query_ttl_ms`, `q_respond_ttl_ms`
+- Route discovery (`'F'`, §3.7b): `route_request_max_ttl`,
+  `route_request_seen_ttl_ms`
 - Sync response: `sync_response_backoff_{min,max}_ms`,
   `sync_response_mobile_penalty_ms`,
   `sync_response_requester_mobile_penalty_ms`,
@@ -2783,8 +2884,8 @@ block for current values):
 - Defer/dedup: `send_defer_ttl_ms`, `last_acked_ttl_ms`, `seen_origin_ttl_ms`
 - Hop budget: `hop_budget_slack`, `hop_budget_max_initial`
 - Bounded state caps: `cap_seen_origins`, `cap_q_queried`,
-  `cap_q_responded_to`, `cap_deferred_sends`,
-  `cap_gateway_deferred_handoffs`, `cap_id_bind`,
+  `cap_q_responded_to`, `cap_route_request_seen`, `cap_route_request_last`,
+  `cap_deferred_sends`, `cap_gateway_deferred_handoffs`, `cap_id_bind`,
   `cap_channel_buffer` — emit `table_cap_hit` on overflow (§13.6)
 - Identity / gateway: `id_bind_ttl_ms`, `gateway_schedule_guard_ms`,
   `gateway_bridged_layers_ttl_ms` (TLV type=4 entry lifetime; pruned
