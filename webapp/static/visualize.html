@@ -116,6 +116,7 @@ canvas { display: block; }
     <button id="btn-zoom-fit" title="Fit all">Fit</button>
     <button id="btn-trace-mode" title="Click packets to trace">Trace</button>
     <button id="btn-rays" title="Show TX→RX propagation lines">Rays</button>
+    <button id="btn-delivery" title="Per-DM / per-channel delivery breakdown">Delivery</button>
     <div class="sep"></div>
     <label>Go to:</label>
     <input id="goto-ms" type="text" placeholder="ms (or 1:30 / 30s)" style="width:140px"
@@ -2607,6 +2608,100 @@ document.getElementById('btn-rays').addEventListener('click', () => {
     render();
 });
 
+// ── Delivery breakdown panel ───────────────────────────────────
+let _dmBreakdownCache = null;
+
+async function loadDeliveryBreakdown() {
+    if (!SIM_ID) {
+        openSidebar();
+        sidebarContent.innerHTML =
+            '<div class="event-detail"><h3>Delivery</h3>' +
+            '<div class="field">Only available for completed runs.</div></div>';
+        return;
+    }
+    if (_dmBreakdownCache) { renderDeliveryPanel(_dmBreakdownCache); return; }
+    openSidebar();
+    sidebarContent.innerHTML = '<div class="event-detail"><h3>Delivery</h3>' +
+        '<div class="field">Loading…</div></div>';
+    try {
+        const r = await fetch(`/api/sims/${SIM_ID}/dm_breakdown`);
+        if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+        _dmBreakdownCache = await r.json();
+        renderDeliveryPanel(_dmBreakdownCache);
+    } catch (e) {
+        sidebarContent.innerHTML = '<div class="event-detail"><h3>Delivery</h3>' +
+            `<div class="field" style="color:#dc2626">Failed: ${escHtml(String(e))}</div></div>`;
+    }
+}
+
+// "name(id)" -> integer id (for traceFlight). null if no id suffix.
+function _nodeIdFromLabel(label) {
+    const m = /\((\d+)\)\s*$/.exec(label || '');
+    return m ? parseInt(m[1], 10) : null;
+}
+
+function renderDeliveryPanel(data) {
+    openSidebar();
+    let html = '<div class="event-detail"><h3>Delivery</h3>';
+
+    const dm = data.summary || [];
+    html += '<h4>DM</h4>';
+    if (!dm.length) {
+        html += '<div class="field">No configured DM pairs.</div>';
+    } else {
+        html += '<table><tr><th>pair</th><th>sent</th><th>arr</th>' +
+                '<th>ack</th><th>give</th><th>hops</th></tr>';
+        dm.forEach((row, i) => {
+            const hops = row.mean_hops == null ? '–' : row.mean_hops.toFixed(1);
+            html += `<tr class="dm-row" data-dm="${i}" style="cursor:pointer">` +
+                `<td>${escHtml(row.origin)}→${escHtml(row.dst)}</td>` +
+                `<td>${row.sent}</td><td>${row.arrived}</td>` +
+                `<td>${row.acked}</td><td>${row.giveup}</td><td>${hops}</td></tr>`;
+        });
+        html += '</table>';
+    }
+
+    const ch = data.channels || [];
+    html += '<h4>Channels</h4>';
+    if (!ch.length) {
+        html += '<div class="field">No channel posts.</div>';
+    } else {
+        html += '<table><tr><th>post</th><th>reach</th>' +
+                '<th>exp</th><th>leaks</th><th>@ms</th></tr>';
+        ch.forEach((row, i) => {
+            const at = row.sent_at_ms == null ? '–' : formatTime(row.sent_at_ms);
+            html += `<tr class="ch-row" data-ch="${i}" style="cursor:pointer">` +
+                `<td>${escHtml(String(row.payload))}</td>` +
+                `<td>${row.reach}</td><td>${row.expected}</td>` +
+                `<td>${row.leaks}</td><td>${at}</td></tr>`;
+        });
+        html += '</table>';
+    }
+    html += '</div>';
+    sidebarContent.innerHTML = html;
+
+    // DM row → flight trace by (origin id, payload).
+    sidebarContent.querySelectorAll('.dm-row[data-dm]').forEach(tr => {
+        tr.addEventListener('click', () => {
+            const summaryRow = dm[+tr.dataset.dm];
+            const msg = (data.messages || []).find(m =>
+                m.origin === summaryRow.origin && m.dst === summaryRow.dst);
+            const originId = _nodeIdFromLabel(summaryRow.origin);
+            const payload = msg ? msg.payload : null;
+            if (originId != null && payload != null) traceFlight(originId, payload);
+        });
+    });
+    // Channel row → center viewport on the post time.
+    sidebarContent.querySelectorAll('.ch-row[data-ch]').forEach(tr => {
+        tr.addEventListener('click', () => {
+            const at = ch[+tr.dataset.ch].sent_at_ms;
+            if (at != null) centerViewportOn(at);
+        });
+    });
+}
+
+document.getElementById('btn-delivery').addEventListener('click', loadDeliveryBreakdown);
+
 // Parse a time string into milliseconds. Accepts: "12345" (ms),
 // "30s" (seconds), "1:30" or "1:30.5" (m:ss). Returns null on failure.
 function parseGotoTime(raw) {
@@ -2627,14 +2722,7 @@ function parseGotoTime(raw) {
     return Number.isFinite(n) ? n : null;
 }
 
-async function gotoTime() {
-    const input = document.getElementById('goto-ms');
-    const target = parseGotoTime(input.value);
-    if (target === null) {
-        input.style.borderColor = '#dc2626';
-        setTimeout(() => { input.style.borderColor = ''; }, 800);
-        return;
-    }
+async function centerViewportOn(target) {
     followMode = false; updateFollowIndicator();
     const span = S.viewTo - S.viewFrom;
     S.viewFrom = target - span / 2;
@@ -2643,6 +2731,17 @@ async function gotoTime() {
     syncScrollbar();
     await loadViewport();
     render();
+}
+
+async function gotoTime() {
+    const input = document.getElementById('goto-ms');
+    const target = parseGotoTime(input.value);
+    if (target === null) {
+        input.style.borderColor = '#dc2626';
+        setTimeout(() => { input.style.borderColor = ''; }, 800);
+        return;
+    }
+    await centerViewportOn(target);
 }
 
 document.getElementById('btn-goto').addEventListener('click', gotoTime);
