@@ -1,0 +1,39 @@
+{
+  "_name": "t73_gateway_visit_schedule_defer",
+  "_desc": "Regression for the visit-layer gateway schedule-defer (gateway_schedule_defer_ms). gw_a is home on L1 and visits L2 on a 10s period (4s window). l2_src lives on L2 — i.e. it reaches gw_a on the gateway's VISIT layer, so gw_a is reachable to it only during the 4s window and is deaf the other 6s. l2_src hears gw_a's L2 beacons (which carry the schedule), then sends cross-layer to l1_dst through gw_a several times across the cycle. Under the OLD code gateway_schedule_defer_ms returned 0 for visit-layer access (the rec.leaf_id ~= our_leaf filter excluded the matching record), so l2_src fired blind into the away-gap and never emitted tx_gateway_schedule_defer. Under the fix it defers any gateway-bound send issued outside the window until the window opens. Verify: l2_src emits tx_gateway_schedule_defer naming gw_a as next_hop, and the cross-layer traffic reaches l1_dst.",
+  "simulation": {
+    "duration_ms": 90000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 73,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "l1_dst", "node_id": 1, "key_hash32": "0x11000001", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "gw_a", "node_id": 10, "key_hash32": "0x11000010", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "is_gateway": true,
+        "gateway_layers": [ { "layer_id": 2, "routing_sf": 8, "allowed_data_sfs": [8], "period_ms": 10000, "duration_ms": 4000, "offset_ms": 5000 } ],
+        "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "l2_src", "node_id": 101, "key_hash32": "0xcafe0000", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 2, "routing_sf": 8, "allowed_data_sfs": [8], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0,
+        "debug_start_ms": 0, "debug_end_ms": 90000 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "l2_src", "to": "gw_a",   "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "gw_a",   "to": "l1_dst", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 30000, "node": "l2_src", "command": "send_layer 1 285212673 xl-a" },
+    { "at_ms": 33000, "node": "l2_src", "command": "send_layer 1 285212673 xl-b" },
+    { "at_ms": 37000, "node": "l2_src", "command": "send_layer 1 285212673 xl-c" },
+    { "at_ms": 42000, "node": "l2_src", "command": "send_layer 1 285212673 xl-d" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "l2_src", "emit_type": "tx_gateway_schedule_defer", "value": "\"next_hop\":10" },
+    { "type": "script_emit_contains", "node": "l1_dst", "emit_type": "delivered", "value": "xl-" }
+  ]
+}

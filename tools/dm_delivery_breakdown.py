@@ -212,15 +212,18 @@ def load_config(path):
     # can resolve them. layer_id lives at config.layer_id (regular nodes)
     # or, for gateways visiting another layer, in gateway_layers[].
     hash_layer_to_name = {}
+    id_to_layer = {}
     for n in nodes:
-        h = _hash_key_to_int(n.get("key_hash32"))
-        if h is None:
-            continue
         cfg_block = n.get("config", {}) or {}
         layer = cfg_block.get("layer_id")
         if layer is not None:
+            id_to_layer[n["node_id"]] = layer
+        h = _hash_key_to_int(n.get("key_hash32"))
+        if h is None:
+            continue
+        if layer is not None:
             hash_layer_to_name[(layer, h)] = n["name"]
-    return cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name
+    return cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name, id_to_layer
 
 
 SEND_RE = re.compile(r"^send(?:_priority|_e2e|_e2e_priority)?\s+(\S+)\s+",
@@ -399,7 +402,17 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # target within its TTL. Distinct from a same-layer no-route giveup (both
     # surface as giveup_reason=defer_ttl, so they must be told apart here).
     gw_giveup = set()
+    # Per-gateway layer-state timeline: {gw_id: [(t_ms, active_layer_id), ...]}.
+    # Lets us tell, for a stalled-at-doorstep DM, whether the gateway was AWAY
+    # on another layer (schedule/timing) or PRESENT-but-unresponsive (busy) at
+    # the moment a neighbour RTS'd it.
+    gw_layers = {}
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        if et == "gateway_schedule_change":
+            lyr = d.get("active_layer_id")
+            if lyr is not None:
+                gw_layers.setdefault(fid, []).append((t_ms, lyr))
+            continue
         o = d.get("origin") or d.get("src")
         c = d.get("ctr")
         if c is None:
@@ -557,7 +570,9 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # arrival via payload at the target. This is the only honest
     # delivery signal for send_layer messages — the gateway rewrites
     # origin/ctr on the second leg.
-    return msgs, arrival_by_payload, drops, gw_giveup
+    for tl in gw_layers.values():
+        tl.sort()
+    return msgs, arrival_by_payload, drops, gw_giveup, gw_layers
 
 
 def outcome(rec):
@@ -697,7 +712,75 @@ def _ev_has(rec, etype, **fields):
     return False
 
 
-def failure_category(rec, gw_giveup):
+def _targeted_gateway(rec):
+    """True if any carrier RTS'd the gateway directly. For a cross-layer first
+    leg the wire `dst` IS the gateway short id, so an rts_* with next==dst means
+    the envelope reached a direct neighbour of the gateway and tried to hand off
+    — i.e. it got to the gateway's doorstep. (If never true, the envelope never
+    reached the gateway's neighbourhood = a routing failure, not availability.)"""
+    gw = rec["dst"]
+    for e in rec["events"]:
+        if e["type"] in ("rts_tx", "rts_retry", "rts_fwd") \
+           and e["fields"].get("next") == gw:
+            return True
+    return False
+
+
+def _revisited_node(rec):
+    """True if some node received this message's DATA more than once — a
+    forwarding loop bounced it back to a node that already held it."""
+    seen = set()
+    for e in rec["events"]:
+        if e["type"] == "data_rx":
+            n = e["node"]
+            if n in seen:
+                return True
+            seen.add(n)
+    return False
+
+
+def _gateway_present_at(gw_layers, gw_id, layer, t):
+    """Was gateway gw_id active on `layer` at time t? Returns True/False, or
+    None if unknown (no timeline / t precedes the first recorded transition)."""
+    tl = gw_layers.get(gw_id) if gw_layers else None
+    if not tl:
+        return None
+    active = None
+    for tt, lyr in tl:            # sorted ascending
+        if tt <= t:
+            active = lyr
+        else:
+            break
+    return None if active is None else (active == layer)
+
+
+def _doorstep_away_or_busy(rec, gw_layers, id_to_layer):
+    """For a doorstep stall, classify why the gateway didn't pick up. The first
+    leg runs on the origin's layer, so the gateway had to be on that layer to
+    answer. Check its layer-state at each RTS-to-gateway attempt: if it was on
+    another layer at ALL of them -> 'away' (schedule/timing); if present for at
+    least one -> 'busy' (congestion/half-duplex/collision). None = unknown."""
+    if gw_layers is None or id_to_layer is None:
+        return None
+    origin_layer = id_to_layer.get(rec["origin"])
+    if origin_layer is None:
+        return None
+    gw = rec["dst"]
+    seen_any = present_any = False
+    for e in rec["events"]:
+        if e["type"] in ("rts_tx", "rts_retry", "rts_fwd") \
+           and e["fields"].get("next") == gw:
+            p = _gateway_present_at(gw_layers, gw, origin_layer, e["t_ms"])
+            if p is None:
+                continue
+            seen_any = True
+            present_any = present_any or p
+    if not seen_any:
+        return None
+    return "busy" if present_any else "away"
+
+
+def failure_category(rec, gw_giveup, gw_layers=None, id_to_layer=None):
     """Routing-layer failure taxonomy for a DM that did NOT arrive. Distinguishes
     route non-convergence (no route at all) from next-hop-silent (route exists,
     next-hop won't answer) from the cross-layer second leg. NB: giveup_reason
@@ -712,7 +795,18 @@ def failure_category(rec, gw_giveup):
         if car == 0 and _ev_has(rec, "send_deferred", reason="no_route"):
             return "XL: origin had no route to gateway"
         if car >= 1:
-            return "XL: origin->gateway stalled (next-hop silent)"
+            # First-leg stall sub-taxonomy (the dominant cross-layer bucket).
+            # Did the envelope reach the gateway's doorstep, or never get there?
+            if _targeted_gateway(rec):
+                aob = _doorstep_away_or_busy(rec, gw_layers, id_to_layer)
+                if aob == "away":
+                    return "XL stall: doorstep, gateway AWAY on other layer (schedule/timing)"
+                if aob == "busy":
+                    return "XL stall: doorstep, gateway PRESENT but no pickup (busy/collision)"
+                return "XL stall: AT gateway doorstep, no pickup (gateway away/busy)"
+            if _revisited_node(rec):
+                return "XL stall: routing LOOP, never reached gateway"
+            return "XL stall: cascade/dead-end, never reached gateway"
         return "XL: other"
     if outcome(rec) == "in_flight":
         return "SL: in-flight at end"
@@ -723,7 +817,8 @@ def failure_category(rec, gw_giveup):
     return f"SL: giveup ({rec.get('giveup_reason')})"
 
 
-def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name):
+def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name,
+                       gw_layers=None, id_to_layer=None):
     cat = Counter()
     ok = 0
     for r in msgs.values():
@@ -732,7 +827,7 @@ def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name):
         if _arrived(r):
             ok += 1
         else:
-            cat[failure_category(r, gw_giveup)] += 1
+            cat[failure_category(r, gw_giveup, gw_layers, id_to_layer)] += 1
     for (origin, dst), n in no_gw_by_pair.items():
         if pair_filter is not None and (origin, dst) not in pair_filter:
             continue
@@ -1469,9 +1564,9 @@ def main():
                  f"  (pass --run to generate it, or provide an "
                  f"explicit EVENTS path)")
 
-    cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name \
+    cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name, id_to_layer \
         = load_config(args.config)
-    msgs, arrival_by_payload, drops, gw_giveup = analyse(
+    msgs, arrival_by_payload, drops, gw_giveup, gw_layers = analyse(
         args.events, slot_to_id, hash_layer_to_name)
 
     # Post-pass: resolve cross-layer target_id + arrival_at_target_ms.
@@ -1561,7 +1656,7 @@ def main():
             print()
             print("=== DM failures (by mechanism) ===")
             render_dm_failures(msgs, no_gw_by_pair, gw_giveup,
-                               pair_filter, id_to_name)
+                               pair_filter, id_to_name, gw_layers, id_to_layer)
         if args.detail:
             print()
             render_detail_text(msgs, pair_filter, id_to_name)

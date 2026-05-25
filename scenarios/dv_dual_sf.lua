@@ -1063,6 +1063,14 @@ PROTOCOL = {
   gateway_visit_period_ms        = 15000,
   gateway_visit_duration_ms      = 7500,       -- 50/50 split
   gateway_visit_offset_ms        = 7500,
+  -- Cross-layer resolve (the 'H' hash-locate round-trip) is bounded by the
+  -- gateway's VISIT CADENCE, not by same-layer timers: the gateway floods H in
+  -- one window, but the binding reply must route multi-hop back AND catch the
+  -- gateway present again, so the round-trip spans ~2-3 visit periods. The
+  -- handoff giveup TTL must cover that or it abandons resolves whose answer is
+  -- still in flight (measured: binding arrived 6.9s AFTER a 30s giveup). Scale
+  -- the TTL off the visit period: resolve_periods × gateway_visit_period_ms.
+  gateway_handoff_resolve_periods = 4,         -- ~2-3 period round-trip + margin
 
   -- ---- Multi-hop hash-locate ('H' frame flood, PROTOCOL §3.7a) ----
   -- The gateway floods an 'H' query on the target layer to resolve a
@@ -4595,19 +4603,37 @@ local function gateway_schedule_defer_ms(self, gateway_id)
   local now = self:now()
   local heard = sched.heard_ms or now
   local our_leaf = active_leaf_id(self)
+  local guard = self.gateway_schedule_guard_ms or 100
   local best_delay = 0
   for _, rec in ipairs(sched.records) do
-    if rec.leaf_id ~= our_leaf and rec.period_ms ~= nil and rec.period_ms > 0 then
+    if rec.period_ms ~= nil and rec.period_ms > 0 then
       local period = rec.period_ms
       local duration = rec.duration_ms or 0
-      -- offset_ms is the countdown to the next foreign window measured from
+      -- offset_ms is the countdown to this record's next window, measured from
       -- the beacon we heard at heard_ms (PROTOCOL: anchored to BCN receive
       -- time). visit_start + k*period covers every later window.
       local visit_start = heard + (rec.offset_ms or 0)
       local phase = (now - visit_start) % period
-      if phase >= 0 and phase < duration then
-        local delay = duration - phase + (self.gateway_schedule_guard_ms or 100)
-        if delay > best_delay then best_delay = delay end
+      if rec.leaf_id ~= our_leaf then
+        -- HOME-layer access: we share the gateway's home layer; this record is
+        -- a FOREIGN visit. The gateway is AWAY (deaf to us) during the window,
+        -- so defer until it ends (+guard for the return switch to settle).
+        if phase >= 0 and phase < duration then
+          local delay = duration - phase + guard
+          if delay > best_delay then best_delay = delay end
+        end
+      else
+        -- VISIT-layer access: this record IS the gateway's visit to OUR layer.
+        -- The gateway is reachable ONLY inside the window; outside it the
+        -- gateway is on its home layer and deaf to us. So if we're outside the
+        -- window, defer until the next one opens (+guard so it has settled on
+        -- our layer); inside, send now. Without this branch a visit-layer node
+        -- has no schedule awareness and fires the initial RTS *and every retry*
+        -- blind into the away-gap — the dominant cross-layer first-leg stall.
+        if phase >= duration then
+          local delay = (period - phase) + guard
+          if delay > best_delay then best_delay = delay end
+        end
       end
     end
   end
@@ -5472,10 +5498,20 @@ function try_drain_gateway_handoffs(self)
         reason = binding_error or d.reason or "not_found",
       })
     else
-      local q_at, q_sent = emit_hash_route_query(self, d.gw_env.target_layer_id,
-                                                 d.gw_env.dst_key_hash32,
-                                                 "gateway_deferred")
-      if q_sent then d.q_sent_at_ms = q_at end
+      -- Re-flood 'H' only after a reply could plausibly have routed back. The
+      -- resolve round-trip is ≥1 visit period (the reply must catch the gateway
+      -- present again), so re-flooding every q_query_ttl_ms (~5s) is pointless:
+      -- the resolver already answered and its reply is in flight — extra floods
+      -- just spawn duplicate replies and thrash the gateway onto the target
+      -- layer, congesting the second-leg forward. Wait ~one visit period
+      -- between floods. (The binding, once it arrives, drains in the branch above.)
+      local reflood_ms = self.gateway_visit_period_ms or 15000
+      if d.q_sent_at_ms == nil or (now - d.q_sent_at_ms) >= reflood_ms then
+        local q_at, q_sent = emit_hash_route_query(self, d.gw_env.target_layer_id,
+                                                   d.gw_env.dst_key_hash32,
+                                                   "gateway_deferred")
+        if q_sent then d.q_sent_at_ms = q_at end
+      end
       table.insert(kept, d)
     end
   end
@@ -8102,8 +8138,13 @@ function on_init(self, config)
   -- mid-flight; lost-route mid-flight is a real failure).
   self.deferred_sends     = {}    -- array of {origin, dst_id, dst_name, payload, user_text, ctr, flags, queued_at_ms}
   self.gateway_deferred_handoffs = {}
+  -- Default the handoff giveup TTL to span the cross-layer resolve round-trip
+  -- (~2-3 visit periods), not the same-layer send_defer_ttl_ms — otherwise the
+  -- gateway abandons resolves whose binding reply is still routing back.
   self.gateway_handoff_defer_ttl_ms = config.gateway_handoff_defer_ttl_ms
-                                      or self.send_defer_ttl_ms
+      or math.max(self.send_defer_ttl_ms or 0,
+                  (self.gateway_handoff_resolve_periods or 4)
+                  * (self.gateway_visit_period_ms or 15000))
   -- Hop-level RTS-retry dedup. {sender_id → {ctr_lo, t_ms}}; lookups
   -- treat entries older than self.last_acked_ttl_ms as missing so the
   -- 4-bit ctr_lo wrap (every 16 sends per sender) doesn't false-pos
