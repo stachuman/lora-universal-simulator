@@ -356,6 +356,8 @@ void SimController::initialize() {
     // matches real Semtech LoRa hardware). See SimController.h note.
     _node_sf_rx_set.assign(static_cast<size_t>(n), {});
     _node_tx_in_flight_until.assign(static_cast<size_t>(n), 0ULL);
+    _node_last_tx_start_ms.assign(static_cast<size_t>(n), 0ULL);
+    _node_last_tx_end_ms.assign(static_cast<size_t>(n), 0ULL);
     for (int i = 0; i < n; ++i) {
         if (_cfg.nodes[i].sf_rx_set.empty()) {
             const int node_sf = _cfg.nodes[i].sf;  // already merged with globals
@@ -996,6 +998,15 @@ void SimController::deliverReceptionsForStep() {
                     break;
                 }
             }
+            // Also catch a receiver TX that overlapped this frame's airtime but
+            // already ended (compacted out of _in_flight before this frame is
+            // delivered at its end_ms). The frame's preamble still arrived while
+            // the receiver was transmitting, so the radio never locked on it.
+            if (!rcv_was_tx
+                && _node_last_tx_start_ms[(size_t)rcv] < tx.end_ms
+                && _node_last_tx_end_ms[(size_t)rcv]   > tx.start_ms) {
+                rcv_was_tx = true;
+            }
             if (rcv_was_tx) {
                 EventLog::dropHalfDuplex(
                     static_cast<unsigned long>(now),
@@ -1369,6 +1380,10 @@ void SimController::registerTransmissionsForStep() {
             // reports the airtime end. Cleared in the compaction loop above
             // when the InFlight is removed at end_ms.
             _node_tx_in_flight_until[(size_t)i] = _in_flight.back().end_ms;
+            // Persisted last-TX window for the half-duplex check (kept after
+            // the TX ends / is compacted out of _in_flight).
+            _node_last_tx_start_ms[(size_t)i] = _in_flight.back().start_ms;
+            _node_last_tx_end_ms[(size_t)i]   = _in_flight.back().end_ms;
 
             // Record this TX in the per-node sliding-window airtime log so
             // both self:airtime_used_ms() (Lua) and the duty-cycle hard-block

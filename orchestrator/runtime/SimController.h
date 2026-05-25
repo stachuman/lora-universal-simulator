@@ -182,6 +182,16 @@ private:
     // vector is sized via assign() below and never reallocates).
     std::vector<uint64_t>                _node_tx_in_flight_until;
 
+    // Per-node window of the most recent transmission [start, end], PERSISTED
+    // after the TX ends (unlike _node_tx_in_flight_until, never reset to 0).
+    // The half-duplex check needs it because an incoming frame is delivered at
+    // its end_ms, by which point a receiver TX that overlapped the frame's
+    // airtime (but ended a few ms earlier) has already been compacted out of
+    // _in_flight — so scanning _in_flight alone would miss it and wrongly
+    // deliver a frame whose preamble arrived while the receiver was TX'ing.
+    std::vector<uint64_t>                _node_last_tx_start_ms;
+    std::vector<uint64_t>                _node_last_tx_end_ms;
+
     // Per-node sim-time at which on_init fires. Drawn uniformly from
     // [0, simulation.node_startup_jitter_ms] using _rng (so reproducible
     // per seed). Nodes with offset 0 init synchronously at SimController
