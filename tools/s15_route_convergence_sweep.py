@@ -27,14 +27,15 @@ DELIV_RE = re.compile(r"delivered\s+(\d+)/(\d+)\s*=\s*([\d.]+)%;\s*(\d+)\s+faile
 CAT_RE = re.compile(r"^\s*(\d+)\s*\(\s*[\d.]+%\s*of fails\)\s+(.*\S)\s*$")
 
 
-def run_seed(seed):
-    with open(BASE_CONFIG) as f:
+def run_seed(seed, config=BASE_CONFIG):
+    with open(config) as f:
         cfg = json.load(f)
     cfg["simulation"]["seed"] = seed
-    tmp_cfg = os.path.join(tempfile.gettempdir(), f"s15_seed_{seed}.json")
+    stem = os.path.splitext(os.path.basename(config))[0]
+    tmp_cfg = os.path.join(tempfile.gettempdir(), f"{stem}_seed_{seed}.json")
     with open(tmp_cfg, "w") as f:
         json.dump(cfg, f)
-    events = os.path.join(tempfile.gettempdir(), f"s15_seed_{seed}.ndjson")
+    events = os.path.join(tempfile.gettempdir(), f"{stem}_seed_{seed}.ndjson")
     out = subprocess.run(
         [sys.executable, DM_TOOL, tmp_cfg, events, "--run",
          "--mode", "dm", "--failures"],
@@ -55,13 +56,19 @@ def run_seed(seed):
 
 
 def main():
-    seeds = [int(s) for s in sys.argv[1:]] or [1522, 7, 13, 101, 777, 2026, 4242, 9001]
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default=BASE_CONFIG, help="scenario JSON to sweep")
+    ap.add_argument("seeds", nargs="*", type=int)
+    a = ap.parse_args()
+    seeds = a.seeds or [1522, 7, 13, 101, 777, 2026, 4242, 9001]
     tot_deliv = tot_total = 0
     agg = Counter()
+    print(f"config: {os.path.basename(a.config)}")
     print(f"{'seed':>6} {'deliv':>7} {'pct':>6}  {'SL-no-route':>11}  failures-by-mechanism")
     print("-" * 96)
     for seed in seeds:
-        d, t, f, cats = run_seed(seed)
+        d, t, f, cats = run_seed(seed, a.config)
         if d is None:
             print(f"{seed:>6}  PARSE-FAIL")
             continue

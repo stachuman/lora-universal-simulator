@@ -1063,6 +1063,15 @@ PROTOCOL = {
   gateway_visit_period_ms        = 15000,
   gateway_visit_duration_ms      = 7500,       -- 50/50 split
   gateway_visit_offset_ms        = 7500,
+  -- Herd-jitter (PROTOCOL §schedule): a gateway with a large 1-hop herd would
+  -- otherwise get a thundering-herd of RTS at window-open (every deferring
+  -- sender wakes at the same instant). The gateway advertises a spread-fraction
+  -- nibble sized from herd_size × this per-exchange airtime estimate ÷ window;
+  -- senders draw a uniform jitter over (nibble/15 × window) on top of the defer.
+  -- Small herds → ~0 spread (no added latency); large herds → spread the window.
+  gateway_herd_exchange_ms       = 600,        -- ~RTS+CTS+DATA+ACK airtime estimate
+  gateway_herd_min               = 3,          -- herds < this don't jitter (≤2 has nothing to de-conflict; spreading only adds latency — see s15 2-node revert)
+  gateway_herd_jitter_max_frac   = 0.6,        -- cap jitter at this fraction of the window; the rest is reserved for the chosen sender's exchange + retries + the gateway's own forwards (avoids over-spread → away when fewer nodes send than the herd size)
   -- Cross-layer resolve (the 'H' hash-locate round-trip) is bounded by the
   -- gateway's VISIT CADENCE, not by same-layer timers: the gateway floods H in
   -- one window, but the binding reply must route multi-hop back AND catch the
@@ -1570,6 +1579,39 @@ local function pack_schedule_record(rec, now)
   return string.char(b0, duration_100ms & 0xff, offset_100ms & 0xff, period_units & 0xff)
 end
 
+-- Count this node's 1-hop neighbours on its CURRENT layer (rt entries whose
+-- primary candidate is direct). Used to size the herd-jitter spread the gateway
+-- advertises — the bigger the herd contending for its window, the wider senders
+-- should spread their deferred RTS to avoid a window-open collision storm.
+local function count_direct_neighbors(node)
+  local n = 0
+  if node.rt then
+    for _, entry in pairs(node.rt) do
+      local c = entry.candidates and entry.candidates[1]
+      if c and c.hops == 1 then n = n + 1 end
+    end
+  end
+  return n
+end
+
+-- Spread-fraction nibble (0..15) advertised in the schedule block. frac =
+-- herd_size × per-exchange airtime ÷ visit window, clamped to 1.0. Small herds
+-- → ~0 (no spread, no added latency); a herd whose exchanges would overrun the
+-- window → 15 (spread across the whole window).
+local function gateway_spread_nibble(node)
+  local window = node.gateway_visit_duration_ms or 7500
+  local herd = count_direct_neighbors(node)
+  -- Tiny herds (≤2) don't collide meaningfully; spreading them only adds
+  -- latency (and a self:rand that reshuffles the sim). Advertise 0 → senders
+  -- skip the jitter entirely. Only herds ≥ gateway_herd_min spread.
+  if window <= 0 or herd < (node.gateway_herd_min or 3) then return 0 end
+  local frac = (herd * (node.gateway_herd_exchange_ms or 600)) / window
+  if frac > 1 then frac = 1 end
+  local nib = math.floor(frac * 15 + 0.5)
+  if nib < 0 then nib = 0 elseif nib > 15 then nib = 15 end
+  return nib
+end
+
 local function pack_schedule_block(node)
   if not node.self_gateway or not node.gateway_schedule_records then return "" end
   local now = node:now()
@@ -1578,7 +1620,10 @@ local function pack_schedule_block(node)
     table.insert(records, pack_schedule_record(rec, now))
   end
   if #records == 0 then return "" end
-  return string.char(#records & 0xff) .. table.concat(records)
+  -- layer_count byte: low nibble = #records (≤15), high nibble = herd spread
+  -- fraction (0 wire bytes added; old beacons with #records≤15 decode spread=0).
+  local lc = ((gateway_spread_nibble(node) & 0x0f) << 4) | (#records & 0x0f)
+  return string.char(lc) .. table.concat(records)
 end
 
 local function pack_beacon_u32_le(v)
@@ -1748,7 +1793,9 @@ local function parse_beacon(frame)
   local pos = 9               -- next byte after fixed key_hash32
   if out.has_schedule then
     if #frame < pos then return nil end           -- need at least the layer_count byte
-    local layer_count = frame:byte(pos)
+    local lc_byte = frame:byte(pos)
+    local layer_count = lc_byte & 0x0f             -- low nibble = #records
+    out.schedule_spread_nibble = (lc_byte >> 4) & 0x0f  -- high nibble = herd spread
     pos = pos + 1
     out.schedule = {}
     if #frame < pos - 1 + layer_count * 4 then return nil end
@@ -4584,6 +4631,7 @@ local function remember_gateway_schedule(self, gateway_id, b)
     primary_leaf_id = b.leaf_id,
     bridged_layers = layer_set,
     records = records,
+    spread_nibble = b.schedule_spread_nibble or 0,   -- herd-jitter spread fraction
   }
 	  self:emit("gateway_schedule_observed", {
 	    gateway = gateway_id,
@@ -4605,6 +4653,7 @@ local function gateway_schedule_defer_ms(self, gateway_id)
   local our_leaf = active_leaf_id(self)
   local guard = self.gateway_schedule_guard_ms or 100
   local best_delay = 0
+  local best_window = 0    -- the window we'll be reachable in, for herd-jitter sizing
   for _, rec in ipairs(sched.records) do
     if rec.period_ms ~= nil and rec.period_ms > 0 then
       local period = rec.period_ms
@@ -4620,7 +4669,7 @@ local function gateway_schedule_defer_ms(self, gateway_id)
         -- so defer until it ends (+guard for the return switch to settle).
         if phase >= 0 and phase < duration then
           local delay = duration - phase + guard
-          if delay > best_delay then best_delay = delay end
+          if delay > best_delay then best_delay = delay; best_window = period - duration end
         end
       else
         -- VISIT-layer access: this record IS the gateway's visit to OUR layer.
@@ -4632,10 +4681,29 @@ local function gateway_schedule_defer_ms(self, gateway_id)
         -- blind into the away-gap — the dominant cross-layer first-leg stall.
         if phase >= duration then
           local delay = (period - phase) + guard
-          if delay > best_delay then best_delay = delay end
+          if delay > best_delay then best_delay = delay; best_window = duration end
         end
       end
     end
+  end
+  -- Herd-jitter: when deferring to a window, spread our arrival across it. The
+  -- schedule-defer otherwise re-synchronizes the whole herd to window-open,
+  -- where their RTS collide (the dominant failure on a densely-connected
+  -- gateway). The gateway advertises a spread-fraction nibble sized from its
+  -- 1-hop herd; we draw a uniform jitter over (nibble/15 × window). Small herds
+  -- advertise ~0 → no jitter, no wasted latency.
+  if best_delay > 0 and (sched.spread_nibble or 0) > 0 and best_window > 0 then
+    local jmax = math.floor((sched.spread_nibble / 15) * best_window)
+    -- Leave the tail of the window for the chosen sender's exchange + retries
+    -- AND the gateway's own forwards, so a high jitter draw never pushes the RTS
+    -- past window-close into the away-gap. Two caps: an absolute couple-retry
+    -- headroom, and a fraction of the window (so when fewer nodes send than the
+    -- herd size, the spread isn't stretched needlessly wide).
+    local headroom = 2 * (self.gateway_herd_exchange_ms or 600)
+    local cap = math.min(best_window - headroom,
+                         math.floor((self.gateway_herd_jitter_max_frac or 0.6) * best_window))
+    if jmax > cap then jmax = cap end
+    if jmax > 0 then best_delay = best_delay + self:rand(0, jmax) end
   end
   return best_delay
 end
