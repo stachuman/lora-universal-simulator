@@ -24,4 +24,5 @@ async def test_visualize_has_delivery_panel():
     assert "renderDeliveryPanel" in html, "renderDeliveryPanel missing"
     assert "/dm_breakdown" in html, "dm_breakdown fetch URL missing"
     assert "centerViewportOn" in html, "centerViewportOn helper missing"
+    assert "fitViewportTo" in html, "fitViewportTo helper missing"
     assert "btn-delivery').addEventListener" in html, "Delivery click handler not wired"

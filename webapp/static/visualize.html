@@ -2680,15 +2680,26 @@ function renderDeliveryPanel(data) {
     html += '</div>';
     sidebarContent.innerHTML = html;
 
-    // DM row → flight trace by (origin id, payload).
+    // DM row → frame the message's time window, then flight-trace it.
+    // Fitting first loads the flight's events into the viewport cache so
+    // traceFlight() can match them and drawFlightPolyline() can chain them.
     sidebarContent.querySelectorAll('.dm-row[data-dm]').forEach(tr => {
-        tr.addEventListener('click', () => {
+        tr.addEventListener('click', async () => {
             const summaryRow = dm[+tr.dataset.dm];
             const msg = (data.messages || []).find(m =>
                 m.origin === summaryRow.origin && m.dst === summaryRow.dst);
             const originId = _nodeIdFromLabel(summaryRow.origin);
             const payload = msg ? msg.payload : null;
-            if (originId != null && payload != null) traceFlight(originId, payload);
+            if (msg) {
+                const ts = (msg.events || [])
+                    .map(e => e.t_ms).filter(t => t != null);
+                for (const f of ['enqueued_ms', 'arrived_ms', 'ack_ms', 'giveup_ms',
+                                 'arrival_at_target_ms']) {
+                    if (msg[f] != null) ts.push(msg[f]);
+                }
+                if (ts.length) await fitViewportTo(Math.min(...ts), Math.max(...ts));
+            }
+            if (originId != null && payload != null) await traceFlight(originId, payload);
         });
     });
     // Channel row → center viewport on the post time.
@@ -2727,6 +2738,22 @@ async function centerViewportOn(target) {
     const span = S.viewTo - S.viewFrom;
     S.viewFrom = target - span / 2;
     S.viewTo = target + span / 2;
+    clampViewport();
+    syncScrollbar();
+    await loadViewport();
+    render();
+}
+
+// Frame [fromMs, toMs] in the viewport with padding. A 500ms floor keeps
+// instantaneous flights from zooming in absurdly far.
+async function fitViewportTo(fromMs, toMs) {
+    if (toMs < fromMs) { const t = fromMs; fromMs = toMs; toMs = t; }
+    let span = toMs - fromMs;
+    if (span < 500) { const mid = (fromMs + toMs) / 2; fromMs = mid - 250; toMs = mid + 250; span = 500; }
+    const pad = span * 0.15;
+    followMode = false; updateFollowIndicator();
+    S.viewFrom = fromMs - pad;
+    S.viewTo = toMs + pad;
     clampViewport();
     syncScrollbar();
     await loadViewport();
