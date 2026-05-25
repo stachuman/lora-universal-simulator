@@ -1393,47 +1393,47 @@
     {
       "at_ms": 600000,
       "node": "alice",
-      "command": "send bob hi"
+      "command": "send bob hi-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-t"
     },
     {
       "at_ms": 612000,
       "node": "bob",
-      "command": "send alice hey"
+      "command": "send alice hey-the-quick-brown-fox-jumps-over-the-lazy-dog-"
     },
     {
       "at_ms": 628000,
       "node": "alice",
-      "command": "send bob any-updates"
+      "command": "send bob any-updates-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-d"
     },
     {
       "at_ms": 645000,
       "node": "bob",
-      "command": "send alice all-green"
+      "command": "send alice all-green-the-quick-"
     },
     {
       "at_ms": 665000,
       "node": "alice",
-      "command": "send bob good"
+      "command": "send bob good-the-quick-brown-fox-jumps-over-the-lazy-dog"
     },
     {
       "at_ms": 685000,
       "node": "bob",
-      "command": "send alice ttyl"
+      "command": "send alice ttyl-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-q"
     },
     {
       "at_ms": 720000,
       "node": "carol",
-      "command": "send heidi ping"
+      "command": "send heidi ping-the-quick-b"
     },
     {
       "at_ms": 738000,
       "node": "heidi",
-      "command": "send carol pong"
+      "command": "send carol pong-the-quick-br"
     },
     {
       "at_ms": 765000,
       "node": "carol",
-      "command": "send heidi howsignal"
+      "command": "send heidi howsignal-the-quick-brown-fox-jumps-over-t"
     },
     {
       "at_ms": 792000,
@@ -1443,102 +1443,102 @@
     {
       "at_ms": 820000,
       "node": "carol",
-      "command": "send heidi ack"
+      "command": "send heidi ack-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-qu"
     },
     {
       "at_ms": 845000,
       "node": "heidi",
-      "command": "send carol 73"
+      "command": "send carol 73-the-quick-brown-fox-jumps-over-the-lazy-dog-t"
     },
     {
       "at_ms": 840000,
       "node": "leo",
-      "command": "send rosa yo"
+      "command": "send rosa yo-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-th"
     },
     {
       "at_ms": 860000,
       "node": "rosa",
-      "command": "send leo yo-back"
+      "command": "send leo yo-back-the-qui"
     },
     {
       "at_ms": 890000,
       "node": "leo",
-      "command": "send rosa test-test"
+      "command": "send rosa test-test-"
     },
     {
       "at_ms": 920000,
       "node": "rosa",
-      "command": "send leo 5of5"
+      "command": "send leo 5of5-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-bro"
     },
     {
       "at_ms": 950000,
       "node": "leo",
-      "command": "send rosa out"
+      "command": "send rosa out-the-quick-brown-fox-jumps-over-the-lazy-do"
     },
     {
       "at_ms": 975000,
       "node": "rosa",
-      "command": "send leo 73"
+      "command": "send leo 73-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-br"
     },
     {
       "at_ms": 960000,
       "node": "ursula",
-      "command": "send yves greetings"
+      "command": "send yves greetings-the-q"
     },
     {
       "at_ms": 978000,
       "node": "yves",
-      "command": "send ursula hi-back"
+      "command": "send ursula hi-back-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-"
     },
     {
       "at_ms": 1005000,
       "node": "ursula",
-      "command": "send yves status"
+      "command": "send yves status-the-quic"
     },
     {
       "at_ms": 1032000,
       "node": "yves",
-      "command": "send ursula nominal"
+      "command": "send ursula nominal-th"
     },
     {
       "at_ms": 1060000,
       "node": "ursula",
-      "command": "send yves out"
+      "command": "send yves out-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-"
     },
     {
       "at_ms": 1085000,
       "node": "yves",
-      "command": "send ursula 73"
+      "command": "send ursula 73-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-ov"
     },
     {
       "at_ms": 1080000,
       "node": "dave",
-      "command": "send_layer 2 335675398 bridge-12-test"
+      "command": "send_layer 2 335675398 bridge-12-test-the-quick-brown-fox-jumps-over-the-lazy-dog-the-"
     },
     {
       "at_ms": 1115000,
       "node": "peter",
-      "command": "send_layer 1 335609860 got-it"
+      "command": "send_layer 1 335609860 got-it-the"
     },
     {
       "at_ms": 1150000,
       "node": "dave",
-      "command": "send_layer 2 335675398 round-trip-ok"
+      "command": "send_layer 2 335675398 round-trip-ok-the-quick-brown-fox-jumps-over-t"
     },
     {
       "at_ms": 1180000,
       "node": "peter",
-      "command": "send_layer 1 335609860 confirmed"
+      "command": "send_layer 1 335609860 confirmed-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jump"
     },
     {
       "at_ms": 1200000,
       "node": "frank",
-      "command": "send_layer 3 335740931 bridge-13-test"
+      "command": "send_layer 3 335740931 bridge-13-test-the-quick-brown-fox-jumps-over"
     },
     {
       "at_ms": 1235000,
       "node": "wendy",
-      "command": "send_layer 1 335609862 got-it"
+      "command": "send_layer 1 335609862 got-it-the-quick"
     },
     {
       "at_ms": 1270000,
@@ -1548,17 +1548,17 @@
     {
       "at_ms": 1300000,
       "node": "wendy",
-      "command": "send_layer 1 335609862 confirmed"
+      "command": "send_layer 1 335609862 confirmed-the-quick-"
     },
     {
       "at_ms": 1320000,
       "node": "mia",
-      "command": "send_layer 3 335740934 bridge-23-test"
+      "command": "send_layer 3 335740934 bridge-23-test-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-"
     },
     {
       "at_ms": 1355000,
       "node": "zoey",
-      "command": "send_layer 2 335675395 got-it"
+      "command": "send_layer 2 335675395 got-it-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-laz"
     },
     {
       "at_ms": 1390000,
@@ -1568,62 +1568,62 @@
     {
       "at_ms": 1420000,
       "node": "zoey",
-      "command": "send_layer 2 335675395 confirmed"
+      "command": "send_layer 2 335675395 confirmed-the"
     },
     {
       "at_ms": 1500000,
       "node": "eve",
-      "command": "send_channel 7 L1-news-1"
+      "command": "send_channel 7 L1-news-1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jum"
     },
     {
       "at_ms": 1530000,
       "node": "grace",
-      "command": "send_channel 7 L1-event-1"
+      "command": "send_channel 7 L1-event-1-the-quick-brown-fox-jumps-over-t"
     },
     {
       "at_ms": 1560000,
       "node": "mia",
-      "command": "send_channel 7 L2-news-1"
+      "command": "send_channel 7 L2-news-1-the-qui"
     },
     {
       "at_ms": 1590000,
       "node": "quinn",
-      "command": "send_channel 7 L2-event-1"
+      "command": "send_channel 7 L2-event-1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jum"
     },
     {
       "at_ms": 1620000,
       "node": "viktor",
-      "command": "send_channel 7 L3-news-1"
+      "command": "send_channel 7 L3-news-1-the-quick-"
     },
     {
       "at_ms": 1650000,
       "node": "drew",
-      "command": "send_channel 7 L3-event-1"
+      "command": "send_channel 7 L3-event-1-th"
     },
     {
       "at_ms": 1680000,
       "node": "eve",
-      "command": "send_channel 7 L1-news-2"
+      "command": "send_channel 7 L1-news-2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-qu"
     },
     {
       "at_ms": 1710000,
       "node": "grace",
-      "command": "send_channel 7 L1-event-2"
+      "command": "send_channel 7 L1-event-2-the-quick-brown-fox-jumps-over-the-l"
     },
     {
       "at_ms": 1740000,
       "node": "mia",
-      "command": "send_channel 7 L2-news-2"
+      "command": "send_channel 7 L2-news-2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick"
     },
     {
       "at_ms": 1770000,
       "node": "quinn",
-      "command": "send_channel 7 L2-event-2"
+      "command": "send_channel 7 L2-event-2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-"
     },
     {
       "at_ms": 1800000,
       "node": "viktor",
-      "command": "send_channel 7 L3-news-2"
+      "command": "send_channel 7 L3-news-2-the-quick-brown-fox-jumps-over"
     },
     {
       "at_ms": 1830000,
@@ -1633,157 +1633,157 @@
     {
       "at_ms": 1860000,
       "node": "eve",
-      "command": "send_channel 7 L1-news-3"
+      "command": "send_channel 7 L1-news-3-the-quick-brown-fox-jumps-over-the-lazy-"
     },
     {
       "at_ms": 1890000,
       "node": "grace",
-      "command": "send_channel 7 L1-event-3"
+      "command": "send_channel 7 L1-event-3-t"
     },
     {
       "at_ms": 1920000,
       "node": "mia",
-      "command": "send_channel 7 L2-news-3"
+      "command": "send_channel 7 L2-news-3-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy"
     },
     {
       "at_ms": 1950000,
       "node": "quinn",
-      "command": "send_channel 7 L2-event-3"
+      "command": "send_channel 7 L2-event-3-the"
     },
     {
       "at_ms": 1980000,
       "node": "viktor",
-      "command": "send_channel 7 L3-news-3"
+      "command": "send_channel 7 L3-news-3-"
     },
     {
       "at_ms": 2010000,
       "node": "drew",
-      "command": "send_channel 7 L3-event-3"
+      "command": "send_channel 7 L3-event-3-the-quick-brown-fox-jumps-over-the-lazy-dog-"
     },
     {
       "at_ms": 2100000,
       "node": "alice",
-      "command": "send bob round-2"
+      "command": "send bob round-2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-o"
     },
     {
       "at_ms": 2115000,
       "node": "mia",
-      "command": "send_channel 7 L2-news-5"
+      "command": "send_channel 7 L2-news-5-the-quick-brown-fox-jumps-over-"
     },
     {
       "at_ms": 2135000,
       "node": "bob",
-      "command": "send alice ack"
+      "command": "send alice ack-the-qu"
     },
     {
       "at_ms": 2160000,
       "node": "carol",
-      "command": "send heidi hey-again"
+      "command": "send heidi hey-again-the-quick-brown-fox-jumps-over-the-laz"
     },
     {
       "at_ms": 2185000,
       "node": "viktor",
-      "command": "send_channel 7 L3-news-5"
+      "command": "send_channel 7 L3-news-5-the-quick-brown-fox-jumps-over-the-laz"
     },
     {
       "at_ms": 2200000,
       "node": "heidi",
-      "command": "send carol still-here"
+      "command": "send carol still-here-the-quick-brown-fox-jumps-over-the-lazy-dog-"
     },
     {
       "at_ms": 2220000,
       "node": "leo",
-      "command": "send rosa second-pass"
+      "command": "send rosa second-pass-"
     },
     {
       "at_ms": 2250000,
       "node": "rosa",
-      "command": "send leo yep"
+      "command": "send leo yep-the-quick-"
     },
     {
       "at_ms": 2270000,
       "node": "ursula",
-      "command": "send yves second-pass"
+      "command": "send yves second-pass-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brow"
     },
     {
       "at_ms": 2300000,
       "node": "drew",
-      "command": "send_channel 7 L3-event-5"
+      "command": "send_channel 7 L3-event-5-the"
     },
     {
       "at_ms": 2320000,
       "node": "yves",
-      "command": "send ursula yep"
+      "command": "send ursula yep-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-o"
     },
     {
       "at_ms": 2350000,
       "node": "dave",
-      "command": "send_layer 2 335675398 stress-test"
+      "command": "send_layer 2 335675398 stress-test-the-quick-brown-fox-jumps-over-the-lazy-dog"
     },
     {
       "at_ms": 2390000,
       "node": "eve",
-      "command": "send_channel 7 L1-news-5"
+      "command": "send_channel 7 L1-news-5-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-t"
     },
     {
       "at_ms": 2420000,
       "node": "peter",
-      "command": "send_layer 1 335609860 loud-and-clear"
+      "command": "send_layer 1 335609860 loud-and-clear-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the"
     },
     {
       "at_ms": 2450000,
       "node": "frank",
-      "command": "send_layer 3 335740931 stress-test"
+      "command": "send_layer 3 335740931 stress-test-the-quick-brown-fox-jumps-ove"
     },
     {
       "at_ms": 2490000,
       "node": "grace",
-      "command": "send_channel 7 L1-event-5"
+      "command": "send_channel 7 L1-event-5-the-quick-brown-fox-jumps-over-the-lazy-do"
     },
     {
       "at_ms": 2520000,
       "node": "wendy",
-      "command": "send_layer 1 335609862 loud-and-clear"
+      "command": "send_layer 1 335609862 loud-and-clear-"
     },
     {
       "at_ms": 2550000,
       "node": "mia",
-      "command": "send_layer 3 335740934 stress-test"
+      "command": "send_layer 3 335740934 stress-test-the-q"
     },
     {
       "at_ms": 2590000,
       "node": "quinn",
-      "command": "send_channel 7 L2-event-5"
+      "command": "send_channel 7 L2-event-5-the-quick-brown-fox-jumps-over-the-lazy-dog-the-qui"
     },
     {
       "at_ms": 2620000,
       "node": "zoey",
-      "command": "send_layer 2 335675395 loud-and-clear"
+      "command": "send_layer 2 335675395 loud-and-clear-the-quick-brown-fox-jumps"
     },
     {
       "at_ms": 2650000,
       "node": "alice",
-      "command": "send bob final"
+      "command": "send bob final-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fo"
     },
     {
       "at_ms": 2675000,
       "node": "bob",
-      "command": "send alice 73-all"
+      "command": "send alice 73-all-the-quick-brown-fox-jumps-over-the-lazy-d"
     },
     {
       "at_ms": 900000,
       "node": "newbie",
-      "command": "send_layer 2 335675398 newbie-hello-1"
+      "command": "send_layer 2 335675398 newbie-hello-1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-"
     },
     {
       "at_ms": 1500000,
       "node": "newbie",
-      "command": "send_layer 2 335675398 newbie-hello-2"
+      "command": "send_layer 2 335675398 newbie-hello-2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick"
     },
     {
       "at_ms": 2100000,
       "node": "newbie",
-      "command": "send_layer 2 335675398 newbie-hello-3"
+      "command": "send_layer 2 335675398 newbie-hello-3-the-quick-brown-fox-jumps-over-the-lazy-"
     }
   ]
 }

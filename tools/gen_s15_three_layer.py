@@ -30,6 +30,7 @@ Run:
 """
 import json
 import os
+import random
 
 # ---------- Top-level constants ----------
 
@@ -335,6 +336,57 @@ def _inject(at_ms, node, command):
     return {"at_ms": at_ms, "node": node, "command": command}
 
 
+# ---------- Realistic message lengths ----------
+#
+# Real LoRa-mesh traffic isn't 8-byte words. Pad every message payload (DM
+# AND channel) to a realistic length drawn from a mixed distribution:
+#   ~30% short acks/status (10-20 B), ~50% chat/telemetry (40-80 B),
+#   ~20% longer (120-200 B).
+# Length is deterministic per (node, at_ms, base) so regeneration is stable.
+# The base word stays as a readable prefix; padding is hyphen-joined (NO
+# spaces) so no command/event parser can mis-split a multi-word payload.
+# Clamped per command type to stay under the wire caps (max_payload_bytes=230,
+# channel_msg_max_payload_bytes=200).
+_FILLER = ("the-quick-brown-fox-jumps-over-the-lazy-dog-" * 6)
+_PAYLOAD_SAFE_MAX = {"send": 220, "send_layer": 210, "send_channel": 195}
+
+
+def _mixed_target_len(rng):
+    r = rng.random()
+    if r < 0.30:
+        return rng.randint(10, 20)      # short ack / status
+    if r < 0.80:
+        return rng.randint(40, 80)      # normal chat / telemetry
+    return rng.randint(120, 200)        # longer message
+
+
+def _pad_payload(verb, base, node, at_ms):
+    rng = random.Random(f"{node}|{at_ms}|{base}")
+    target = min(_mixed_target_len(rng), _PAYLOAD_SAFE_MAX[verb])
+    if len(base) >= target:
+        return base
+    return (base + "-" + _FILLER)[:target]
+
+
+def _expand_payloads(commands):
+    """Rewrite send/send_layer/send_channel payloads to realistic lengths."""
+    out = []
+    for c in commands:
+        node, at_ms, cmd = c["node"], c["at_ms"], c["command"]
+        verb = cmd.split(None, 1)[0]
+        if verb == "send" and len(cmd.split(None, 2)) == 3:
+            _, dst, base = cmd.split(None, 2)
+            cmd = f"send {dst} {_pad_payload('send', base, node, at_ms)}"
+        elif verb == "send_layer" and len(cmd.split(None, 3)) == 4:
+            _, layer, h, base = cmd.split(None, 3)
+            cmd = f"send_layer {layer} {h} {_pad_payload('send_layer', base, node, at_ms)}"
+        elif verb == "send_channel" and len(cmd.split(None, 2)) == 3:
+            _, ch, base = cmd.split(None, 2)
+            cmd = f"send_channel {ch} {_pad_payload('send_channel', base, node, at_ms)}"
+        out.append(_inject(at_ms, node, cmd))
+    return out
+
+
 # Phase 1 — DM-only (t=600s -> 1500s, 15 min). 7 burst pairs,
 # staggered ~120s apart. Each pair is a back-and-forth burst.
 PHASE1_INJECTS = [
@@ -490,8 +542,8 @@ def build_scenario():
         "topology": {
             "links": build_links(),
         },
-        "commands": (PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS
-                     + JOIN_INJECTS),
+        "commands": _expand_payloads(
+            PHASE1_INJECTS + PHASE2_INJECTS + PHASE3_INJECTS + JOIN_INJECTS),
     }
 
 
