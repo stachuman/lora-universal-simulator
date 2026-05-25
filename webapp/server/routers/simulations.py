@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from server.config import validate_safe_id
 from server.services.config_validator import validate as validate_lus_config
+from server.services.dm_breakdown import DmBreakdownCache
 from server.services.event_index import EventIndex, EventIndexCache
 from server.services.sim_manager import SimManager
 
@@ -205,6 +206,34 @@ async def sim_events(
     events = index.query_time_range(from_ms, to_ms, max_events)
     return _cached_json_response(request, sim_id,
                                  {"events": events, "count": len(events)})
+
+
+@router.get("/{sim_id}/dm_breakdown")
+async def sim_dm_breakdown(sim_id: str, request: Request):
+    """Per-DM + per-channel delivery breakdown (see tools/dm_delivery_breakdown.py).
+
+    Returns {"summary": [...], "messages": [...], "channels": [...]} for a
+    completed sim. 409 while still running, 404 if unknown / no events."""
+    sim = _get_sim_or_404(sim_id, request)
+    sim_manager: SimManager = request.app.state.sim_manager
+    cache: DmBreakdownCache = request.app.state.dm_breakdown_cache
+
+    events_path = sim_manager.get_events_path(sim_id)
+    if events_path is None:
+        if sim.status in ("pending", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Simulation is still {sim.status}; events not available yet",
+            )
+        raise HTTPException(
+            status_code=404, detail="Events file not found for this simulation")
+
+    config_path = sim_manager.get_config_path(sim_id)
+    if config_path is None:
+        raise HTTPException(status_code=404, detail="Config not found for this simulation")
+
+    payload = cache.get(sim_id, str(config_path), str(events_path))
+    return _cached_json_response(request, sim_id, payload)
 
 
 @router.get("/{sim_id}/density")

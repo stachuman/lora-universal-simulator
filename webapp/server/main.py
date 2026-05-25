@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from server.config import Settings
 from server.routers import interactive, simulations, topologies, topo_creator
+from server.services.dm_breakdown import DmBreakdownCache
 from server.services.event_index import EventIndexCache
 from server.services.interactive_manager import InteractiveSessionManager
 from server.services.sim_manager import SimManager
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
         cwd=settings.LUS_CWD,
     )
     app.state.event_cache = EventIndexCache(max_size=5)
+    app.state.dm_breakdown_cache = DmBreakdownCache()
     app.state.interactive_manager = InteractiveSessionManager(
         data_dir=settings.DATA_DIR,
         orchestrator_path=str(settings.ORCHESTRATOR_PATH),

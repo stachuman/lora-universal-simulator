@@ -83,7 +83,8 @@ import os
 import re
 import subprocess
 import sys
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 
 
 def maybe_run(cfg_path, events_path, lus_path):
@@ -1567,6 +1568,42 @@ def main():
         if args.detail:
             print()
             render_channel_detail(posts_meta, id_to_name, args.post)
+
+
+class DmBreakdownCache:
+    """mtime-invalidated LRU memo of the full (mode=all, detail=True)
+    breakdown payload, keyed by sim_id. The payload is small plain JSON,
+    so unlike EventIndexCache this keeps the computed dict, not an index."""
+
+    def __init__(self, max_size: int = 8):
+        self._max_size = max_size
+        self._cache: "OrderedDict[str, tuple[int, dict]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, sim_id: str, config_path: str, events_path: str) -> dict:
+        try:
+            mtime = os.stat(events_path).st_mtime_ns
+        except OSError:
+            mtime = 0
+        with self._lock:
+            hit = self._cache.get(sim_id)
+            if hit is not None and hit[0] >= mtime:
+                self._cache.move_to_end(sim_id)
+                return hit[1]
+        # Compute outside the lock (idempotent; a concurrent double-compute
+        # is harmless and cheaper than holding the lock through a file walk).
+        payload = compute_breakdown(config_path, events_path,
+                                    mode="all", detail=True)
+        with self._lock:
+            self._cache[sim_id] = (mtime, payload)
+            self._cache.move_to_end(sim_id)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
+        return payload
+
+    def evict(self, sim_id: str) -> None:
+        with self._lock:
+            self._cache.pop(sim_id, None)
 
 
 if __name__ == "__main__":
