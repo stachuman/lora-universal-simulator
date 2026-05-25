@@ -1031,6 +1031,12 @@ PROTOCOL = {
 
   -- ---- Defer / dedup ----
   send_defer_ttl_ms              = 30000,
+  -- 'F' RREP de-storm backoff (§3.7b). The RREP rides tx_initiating, whose LBT
+  -- only defers when the channel is already busy; simultaneous reverse-path
+  -- repliers all sense clear and collide at the receiver. A small random backoff
+  -- spreads them so LBT can then serialize the residual. ~a few routing-SF
+  -- frame-airtimes.
+  route_reply_jitter_ms          = 400,
   last_acked_ttl_ms              = 10000,
   seen_origin_ttl_ms             = 30000,
 
@@ -4511,6 +4517,11 @@ local function activate_gateway_layer(self, rec, reason)
     duration_ms = rec.duration_ms,
     reason = reason or "schedule",
   })
+  -- A layer we just (re)entered may hold deferred sends whose RREQ we suppressed
+  -- while off-layer (try_drain_deferred layer-gate). Kick a drain now so they
+  -- requery near window-open, maximizing the chance the RREP returns before we
+  -- hop away. after() so it runs past the current callback (avoids reentrancy).
+  self:after(1, function() if try_drain_deferred then try_drain_deferred(self) end end)
 end
 
 local function activate_primary_layer(self, reason)
@@ -4541,6 +4552,10 @@ local function activate_primary_layer(self, reason)
       data_sf_bitmap = self.allowed_sf_bitmap,
       reason = reason or "primary",
     })
+    -- Same as activate_gateway_layer: returning to our home layer, kick a drain
+    -- so home-layer deferred sends requery promptly (their RREQ was suppressed
+    -- while we were away visiting).
+    self:after(1, function() if try_drain_deferred then try_drain_deferred(self) end end)
   end
 end
 
@@ -5437,14 +5452,41 @@ function send_route_reply(self, origin, dst_id, hops_to_dst)
     return false
   end
   local nh = cand.next_hop
-  self:emit("rrep_tx", { origin = origin, dst = dst_id, next = nh, hops = hops_to_dst })
-  tx_initiating(self, pack_r_reply(origin, active_leaf_id(self), dst_id, nh, hops_to_dst), {
-    sf    = active_routing_sf(self),
-    label = "F",
-    info  = string.format("rrep origin=%s dst=%s next=%s hops=%d",
-                          name_of(self, origin), name_of(self, dst_id),
-                          name_of(self, nh), hops_to_dst),
-  })
+  -- Schedule-aware + jittered RREP. The RREP rides tx_initiating, whose LBT only
+  -- backs off when the channel is already BUSY -- so two reverse-path holders
+  -- answering one RREQ at the same instant both sense clear and collide at the
+  -- receiver (the dominant cross-layer route-discovery failure: a PRESENT gateway
+  -- that decodes nothing). Two corrections, mirroring why send_hash_bind_response
+  -- uses the coordinated queued path:
+  --   1. defer to the next-hop gateway's presence window when it is AWAY
+  --      (gateway_schedule_defer_ms; 0 when nh is not a known/away gateway), and
+  --   2. always add a small random backoff (route_reply_jitter_ms) so
+  --      simultaneous repliers spread out and LBT serializes the residual.
+  local sched = gateway_schedule_defer_ms(self, nh)
+  local delay = sched + self:rand(0, self.route_reply_jitter_ms or 0)
+  if sched > 0 then
+    -- The next hop is a gateway currently away on another layer; we hold the
+    -- RREP for its window instead of firing it blind (mirrors the DATA-path
+    -- tx_gateway_schedule_defer). Distinct emit so this path is observable.
+    self:emit("rrep_gateway_schedule_defer", {
+      origin = origin, dst = dst_id, next_hop = nh, sched_ms = sched,
+    })
+  end
+  self:emit("rrep_tx", { origin = origin, dst = dst_id, next = nh,
+                         hops = hops_to_dst, defer_ms = delay })
+  local frame = pack_r_reply(origin, active_leaf_id(self), dst_id, nh, hops_to_dst)
+  local sf    = active_routing_sf(self)
+  local info  = string.format("rrep origin=%s dst=%s next=%s hops=%d",
+                              name_of(self, origin), name_of(self, dst_id),
+                              name_of(self, nh), hops_to_dst)
+  local function emit_rrep()
+    tx_initiating(self, frame, { sf = sf, label = "F", info = info })
+  end
+  if delay > 0 then
+    self:after(delay, emit_rrep)
+  else
+    emit_rrep()
+  end
   return true
 end
 
@@ -6351,7 +6393,17 @@ try_drain_deferred = function(self)
     -- present, redrained, redeferred, with no TTL exit. s12 6h showed
     -- one message accumulating 477 deferrals over 5.7 hours, consuming
     -- airtime for futile retries while DMs queued behind it.
-    if (now - d.queued_at_ms) >= self.send_defer_ttl_ms then
+    -- Duty-cycle-scaled TTL. A gateway's layer-targeted deferred send is only
+    -- serviceable while we're present on d.tx_layer_id (~50% of wall-clock for a
+    -- time-sharing gateway), and route discovery for it only floods during those
+    -- windows (the layer-gate below). The same-layer 30s send_defer_ttl_ms would
+    -- expire after only ~2 on-layer windows -- too few RREQ rounds. Use the
+    -- visit-period-scaled gateway_handoff_defer_ttl_ms so it gets enough.
+    local defer_ttl = self.send_defer_ttl_ms
+    if self.self_gateway and d.tx_layer_id ~= nil then
+      defer_ttl = math.max(defer_ttl, self.gateway_handoff_defer_ttl_ms or 0)
+    end
+    if (now - d.queued_at_ms) >= defer_ttl then
       self:emit("send_giveup", {
         origin     = d.origin, dst = d.dst_id, dst_name = d.dst_name,
         payload    = d.user_text, ctr = d.ctr,
@@ -6360,9 +6412,25 @@ try_drain_deferred = function(self)
       })
       self:log(string.format(
         "send_giveup dst=%s waited=%dms (defer TTL %dms expired)",
-        d.dst_name, now - d.queued_at_ms, self.send_defer_ttl_ms))
+        d.dst_name, now - d.queued_at_ms, defer_ttl))
     elseif d_rt[d.dst_id] ~= nil then
       table.insert(drained, d)
+    elseif d.tx_layer_id ~= nil
+           and d.tx_layer_id ~= (self.active_layer_id or self.layer_id or 0) then
+      -- Layer-gated route discovery. The RREQ floods our CURRENT active layer
+      -- (emit_route_request → active_leaf_id), but this dst lives on
+      -- d.tx_layer_id. A gateway servicing this drain while visiting another
+      -- layer would flood the wrong layer: the RREQ never reaches the dst, the
+      -- airtime is wasted, AND the per-dst RREQ dedup (route_request_last) gets
+      -- stamped so the eventual on-layer flood is suppressed. So when we're not
+      -- on the dst's layer, hold the item — our visit schedule will return us to
+      -- tx_layer_id and the next drain there will requery correctly.
+      self:emit("send_defer_requery_offlayer", {
+        origin = d.origin, dst = d.dst_id, dst_name = d.dst_name, ctr = d.ctr,
+        tx_layer_id = d.tx_layer_id,
+        active_layer = self.active_layer_id or self.layer_id or 0,
+      })
+      table.insert(kept, d)
     else
       local q_at, q_sent = emit_route_request(self, d.dst_id, d.dst_name,
                                             d.reason or "deferred_no_route",

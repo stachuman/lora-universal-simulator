@@ -45,7 +45,14 @@ Options:
   --json                 Emit JSON instead of the table.
   --failures             DM mode: break failed DMs down by routing-layer
                          mechanism (no-route / next-hop-silent / post-gateway /
-                         no-gateway / in-flight), same vs cross-layer.
+                         no-gateway / in-flight), same vs cross-layer. Cross-layer
+                         failures that reached the gateway but never delivered are
+                         sub-classified by WHERE the second leg died — "no route
+                         to target" (gw never RTS'd the forward → awaiting RREP),
+                         "first-hop stalled" (RTS'd, no hop-1 ACK), "lost
+                         downstream" (handed off, lost >=2 hops out), or the
+                         resolve-bound cases — plus a HOME/VISIT tally of the
+                         target's layer relative to the gateway.
   --detail               Include per-message timeline (text mode) or
                          per-message event list (JSON mode).
   --pair PAIR[,PAIR...]  Filter DM rows to specific pairs. Form
@@ -224,6 +231,20 @@ def load_config(path):
         if layer is not None:
             hash_layer_to_name[(layer, h)] = n["name"]
     return cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name, id_to_layer
+
+
+def gateway_layers(cfg):
+    """Map each gateway id to its home layer and the list of layers it visits.
+    Used to tag a cross-layer second-leg failure by whether the target sits on
+    the gateway's HOME layer (present ~50% in long windows) or a VISIT layer."""
+    gw_home, gw_visit = {}, {}
+    for n in cfg.get("nodes", []):
+        c = n.get("config") or {}
+        visits = c.get("gateway_layers")
+        if visits or c.get("is_gateway"):
+            gw_home[n["node_id"]] = c.get("layer_id")
+            gw_visit[n["node_id"]] = [v.get("layer_id") for v in (visits or [])]
+    return gw_home, gw_visit
 
 
 SEND_RE = re.compile(r"^send(?:_priority|_e2e|_e2e_priority)?\s+(\S+)\s+",
@@ -407,6 +428,19 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # on another layer (schedule/timing) or PRESENT-but-unresponsive (busy) at
     # the moment a neighbour RTS'd it.
     gw_layers = {}
+    # --- Second-leg (cross-layer gateway forward) sub-classification ---
+    # When an envelope reaches the gateway but the target never gets it, WHERE
+    # did the forward die? handoff_enq: (sender, payload) -> [(gw, fwd_ctr,
+    # target)] for each gateway_handoff_enqueued (binding resolved + forward
+    # queued). delivered_fwd: (gw, target, fwd_ctr) the target actually decoded.
+    # h_resolved / bind_set: did a resolver answer the gateway's 'H' query / did
+    # the gateway learn the binding (resolve-bound drill). gw_fwd_origins: the
+    # gateway ids that emit forwards (bounds the fwd-trace pass below).
+    handoff_enq = defaultdict(list)
+    delivered_fwd = set()
+    h_resolved = set()
+    bind_set = set()
+    gw_fwd_origins = set()
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         if et == "gateway_schedule_change":
             lyr = d.get("active_layer_id")
@@ -426,6 +460,10 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
                 key = (dst, payload)
                 if key not in arrival_by_payload:
                     arrival_by_payload[key] = t_ms
+            # Second-leg arrival: for the gateway's re-issued forward, origin is
+            # the gateway and ctr is the forward ctr.
+            if o is not None and dst is not None and c is not None:
+                delivered_fwd.add((o, dst, c))
         elif et == "gateway_envelope_dropped":
             drops.append({"origin": d.get("origin", fid),
                           "target_layer_id": d.get("target_layer_id"),
@@ -435,6 +473,20 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
             o2, hk = d.get("origin"), d.get("dst_key_hash32")
             if o2 is not None and hk is not None:
                 gw_giveup.add((o2, hk))
+        elif et == "gateway_handoff_enqueued":
+            so, pl, gw = d.get("origin"), d.get("payload"), d.get("via_gateway")
+            fctr, tgt = d.get("ctr"), d.get("dst")
+            if so is not None and gw is not None and fctr is not None:
+                handoff_enq[(so, pl)].append((gw, fctr, tgt))
+                gw_fwd_origins.add(gw)
+        elif et == "h_resolved":
+            ho, hk = d.get("origin"), d.get("key_hash32")
+            if ho is not None and hk is not None:
+                h_resolved.add((ho, hk))
+        elif et == "gateway_remote_bind_set":
+            hk = d.get("key_hash32")
+            if hk is not None:
+                bind_set.add((fid, hk))
 
     # Index for looking up the originator's record from gateway-side
     # handoff events. (origin, ctr) -> record_key (origin, dst, ctr)
@@ -476,7 +528,29 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     def rec_lookup(k):
         return msgs.get(k)
 
+    # Forward-trace for the second-leg classifier. The (gw, ctr) key collides
+    # across targets, so carriers/gw_rts are keyed (gw, ctr, target) (rts_tx /
+    # data_tx carry dst=target); hop1_ack is keyed (gw, ctr, payload) (ack_rx
+    # lacks dst but carries payload). Built only for gateway forward-origins.
+    fwd_carriers = defaultdict(set)
+    fwd_gw_rts = set()
+    fwd_hop1_ack = set()
+
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        # Second-leg forward trace: who carried the gateway's forward, did the
+        # gateway itself RTS it, and did the gateway get the hop-1 ACK?
+        o_ = d.get("origin")
+        if o_ in gw_fwd_origins:
+            c_ = d.get("ctr")
+            if et in ("rts_tx", "rts_retry", "rts_fwd", "data_tx"):
+                dst_ = d.get("dst")
+                if c_ is not None and dst_ is not None:
+                    fwd_carriers[(o_, c_, dst_)].add(fid)
+                    if fid == o_ and et in ("rts_tx", "rts_retry"):
+                        fwd_gw_rts.add((o_, c_, dst_))
+            elif et == "ack_rx" and fid == o_ and c_ is not None:
+                fwd_hop1_ack.add((o_, c_, d.get("payload")))
+
         # Gateway-side handoff events refer to the originator's record
         # via origin + ctr + via_gateway (the gateway short id). They
         # MUST NOT create new records — they only annotate existing
@@ -572,7 +646,16 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     # origin/ctr on the second leg.
     for tl in gw_layers.values():
         tl.sort()
-    return msgs, arrival_by_payload, drops, gw_giveup, gw_layers
+    second_leg = {
+        "handoff_enq":   handoff_enq,
+        "delivered_fwd": delivered_fwd,
+        "h_resolved":    h_resolved,
+        "bind_set":      bind_set,
+        "fwd_gw_rts":    fwd_gw_rts,
+        "fwd_hop1_ack":  fwd_hop1_ack,
+        "fwd_carriers":  fwd_carriers,
+    }
+    return msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg
 
 
 def outcome(rec):
@@ -780,6 +863,58 @@ def _doorstep_away_or_busy(rec, gw_layers, id_to_layer):
     return "busy" if present_any else "away"
 
 
+def classify_second_leg(rec, sl, gw_home=None, gw_visit=None, id_to_layer=None):
+    """Sub-classify a cross-layer message that REACHED the gateway but whose
+    target never got it — i.e. where did the gateway's forward (second leg) die?
+
+      no route to target  — forward was enqueued but the gateway NEVER RTS'd it
+                            (it had no route on the target layer → awaiting RREP)
+      first-hop stalled    — gateway RTS'd but never got its hop-1 ACK
+      lost downstream      — gateway GOT its hop-1 ACK (handed off), but the msg
+                            died >=2 hops out among the target layer's own relays
+      forward not enqueued — gateway never even queued a forward (binding
+                            unresolved); drilled via h_resolved / bind_set.
+
+    Returns (label, location) where location is HOME/VISIT/"?" — the target's
+    layer relative to the gateway (gateways are part-time on every layer they
+    serve, so this says which presence regime the failure sits in).
+    """
+    origin = rec["origin"]
+    payload = rec.get("payload")
+    gw = rec["dst"]                      # cross-layer wire dst == gateway id
+    khash = rec.get("dst_key_hash32")
+    flist = sl["handoff_enq"].get((origin, payload), [])
+
+    loc = "?"
+    target = rec.get("target_id")
+    tl = id_to_layer.get(target) if (id_to_layer and target is not None) else None
+    if tl is not None and gw_home is not None:
+        if tl == gw_home.get(gw):
+            loc = "HOME"
+        elif tl in (gw_visit.get(gw) or []):
+            loc = "VISIT"
+
+    if flist:
+        gw_rts = any((g, ctr, tgt) in sl["fwd_gw_rts"] for (g, ctr, tgt) in flist)
+        hop1 = any((g, ctr, payload) in sl["fwd_hop1_ack"] for (g, ctr, _t) in flist)
+        if not gw_rts:
+            label = "XL 2nd-leg: no route to target (gw never RTS'd forward)"
+        elif not hop1:
+            label = "XL 2nd-leg: first-hop stalled (gw RTS'd, no hop-1 ACK)"
+        else:
+            label = "XL 2nd-leg: lost downstream (handed off, lost >=2 hops out)"
+    else:
+        answered = (gw, khash) in sl["h_resolved"]
+        learned = (gw, khash) in sl["bind_set"]
+        if answered and not learned:
+            label = "XL 2nd-leg: resolve reply missed gw (resolver answered, gw never learned)"
+        elif answered and learned:
+            label = "XL 2nd-leg: resolve learned late (binding arrived, no forward)"
+        else:
+            label = "XL 2nd-leg: forward never enqueued (binding unresolved)"
+    return label, loc
+
+
 def failure_category(rec, gw_giveup, gw_layers=None, id_to_layer=None):
     """Routing-layer failure taxonomy for a DM that did NOT arrive. Distinguishes
     route non-convergence (no route at all) from next-hop-silent (route exists,
@@ -791,7 +926,9 @@ def failure_category(rec, gw_giveup, gw_layers=None, id_to_layer=None):
         if (rec["origin"], rec.get("dst_key_hash32")) in gw_giveup:
             return "XL: gateway gave up (resolve/route to target)"
         if rec["arrived_ms"] is not None:
-            return "XL: reached gateway, lost after forward"
+            # Sub-classified into the second-leg mechanism by classify_second_leg
+            # (set on the record in main); fall back to the flat label if absent.
+            return rec.get("second_leg") or "XL: reached gateway, lost after forward"
         if car == 0 and _ev_has(rec, "send_deferred", reason="no_route"):
             return "XL: origin had no route to gateway"
         if car >= 1:
@@ -820,6 +957,7 @@ def failure_category(rec, gw_giveup, gw_layers=None, id_to_layer=None):
 def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name,
                        gw_layers=None, id_to_layer=None):
     cat = Counter()
+    sl_loc = Counter()        # HOME/VISIT split of the second-leg failures
     ok = 0
     for r in msgs.values():
         if pair_filter is not None and (r["origin"], effective_dst(r)) not in pair_filter:
@@ -828,6 +966,8 @@ def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name,
             ok += 1
         else:
             cat[failure_category(r, gw_giveup, gw_layers, id_to_layer)] += 1
+            if r.get("second_leg") and r.get("second_leg_loc"):
+                sl_loc[r["second_leg_loc"]] += 1
     for (origin, dst), n in no_gw_by_pair.items():
         if pair_filter is not None and (origin, dst) not in pair_filter:
             continue
@@ -840,6 +980,10 @@ def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name,
     print(f"delivered {ok}/{tot} = {100*ok/tot:.1f}%;  {fail} failed, by mechanism:")
     for k, v in cat.most_common():
         print(f"  {v:>4} ({100*v/fail:4.1f}% of fails)  {k}")
+    if sl_loc:
+        tot_sl = sum(sl_loc.values())
+        loc_str = ", ".join(f"{k} {v}" for k, v in sl_loc.most_common())
+        print(f"  (2nd-leg target location, {tot_sl} fails: {loc_str})")
 
 
 def render_detail_text(msgs, pair_filter, id_to_name):
@@ -954,6 +1098,9 @@ def render_json(rows, msgs, pair_filter, id_to_name, detail):
                 entry["handoff_drained_ms"]     = r.get("handoff_drained_ms")
                 entry["handoff_deferred_reason"]= r.get("handoff_deferred_reason")
                 entry["handoff_giveup_reason"]  = r.get("handoff_giveup_reason")
+                if r.get("second_leg"):
+                    entry["second_leg"]         = r["second_leg"]
+                    entry["second_leg_loc"]     = r.get("second_leg_loc")
             messages.append(entry)
         out["messages"] = messages
     json.dump(out, sys.stdout, indent=2)
@@ -1548,7 +1695,9 @@ def main():
                    help="which view to emit (default: all)")
     p.add_argument("--failures", action="store_true",
                    help="DM mode: print failure breakdown by routing-layer "
-                        "mechanism (no-route / next-hop-silent / post-gateway)")
+                        "mechanism, incl. cross-layer second-leg sub-classes "
+                        "(no-route-to-target / first-hop-stalled / lost-downstream "
+                        "/ resolve-bound) + a HOME/VISIT target-location tally")
     p.add_argument("--post", default=None,
                    help="filter channel posts: payload substring "
                         "(case-insensitive), e.g. 'news-3'")
@@ -1566,8 +1715,9 @@ def main():
 
     cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name, id_to_layer \
         = load_config(args.config)
-    msgs, arrival_by_payload, drops, gw_giveup, gw_layers = analyse(
+    msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg = analyse(
         args.events, slot_to_id, hash_layer_to_name)
+    gw_home, gw_visit = gateway_layers(cfg)
 
     # Post-pass: resolve cross-layer target_id + arrival_at_target_ms.
     # Done here (not in analyse) because we need name_to_id which the
@@ -1588,6 +1738,13 @@ def main():
         r["target_id"] = t_id
         if r["payload"] is not None:
             r["arrival_at_target_ms"] = arrival_by_payload.get((t_id, r["payload"]))
+        # Second-leg sub-classification for failures in the "reached gateway,
+        # lost after forward" bucket (envelope decoded at the gw, target never
+        # got it, and the gateway didn't formally give up resolving).
+        if (r["arrived_ms"] is not None and not _arrived(r)
+                and (r["origin"], r.get("dst_key_hash32")) not in gw_giveup):
+            r["second_leg"], r["second_leg_loc"] = classify_second_leg(
+                r, second_leg, gw_home, gw_visit, id_to_layer)
 
     # Resolve dropped cross-layer sends (no gateway route) to (origin, target)
     # pairs so they count toward the honest cross-layer denominator.

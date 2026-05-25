@@ -841,10 +841,40 @@ matching the DV 8-hop cap). Per-dst origination is rate-limited/escalated via
 `route_request_last` (capped by `cap_route_request_last`, the table that
 replaced the old `q_queried` route-query table).
 
+**Gateway-aware discovery (part-time relays).** A gateway time-shares layers
+(home + visit windows), so a deferred forward to a node on a given layer is only
+serviceable while the gateway is actually on that layer. Two corrections keep
+route discovery from wasting effort or firing blind against such a part-time
+endpoint:
+
+- **Layer-gated requery.** A deferred send carries its target layer
+  (`tx_layer_id`). The drain only floods the RREQ while the node is on that layer
+  (`active_layer_id == tx_layer_id`); off-layer it emits
+  `send_defer_requery_offlayer` and holds without flooding. Otherwise a gateway
+  draining while visiting another layer floods the RREQ where the dst isn't —
+  wasted airtime, and the per-dst `route_request_last` dedup gets stamped so the
+  eventual on-layer flood is suppressed (the layer-gate is what keeps the
+  dst-keyed dedup from being cross-layer-poisoned). A drain is kicked on every
+  layer (re)activation so held items requery near window-open. The defer TTL for
+  a gateway's layer-targeted send is the visit-period-scaled
+  `gateway_handoff_defer_ttl_ms` (not the same-layer `send_defer_ttl_ms`), since
+  it only gets ~half the wall-clock as serviceable on-layer windows.
+- **Schedule-aware, jittered RREP.** The RREP rides `tx_initiating`, whose LBT
+  only backs off when the channel is already busy — so several reverse-path
+  holders answering one RREQ at the same instant all sense clear and collide at
+  the receiver (a *present* gateway that decodes nothing). `send_route_reply`
+  therefore (a) defers to the next-hop gateway's presence window when it is away
+  (`gateway_schedule_defer_ms`, emitting `rrep_gateway_schedule_defer`),
+  mirroring how `send_hash_bind_response` uses the coordinated queued path, and
+  (b) always adds a small random backoff (`route_reply_jitter_ms`) so
+  simultaneous repliers spread out and LBT serializes the residual.
+
 **Events:** `r_tx` (RREQ originated), `rreq_rx` / `rreq_forward`,
 `rreq_resolved_self` / `rreq_resolved_cached` (a reply was generated),
 `rrep_tx` / `rrep_rx`, `rrep_arrived` (forward route installed at origin),
 `rrep_drop_no_reverse` (RREP could not start/continue — no reverse route),
+`rrep_gateway_schedule_defer` (RREP held for an away next-hop gateway's window),
+`send_defer_requery_offlayer` (requery withheld — node not on the dst's layer),
 `route_request_suppressed` (origination rate-limited).
 
 ### 3.8 J (`'J'`) — join/lease control
@@ -2606,10 +2636,12 @@ expectations) subscribe by event_type.
 | `r_tx` | `'F'` RREQ route-Find flood originated (§3.7b) | `dst`, `dst_name`, `ttl`, `reason` |
 | `rreq_rx` / `rreq_forward` | `'F'` RREQ received / re-flooded (reverse path laid) | `origin`, `dst`, `ttl`, `hops` |
 | `rreq_resolved_self` / `rreq_resolved_cached` | RREQ reached the dst itself / an intermediate node holding `rt[dst]`; an RREP is generated | `origin`, (`dst`, `hops` for cached) |
-| `rrep_tx` / `rrep_rx` | `'F'` RREP sent toward origin / received by the addressed next-hop (forward path laid) | `origin`, `dst`, `next`, `hops` |
+| `rrep_tx` / `rrep_rx` | `'F'` RREP sent toward origin / received by the addressed next-hop (forward path laid). `defer_ms` = schedule-defer + jitter applied before tx | `origin`, `dst`, `next`, `hops`, `defer_ms` |
+| `rrep_gateway_schedule_defer` | RREP held for an away next-hop gateway's presence window before tx (§3.7b) | `origin`, `dst`, `next_hop`, `sched_ms` |
 | `rrep_arrived` | RREP reached origin; forward route to `dst` installed, deferred send drains | `dst`, `hops` |
 | `rrep_drop_no_reverse` | RREP could not start/continue — no reverse route to origin | `origin`, `dst` |
 | `route_request_suppressed` | `'F'` RREQ origination rate-limited (recent same-or-lower-TTL flood for this dst) | `dst`, `dst_name`, `reason`, `last_r_ms` |
+| `send_defer_requery_offlayer` | Deferred-send requery withheld: node is not on the dst's layer (`tx_layer_id`), so the RREQ would flood the wrong layer (§3.7b) | `origin`, `dst`, `dst_name`, `ctr`, `tx_layer_id`, `active_layer` |
 | `forward_fail` | Forwarder dropped (no route, no budget, etc.) | `origin`, `dst`, `reason` |
 | `retune_for_data` | RX retuned for DATA reception | `from`, `ctr_lo`, `chosen_data_sf` |
 | `e2e_ack_pending` | Originator registered a `send_e2e` and is waiting for E2E ACK (§7.4) | `dst`, `ctr`, `ttl_ms` |
@@ -2876,7 +2908,7 @@ block for current values):
   `cascade_requeue_load_threshold`
 - Q frames: `q_query_ttl_ms`, `q_respond_ttl_ms`
 - Route discovery (`'F'`, §3.7b): `route_request_max_ttl`,
-  `route_request_seen_ttl_ms`
+  `route_request_seen_ttl_ms`, `route_reply_jitter_ms` (RREP de-storm backoff)
 - Sync response: `sync_response_backoff_{min,max}_ms`,
   `sync_response_mobile_penalty_ms`,
   `sync_response_requester_mobile_penalty_ms`,
