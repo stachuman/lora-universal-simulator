@@ -107,14 +107,20 @@ in rough priority:
 - **Gateway presence / second-leg forwarding** — the 2nd-leg "lost downstream"
   and first-leg "never reached gateway" buckets are multi-hop route-quality on a
   part-time gateway, not contention.
-- **Window-edge guard (`gateway_schedule_guard_ms`, default 100ms)** — *new
-  candidate*. With the TX-time countdown fix the advertised window is now
-  accurate, so the old systematic **+398ms-late** anchor (which was an *accidental*
-  guard keeping deferred sends safely inside the window) is gone — senders now
-  fire right at window-open's settle edge (window-defers rose 2→20 on one seed).
-  The guard is now the *explicit* knob to bias sends a few hundred ms into the
-  window. Try widening it and re-gate. (Only worth it as an XL nudge; XL is still
-  structural.)
+- **Window-edge guard (`gateway_schedule_guard_ms`) — TESTED, density-dependent,
+  NOT a flat default.** With the TX-time countdown accurate, the guard is the
+  explicit "how far into the window to aim" knob (the old +398ms-late anchor was
+  an *accidental* such guard). Two independent 16-seed s15 sweeps: a clear optimum
+  at **300ms → XL +6.7pp** (72.5→79.2, 32-seed; ALL/SAME/CHAN also up, 0 leaks),
+  degrading past 600. **BUT dense s16 moves the opposite way: 300ms LOSES ~9pp**
+  (13.1→4.0, 6-seed) — a bigger guard bunches a dense herd later in the window
+  (collisions + lost exchange/forward runway). So **kept at 100** (a flat raise is
+  unsafe). **Next: an ADAPTIVE guard** keyed off the gateway's advertised
+  herd-spread nibble (`gateway_spread_nibble`) — large guard for sparse herds
+  (capture the s15 win), shrink toward 0 as the herd densifies (protect s16). This
+  is the first *timing-alignment* lever to move XL (airtime/contention levers were
+  all flat) — refines the meta-lesson: XL is insensitive to airtime, but sensitive
+  to schedule-window alignment.
 - Re-confirm the cross-layer failure taxonomy with `dm_delivery_breakdown
   --failures` after any change; measure 8–16 seeds (XL is noise-dominated).
 

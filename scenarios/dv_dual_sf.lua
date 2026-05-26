@@ -1056,6 +1056,15 @@ PROTOCOL = {
   id_bind_ttl_ms                 = 172800000,  -- 48 h
 
   -- ---- Gateway scheduling ----
+  -- Sender waits this long past the predicted window edge before firing at a
+  -- gateway (margin for the gateway's layer-switch settle). DENSITY-DEPENDENT:
+  -- with the accurate TX-time countdown (apply_schedule_tx_fixup), raising this
+  -- to 300 gained +6.7pp XL on sparse s15 (32-seed) but LOST ~9pp on dense s16
+  -- (13.1%->4.0%, 6-seed) -- in a dense herd a bigger guard bunches more senders
+  -- later in the window, costing collisions + lost RTS/CTS/DATA/ACK+forward
+  -- runway. A flat raise is therefore unsafe; kept at 100. The proper fix is an
+  -- ADAPTIVE guard that scales down as the gateway's advertised herd-spread
+  -- nibble rises (see gateway_spread_nibble / DELIVERY_ANALYSIS.md).
   gateway_schedule_guard_ms      = 100,
   -- Gateway visit-schedule defaults: fallback when a gateway_layers[i] record
   -- omits the field (the per-record value always wins). Switching FREQUENCY is
