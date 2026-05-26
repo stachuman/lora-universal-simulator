@@ -14,6 +14,13 @@ when a root cause, lever, or measurement changes — don't re-derive from scratc
   no-route-to-target / first-hop-stalled / lost-downstream / resolve-bound, with a
   HOME/VISIT target-location tally). Requires explicit `node_id` in config (runs on
   `scenarios/s*.json` + t74/t75, not older node_id-less t-tests).
+- **Lifecycle trace: `--trace SUBSTR`** — follows a message end-to-end through every
+  event (origin → relays → gateway transit/handoff → H-query/resolve → delivery),
+  auto-following the destination hash so the gateway-chain events come along. Use
+  this to find *where* a cross-layer message dies instead of hand-rolling greps —
+  the `--failures` buckets can mislabel (e.g. a chained message that dies in the
+  inter-gateway transit shows as "binding-unresolved"; `--trace` shows the real
+  `hop_budget_exceeded` / loop). e.g. `--trace xl-w015-e020`.
 
 ## Current state (after commit f467346)
 8–16 seed s15: aggregate DM ~**90%**, same-layer ~**97%**, cross-layer ~**77–78%**,
@@ -177,20 +184,36 @@ consumed hop list is the loop/TTL guard. A 1-element list == the old behaviour
 separate L1↔L2 / L1↔L3 gateways, no direct bridge): 3/3 forward + 2/2 reverse
 deliver. Path *learning* (auto-deriving hops from the bridged-layers TLVs) is the
 deferred follow-on; for now the sender supplies the path explicitly.
-**s17 west↔east, end-to-end status (1 h run, hop-paths `1,3`/`2,1`):** the
-chaining *mechanism* is complete — origin-drops 12→0 (envelopes start), and after
-a **transit on-layer guard fix** (the transit's next gateway bridges the entered
-layer *by definition*, so `select_gateway_for_layer(next, skip_seen_guard=true)`
-lets reactive RREQ reach a non-adjacent same-layer gateway) `transit_drop` went
-8→0: all west↔east envelopes now flow `L2→gw_w→hub L1→gw_e→L3`. **But delivery is
-still 0/12** — the *final leg* (gateway → a **deep** suburb node, multi-hop, inside
-the gateway's brief visit window) fails. That's the **same structural
-2nd-leg-in-window wall** that caps center↔suburb XL (~36% on this run), now
-compounded by the 2-gateway path (the message arrives late, then needs a far-
-suburb multi-hop in a window). So west↔east is no longer a *chaining* gap — it's
-the broader cross-layer 2nd-leg delivery limit (the open structural frontier).
-Note s17 XL is noisy on a single 1-h run (no seed sweep); the center↔suburb dip
-(42→36) is within that + added L1 transit contention.
+**s17 west↔east, end-to-end status — ROOT CAUSE (via `--trace`).** The chaining
+*mechanism* is complete: origin-drops 12→0 (envelopes start), and after a **transit
+on-layer guard fix** (`select_gateway_for_layer(next, skip_seen_guard=true)` — the
+transit's next gateway bridges the entered layer by definition, so reactive RREQ
+can reach a non-adjacent same-layer gateway) `transit_drop` went 8→0. **But
+delivery is still 0/12**, and `dm_delivery_breakdown --trace xl-w015-e020` shows
+exactly why: the message reaches the first gateway fine, gw_w0 fires the transit
+(`gateway_envelope_transit → gw_e1`) and forwards on L1 — but the **inter-gateway
+forward `gw_w0 → gw_e1` dies crossing the center**:
+`…→c046 NACK loop_duplicate → path_cascade →…→c021 hop_budget_exceeded → rts_giveup`.
+The two gateways sit at **opposite boundaries, >8 hops apart** across the deg-9 /
+diam-11 center, so the forward blows the **8-hop DV budget** (and loops). The far
+gateway never receives the envelope.
+
+This corrects earlier guesses in this section: it is **NOT** resolution / H-query /
+visit-window. The `--failures` "binding-unresolved" label is *misleading for
+chained messages* — the gateway never got far enough to even try resolving.
+(2nd-leg / H-query resolution is fine where the gateway is actually reached:
+intra-suburb same-layer delivery is 100%.)
+
+**Reframe — the real root is the 8-hop DV budget vs the center diameter (11).** One
+cause behind three failure buckets: (a) west↔east inter-gateway transit (>8 hops),
+(b) the "routing LOOP / never reached gateway" bucket (those transit forwards
+looping in the dense center), (c) long same-layer center pairs (`c000↔c090` = 19
+hops). Any path > 8 hops hits `hop_budget_exceeded`. Wire: DV stores `hops-1` in
+3 bits (cap 8); the in-memory 8-hop cap rejects `combined_hops > 8`. Options:
+tighten geometry (denser center / gateways nearer the middle → all paths ≤8) **or**
+raise the hop budget (wire/cap change). **NEXT (under discussion): raise the cap
+8 → 16.** Note s17 XL is single-run noisy; center↔suburb dip (42→36) is within that
++ added L1 transit contention.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
