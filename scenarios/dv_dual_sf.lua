@@ -1056,16 +1056,18 @@ PROTOCOL = {
   id_bind_ttl_ms                 = 172800000,  -- 48 h
 
   -- ---- Gateway scheduling ----
-  -- Sender waits this long past the predicted window edge before firing at a
-  -- gateway (margin for the gateway's layer-switch settle). DENSITY-DEPENDENT:
-  -- with the accurate TX-time countdown (apply_schedule_tx_fixup), raising this
-  -- to 300 gained +6.7pp XL on sparse s15 (32-seed) but LOST ~9pp on dense s16
-  -- (13.1%->4.0%, 6-seed) -- in a dense herd a bigger guard bunches more senders
-  -- later in the window, costing collisions + lost RTS/CTS/DATA/ACK+forward
-  -- runway. A flat raise is therefore unsafe; kept at 100. The proper fix is an
-  -- ADAPTIVE guard that scales down as the gateway's advertised herd-spread
-  -- nibble rises (see gateway_spread_nibble / DELIVERY_ANALYSIS.md).
-  gateway_schedule_guard_ms      = 100,
+  -- Base guard: sender waits this long past the predicted window edge before
+  -- firing at a gateway (margin for the layer-switch settle). The EFFECTIVE guard
+  -- is adaptive (gateway_schedule_defer_ms): a bigger guard biases the send deeper
+  -- into the window -- a win for SPARSE herds (s15 +6.7pp at 300ms) but a loss for
+  -- DENSE ones (s16 -9pp; sends bunch + collide + lose exchange runway). So the
+  -- sparse_bonus below is added only when the gateway advertises a sparse herd
+  -- (spread nibble 0 == herd < gateway_herd_min, i.e. herd-jitter inactive); dense
+  -- herds keep the base and rely on the jitter spread instead.
+  gateway_schedule_guard_ms      = 100,        -- dense base
+  -- Added to the guard for SPARSE-herd gateways (spread nibble 0): 100+200=300ms,
+  -- the measured s15 optimum. Dense gateways (nibble>0) get the base only.
+  gateway_schedule_guard_sparse_bonus_ms = 200,
   -- Gateway visit-schedule defaults: fallback when a gateway_layers[i] record
   -- omits the field (the per-record value always wins). Switching FREQUENCY is
   -- the lever for cross-layer delivery, not the home/visit SPLIT (which is
@@ -4737,7 +4739,16 @@ local function gateway_schedule_defer_ms(self, gateway_id)
   local now = self:now()
   local heard = sched.heard_ms or now
   local our_leaf = active_leaf_id(self)
+  -- Adaptive guard: bias the send deeper into the window only for SPARSE herds.
+  -- spread_nibble 0 == the gateway reports herd < gateway_herd_min (herd-jitter
+  -- inactive) -- those want the settle-edge margin (s15 +6.7pp at 300ms). Dense
+  -- herds (nibble>0) keep the base: a bigger guard bunches them later in the
+  -- window (s16 -9pp), and the jitter spread already disperses them. See
+  -- project_gateway_schedule_guard_density / DELIVERY_ANALYSIS.md.
   local guard = self.gateway_schedule_guard_ms or 100
+  if (sched.spread_nibble or 0) == 0 then
+    guard = guard + (self.gateway_schedule_guard_sparse_bonus_ms or 200)
+  end
   local best_delay = 0
   local best_window = 0    -- the window we'll be reachable in, for herd-jitter sizing
   for _, rec in ipairs(sched.records) do

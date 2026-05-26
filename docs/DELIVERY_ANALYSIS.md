@@ -94,7 +94,8 @@ chasing airtime/contention for XL.
 | Route-error (RERR / no-route NACK) | **REVERTED — refuted** | failed gate (89.8→86.6%). Dead-ends are *congestion* artifacts (transiently-blinded routes), not dead routes; invalidating them removes recoverable paths + adds airtime. **Do not retry without solving congestion first.** |
 | Differential `gateway_sweep` | **implemented (uncommitted)** | sweep only when dirty routes/channels for the layer. −71% gateway beacon airtime (134→39s), channel reach preserved (93.9%), same-layer flat-up; **XL flat-within-noise** (efficiency win, not an XL fix). |
 | Beacon-overhead → cross-layer | **refuted as an XL lever** | cutting beacon airtime is flat-on-XL (same as RERR). XL is structural, not airtime. |
-| TX-time schedule countdown (`apply_schedule_tx_fixup`) | **implemented (uncommitted)** | re-stamp the visit-window countdown byte at the actual `self:tx` instant against `(tx_now + airtime)` instead of pack-time. Anchor error median **342→50ms**, p90 706→98, signed mean **+398→−17ms** (was systematically *late*). 16-seed s15: **CHAN +4.1pp** (89.6→93.7, consistent both batches), **XL +2.4pp = flat-within-noise**, ALL flat, SAME −1.3pp, 0 leaks. A **correctness + channel-reach** win, NOT an XL lever — reconfirms XL is structural. |
+| TX-time schedule countdown (`apply_schedule_tx_fixup`) | **shipped** (eb3ec76) | re-stamp the visit-window countdown byte at the actual `self:tx` instant against `(tx_now + airtime)` instead of pack-time. Anchor error median **342→50ms**, p90 706→98, signed mean **+398→−17ms** (was systematically *late*). 16-seed s15: **CHAN +4.1pp** (89.6→93.7, consistent both batches), **XL +2.4pp = flat-within-noise**, ALL flat, SAME −1.3pp, 0 leaks. A **correctness + channel-reach** win, NOT an XL lever — reconfirms XL is structural. |
+| Adaptive schedule guard (`gateway_schedule_guard_sparse_bonus_ms`) | **implemented (uncommitted)** | add the guard bonus only for SPARSE-herd gateways (advertised spread nibble 0 → 100+200=300ms); dense gateways (nibble>0) keep base 100. Captures the sparse-herd settle-margin win while protecting dense herds. 32-seed s15 **XL +3.1pp** (72.5→75.6); dense **s16 byte-identical** (10.0/10.9 both arms, 0 regression); 0 leaks. The **first timing-alignment lever to move XL** (airtime levers were all flat). Conservative vs flat-300 (+6.7pp on s15) because s15 also has nibble>0 gateways that the binary rule leaves at base — a graduated rule could capture more but risks s16. |
 
 ## Open problem & next lever
 **Cross-layer (~77%) is the remaining gap, and it is STRUCTURAL — not airtime.**
@@ -107,20 +108,17 @@ in rough priority:
 - **Gateway presence / second-leg forwarding** — the 2nd-leg "lost downstream"
   and first-leg "never reached gateway" buckets are multi-hop route-quality on a
   part-time gateway, not contention.
-- **Window-edge guard (`gateway_schedule_guard_ms`) — TESTED, density-dependent,
-  NOT a flat default.** With the TX-time countdown accurate, the guard is the
-  explicit "how far into the window to aim" knob (the old +398ms-late anchor was
-  an *accidental* such guard). Two independent 16-seed s15 sweeps: a clear optimum
-  at **300ms → XL +6.7pp** (72.5→79.2, 32-seed; ALL/SAME/CHAN also up, 0 leaks),
-  degrading past 600. **BUT dense s16 moves the opposite way: 300ms LOSES ~9pp**
-  (13.1→4.0, 6-seed) — a bigger guard bunches a dense herd later in the window
-  (collisions + lost exchange/forward runway). So **kept at 100** (a flat raise is
-  unsafe). **Next: an ADAPTIVE guard** keyed off the gateway's advertised
-  herd-spread nibble (`gateway_spread_nibble`) — large guard for sparse herds
-  (capture the s15 win), shrink toward 0 as the herd densifies (protect s16). This
-  is the first *timing-alignment* lever to move XL (airtime/contention levers were
-  all flat) — refines the meta-lesson: XL is insensitive to airtime, but sensitive
-  to schedule-window alignment.
+- **Adaptive schedule guard — IMPLEMENTED** (see levers table). The guard is the
+  "how far into the window to aim" knob (the old +398ms-late anchor was an
+  *accidental* such guard). Density-dependent: a 300ms flat guard gave s15 **+6.7pp**
+  but dense s16 **−9pp** (a bigger guard bunches a dense herd → collisions). So the
+  bonus is now added only for sparse-herd gateways (spread nibble 0): s15 **+3.1pp**,
+  s16 untouched. This is the **first timing-alignment lever to move XL** (airtime
+  levers were all flat) — refines the meta-lesson: XL is insensitive to airtime but
+  sensitive to schedule-window alignment. **Remaining opportunity:** s15 also routes
+  through nibble>0 gateways that the binary rule leaves at base (hence +3.1 not
+  +6.7) — a *graduated* guard (bonus tapering with nibble) could capture more, but
+  must be re-gated on s16 (mid-nibble is where the dense regression lives).
 - Re-confirm the cross-layer failure taxonomy with `dm_delivery_breakdown
   --failures` after any change; measure 8–16 seeds (XL is noise-dominated).
 

@@ -17,7 +17,7 @@
       "config": { "layer_id": 1, "is_gateway": true,
         "gateway_layers": [
           { "layer_id": 2, "routing_sf": 8, "allowed_data_sfs": [8], "period_ms": 9000, "duration_ms": 3000, "offset_ms": 3000 },
-          { "layer_id": 3, "routing_sf": 9, "allowed_data_sfs": [9], "period_ms": 9000, "duration_ms": 3000, "offset_ms": 6000 }
+          { "layer_id": 3, "routing_sf": 9, "allowed_data_sfs": [9], "period_ms": 18000, "duration_ms": 3000, "offset_ms": 6000 }
         ],
         "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
     { "name": "l2_relay", "node_id": 100, "key_hash32": "0xcafe0001", "script": "scenarios/dv_dual_sf.lua",
