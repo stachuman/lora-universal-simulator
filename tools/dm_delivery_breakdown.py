@@ -1677,6 +1677,81 @@ def render_channel_detail(rows_meta, id_to_name, post_filter):
         print()
 
 
+# Fields shown (when present) on each --trace line, in order. node-id fields are
+# rendered name(id). Covers the same-layer path AND the cross-layer gateway chain.
+_TRACE_FIELDS = ("origin", "dst", "next", "via_gateway", "gateway", "next_gateway",
+                 "target_layer_id", "hops", "remaining_hops", "entered_layer",
+                 "next_layer", "dst_key_hash32", "ctr", "ctr_lo", "attempt_seq", "reason")
+_TRACE_NODE_FIELDS = {"origin", "dst", "next", "via_gateway", "gateway", "next_gateway"}
+
+
+def render_trace(events_path, substr, slot_to_id, id_to_name):
+    """Follow a message (or messages) end-to-end through every event that touches
+    it, including the cross-layer gateway chain (transit / handoff / no_binding /
+    H-query / remote-bind) that the per-message --detail timeline omits.
+
+    Selection: any script_emit whose data has a string field containing SUBSTR
+    (case-insensitive) -- this catches the origin send + the delivery (both carry
+    the payload). We then also follow each `dst_key_hash32` seen on a matching
+    event, so the gateway-side events (which carry the hash, not the text) come
+    along. Output is one chronological line per event."""
+    sub = substr.lower()
+
+    def nm(nid):
+        n = id_to_name.get(nid)
+        return f"{n}({nid})" if n is not None else str(nid)
+
+    def matches(d):
+        for v in d.values():
+            if isinstance(v, str) and sub in v.lower():
+                return True
+        return False
+
+    hashes = set()
+    with open(events_path) as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "script_emit" and matches(e.get("data", {})):
+                h = e["data"].get("dst_key_hash32")
+                if isinstance(h, int):
+                    hashes.add(h)
+
+    rows = []
+    with open(events_path) as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") != "script_emit":
+                continue
+            d = e.get("data", {})
+            if matches(d) or (isinstance(d.get("dst_key_hash32"), int)
+                              and d["dst_key_hash32"] in hashes):
+                rows.append(e)
+    rows.sort(key=lambda e: e.get("time_ms", 0))
+
+    print(f"TRACE '{substr}': {len(rows)} events; following hashes {sorted(hashes)}")
+    for e in rows:
+        d = e.get("data", {})
+        idx = e.get("node")
+        node = nm(slot_to_id.get(idx, idx)) if isinstance(idx, int) else str(idx)
+        parts = []
+        for k in _TRACE_FIELDS:
+            if k in d:
+                v = d[k]
+                if k in _TRACE_NODE_FIELDS and isinstance(v, int):
+                    v = nm(v)
+                parts.append(f"{k}={v}")
+        pl = d.get("payload")
+        if isinstance(pl, str):
+            parts.append(f"pl={pl[:20]}")
+        print(f"  t={e.get('time_ms', 0):>8}  {node:16s} {e['emit_type']:30s} {' '.join(parts)}")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
@@ -1707,6 +1782,13 @@ def main():
     p.add_argument("--post", default=None,
                    help="filter channel posts: payload substring "
                         "(case-insensitive), e.g. 'news-3'")
+    p.add_argument("--trace", default=None, metavar="SUBSTR",
+                   help="follow message(s) end-to-end: dump every event whose "
+                        "payload contains SUBSTR (case-insensitive), plus the "
+                        "gateway-chain events for the destination hash(es) they "
+                        "resolve to. Shows where a cross-layer message dies "
+                        "(transit / handoff / no_binding / H-query). "
+                        "e.g. --trace xl-w015-e020")
     args = p.parse_args()
 
     if args.events is None:
@@ -1721,6 +1803,11 @@ def main():
 
     cfg, id_to_name, name_to_id, slot_to_id, hash_layer_to_name, id_to_layer \
         = load_config(args.config)
+
+    if args.trace:
+        render_trace(args.events, args.trace, slot_to_id, id_to_name)
+        return
+
     msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg = analyse(
         args.events, slot_to_id, hash_layer_to_name)
     gw_home, gw_visit = gateway_layers(cfg)
