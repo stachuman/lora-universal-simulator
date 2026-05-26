@@ -219,9 +219,25 @@ wire change). Guarded by **t78** (an 11-hop linear chain delivers only at cap≥
 verified 0 delivered at all-caps=8). Suite 98/98. **Caveat (unchanged):** a 16-hop
 unicast is ~0.95^16 ≈ 0.4 reliable + multi-second — the cap *enables* west↔east
 (gw_w0→gw_e1 ≈ 9–11 hops) and the long center pairs to route, it doesn't make them
-reliable; the 19-hop `c000↔c090` still exceeds 16. (s17 west↔east payoff pending a
-re-run.) Note s17 XL is single-run noisy; center↔suburb dip (42→36) is within that
-+ added L1 transit contention.
+reliable; the 19-hop `c000↔c090` still exceeds 16.
+
+**MEASURED (seed 17, single run).** Total DM 47%→**54%**; **west↔east 0/12 → 4/12**
+(`e020→w015` **3/3, ~9 carriers**; `e010→w031` 1/3). Structural win is seed-
+independent: `--trace e020-w015` shows a clean ~9-hop east-layer climb to gw_e1 then
+gateway transit — a path categorically impossible under the old 8-hop cap. And
+**`no_gw`=0 / `giveup`=0 across all 26 pairs** — the "route can't exist" wall is
+gone. (Rate numbers are single-seed/noisy — 3 msgs/pair; trust the structural claim,
+sweep ≥6–8 seeds before trusting +7pp.)
+
+**NEW dominant bottleneck (the cap is no longer the wall).** `--failures` on the
+cap-16 run: **33% of fails = "XL stall: routing LOOP, never reached gateway"**, 19%
+= "doorstep: gateway PRESENT but no pickup (busy/collision)". All 17 in-flight
+failures are downstream attrition, not no-route. `--trace w015-e020` (the 0%
+direction) is the archetype: the first leg bounces through the **wrong** west gateway
+(gw_w0) with `rts_tx_blocked: self_tx_in_flight` + repeated `cts_timeout`, reaching
+the intended gw_w1 only at **+13.8s**, after which the cross-layer transit doesn't
+complete. So next levers are **first-leg gateway selection (pick the right gateway,
+don't loop)** and **gateway-doorstep contention**, not hop budget.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
