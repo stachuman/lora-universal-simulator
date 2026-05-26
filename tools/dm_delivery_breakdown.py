@@ -447,6 +447,13 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     h_resolved = set()
     bind_set = set()
     gw_fwd_origins = set()
+    # Stage-funnel inputs. hops_by_payload: payload -> layer-hop path string
+    # (e.g. "1,3") from the originator's envelope; len==1 -> single-gateway
+    # (suburb<->center), len>=2 -> chained (suburb<->suburb via center).
+    # transit_started: (origin, dst_key_hash32) that emitted a transit forward
+    # (the first gw re-wrapped toward a second gw) -- i.e. Stage-2 was attempted.
+    hops_by_payload = {}
+    transit_started = set()
     for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
         if et == "gateway_schedule_change":
             lyr = d.get("active_layer_id")
@@ -493,6 +500,14 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
             hk = d.get("key_hash32")
             if hk is not None:
                 bind_set.add((fid, hk))
+        elif et == "gateway_envelope_enqueued":
+            pl, hp = d.get("payload"), d.get("hops")
+            if pl is not None and hp is not None:
+                hops_by_payload.setdefault(pl, str(hp))
+        elif et == "gateway_envelope_transit":
+            to_, hk = d.get("origin"), d.get("dst_key_hash32")
+            if to_ is not None and hk is not None:
+                transit_started.add((to_, hk))
 
     # Index for looking up the originator's record from gateway-side
     # handoff events. (origin, ctr) -> record_key (origin, dst, ctr)
@@ -653,13 +668,15 @@ def analyse(events_path, slot_to_id, hash_layer_to_name=None):
     for tl in gw_layers.values():
         tl.sort()
     second_leg = {
-        "handoff_enq":   handoff_enq,
-        "delivered_fwd": delivered_fwd,
-        "h_resolved":    h_resolved,
-        "bind_set":      bind_set,
-        "fwd_gw_rts":    fwd_gw_rts,
-        "fwd_hop1_ack":  fwd_hop1_ack,
-        "fwd_carriers":  fwd_carriers,
+        "handoff_enq":     handoff_enq,
+        "delivered_fwd":   delivered_fwd,
+        "h_resolved":      h_resolved,
+        "bind_set":        bind_set,
+        "fwd_gw_rts":      fwd_gw_rts,
+        "fwd_hop1_ack":    fwd_hop1_ack,
+        "fwd_carriers":    fwd_carriers,
+        "hops_by_payload": hops_by_payload,
+        "transit_started": transit_started,
     }
     return msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg
 
@@ -990,6 +1007,111 @@ def render_dm_failures(msgs, no_gw_by_pair, gw_giveup, pair_filter, id_to_name,
         tot_sl = sum(sl_loc.values())
         loc_str = ", ".join(f"{k} {v}" for k, v in sl_loc.most_common())
         print(f"  (2nd-leg target location, {tot_sl} fails: {loc_str})")
+
+
+def _fmt_reasons(counter, top=4):
+    """Compact 'reason (n)' list, most common first."""
+    if not counter:
+        return ""
+    return "  ".join(f"{k} ({v})" for k, v in counter.most_common(top))
+
+
+def render_xl_funnel(msgs, no_gw_by_pair, gw_giveup, second_leg,
+                     pair_filter, id_to_name, gw_layers=None, id_to_layer=None):
+    """Cross-layer stage funnel — WHERE in the pipeline do XL messages leak?
+
+    Stages (see docs/DELIVERY_ANALYSIS.md 'Cross-layer delivery pipeline'):
+      S0 enqueued        — originator built + queued the gateway envelope
+      S1 reached gateway — first leg delivered the envelope to the egress gw
+                           (data_rx at the wire dst == the gateway)
+      S2 transited       — (chained suburb<->suburb only) the egress gw's
+                           re-wrapped forward reached a SECOND gateway
+      S3 final-leg queued— a gateway resolved the target + queued the forward
+      S4 delivered       — the target decoded the DATA
+
+    The headline rows count 'furthest stage reached'; the 'lost' column is the
+    drop entering that stage, and the reasons come from failure_category — whose
+    Stage-1 labels already split window-miss (gw AWAY on another layer) vs
+    in-window (gw PRESENT -> stale-route loop / contention)."""
+    handoff_enq = second_leg["handoff_enq"]
+    hops_by_payload = second_leg["hops_by_payload"]
+    transit_started = second_leg["transit_started"]
+
+    recs = []
+    for r in msgs.values():
+        if not r.get("via_gateway"):
+            continue
+        if pair_filter is not None and (r["origin"], effective_dst(r)) not in pair_filter:
+            continue
+        recs.append(r)
+    dropped = 0
+    for (origin, dst), n in no_gw_by_pair.items():
+        if pair_filter is not None and (origin, dst) not in pair_filter:
+            continue
+        dropped += n
+
+    def path_len(r):
+        hp = hops_by_payload.get(r.get("payload"))
+        return len([x for x in str(hp).split(",") if x != ""]) if hp else 1
+
+    def furthest(r):
+        if _arrived(r):
+            return 4
+        origin, payload = r["origin"], r.get("payload")
+        if handoff_enq.get((origin, payload)):
+            return 3
+        if r["arrived_ms"] is not None:
+            if (path_len(r) >= 2
+                    and (origin, r.get("dst_key_hash32")) in transit_started):
+                return 2     # reached egress gw + transit fired, 2nd gw never handed off
+            return 1         # reached egress gw, no transit / no handoff
+        return 0             # never reached the egress gw
+
+    enq = len(recs)
+    if enq + dropped == 0:
+        print("(no cross-layer messages in scope)")
+        return
+    nstage = Counter()
+    loss_first = Counter()   # furthest == 0 (died on first leg)
+    loss_gw = Counter()      # furthest in {1,2} (reached gw, died at transit/resolve)
+    loss_final = Counter()   # furthest == 3 (final-leg forward queued, never arrived)
+    n_two = two_reached_gw1 = two_transited = two_delivered = 0
+    for r in recs:
+        s = furthest(r)
+        nstage[s] += 1
+        cat = failure_category(r, gw_giveup, gw_layers, id_to_layer) if s < 4 else None
+        if s == 0:
+            loss_first[cat] += 1
+        elif s in (1, 2):
+            loss_gw[cat] += 1
+        elif s == 3:
+            loss_final[cat] += 1
+        if path_len(r) >= 2:
+            n_two += 1
+            if r["arrived_ms"] is not None:
+                two_reached_gw1 += 1
+            hk = handoff_enq.get((r["origin"], r.get("payload")), [])
+            if _arrived(r) or any(g != r["dst"] for (g, _c, _t) in hk):
+                two_transited += 1
+            if _arrived(r):
+                two_delivered += 1
+
+    r1 = sum(nstage[j] for j in range(1, 5))   # reached egress gw
+    r3 = sum(nstage[j] for j in range(3, 5))   # final-leg queued
+    r4 = nstage[4]                             # delivered
+    total = enq + dropped
+    print(f"cross-layer messages: {total}   ({dropped} dropped at enqueue: no gateway route)")
+    print(f"{'stage':<30}{'reached':>8}{'lost':>6}   why it was lost entering this stage")
+    print("-" * 92)
+    print(f"{'S0 enqueued (envelope built)':<30}{enq:>8}{dropped:>6}   "
+          f"{'(pre-enqueue: no gateway route)' if dropped else ''}")
+    print(f"{'S1 reached egress gateway':<30}{r1:>8}{enq - r1:>6}   {_fmt_reasons(loss_first)}")
+    print(f"{'S3 final-leg queued by a gw':<30}{r3:>8}{r1 - r3:>6}   {_fmt_reasons(loss_gw)}")
+    print(f"{'S4 delivered':<30}{r4:>8}{r3 - r4:>6}   {_fmt_reasons(loss_final)}")
+    if n_two:
+        print(f"  chained suburb<->suburb (2-gw): {n_two} sent · "
+              f"{two_reached_gw1} reached gw1 · {two_transited} transited to gw2 · "
+              f"{two_delivered} delivered")
 
 
 def render_detail_text(msgs, pair_filter, id_to_name):
@@ -1903,6 +2025,10 @@ def main():
         print("=== DM ===")
         render_table(rows)
         if args.failures:
+            print()
+            print("=== Cross-layer stage funnel ===")
+            render_xl_funnel(msgs, no_gw_by_pair, gw_giveup, second_leg,
+                             pair_filter, id_to_name, gw_layers, id_to_layer)
             print()
             print("=== DM failures (by mechanism) ===")
             render_dm_failures(msgs, no_gw_by_pair, gw_giveup,

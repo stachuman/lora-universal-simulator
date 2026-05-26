@@ -236,8 +236,90 @@ failures are downstream attrition, not no-route. `--trace w015-e020` (the 0%
 direction) is the archetype: the first leg bounces through the **wrong** west gateway
 (gw_w0) with `rts_tx_blocked: self_tx_in_flight` + repeated `cts_timeout`, reaching
 the intended gw_w1 only at **+13.8s**, after which the cross-layer transit doesn't
-complete. So next levers are **first-leg gateway selection (pick the right gateway,
-don't loop)** and **gateway-doorstep contention**, not hop budget.
+complete.
+
+### Root cause: stale visiting-gateway routes (NOT selection, NOT coverage)
+Traced to ground (`w015→e020`, `w028→c060`): the first-leg loops/bounces are caused
+by **stale routes to the time-shared gateways**, not by which gateway is chosen.
+- gws are **home=center, ~50% duty** on each suburb. West nodes learn routes to them
+  in the **t<200s convergence burst**, then those routes **freeze for the whole run**:
+  the remote-route aging TTL is **3 h** but the sim is **1 h**, so they can't expire
+  (`age_out_stale_routes` never evicts them — confirmed: **no `rt_aged`/`rt_prune`**
+  for gw dests at w015; **no `route_query` at send** → Pass 1 used a stale *present*
+  route; w005's route to gw_w1 was pinned t=46 s → t=2161 s).
+- The frozen routes across nodes are **mutually inconsistent** (snapshots of a
+  half-present gw taken at different times) → a 6-hop bounce *through the other gw*
+  or an outright loop → `loop_duplicate` → `cascade_exhausted` → `giveup`.
+- Selection/coverage are **fine**: `no_gw`/`giveup` = 0 everywhere; w015 held routes
+  to **both** gws at equal (stale) 4 hops and picked gw_w1 on the score tiebreak.
+  "Pick the nearer gw" can't help — the hop counts are fiction.
+
+### Tried & REVERTED: short TTL for gateway routes
+`rt_aging_ttl_gateway_ms` = 45 s for `is_gateway` routes (expire stale ones →
+reactive RREQ rediscovers fresh). Mechanism worked in isolation (regression caught
+it), but **s17 single-seed delivery did not improve**: DM 54%→50%, **cross-layer
+20/48 → 12/48**, and failures shifted to the **predicted** weakness — "gateway gave
+up (resolve/route)" jumped to 33%. Expiry forces reactive rediscovery that **can't
+converge inside the ~7.5 s visit window**, trading loops for give-ups. Reverted to
+the cap-16 state. **Lesson: reactive rediscovery is the wrong tool for an
+intermittent-but-scheduled destination — go proactive / schedule-driven.** (Also:
+one s17 seed can't settle a rate; the *failure-mode shift* is the seed-robust signal.)
+
+## Cross-layer delivery pipeline (the model — read this before chasing XL drops)
+
+A cross-layer DM carries a **layer-hop path** (e.g. `[1,3]` = enter L1, then L3).
+suburb↔center = 1 gateway hop; suburb↔suburb = 2 gateway hops chained via center.
+All 4 gws are **home=L1, visiting one suburb ~50% of the time**.
+
+Hard case `w015→e020` (path `[1,3]`):
+```
+ STAGE 0        STAGE 1              STAGE 2                STAGE 3            STAGE 4
+ select       first leg (L2)      inter-gw transit (L1)   final leg (L3)      deliver
+ egress gw  origin ─hops▶ gw_w   gw_w ─hops▶ gw_e         gw_e ─hops▶ tgt     tgt decodes
+   │            │                    │                        │                  │
+ gw bridging  route to gw_w on L2  gw_w (now on L1/home)    gw_e (now on L3)   DATA
+ L2→L1        while gw_w visits L2 forwards across center   resolve hash→id    arrives
+                                   to gw_e (on L1)          then route to tgt
+```
+suburb↔center (path `[1]`) is the same but **stops after Stage 1** (gw is already
+home on the target's layer; no transit, no 2nd gw).
+
+| Stage | What | State it needs | Timing constraint | Failure buckets |
+|---|---|---|---|---|
+| **0 select** | `select_gateway_for_layer` picks egress gw | rt route to a gw (Pass1 lowest-hops / Pass2 arbitrary); `bridged_layers` | — | `no_gateway_known`, `gateway_known_no_route` (both 0 today) |
+| **1 first leg** | DV forward origin→gw on origin's layer | **every hop's rt route to the gw** (stale/loopy hot-spot) | gw **present on this layer** | "routing LOOP / never reached gw" (33%), "cascade/dead-end", "doorstep present-no-pickup" (19%), "doorstep gw away" |
+| **2 transit** | gw pops layer, re-wraps, forwards across center to next gw | **center routes to the next gw** (also intermittent) | both gws on center **at once**; crosses diam-11 center (cap≥~11) | inter-gw forward loops in center (`loop_duplicate`→`cascade`→`giveup`) |
+| **3 final leg** | last gw resolves tgt `hash→id` (H-query) + routes to tgt | gw **binding table**; gw route to tgt on visit layer | gw **present on target's layer** | "gw gave up resolve/route", "2nd-leg lost downstream", "binding unresolved", "2nd-leg first-hop stalled" |
+| **4 deliver** | tgt decodes DATA → `delivered` | — | — | (success) |
+
+**Timing model (why XL is slow *and* fragile).** `w015→e020` needs a *sequence* of
+window alignments, each adding buffering latency: (1) gw_w on L2 [recv first leg] →
+(2) gw_w on L1 [transit] → (3) gw_e on L1 [recv transit; 2&3 must overlap] → (4) gw_e
+on L3 [final leg]. Each gw is on each layer ~50% of the time, so the message buffers
+at each gw until its window opens. **The schedules are deterministic and known
+(`gateway_neighbor_schedules`) — the unexploited lever.**
+
+**Funnel readout (`dm_delivery --failures`, cap-16 baseline, 48 XL msgs, 20 delivered):**
+```
+S0 enqueued                48
+S1 reached egress gateway  26   ← lost 22: LOOP(12)  doorstep-busy(7)  doorstep-away(2)
+S3 final-leg queued        23   ← lost 3
+S4 delivered               20   ← lost 3 (2nd-leg downstream)
+  2-gw suburb↔suburb: 12 sent · 6 reached gw1 · 4 transited · 4 delivered
+```
+**~79% of XL loss is the FIRST LEG (22/28).** Once a msg reaches the gw, **77%
+deliver** (20/26). The window split is decisive: only **2** first-leg losses are
+"gateway away" (window-miss) — the rest are **stale-route LOOPS (12)** + **doorstep
+contention (7, gw present, no pickup)**. ⇒ the lever is **route consistency /
+loop-prevention on the first leg** (+ doorstep contention), **NOT** window timing.
+(`dm_delivery --failures` prints this funnel for every run — use it before guessing.)
+
+**Structural diagnosis.** Every stage routes to / through an **intermittent**
+destination using DV routing built for **stable** destinations. That mismatch is the
+root of the stale/loopy routes at Stages 1–3. Reactive freshness (the reverted TTL
+fix) can't converge in the 7.5 s window → the promising direction is **proactive,
+schedule-driven**: establish/refresh routes to a gw exactly when its window opens,
+and time sends to windows.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
