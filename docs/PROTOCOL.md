@@ -140,7 +140,7 @@ if has_schedule == 1 (optional schedule block):
 route entries × n_entries (3 bytes each, start after fixed key_hash32 and
 optional schedule block):
        ┌──────┬──────┬────────────────────────────────────────┐
-       │ dest │ next │ score_bucket(4) │ (hops-1)(3) │ is_gw(1) │
+       │ dest │ next │ score_bucket(4) │ rsv(3) │ is_gw(1) │ hops(8) │
        └──────┴──────┴────────────────────────────────────────┘
 
 if S == 1:
@@ -389,26 +389,34 @@ The finite, hop-by-hop-consumed list is the loop/TTL guard. Path *learning*
 (auto-deriving hops from the `bridged_layers` TLVs) is a deferred follow-on; today
 the sender supplies the path explicitly. Validated by test t77.
 
-**Route entry byte 2 bit fields:**
+**Route entry (4 bytes): `dest(1) | next(1) | byte2 | hops(1)`.** byte 2 bit fields:
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
   via `bucket_of_snr_4b` (16 buckets, 2 dB resolution, range −20..+10 dB).
   Decoded via `snr_of_bucket_4b`. ACK uses a separate 2-bit coarse SNR
   encoding so it can also carry budget back-pressure plus an addressed
   recipient byte.
-- `(hops-1)` (3 bits, 3:1): wire carries `hops − 1` (range 0..7). In-memory
-  `rt[]` candidates store decoded `hops` (range 1..8). The 8-hop cap is
-  preserved: `combined_hops > 8` routes are rejected at the receiver.
+- `rsv` (3 bits, 3:1): reserved (formerly `hops-1`; hops moved to its own byte).
 - `is_gateway` (1 bit, 0): the advertised path's terminal node is a gateway.
   Per-candidate storage in `rt[]`; the data plane reads it from the primary
   candidate. Different advertisers may disagree; route-selection picks
   among candidates by score, and the chosen candidate's `is_gateway` is
   authoritative.
 
-**Frame size:** default route-entry page should budget an 8-byte fixed header:
-`'B' + flags + src + n/flags + key_hash32`. To preserve the old 151-byte
-default airtime cap, `beacon_max_entries` drops from 49 to 47 entries
-(`8 + 47 × 3 = 149`). If `S=1`, add 32 bytes after the route-entry block. A
-gateway BCN with L upper layers adds 1 + 4L bytes.
+**`hops` byte (byte 3):** full 8-bit hop count (range 1..255). The active **DV
+routing cap is `dv_hop_cap` (default 16)** — `combined_hops > dv_hop_cap` routes
+are rejected at the receiver, and the reactive `route_request_max_ttl` /
+`hash_query_max_ttl` floods track it (all three move together). Because hops have
+their own byte, raising the cap is a one-constant change with no wire change.
+Per-message reach is bounded by the DATA `hop_budget` (`hops_remaining`, 5 bits →
+0..31; see §7.6). Real-LoRa caveat: a path this long is slow and lossy
+(~0.95^h per-hop), so a high cap *enables* long routes, it doesn't make them
+reliable.
+
+**Frame size:** route entries are now **4 bytes** (`dest + next + byte2 + hops`).
+Fixed header is 8 bytes (`'B' + flags + src + n/flags + key_hash32`); `S=1` adds
+32 bytes; a gateway BCN with L upper layers adds 1 + 4L bytes. (The +1 byte/entry
+vs the old 3-byte packing is offset in a real implementation by reclaiming the
+over-provisioned packet-code byte — a full char for <16 frame types.)
 
 **Pre-bit-pack history:** before Phase 1-2 entries were 4 bytes
 (`dest + next + score_i8(8) + hops(8)`) and the default was 200 bytes.
@@ -767,8 +775,8 @@ accumulate every node's binding, and route entries do NOT carry hashes.
 - `leaf_id` (4): target layer nibble; receivers reject foreign-layer `'H'`
   frames (same filter every frame uses). `flags` (4): reserved.
 - `key_hash32` (4 LE): identity hash to resolve.
-- `ttl` (8): initial `hash_query_max_ttl` (default 8, matching the DV
-  8-hop routing cap so the flood can reach any routable node);
+- `ttl` (8): initial `hash_query_max_ttl` (default 16, matching `dv_hop_cap`
+  so the flood can reach any routable node);
   decremented per forward; dropped at 0.
 
 **Forwarding** (`'H'` is the one forwardable control frame):
@@ -868,8 +876,8 @@ Instead the discovery is two-directional:
 **Expanding ring.** The first probe (from `defer_send_for_route`'s no-route
 path) uses `ttl=1` (radius 2 — cheap, and enough to catch the common "dst is
 2 hops away via a node that already has the route" case). If that fails, the
-deferred-send requery escalates to `route_request_max_ttl` (default 8,
-matching the DV 8-hop cap). Per-dst origination is rate-limited/escalated via
+deferred-send requery escalates to `route_request_max_ttl` (default 16,
+matching `dv_hop_cap`). Per-dst origination is rate-limited/escalated via
 `route_request_last` (capped by `cap_route_request_last`, the table that
 replaced the old `q_queried` route-query table).
 
@@ -2956,7 +2964,7 @@ block for current values):
   on access if older), `gateway_bridged_layers_max_per_tlv` (cap on
   entries per TLV, default 9 per the 4-bit `len` field)
 - Hash-locate `'H'` flood (§3.7a): `hash_query_max_ttl` (initial flood
-  TTL, default 8 = the DV 8-hop routing cap), `hash_query_seen_ttl_ms` (forwarder
+  TTL, default 16 = `dv_hop_cap`), `hash_query_seen_ttl_ms` (forwarder
   dedup window, default 10 s), `cap_hash_query_seen` (dedup-set cap,
   default 64)
 - Join: `join_{listen,discover_jitter,discover_wait}_ms`,

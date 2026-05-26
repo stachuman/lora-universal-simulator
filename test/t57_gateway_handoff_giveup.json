@@ -31,7 +31,7 @@
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_deferred", "value": "\"dst_key_hash32\":3735928559" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_deferred", "value": "\"q_sent\":true" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "h_tx", "value": "\"key_hash32\":3735928559" },
-    { "type": "script_emit_contains", "node": "gw_4", "emit_type": "h_tx", "value": "\"ttl\":8" },
+    { "type": "script_emit_contains", "node": "gw_4", "emit_type": "h_tx", "value": "\"ttl\":16" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_giveup", "value": "\"dst_key_hash32\":3735928559" },
     { "type": "script_emit_contains", "node": "gw_4", "emit_type": "gateway_handoff_giveup", "value": "\"target_layer_id\":5" },
     { "type": "event_count", "event_type": "gateway_handoff_enqueued", "node": "gw_4", "min": 0, "max": 0 }

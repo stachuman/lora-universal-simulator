@@ -5,7 +5,7 @@
 -- Wire format:
 -- | Tag   | Frame  | Layout                                                                          |
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
--- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|has_ext(1)|n_entries(6)](1), key_hash32(4), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|(hops-1)(3)|is_gateway(1)](1)}, seen_bitmap(32B)?, ext_len(1)+TLVs?  →  8 + [1+4L]? + 3n + [32]? + [1+ext]? B |
+-- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|has_ext(1)|n_entries(6)](1), key_hash32(4), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|rsv(3)|is_gateway(1)](1), hops(1)}, seen_bitmap(32B)?, ext_len(1)+TLVs?  →  8 + [1+4L]? + 4n + [32]? + [1+ext]? B |
 -- | `'R'` | RTS    | `R`, src(1), next(1), [addr_len(3)|rsv(1)|leaf_id(4)](1), dst(1 when addr_len=0), [ctr_lo(4)|rsv(4)](1), sf_bitmap(1), payload_len(1)  →  8 B (in-leaf) |
 -- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|already_received(1)](1)  →  2 B                      |
 -- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
@@ -144,7 +144,7 @@
 --       else:
 --         cand = {via=N, n2_hop=e.next, score=min(rx_snr, e.score),
 --                 hops=e.hops+1}
---         adopt if hops<=8 AND (no current OR better score OR same score & fewer hops)
+--         adopt if hops<=dv_hop_cap AND (no current OR better score OR same score & fewer hops)
 --     emit rt_full once rt covers all peers
 --   The stored n2_hop (N's claimed next-hop for that dest) is the only
 --   reason a 3-cycle can be detected without enlarging the wire format —
@@ -757,18 +757,19 @@
 --   Mobile endpoints emit identity-only BCN: n_entries=0, no seen bitmap,
 --   no route entries, no liveness extension. This refreshes id_bind without
 --   advertising a mobile as a transit router.
---   entries (3 B each):
+--   entries (4 B each):
 --     byte 0 : dest (8)
 --     byte 1 : next (8)
---     byte 2 : score_bucket(4 hi) | (hops - 1)(3) | is_gateway(1 lo)
+--     byte 2 : score_bucket(4 hi) | rsv(3) | is_gateway(1 lo)
+--     byte 3 : hops (8, 1..255)
 -- leaf_id (4 bits): same field as RTS. Receivers reject foreign-leaf
 -- beacons before rt_merge so foreign nodes don't pollute our routing
 -- tables.
 -- Per-entry score is the 4-bit SNR bucket (16 levels, 2 dB resolution,
 -- range -20..+10 dB) — same encoding used by the ACK piggyback for
--- consistency. Hops are encoded on-wire as `hops - 1` (3 bits, range 0..7)
--- to free 1 bit for `is_gateway`; the in-memory hops value stays 1..8 so
--- the protocol's 8-hop cap is preserved. `is_gateway` is per-(dest, advertiser)
+-- consistency. Hops ride in their own full byte (range 1..255), so the
+-- active DV routing cap (`dv_hop_cap`, default 16) can grow with no wire
+-- change. `is_gateway` is per-(dest, advertiser)
 -- and rides on each rt[] candidate so different advertisers' claims stay
 -- separate.
 
@@ -1042,7 +1043,11 @@ PROTOCOL = {
 
   -- ---- Hop budget (§7.6) ----
   hop_budget_slack               = 3,
-  hop_budget_max_initial         = 15,         -- 4-bit field max
+  hop_budget_max_initial         = 31,         -- 5-bit field max (hops_remaining)
+  -- DV routing hop cap (was 8). The on-wire hops field is a full byte (1..255),
+  -- so raising this is a one-constant change with no wire change. Routes with
+  -- combined_hops > dv_hop_cap are rejected; route_request_max_ttl tracks it.
+  dv_hop_cap                     = 16,
 
   -- ---- Bounded-state caps (§11.1 in ROADMAP) ----
   cap_seen_origins               = 256,
@@ -1101,10 +1106,10 @@ PROTOCOL = {
   -- ---- Multi-hop hash-locate ('H' frame flood, PROTOCOL §3.7a) ----
   -- The gateway floods an 'H' query on the target layer to resolve a
   -- dst_key_hash32 -> node_id binding it doesn't hold. TTL bounds the
-  -- flood; forwarders dedup on (origin, hash). TTL = 8 to match the
-  -- DV 8-hop routing cap (hops 1..8, combined_hops>8 rejected) — a
-  -- query must be able to reach any node that's routable in the layer.
-  hash_query_max_ttl             = 8,
+  -- flood; forwarders dedup on (origin, hash). TTL tracks the DV hop cap
+  -- (dv_hop_cap; combined_hops>cap rejected) — a query must be able to reach any
+  -- node that's routable in the layer.
+  hash_query_max_ttl             = 16,
   hash_query_seen_ttl_ms         = 10000,   -- ~2× q_query_ttl_ms
   cap_hash_query_seen            = 64,
 
@@ -1114,7 +1119,7 @@ PROTOCOL = {
   -- ring: first attempt TTL=1 (cheap, a neighbour may answer like old Q),
   -- escalate to route_request_max_ttl on the next requery. Reverse path is
   -- learned as the RREQ floods; the RREP lays the forward path on the way back.
-  route_request_max_ttl          = 8,        -- matches the DV 8-hop cap
+  route_request_max_ttl          = 16,       -- matches the DV hop cap (dv_hop_cap)
   route_request_seen_ttl_ms      = 10000,    -- RREQ flood dedup window
   cap_route_request_seen         = 64,       -- relay-side flood-dedup table
   cap_route_request_last         = 128,      -- origination-side per-dst table (was cap_q_queried)
@@ -1780,12 +1785,17 @@ local function pack_beacon(node, max_entries, offset, dirty_only)
   local function pack_one(dest_id)
     local p = node.rt[dest_id].candidates[1]
     local b = bucket_of_snr_4b(p.score)               -- 4-bit bucket
-    local hops_wire = (p.hops - 1) & 0x7              -- wire stores hops-1 (range 0..7)
     local is_gw     = (p.is_gateway == true) and 1 or 0
-    local entry_byte2 = ((b & 0xf) << 4) | (hops_wire << 1) | is_gw
+    -- byte2: score_bucket(4 hi) | rsv(3) | is_gateway(1 lo). hops moved to its
+    -- own full byte (1..255) so the routing cap can grow past 8 with no further
+    -- wire change (active cap = dv_hop_cap). +1 byte/entry on the wire; in the
+    -- real implementation this is offset by reclaiming the over-provisioned
+    -- packet-code byte (a char for <16 frame types).
+    local entry_byte2 = ((b & 0xf) << 4) | is_gw
     out = out .. string.char(dest_id)
               .. string.char(p.next_hop)
               .. string.char(entry_byte2)
+              .. string.char(p.hops & 0xff)
   end
   for i = 1, dirty_n do pack_one(dirty_in_order[i]) end
   for _, d  in ipairs(stable_page) do pack_one(d) end
@@ -1852,15 +1862,14 @@ local function parse_beacon(frame)
       pos = pos + 4
     end
   end
-  if #frame < pos - 1 + 3*n then return nil end   -- length check (accounts for schedule skip)
+  if #frame < pos - 1 + 4*n then return nil end   -- 4 B/entry (accounts for schedule skip)
   for _ = 1, n do
     local dest        = frame:byte(pos)
     local nxt         = frame:byte(pos + 1)
     local sh          = frame:byte(pos + 2)
     local score_bucket = (sh >> 4) & 0xf
-    local hops_wire    = (sh >> 1) & 0x7
-    local hops         = hops_wire + 1             -- decode hops-1 → hops
     local is_gateway   = (sh & 0x01) ~= 0
+    local hops         = frame:byte(pos + 3)       -- full hops byte (1..255)
     table.insert(out.entries, {
       dest       = dest,
       next       = nxt,
@@ -1869,7 +1878,7 @@ local function parse_beacon(frame)
       hops       = hops,
       is_gateway = is_gateway,
     })
-    pos = pos + 3
+    pos = pos + 4
   end
   if has_seen_bitmap then
     if #frame < pos - 1 + BCN_SEEN_BITMAP_BYTES then return nil end
@@ -2724,7 +2733,7 @@ end
 --   byte 1   : addr_len(3 hi) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
 --   byte 2   : next (immediate next-hop receiver)
 --   byte 3   : dst  (final destination — single byte when addr_len==0)
---   byte 4   : hop_budget byte: hops_remaining(4 hi) | committed_hops(4 lo)  (§7.6)
+--   byte 4   : hop_budget byte: hops_remaining(5 hi) | committed_hops(3 lo)  (§7.6)
 --   byte 5   : prev_fwd_rt_hops — previous transmitter's rt[dst].hops claim    (§7.6)
 --   bytes 6-7: ctr (16-bit LE, per-(origin,dst) counter)
 --   bytes 8..(7+n): ciphertext (= plaintext placeholder for now;
@@ -2738,15 +2747,17 @@ end
 local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
   -- inner = pre-assembled bytes: src_addr_len(1) | src_addr(1) | body
   -- hop_budget = optional table { remaining, committed, prev_fwd_rt_hops }
-  --   remaining: hops_remaining (4 bits, 0-15); default 15 = no enforcement
-  --   committed: committed_hops (4 bits, 0-15); default 0
+  --   remaining: hops_remaining (5 bits, 0-31); default 31 = no enforcement.
+  --     5 bits so the TTL reaches the 16-hop cap (+slack).
+  --   committed: committed_hops (3 bits, 0-7); default 0. Informational (NACK
+  --     reason); saturates at 7.
   --   prev_fwd_rt_hops: previous fwd's claim of dst's hops (8 bits); default 0
   local addr_len = 0                                      -- in-leaf only this phase
   local byte1 = ((addr_len & 0x7) << 5) | (flags & 0x0f) -- flags: bits 0-3 (PAYLOAD_TYPE_M, PRIORITY, E2E_IS_ACK, E2E_ACK_REQ)
   local hb = hop_budget or {}
-  local hb_remaining = math.min(15, math.max(0, hb.remaining or 15))
-  local hb_committed = math.min(15, math.max(0, hb.committed or 0))
-  local hop_budget_byte = ((hb_remaining & 0xf) << 4) | (hb_committed & 0xf)
+  local hb_remaining = math.min(31, math.max(0, hb.remaining or 31))
+  local hb_committed = math.min(7, math.max(0, hb.committed or 0))
+  local hop_budget_byte = ((hb_remaining & 0x1f) << 3) | (hb_committed & 0x07)
   local prev_fwd_rt_hops = math.min(255, math.max(0, hb.prev_fwd_rt_hops or 0))
   local ctr_lo_byte = ctr & 0xff
   local ctr_hi_byte = (ctr >> 8) & 0xff
@@ -2772,8 +2783,8 @@ local function parse_data(frame)
   local dst      = frame:byte(4)
   local hop_budget_byte   = frame:byte(5)
   local prev_fwd_rt_hops  = frame:byte(6)
-  local hb_remaining = (hop_budget_byte >> 4) & 0xf
-  local hb_committed = hop_budget_byte & 0xf
+  local hb_remaining = (hop_budget_byte >> 3) & 0x1f
+  local hb_committed = hop_budget_byte & 0x07
   local ctr_lo_byte = frame:byte(7)
   local ctr_hi_byte = frame:byte(8)
   local ctr      = ctr_lo_byte | (ctr_hi_byte << 8)
@@ -5169,7 +5180,7 @@ local function emit_rt_quality_snapshots(self)
         reason = "primary_budget_tier"
       elseif delta >= 2 then
         reason = "primary_worse_than_alt"
-      elseif (primary.hops or 0) >= 8 then
+      elseif (primary.hops or 0) >= (self.dv_hop_cap or 16) then
         reason = "primary_long"
       end
       if reason ~= nil then
@@ -8176,10 +8187,11 @@ function on_init(self, config)
   -- (=0.3125, ~10-sample effective window).
   self.snr_ewma_in    = {}
   self.snr_ewma_out   = {}
-  -- beacon_max_bytes is a PROTOCOL constant (151, fits 47 entries).
-  -- Header is 4 bytes ('B' + leaf_id_byte + src + n); entries 3 bytes each.
+  -- beacon_max_bytes is a PROTOCOL constant (151). Header is 8 bytes
+  -- ('B' + byte1 + src + n_byte + key_hash32(4)); route entries are 4 bytes each
+  -- (dest + next + byte2 + hops) -> (151-8)/4 = 35 entries fit the airtime cap.
   self.beacon_max_entries = math.max(1,
-    math.floor((self.beacon_max_bytes - 8) / 3))
+    math.floor((self.beacon_max_bytes - 8) / 4))
   -- Radio params for airtime calculation. The runtime injects per-node
   -- resolved values via `_sim_bw_hz` and `_sim_cr` so the script's
   -- airtime math matches what the radio actually does (otherwise s03's
@@ -9344,7 +9356,7 @@ function on_recv(self, frame, meta)
         local rx_score_q4 = route_score_from_snr(self, meta_snr_q4)
         local combined_score_q4 = math.min(rx_score_q4, e.score)
         local combined_hops  = e.hops + 1
-        if combined_hops <= 8 then
+        if combined_hops <= (self.dv_hop_cap or 16) then
           local cand = {
             next_hop   = b.src,
             n2_hop     = e.next,   -- N's claimed next-hop for e.dest; used by rt_prune_cycle
@@ -10617,7 +10629,7 @@ function on_recv(self, frame, meta)
     -- clears on ACK reception before our NACK arrives, and the rt-learning
     -- side-effect (rt[dst].hops upward) is lost.
     local hb_new_remaining = d.hop_remaining - 1
-    local hb_new_committed = math.min(15, d.hop_committed + 1)
+    local hb_new_committed = math.min(7, d.hop_committed + 1)
     local is_delivered_for_budget_check = (d.dst == self.id)
     if not is_delivered_for_budget_check and hb_new_remaining < 0 then
       self:emit("hop_budget_exceeded", {

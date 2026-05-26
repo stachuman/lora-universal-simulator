@@ -208,11 +208,19 @@ intra-suburb same-layer delivery is 100%.)
 cause behind three failure buckets: (a) west↔east inter-gateway transit (>8 hops),
 (b) the "routing LOOP / never reached gateway" bucket (those transit forwards
 looping in the dense center), (c) long same-layer center pairs (`c000↔c090` = 19
-hops). Any path > 8 hops hits `hop_budget_exceeded`. Wire: DV stores `hops-1` in
-3 bits (cap 8); the in-memory 8-hop cap rejects `combined_hops > 8`. Options:
-tighten geometry (denser center / gateways nearer the middle → all paths ≤8) **or**
-raise the hop budget (wire/cap change). **NEXT (under discussion): raise the cap
-8 → 16.** Note s17 XL is single-run noisy; center↔suburb dip (42→36) is within that
+hops). Any path > 8 hops hit `hop_budget_exceeded`.
+
+**DONE: hop cap raised 8 → 16.** Route entry `hops` moved to its own full wire byte
+(1..255; +1 B/entry, `beacon_max_entries` 47→35); DATA `hop_budget` `hops_remaining`
+widened to 5 bits (0..31); the three caps moved together — `dv_hop_cap`=16 (beacon
+adoption `combined_hops>cap`), `route_request_max_ttl`=16 (RREQ flood), and
+`hash_query_max_ttl`=16 (H flood). Raising further is now a one-constant change (no
+wire change). Guarded by **t78** (an 11-hop linear chain delivers only at cap≥11;
+verified 0 delivered at all-caps=8). Suite 98/98. **Caveat (unchanged):** a 16-hop
+unicast is ~0.95^16 ≈ 0.4 reliable + multi-second — the cap *enables* west↔east
+(gw_w0→gw_e1 ≈ 9–11 hops) and the long center pairs to route, it doesn't make them
+reliable; the 19-hop `c000↔c090` still exceeds 16. (s17 west↔east payoff pending a
+re-run.) Note s17 XL is single-run noisy; center↔suburb dip (42→36) is within that
 + added L1 transit contention.
 
 ## Tooling gotchas (so they aren't rediscovered)
