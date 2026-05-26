@@ -321,6 +321,35 @@ fix) can't converge in the 7.5 s window → the promising direction is **proacti
 schedule-driven**: establish/refresh routes to a gw exactly when its window opens,
 and time sends to windows.
 
+### First-leg loop mechanism + FIX (gateway_doorstep_hold)
+Tracing the Stage-1 LOOP bucket (`w028→c060`, `w015→e020` wave-1): the loop is **not**
+a stale-hop-count DV cycle — it's the generic multi-path recovery machinery
+backfiring on a **single-funnel** gateway. A gateway-bound envelope's wire dst IS the
+gateway; when a doorstep RTS gets no CTS (collision in the gw's narrow window, or the
+gw mid-switch off-layer), `tx_blind_alt` / `pick_next_cascade_hop` re-route the copy
+to a **sibling** gateway-neighbour — which also can't reach the gw — so copies bounce
+(`loop_duplicate` → `cascade_exhausted` → `rts_giveup`) and self-contend. Confirmed by
+the collision check: the gw receiver is a 1.7× collision hotspot, 30 collisions hit
+gw_w1 during one 24 s attempt; the `cts_timeout`s are contention, not staleness.
+
+**FIX (committed):** `gateway_doorstep_hold` in `dv_dual_sf.lua` (`rts_timeout_fire` /
+`ack_timeout_fire`). When the silent next-hop IS a known gateway (`px.next==px.dst`,
+`gateway_neighbor_schedules[dst]`), suppress the sibling fan-out: hold the **single**
+copy and requeue it window-aware (`gateway_schedule_defer_ms`) + jittered
+(`gateway_doorstep_retry_jitter_ms`, burst-avoidance) until a **real** giveup at
+`gateway_send_giveup_ms` (150 s ≈ 10 windows), instead of the seconds-long
+cascade-exhaust. Relay hops (`next≠dst`) and same-layer routing are untouched.
+Guarded by **t80** (3 suburb nodes contend at one gw window → holds, 3/3 deliver, 0
+`path_cascade`/`loop_duplicate`/`giveup`; fails when the giveup knob is neutered).
+
+**Result (s17, seed 17, single run):** overall DM **54%→62%**, cross-layer **20/48→
+26/48** (42%→54%). First-leg losses **22→13** (routing LOOP **12→7**, doorstep-busy
+**7→2**); messages reaching the egress gw **26→35**. The targeted bucket shrank and
+delivery rose — the *opposite* of the reverted TTL fix's failure-mode shift, so the
+single-seed signal is trustworthy in *direction* (sweep for the rate). **Untouched:
+the 2-gw suburb↔suburb path (4/12)** — its loss is now Stage-2 (inter-gateway transit
+across the center), the next target.
+
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
   = config `node_id`.

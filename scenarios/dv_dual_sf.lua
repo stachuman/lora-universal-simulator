@@ -1032,6 +1032,18 @@ PROTOCOL = {
 
   -- ---- Defer / dedup ----
   send_defer_ttl_ms              = 30000,
+  -- ---- Gateway-doorstep hold (first-leg loop fix) ----
+  -- A cross-layer envelope's wire dst IS its egress gateway. When a node RTSing
+  -- that gateway directly gets no CTS (contention in the gateway's narrow visit
+  -- window, or the gateway mid-switch off our layer), the generic retry/blind-
+  -- alt/cascade machinery fans the copy out to SIBLING gateway-neighbours — none
+  -- of which can reach an absent/contended gateway either, so the copies bounce
+  -- (loop_duplicate) and self-contend. Instead we HOLD the single copy and retry
+  -- the same gateway, window-aware (gateway_schedule_defer_ms) + jittered, until
+  -- a real giveup at gateway_send_giveup_ms. The jitter spreads the gateway's
+  -- neighbours across the window so they don't all RTS at once.
+  gateway_send_giveup_ms           = 150000,  -- 2.5 min (~10 visit windows) before a real send_giveup
+  gateway_doorstep_retry_jitter_ms = 2000,    -- burst-avoidance spread for in-window retries
   -- 'F' RREP de-storm backoff (§3.7b). The RREP rides tx_initiating, whose LBT
   -- only defers when the channel is already busy; simultaneous reverse-path
   -- repliers all sense clear and collide at the receiver. A small random backoff
@@ -6069,6 +6081,85 @@ local function try_cascade_requeue(self, trigger)
   return true
 end
 
+-- First-leg loop fix: hold a gateway-bound envelope at the doorstep instead of
+-- fanning it out to sibling neighbours. Called from rts_timeout_fire /
+-- ack_timeout_fire when the pending tx's next hop IS a known gateway we're
+-- RTSing directly (px.next == px.dst). Returns true if it took ownership of the
+-- message (caller must `return`), false to let normal retry/cascade proceed.
+-- Global (not local) to dodge the 200-local-per-chunk limit; closes over the
+-- locals visible here (gateway_schedule_defer_ms, name_of) and the global
+-- become_free (assigned later, resolved at call time).
+function gateway_doorstep_hold(self, captured_ctr_lo)
+  local px = self.pending_tx
+  if px == nil then return false end
+  -- Only the doorstep hop of a cross-layer first leg: next hop is the wire dst
+  -- AND that dst is a gateway we hold a visit schedule for. Mid-first-leg relay
+  -- hops (next ~= dst) fall through to normal cascade so we can still route
+  -- around a genuinely dead relay; the 2nd leg (gw -> real target) has a
+  -- non-gateway dst and is unaffected.
+  if px.next ~= px.dst then return false end
+  if self.gateway_neighbor_schedules == nil
+     or self.gateway_neighbor_schedules[px.dst] == nil then
+    return false
+  end
+
+  local now = self:now()
+  local enq = px.enqueue_time_ms or now
+  local age = now - enq
+  local giveup_ms = self.gateway_send_giveup_ms or 150000
+  if age >= giveup_ms then
+    -- Patient buffer exhausted across many windows: a real, honest giveup.
+    self:emit("send_giveup", {
+      origin = px.origin, payload = px.user_text, ctr = px.ctr,
+      ctr_lo = captured_ctr_lo, dst = px.dst,
+      reason = "gateway_unreachable_timeout", age_ms = age,
+    })
+    self:log(string.format(
+      "send_giveup msg=%d dst=%s (gateway unreachable %dms >= %dms)",
+      captured_ctr_lo, name_of(self, px.dst), age, giveup_ms))
+    self.pending_tx = nil
+    become_free(self)
+    return true
+  end
+
+  -- Window-aware backoff: 0 if the gateway is currently reachable on our layer,
+  -- else the wait until its next visit window. Add jitter so neighbours spread
+  -- across the window (burst-avoidance) rather than re-colliding in lockstep.
+  local wait = gateway_schedule_defer_ms(self, px.dst)
+  local jitter = self:rand(0, (self.gateway_doorstep_retry_jitter_ms or 0) + 1)
+  local backoff = wait + jitter
+  if backoff <= 0 then backoff = 200 end
+  -- Requeue the SINGLE copy (no fan-out). enqueue_time_ms preserved so the
+  -- giveup clock spans the whole buffered lifetime; requeue_count untouched so
+  -- this doesn't burn the generic cascade budget.
+  table.insert(self.tx_queue, {
+    origin          = px.origin,
+    dst_id          = px.dst,
+    dst_name        = name_of(self, px.dst),
+    payload         = px.payload,
+    user_text       = px.user_text,
+    ctr             = px.ctr,
+    flags           = px.flags or 0,
+    previous_hop    = px.previous_hop,
+    enqueue_time_ms = enq,
+    requeue_count   = px.requeue_count or 0,
+    next_attempt_ms = now + backoff,
+    tx_layer_id     = px.tx_layer_id,
+  })
+  self:emit("gateway_hold_requeue", {
+    origin = px.origin, payload = px.user_text, ctr = px.ctr,
+    ctr_lo = captured_ctr_lo, dst = px.dst,
+    wait_ms = wait, jitter_ms = jitter, backoff_ms = backoff,
+    age_ms = age, giveup_ms = giveup_ms,
+  })
+  self:log(string.format(
+    "gateway_hold_requeue msg=%d dst=%s backoff=%dms (win=%d jit=%d) age=%d/%dms",
+    captured_ctr_lo, name_of(self, px.dst), backoff, wait, jitter, age, giveup_ms))
+  self.pending_tx = nil
+  become_free(self)
+  return true
+end
+
 -- Fires after rts_timeout_ms with no CTS. Decides retry vs giveup vs
 -- defer (when busy as receiver of someone else's data).
 local function rts_timeout_fire(self, captured_ctr_lo)
@@ -6094,6 +6185,12 @@ local function rts_timeout_fire(self, captured_ctr_lo)
     end)
     return
   end
+
+  -- Gateway-doorstep hold (first-leg loop fix): if we're RTSing a known gateway
+  -- directly and got no CTS, hold + retry it window-aware instead of fanning the
+  -- copy out to sibling neighbours (which loops). Replaces the retry/blind/
+  -- cascade machinery for this hop only; no-op for every other destination.
+  if gateway_doorstep_hold(self, captured_ctr_lo) then return end
 
   -- F1 mitigation: receiver may have just become blind (we overheard a
   -- CTS to a different sender after our RTS-tx and before the timeout).
@@ -6297,6 +6394,11 @@ local function ack_timeout_fire(self, captured_ctr_lo)
     end)
     return
   end
+
+  -- Gateway-doorstep hold (first-leg loop fix): same as in rts_timeout_fire —
+  -- a DATA-ACK loss to the egress gateway holds + retries window-aware rather
+  -- than cascading the copy to siblings.
+  if gateway_doorstep_hold(self, captured_ctr_lo) then return end
 
   if self.pending_tx.retries_left <= 0 then
     -- K=3 failure cascade — same logic as the rts_timeout giveup branch
