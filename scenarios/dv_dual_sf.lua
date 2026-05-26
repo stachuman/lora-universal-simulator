@@ -1019,6 +1019,17 @@ PROTOCOL = {
   cascade_requeue_total_max_ms   = 60000,
   cascade_requeue_load_threshold = 0,
 
+  -- ---- Hop-gradient loop guard (same-layer loop fix) ----
+  -- Bound the alternate-route search (cascade / blind-alt / loop-dup retry, all
+  -- of which flow through next_hop_selectable) to routes no more than this many
+  -- hops "uphill" of our best known route to the dst. Stops the alt search from
+  -- wandering into longer paths that cycle in a dense mesh (observed: a center
+  -- DM bouncing across many nodes, back to its own origin). Soft cap, not a hard
+  -- "strictly closer" gate: a budget-blocked/silent primary can still fall
+  -- through to a slightly-longer usable alternate. nil disables. Loop-freedom
+  -- backstop is the data-plane origin/prev-hop guards, not this. Tune 0/1/2.
+  gradient_max_uphill_hops       = 1,
+
   -- ---- Q frames ----
   q_query_ttl_ms                 = 5000,
   q_respond_ttl_ms               = 10000,
@@ -3078,6 +3089,15 @@ local function classify_blind(self, dst_id, current_next_hop, alts_tried, previo
       return "alt", c.next_hop
     end
   end
+  -- Fallback: no near (gradient-respecting) alt; allow an uphill one rather
+  -- than strand. Loop-freedom backstop = data-plane origin/prev-hop guards.
+  for _, c in ipairs(entry.candidates) do
+    if next_hop_selectable(self, dst_id, c, previous_hop, alts_tried,
+                           current_next_hop, "blind_alt", true)
+       and not is_blind(self, c.next_hop) then
+      return "alt", c.next_hop
+    end
+  end
   return "defer", remaining + 1
 end
 
@@ -3886,7 +3906,7 @@ local function emit_stale_next_skip(self, dst_id, next_hop, source)
 end
 
 next_hop_selectable = function(self, dst_id, c, previous_hop, alts_tried,
-                               current_next_hop, source)
+                               current_next_hop, source, allow_uphill)
   if not c or c.next_hop == nil then return false end
   if current_next_hop ~= nil and c.next_hop == current_next_hop then
     return false
@@ -3912,6 +3932,24 @@ next_hop_selectable = function(self, dst_id, c, previous_hop, alts_tried,
   if not fresh then
     emit_stale_next_skip(self, dst_id, c.next_hop, source)
     return false
+  end
+  -- Hop-gradient loop guard: reject an alternate that routes materially uphill
+  -- (more hops to dst than our best route + gradient_max_uphill_hops). Bounds
+  -- the cascade/blind/loop-dup alt search to near-best paths so it can't wander
+  -- into longer cycles. The earlier budget/silent filters run first, so a
+  -- blocked primary still falls through to a usable within-tolerance alternate.
+  local cap = self.gradient_max_uphill_hops
+  if not allow_uphill and cap ~= nil and cap >= 0 and c.hops ~= nil then
+    local entry = self.rt[dst_id]
+    local best = entry and entry.candidates and entry.candidates[1]
+    if best and best.hops ~= nil and c.hops > best.hops + cap then
+      self:emit("rt_skip_uphill", {
+        dest = dst_id, next = c.next_hop,
+        cand_hops = c.hops, best_hops = best.hops, cap = cap,
+        source = source or "route_select",
+      })
+      return false
+    end
   end
   return true
 end
@@ -5295,6 +5333,15 @@ local function pick_next_cascade_hop(self, px)
   for _, c in ipairs(entry.candidates) do
     if next_hop_selectable(self, px.dst, c, px.previous_hop, px.alts_tried,
                            nil, "cascade_order")
+       and not is_blind(self, c.next_hop) then
+      return c.next_hop
+    end
+  end
+  -- Fallback: no near (gradient-respecting) alt; allow an uphill one rather
+  -- than strand. Loop-freedom backstop = data-plane origin/prev-hop guards.
+  for _, c in ipairs(entry.candidates) do
+    if next_hop_selectable(self, px.dst, c, px.previous_hop, px.alts_tried,
+                           nil, "cascade_order", true)
        and not is_blind(self, c.next_hop) then
       return c.next_hop
     end
@@ -10896,6 +10943,23 @@ function on_recv(self, frame, meta)
     local d_user_text = event_payload
     local d_committed_at_dst = hb_new_committed   -- §7.6: for E2E ACK actual_hops_used
     local is_delivered = (d.dst == self.id)
+
+    -- Origin-loop drop (same-layer loop fix): a frame WE originated has looped
+    -- back to us. The ACK already went to rx_from (so the upstream stops
+    -- retrying), but we must NOT re-forward our own frame — re-injecting it is
+    -- what turns a transient bounce into a sustained loop (observed: an origin
+    -- re-sending its own returned DATA). Absorb + drop.
+    if not is_delivered and d_origin == self.id then
+      self:emit("origin_loop_drop", {
+        origin = d_origin, payload = d_user_text, ctr = d_ctr,
+        dst = d_dst, from = d_src,
+      })
+      self:log(string.format(
+        "origin_loop_drop ctr=%d dst=%s (our own frame looped back via %s)",
+        d_ctr, name_of(self, d_dst), name_of(self, d_src)))
+      self:after(self.ack_air_ms + 1, function() become_free(self) end)
+      return
+    end
 
     -- §7.6: forward_hop_budget = the decremented values that will travel
     -- with the forwarded frame (next-hop and beyond). Already enforced

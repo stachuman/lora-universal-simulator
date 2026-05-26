@@ -381,6 +381,38 @@ Start the local investigation by tracing a working direction vs its failing reve
 **2-gw is robustly the worst** (25% mean, 17–33% *every* seed — confirmed bottleneck,
 not noise); it's the eventual gateway target (Stage-2 inter-gateway transit).
 
+### Same-layer anti-loop package — shipped (net +5pp); refinement pending
+Built in `dv_dual_sf.lua`: **origin-drop** (a node never re-forwards a frame it
+originated — kills the return-to-origin loop seen in `c040→c120`), a **soft
+hop-gradient** (`gradient_max_uphill_hops`, default 1: the alternate-route search in
+`next_hop_selectable` — shared by the cascade picker, `classify_blind`, and the
+`loop_duplicate` retry — prefers routes within `cap` hops of the best, with a 2-pass
+fallback that allows uphill rather than strand), and the pre-existing prev-hop
+split-horizon. (`prev-hop` already existed; storm/loop-feed are subsumed because all
+alt-pickers flow through the gated `next_hop_selectable`.)
+
+**4-seed sweep vs doorstep-only baseline:** ALL **59%→64%**, XL 1-gw **51%→65%**,
+XL 2-gw **25%→31%**, same-layer **82%→77%**. So it's a net win — but it helped
+**cross-layer**, not the same-layer it targeted, and slightly *regressed* same-layer.
+
+**Why same-layer regressed (the next thing to fix).** Clean within-seed evidence
+(seed 1700): the **hard** gradient gave same-layer **93%**, the **soft** gave **70%**.
+The soft pass-2 uphill fallback **re-allows the same-layer loops the hard gradient
+killed** — and it fires exactly when it shouldn't: under dense-center contention,
+pass-1 exhausts the (merely *busy*) near alternates, so pass-2 hands the message a
+far/loopy path. That same fallback is what *rescues* cross-layer (sparse/gateway legs
+genuinely need the longer path). So: **hard** → same-layer loops die / cross-layer
+strands; **soft** → cross-layer recovers / same-layer loops return.
+
+**Refinement (planned):** the discriminator isn't hard-vs-soft, it's *does a short
+path exist?* Gate pass-2 (uphill) on **"no non-uphill candidate exists at all"**; when
+a short path exists but is merely busy (dense center), return nil → the existing
+requeue **backs off and retries the short path** instead of going uphill. Expected to
+recover same-layer (toward the hard-gradient 90s) while keeping the cross-layer gain.
+Regression test for the loop guards lands with this (the guards fire under
+dense-contention *scale* — s17 — not in a toy topology, so it's validated by the
+sweep, not a unit test, until the refined behavior is final).
+
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
   = config `node_id`.
