@@ -350,6 +350,32 @@ single-seed signal is trustworthy in *direction* (sweep for the rate). **Untouch
 the 2-gw suburb↔suburb path (4/12)** — its loss is now Stage-2 (inter-gateway transit
 across the center), the next target.
 
+### Delivery by traffic class — NEXT: local (same-layer) first
+Breaking the post-fix s17 run (seed 17; **single seed — a 1701–1703 sweep was run to
+harden these, see git history**) down by what the traffic actually is:
+
+| class | delivered | rate | abs loss |
+|---|---|---|---|
+| Channels (broadcast gossip) | ~1416/1470 | ~96% | — |
+| Same-layer DM (within a layer) | 22/30 | **73%** | 8 |
+| XL **1-gw** (suburb↔center) | 22/36 | **61%** | 14 |
+| XL **2-gw** (suburb↔suburb) | 4/12 | **33%** | 8 |
+
+**Decision (2026-05-26): work LOCAL/same-layer delivery FIRST, then return to
+gateway traffic.** Same-layer is foundational — every cross-layer leg rides on
+same-layer hops, so lifting it lifts 1-gw and 2-gw too.
+
+**Same-layer 73% is NOT a multi-hop ceiling (do not assume it is).** The tell is a
+**directional routing asymmetry**: same node pair, *symmetric* bidir links, yet
+`c040→c120` = **0/3** while `c120→c040` = **3/3** at mean **3.3 hops**. A 3-hop pair
+at 0% one-way / 100% the other can't be PHY attrition (that's ~symmetric) — it's a
+routing failure (one direction gets a clean route, the reverse loops/gives up). East
+suburb shows the same shape (`e030→e005` 1/3 vs `e005→e030` 2/3). Same-layer failure
+modes are `next-hop-silent` / `giveup` (routing/contention), not PHY drops; with
+RTS/CTS/ACK+retries per-hop should clear ~0.99, so ~10-hop paths should beat 73%.
+**Headroom is real.** Start the local investigation by tracing a working direction vs
+its failing reverse (`c040→c120` vs `c120→c040`) to find why one side loops.
+
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
   = config `node_id`.
