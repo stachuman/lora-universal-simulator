@@ -379,9 +379,15 @@ def build_commands(nodes):
     # (center<->west, center<->east, west<->east via center), channel posters.
     intra = [(cn(10), cn(150)), (cn(40), cn(120)), (wn(5), wn(30)),
              (en(5), en(30)), (cn(0), cn(90))]
-    xl = [(cn(20), wn(10), 2), (cn(60), wn(28), 2), (cn(100), wn(20), 2),
-          (cn(30), en(15), 3), (cn(80), en(31), 3), (cn(140), en(25), 3),
-          (wn(15), en(20), 3), (en(10), wn(31), 2)]
+    xl = [(cn(20), wn(10)), (cn(60), wn(28)), (cn(100), wn(20)),
+          (cn(30), en(15)), (cn(80), en(31)), (cn(140), en(25)),
+          (wn(15), en(20)), (en(10), wn(31))]
+    # Source-routed layer-hop path for a hub topology: direct if either endpoint
+    # is the hub L1, else traverse the hub. West<->east (L2<->L3) has no direct
+    # gateway -> chain via L1: L2->L3 = "1,3", L3->L2 = "1,2".
+    def lyr(name): return byname[name]["config"]["layer_id"]
+    def hoppath(src_l, dst_l):
+        return str(dst_l) if (src_l == 1 or dst_l == 1) else f"1,{dst_l}"
     posters = [cn(5), cn(75), wn(8), wn(30), en(8), en(30)]
     active = DURATION_MS - QUIET_MS
     cmds = []
@@ -392,10 +398,10 @@ def build_commands(nodes):
             cmds += [_inj(t, a, f"send {b} hi-w{w}"),
                      _inj(t+15000, b, f"send {a} hey-w{w}")]
             t += 40000
-        for a, b, blayer in xl:
-            cmds.append(_inj(t, a, f"send_layer {blayer} {hd(b)} xl-{a}-{b}-w{w}"))
-            alayer = byname[a]["config"]["layer_id"]
-            cmds.append(_inj(t+25000, b, f"send_layer {alayer} {hd(a)} xl-{b}-{a}-w{w}"))
+        for a, b in xl:
+            al, bl = lyr(a), lyr(b)
+            cmds.append(_inj(t, a, f"send_layer {hoppath(al, bl)} {hd(b)} xl-{a}-{b}-w{w}"))
+            cmds.append(_inj(t+25000, b, f"send_layer {hoppath(bl, al)} {hd(a)} xl-{b}-{a}-w{w}"))
             t += 45000
         for i, p in enumerate(posters):
             cmds.append(_inj(base + 60000 + i*20000, p, f"send_channel 7 ch-{p}-w{w}"))

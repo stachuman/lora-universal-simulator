@@ -4901,7 +4901,12 @@ local function age_out_gateway_remote_bind(self)
   end
 end
 
-local function select_gateway_for_layer(self, target_layer_id)
+-- skip_seen_guard: set by the gateway-chaining TRANSIT path. There, the wanted
+-- gateway bridges the *entered* layer by definition, so it is reachable on this
+-- layer (multi-hop) even if our seen-bitmap hasn't observed it directly -- the
+-- on-layer guard (which exists to reject genuine cross-layer TLV leaks) would
+-- otherwise wrongly drop it; reactive RREQ then discovers the route.
+local function select_gateway_for_layer(self, target_layer_id, skip_seen_guard)
   target_layer_id = math.floor(target_layer_id or -1)
   -- Prune stale propagated entries before reading. Cheap (table walk).
   prune_aged_bridged_layers(self, self:now())
@@ -4968,7 +4973,7 @@ local function select_gateway_for_layer(self, target_layer_id)
         -- dual-layer gateway: it bridges L2 but is unreachable from L1, so we
         -- must not address an envelope to it (we'd never route to it).
         local seen = self.dest_seen_ms and self.dest_seen_ms[gw_id]
-        if seen ~= nil and (ttl <= 0 or (now2 - seen) <= ttl) then
+        if skip_seen_guard or (seen ~= nil and (ttl <= 0 or (now2 - seen) <= ttl)) then
           return gw_id, nil, nil
         end
       end
@@ -10892,7 +10897,10 @@ function on_recv(self, frame, meta)
             local remaining = {}
             for i = 2, #gw_env.hops do remaining[#remaining + 1] = gw_env.hops[i] end
             local next_layer = remaining[1]
-            local next_gw = select_gateway_for_layer(self, next_layer)
+            -- skip the on-layer guard: the next gateway bridges the entered
+            -- layer, so it IS on-layer (possibly multi-hop) -- let reactive
+            -- route discovery reach it instead of dropping the transit.
+            local next_gw = select_gateway_for_layer(self, next_layer, true)
             if next_gw == nil or next_gw == self.id then
               self:emit("gateway_envelope_transit_drop", {
                 origin = d_origin, via_gateway = self.id,

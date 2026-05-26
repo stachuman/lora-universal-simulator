@@ -298,8 +298,10 @@ def configured_pairs(cfg, name_to_id, hash_layer_to_name):
         cmd = c.get("command", "")
         m_layer = SEND_LAYER_RE.match(cmd)
         if m_layer:
-            target_layer = int(m_layer.group(1))
+            # layer field may be a comma-separated source-routed hop path
+            # (e.g. "1,3"); the destination sits on the LAST hop's layer.
             try:
+                target_layer = int(m_layer.group(1).split(",")[-1])
                 target_hash = int(m_layer.group(2))
             except ValueError:
                 continue

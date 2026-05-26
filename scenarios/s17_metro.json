@@ -18412,22 +18412,22 @@
     {
       "at_ms": 1070000,
       "node": "w015",
-      "command": "send_layer 3 386072596 xl-w015-e020-w0"
+      "command": "send_layer 1,3 386072596 xl-w015-e020-w0"
     },
     {
       "at_ms": 1095000,
       "node": "e020",
-      "command": "send_layer 2 386007055 xl-e020-w015-w0-the-quick-brown-fox-jumps-o"
+      "command": "send_layer 1,2 386007055 xl-e020-w015-w0-the-quick-brown-fox-jumps-o"
     },
     {
       "at_ms": 1115000,
       "node": "e010",
-      "command": "send_layer 2 386007071 xl-e010-w031-w0-th"
+      "command": "send_layer 1,2 386007071 xl-e010-w031-w0-th"
     },
     {
       "at_ms": 1140000,
       "node": "w031",
-      "command": "send_layer 3 386072586 xl-w031-e010-w0"
+      "command": "send_layer 1,3 386072586 xl-w031-e010-w0"
     },
     {
       "at_ms": 660000,
@@ -18572,22 +18572,22 @@
     {
       "at_ms": 2070000,
       "node": "w015",
-      "command": "send_layer 3 386072596 xl-w015-e020-w1-the-quick-brown-fox-jumps"
+      "command": "send_layer 1,3 386072596 xl-w015-e020-w1-the-quick-brown-fox-jumps"
     },
     {
       "at_ms": 2095000,
       "node": "e020",
-      "command": "send_layer 2 386007055 xl-e020-w015-w1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick"
+      "command": "send_layer 1,2 386007055 xl-e020-w015-w1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick"
     },
     {
       "at_ms": 2115000,
       "node": "e010",
-      "command": "send_layer 2 386007071 xl-e010-w031-w1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-ju"
+      "command": "send_layer 1,2 386007071 xl-e010-w031-w1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-ju"
     },
     {
       "at_ms": 2140000,
       "node": "w031",
-      "command": "send_layer 3 386072586 xl-w031-e010-w1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-d"
+      "command": "send_layer 1,3 386072586 xl-w031-e010-w1-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-d"
     },
     {
       "at_ms": 1660000,
@@ -18732,22 +18732,22 @@
     {
       "at_ms": 3070000,
       "node": "w015",
-      "command": "send_layer 3 386072596 xl-w015-e020-w2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-"
+      "command": "send_layer 1,3 386072596 xl-w015-e020-w2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-"
     },
     {
       "at_ms": 3095000,
       "node": "e020",
-      "command": "send_layer 2 386007055 xl-e020-w015-w2-the"
+      "command": "send_layer 1,2 386007055 xl-e020-w015-w2-the"
     },
     {
       "at_ms": 3115000,
       "node": "e010",
-      "command": "send_layer 2 386007071 xl-e010-w031-w2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fo"
+      "command": "send_layer 1,2 386007071 xl-e010-w031-w2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fo"
     },
     {
       "at_ms": 3140000,
       "node": "w031",
-      "command": "send_layer 3 386072586 xl-w031-e010-w2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jump"
+      "command": "send_layer 1,3 386072586 xl-w031-e010-w2-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jumps-over-the-lazy-dog-the-quick-brown-fox-jump"
     },
     {
       "at_ms": 2660000,

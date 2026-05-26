@@ -177,8 +177,20 @@ consumed hop list is the loop/TTL guard. A 1-element list == the old behaviour
 separate L1↔L2 / L1↔L3 gateways, no direct bridge): 3/3 forward + 2/2 reverse
 deliver. Path *learning* (auto-deriving hops from the bridged-layers TLVs) is the
 deferred follow-on; for now the sender supplies the path explicitly.
-**To close s17's west↔east bucket**, regenerate s17 with `1,3` / `2,1` hop lists
-on those pairs (gen_s17_metro.py build_commands) — separate change.
+**s17 west↔east, end-to-end status (1 h run, hop-paths `1,3`/`2,1`):** the
+chaining *mechanism* is complete — origin-drops 12→0 (envelopes start), and after
+a **transit on-layer guard fix** (the transit's next gateway bridges the entered
+layer *by definition*, so `select_gateway_for_layer(next, skip_seen_guard=true)`
+lets reactive RREQ reach a non-adjacent same-layer gateway) `transit_drop` went
+8→0: all west↔east envelopes now flow `L2→gw_w→hub L1→gw_e→L3`. **But delivery is
+still 0/12** — the *final leg* (gateway → a **deep** suburb node, multi-hop, inside
+the gateway's brief visit window) fails. That's the **same structural
+2nd-leg-in-window wall** that caps center↔suburb XL (~36% on this run), now
+compounded by the 2-gateway path (the message arrives late, then needs a far-
+suburb multi-hop in a window). So west↔east is no longer a *chaining* gap — it's
+the broader cross-layer 2nd-leg delivery limit (the open structural frontier).
+Note s17 XL is noisy on a single 1-h run (no seed sweep); the center↔suburb dip
+(42→36) is within that + added L1 transit contention.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
