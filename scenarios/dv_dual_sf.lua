@@ -7904,7 +7904,25 @@ local function schedule_gateway_layer_window(self, rec)
       return
     end
     activate_gateway_layer(self, rec, "schedule")
-    send_beacon_page(self, "gateway_sweep")
+    -- Differential visit-entry beacon. The schedule is static — a node computes
+    -- all future windows from one hearing (gateway_schedule_defer_ms), and real
+    -- clock drift (~±20-50ppm → ~100-200ms over 30-60min) is negligible vs the
+    -- multi-second window — so re-announcing it every visit is waste, and an
+    -- otherwise-empty sweep just burns the ~728ms SF9 seen-bitmap overhead.
+    -- Only sweep when we have NEW state to push to this layer: dirty routes (rt
+    -- is the active=visit layer here) or dirty channel messages. When quiet,
+    -- skip — the periodic beacon + Q REQ_SYNC (jittered) carry the slow path.
+    -- (See DELIVERY_ANALYSIS.md §2.) Inlined to avoid a 201st main-chunk local.
+    local sweep_has_new = false
+    for _, _re in pairs(self.rt) do
+      if _re.dirty then sweep_has_new = true; break end
+    end
+    if not sweep_has_new and self.channel_buffer then
+      for _, _ce in ipairs(self.channel_buffer) do
+        if _ce.dirty then sweep_has_new = true; break end
+      end
+    end
+    if sweep_has_new then send_beacon_page(self, "gateway_sweep") end
     self:after(rec.duration_ms, function()
       if self.pending_tx == nil and self.pending_rx == nil then
         activate_primary_layer(self, "schedule_return")

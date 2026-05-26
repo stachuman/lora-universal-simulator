@@ -239,6 +239,20 @@ from the sender's layer, it defers until the advertised foreign-layer window
 closes plus a small guard. Gateways also emit `gateway_schedule_change` when
 their own radio context switches.
 
+**Differential visit-entry beacon.** Because a receiver computes every future
+window from a single hearing (above) and realistic clock drift (~±20–50 ppm ≈
+100–200 ms over 30–60 min) is negligible against the multi-second window, the
+gateway does **not** re-broadcast on every visit-window entry. It emits the
+visit-entry beacon (`gateway_sweep`) only when it has **new state to push to that
+layer** — dirty routes (active-layer `rt`) or dirty channel messages
+(`channel_buffer`); otherwise it skips. New nodes acquire the schedule reactively
+via `Q REQ_SYNC` (response jittered by `sync_response_backoff_*`), and the slow
+periodic beacon carries it otherwise. This cut a time-shared gateway's beacon
+airtime ~70% with channel reach preserved (see DELIVERY_ANALYSIS.md §2). The
+visit-entry beacon's airtime is dominated by the 32-byte seen-bitmap (channel
+gossip), not routes — so gating it on dirty state preserves channel propagation
+while dropping the redundant idle re-announcements.
+
 **Tuning the visit schedule (cross-layer delivery).** A time-shared gateway can
 only be on one layer at a time, so cross-layer traffic loses messages at three
 points: the **doorstep** (a frame reaches a gateway neighbour but the final hop

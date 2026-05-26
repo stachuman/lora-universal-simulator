@@ -379,12 +379,16 @@ def walk_events(events_path, slot_to_id):
 def walk_phy_events(events_path, name_to_id):
     """Yield (time_ms, fid_or_None, phy_type, e) for physical-layer events.
 
-    type in {tx, tx_deferred, rx, drop_halfduplex, drop_collision,
-    drop_off_sf, ...}. These events use string `node`/`from`/`to`
-    fields, so we resolve via name_to_id.
+    type in {tx, tx_deferred, rx, collision, drop_halfduplex,
+    drop_sf_mismatch, drop_preamble_miss, drop_rx_blind, ...}. These events use
+    string `node`/`from`/`to` fields, so we resolve via name_to_id.
+
+    NB: the orchestrator emits collisions as type `collision` (not
+    `drop_collision`) and off-SF drops as `drop_sf_mismatch` (not `drop_off_sf`).
+    The old names matched nothing, so this walker was blind to collisions.
     """
-    PHY_TYPES = {"tx", "tx_deferred", "rx", "drop_halfduplex",
-                 "drop_collision", "drop_off_sf"}
+    PHY_TYPES = {"tx", "tx_deferred", "rx", "collision", "drop_halfduplex",
+                 "drop_sf_mismatch", "drop_preamble_miss", "drop_rx_blind"}
     with open(events_path) as f:
         for line in f:
             try:
@@ -1391,8 +1395,8 @@ def analyse_channel(events_path, slot_to_id, posts, name_to_id):
                     pkt_kind[pkt] = "bcn"
         # --- RX / drop side: match by pkt against either DATA-M or
         #     BCN known transmissions ---
-        elif phy_t in ("rx", "drop_halfduplex",
-                       "drop_collision", "drop_off_sf"):
+        elif phy_t in ("rx", "collision", "drop_halfduplex",
+                       "drop_sf_mismatch", "drop_preamble_miss", "drop_rx_blind"):
             pkt = e.get("pkt")
             post_ids = pkt_to_posts.get(pkt)
             if not post_ids:
