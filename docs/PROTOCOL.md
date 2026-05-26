@@ -371,6 +371,24 @@ propagated into L1 via a dual-layer gateway is *not* reachable from L1 and must
 not be addressed. Direct-neighbour gateways skip the guard (heard directly, so
 on-layer by construction).
 
+**Source-routed layer path (gateway chaining).** The cross-layer envelope (in the
+DATA payload, magic `\31G2`) carries an ordered **layer-hop list**, not a single
+target layer: `MAGIC | hop_count | hops… | dst_hash(4 LE) | body` (hop_count ≤
+`GW_ENV_MAX_HOPS`=4). `send_layer <l1,l2,…> <hash> <text>` lists the hops to
+traverse (last = destination's layer); a bare `<layer>` is a 1-hop path (the
+common case, unchanged — a 1-element list). The originator runs
+`select_gateway_for_layer(hops[1])` and envelopes the **full** path. Each gateway
+pops the entered layer `hops[1]`: if the list is then empty it delivers to
+`dst_hash` on that layer (the binding lookup above); otherwise it selects a
+gateway bridging to the next hop and re-wraps the *remaining* envelope toward it
+(emit `gateway_envelope_transit`; the binary re-wrapped envelope rides as that
+forward's payload). This lets a message cross two layers with **no direct bridge**
+— e.g. west(L2)→east(L3) via the hub as `1,3` — without per-layer cross-gateway
+route discovery: the sender source-routes the transit (like loose source routing).
+The finite, hop-by-hop-consumed list is the loop/TTL guard. Path *learning*
+(auto-deriving hops from the `bridged_layers` TLVs) is a deferred follow-on; today
+the sender supplies the path explicitly. Validated by test t77.
+
 **Route entry byte 2 bit fields:**
 - `score_bucket` (4 bits, 7:4): chain-min SNR quantized to a 4-bit bucket
   via `bucket_of_snr_4b` (16 buckets, 2 dB resolution, range −20..+10 dB).

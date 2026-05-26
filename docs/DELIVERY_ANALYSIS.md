@@ -137,6 +137,49 @@ The fix above addresses these; the residual XL gap is structural. **8-seed XL
 flipped −2.4pp → +2.4pp at 16 seeds** — a live reminder to gate borderline XL
 results at ≥16 seeds.
 
+## s17_metro — large asymmetric metro (252 nodes, explicit links)
+Production-fidelity companion to s15 (`tools/gen_s17_metro.py`, committed dba3163):
+dense center L1 (180, SF8) + sparse west L2 (34, SF9) + sparse east L3 (34, SF7),
+4 boundary gateways (2 L1↔L2 west, 2 L1↔L3 east). **Topology is EXPLICIT
+individually-defined links**, NOT path-loss-derived — path-loss couples degree to
+density (dense cluster → unicast saturation) and log-distance is a poor LoRa fit
+(real Gdansk map fits alpha≈0.67; terrain dominates). Instead: degree-capped KNN
+(center 9, suburbs 5) with per-direction shadowed SNR from the real Gdansk
+regression (SNR = 2.45 − 6.69·log10(d_km), σ=6.7). 1 h, 10-min quiet, 3 traffic
+waves (48 XL sends). Run: 0 assertions, 0 leaks, **SAME 63% / XL 38% / CHAN 98%**.
+Path-loss vs explicit-links A/B was decisive: SAME 40→90 (small-N) , XL 12→38,
+runtime 204→96s at the explicit/degree-capped model.
+
+### Finding: west↔east XL needs GATEWAY CHAINING (dominant XL drop bucket)
+The biggest XL failure (12 of 41 fails; `gateway_envelope_dropped` reason
+`gateway_known_no_route`) is **entirely the west↔east (L2↔L3) pairs** (origins
+w015/w031→L3, e010/e020→L2, 3 waves each). s17 has **no direct L2↔L3 gateway**
+(the suburbs are geographically opposite — only L1↔L2 and L1↔L3 exist), and
+`select_gateway_for_layer` (dv_dual_sf.lua ~4885) only envelopes to a SINGLE
+gateway that *directly* bridges the target layer. Reaching east from west needs
+L2→[gw_w]→center L1→[gw_e]→L3 — two cross-layer hops — which the protocol does
+**not chain**. Evidence: w015 only ever learns `gw_w0 → L1` as a routable/on-layer
+gateway; it "knows" gw_e→L3 only via a *leaked* TLV that the on-layer guard
+correctly refuses to address (never seen on L2, no route). s15 hid this with a
+direct bridge_23. Center↔suburb XL (which has a direct gateway) is unaffected —
+that's where the other XL buckets live (2nd-leg loss, doorstep, cascade).
+
+### Fix: source-routed layer-hop envelope (IMPLEMENTED — gateway chaining)
+The cross-layer envelope (in the DATA *payload*, magic `\31G2`) now carries an
+ordered **layer-hop path** instead of a single target layer:
+`MAGIC | hop_count | hops… | dst_hash | body` (≤ `GW_ENV_MAX_HOPS`=4). The sender
+gives the hops to traverse (last = dst layer), e.g. `send_layer 1,3 <hash> <text>`
+for L2→L3 via the hub. Each gateway pops the entered layer (`hops[1]`); empty →
+deliver to the hash there, else `select_gateway_for_layer(next)` and re-wrap the
+remaining envelope toward that gateway (`gateway_envelope_transit`). The finite,
+consumed hop list is the loop/TTL guard. A 1-element list == the old behaviour
+(backward-compatible; all 72 t-tests pass). **Validated by t77** (L2↔L3 via L1,
+separate L1↔L2 / L1↔L3 gateways, no direct bridge): 3/3 forward + 2/2 reverse
+deliver. Path *learning* (auto-deriving hops from the bridged-layers TLVs) is the
+deferred follow-on; for now the sender supplies the path explicitly.
+**To close s17's west↔east bucket**, regenerate s17 with `1,3` / `2,1` hop lists
+on those pairs (gen_s17_metro.py build_commands) — separate change.
+
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
   = config `node_id`.

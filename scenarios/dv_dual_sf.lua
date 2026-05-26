@@ -2172,7 +2172,8 @@ function channel_msg_id_from_bytes(s, off)
        |  (s:byte(off + 3) & 0xff)
 end
 local MAC_LEN = 4                    -- 4-byte zero MAC placeholder until §8 crypto lands
-local GW_ENV_MAGIC = "\31G1"         -- gateway DATA envelope v1: magic + layer + key_hash32 + body
+local GW_ENV_MAGIC = "\31G2"         -- gateway DATA envelope v2: magic + hop_count + hops[] + key_hash32 + body
+GW_ENV_MAX_HOPS = 4                  -- bounded layer-hop path (loop + length guard). Global: 200-local chunk cap.
 -- Hash-bind response body magic (PROTOCOL §3.7a). A resolver answering an
 -- 'H' flood query sends a routed DATA back to the gateway whose body starts
 -- with this magic, then target_layer(8) | node_id(8) | key_hash32(4 LE).
@@ -2474,20 +2475,40 @@ local function parse_u32_le(frame, off)
           | (frame:byte(off + 3) << 24)) & 0xffffffff
 end
 
-local function pack_gateway_envelope(target_layer_id, dst_key_hash32, body)
+-- Source-routed layer path: `hops` is an ordered list of layer ids the message
+-- must traverse (last = destination's layer). A bare number is accepted for the
+-- common single-hop case (== today's behaviour). Each gateway pops the layer it
+-- just entered (hops[1]); when the list empties, deliver to the hash on that
+-- layer, else forward to a gateway bridging to the next hop. The path lives in
+-- the DATA *payload* (this envelope), not the DATA header.
+local function pack_gateway_envelope(hops, dst_key_hash32, body)
+  if type(hops) == "number" then hops = { hops } end
+  local n = #hops
+  if n < 1 then hops = { 0 }; n = 1 end
+  if n > GW_ENV_MAX_HOPS then n = GW_ENV_MAX_HOPS end
+  local hb = ""
+  for i = 1, n do hb = hb .. string.char(math.floor(hops[i] or 0) & 0xff) end
   return GW_ENV_MAGIC
-      .. string.char((target_layer_id or 0) & 0xff)
+      .. string.char(n & 0xff)
+      .. hb
       .. pack_u32_le(dst_key_hash32 or 0)
       .. (body or "")
 end
 
 local function parse_gateway_envelope(body)
-  if type(body) ~= "string" or #body < 8 then return nil end
+  -- min frame: magic(3) + hop_count(1) + >=1 hop + hash(4) = 9 bytes
+  if type(body) ~= "string" or #body < 9 then return nil end
   if body:sub(1, #GW_ENV_MAGIC) ~= GW_ENV_MAGIC then return nil end
+  local n = body:byte(4)
+  if n == nil or n < 1 or n > GW_ENV_MAX_HOPS then return nil end
+  if #body < 4 + n + 4 then return nil end
+  local hops = {}
+  for i = 1, n do hops[i] = body:byte(4 + i) end
   return {
-    target_layer_id = body:byte(4),
-    dst_key_hash32 = parse_u32_le(body, 5),
-    body = body:sub(9),
+    hops = hops,
+    target_layer_id = hops[1],        -- current/next hop (compat alias for single-hop reads)
+    dst_key_hash32 = parse_u32_le(body, 4 + n + 1),
+    body = body:sub(4 + n + 5),
   }
 end
 
@@ -5408,12 +5429,16 @@ function enqueue_gateway_handoff(self, gw_env, d_origin, binding)
   local target_id = binding.node_id
   local forward_ctr = self:next_ctr(target_id)
   local forward_inner = string.char(0) .. string.char(self.id) .. gw_env.body
+  -- Telemetry payload must be JSON/UTF-8 safe: on a TRANSIT forward gw_env.body
+  -- is a re-wrapped (binary) envelope, not printable text. Show a marker instead.
+  local _pl = gw_env.body or ""
+  if _pl:find("[^%g ]") then _pl = string.format("<bin %dB>", #_pl) end
   table.insert(self.tx_queue, {
     origin     = self.id,
     dst_id     = target_id,
     dst_name   = name_of(self, target_id),
     payload    = forward_inner,
-    user_text  = gw_env.body,
+    user_text  = _pl,                   -- telemetry only (binary-safe); wire payload = forward_inner
     ctr        = forward_ctr,
     flags      = 0,
     gw_relay   = true,                  -- cross-layer forward → RTS_FLAG_RELAY (§10a exempt)
@@ -5428,7 +5453,7 @@ function enqueue_gateway_handoff(self, gw_env, d_origin, binding)
     target_layer_id = gw_env.target_layer_id,
     dst = target_id,
     dst_key_hash32 = gw_env.dst_key_hash32,
-    payload = gw_env.body,
+    payload = _pl,
     ctr = forward_ctr,
     depth = #self.tx_queue,
     binding_source = binding.source,
@@ -10856,27 +10881,64 @@ function on_recv(self, frame, meta)
             rx_hash_bind.key_hash32, rx_hash_bind.target_layer_id))
         elseif gw_env ~= nil and self.self_gateway == true then
           gateway_consumed = true
-          local target, binding_error = gateway_binding_for_env(self, gw_env)
-
-          if target == nil or not gateway_layer_enabled(self, gw_env.target_layer_id) then
-            self:emit("gateway_no_binding", {
-              origin = d_origin,
-              via_gateway = self.id,
-              target_layer_id = gw_env.target_layer_id,
-              dst_key_hash32 = gw_env.dst_key_hash32,
-              payload = gw_env.body,
-              reason = binding_error or "not_found",
-            })
-            self:log(string.format(
-              "gateway_no_binding layer=%d key_hash32=%u reason=%s",
-              gw_env.target_layer_id, gw_env.dst_key_hash32,
-              binding_error or "not_found"))
-            if (binding_error or "not_found") == "not_found"
-               and gateway_layer_enabled(self, gw_env.target_layer_id) then
-              defer_gateway_handoff(self, gw_env, d_origin, "not_found")
+          if #(gw_env.hops or {}) > 1 then
+            -- TRANSIT (source-routed layer path): this gateway bridged the entered
+            -- layer hops[1]; the message must continue to hops[2]. Pop the entered
+            -- layer and forward the REMAINING path to a gateway bridging (entered
+            -- -> next hop). The re-wrapped (shorter) envelope rides as the
+            -- forwarded DATA's payload; the next gateway pops the next hop. The
+            -- finite hop list (<=GW_ENV_MAX_HOPS, enforced at parse) bounds the chain.
+            local entered = gw_env.hops[1]
+            local remaining = {}
+            for i = 2, #gw_env.hops do remaining[#remaining + 1] = gw_env.hops[i] end
+            local next_layer = remaining[1]
+            local next_gw = select_gateway_for_layer(self, next_layer)
+            if next_gw == nil or next_gw == self.id then
+              self:emit("gateway_envelope_transit_drop", {
+                origin = d_origin, via_gateway = self.id,
+                entered_layer = entered, next_layer = next_layer,
+                dst_key_hash32 = gw_env.dst_key_hash32,
+                reason = knows_gateway_for_layer(self, next_layer)
+                         and "gateway_known_no_route" or "no_gateway_known",
+              })
+            else
+              self:emit("gateway_envelope_transit", {
+                origin = d_origin, via_gateway = self.id,
+                entered_layer = entered, next_layer = next_layer,
+                next_gateway = next_gw,
+                remaining_hops = table.concat(remaining, ","),
+                dst_key_hash32 = gw_env.dst_key_hash32,
+              })
+              enqueue_gateway_handoff(self, {
+                hops = remaining,
+                target_layer_id = entered,   -- forward to next_gw ON the entered layer
+                dst_key_hash32 = gw_env.dst_key_hash32,
+                body = pack_gateway_envelope(remaining, gw_env.dst_key_hash32, gw_env.body),
+              }, d_origin, { node_id = next_gw, source = "transit" })
             end
           else
-            enqueue_gateway_handoff(self, gw_env, d_origin, target)
+            -- LAST hop: deliver to the destination hash on this layer.
+            local target, binding_error = gateway_binding_for_env(self, gw_env)
+            if target == nil or not gateway_layer_enabled(self, gw_env.target_layer_id) then
+              self:emit("gateway_no_binding", {
+                origin = d_origin,
+                via_gateway = self.id,
+                target_layer_id = gw_env.target_layer_id,
+                dst_key_hash32 = gw_env.dst_key_hash32,
+                payload = gw_env.body,
+                reason = binding_error or "not_found",
+              })
+              self:log(string.format(
+                "gateway_no_binding layer=%d key_hash32=%u reason=%s",
+                gw_env.target_layer_id, gw_env.dst_key_hash32,
+                binding_error or "not_found"))
+              if (binding_error or "not_found") == "not_found"
+                 and gateway_layer_enabled(self, gw_env.target_layer_id) then
+                defer_gateway_handoff(self, gw_env, d_origin, "not_found")
+              end
+            else
+              enqueue_gateway_handoff(self, gw_env, d_origin, target)
+            end
           end
           -- Gateway control envelope is consumed by the gateway and is not
           -- emitted as user DATA locally.
@@ -11422,23 +11484,35 @@ function on_command(self, cmd_str)
   local target_layer_s, target_hash_s, gateway_text =
     cmd_str:match("^send_layer (%S+) (%S+) (.+)$")
   if target_layer_s then
-    local target_layer_id = tonumber(target_layer_s)
-    local dst_key_hash32 = tonumber(target_hash_s)
-    if target_layer_id == nil or dst_key_hash32 == nil then
-      return "ERROR: usage: send_layer <layer_id> <dst_key_hash32> <text>"
+    -- layer field is a comma-separated layer-hop PATH (the hops to traverse,
+    -- last = destination's layer); a bare layer (e.g. "2") is a 1-hop path ==
+    -- today's behaviour. e.g. an L2 node reaching L3 via the hub: "1,3".
+    local hops = {}
+    for s in target_layer_s:gmatch("[^,]+") do
+      local v = tonumber(s)
+      if v == nil then break end
+      hops[#hops + 1] = math.floor(v)
     end
+    local dst_key_hash32 = tonumber(target_hash_s)
+    if #hops < 1 or #hops > GW_ENV_MAX_HOPS or dst_key_hash32 == nil then
+      return string.format(
+        "ERROR: usage: send_layer <layer[,layer...]> <dst_key_hash32> <text> (<=%d hops)",
+        GW_ENV_MAX_HOPS)
+    end
+    local target_layer_id = hops[#hops]    -- destination's layer (logging)
+    local first_hop = hops[1]              -- next layer to enter
 
     local dst_id = nil
     local dst_name = nil
     local wire_body = gateway_text
-    if target_layer_id == (self.layer_id or 0) then
+    if #hops == 1 and first_hop == (self.layer_id or 0) then
       dst_id = id_bind_find_by_hash(self, dst_key_hash32)
       if dst_id == nil then
         return string.format("ERROR: no local binding for key_hash32=%u", dst_key_hash32)
       end
       dst_name = name_of(self, dst_id)
     else
-      dst_id = select_gateway_for_layer(self, target_layer_id)
+      dst_id = select_gateway_for_layer(self, first_hop)
       if dst_id == nil then
         -- Silent-failure no more: this send produces no envelope and no DATA.
         -- reason distinguishes a true gap (no gateway advertised for the layer)
@@ -11446,19 +11520,20 @@ function on_command(self, cmd_str)
         -- route to it -- typically its route aged out during a visit absence).
         self:emit("gateway_envelope_dropped", {
           origin = self.id,
-          target_layer_id = target_layer_id,
+          target_layer_id = first_hop,
           dst_key_hash32 = dst_key_hash32,
-          reason = knows_gateway_for_layer(self, target_layer_id)
+          reason = knows_gateway_for_layer(self, first_hop)
                    and "gateway_known_no_route" or "no_gateway_known",
         })
-        return string.format("ERROR: no gateway route for layer=%d", target_layer_id)
+        return string.format("ERROR: no gateway route for layer=%d", first_hop)
       end
       dst_name = name_of(self, dst_id)
-      wire_body = pack_gateway_envelope(target_layer_id, dst_key_hash32, gateway_text)
+      wire_body = pack_gateway_envelope(hops, dst_key_hash32, gateway_text)
       self:emit("gateway_envelope_enqueued", {
         origin = self.id,
         gateway = dst_id,
         target_layer_id = target_layer_id,
+        hops = table.concat(hops, ","),
         dst_key_hash32 = dst_key_hash32,
         payload = gateway_text,
       })
