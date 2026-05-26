@@ -94,6 +94,7 @@ chasing airtime/contention for XL.
 | Route-error (RERR / no-route NACK) | **REVERTED — refuted** | failed gate (89.8→86.6%). Dead-ends are *congestion* artifacts (transiently-blinded routes), not dead routes; invalidating them removes recoverable paths + adds airtime. **Do not retry without solving congestion first.** |
 | Differential `gateway_sweep` | **implemented (uncommitted)** | sweep only when dirty routes/channels for the layer. −71% gateway beacon airtime (134→39s), channel reach preserved (93.9%), same-layer flat-up; **XL flat-within-noise** (efficiency win, not an XL fix). |
 | Beacon-overhead → cross-layer | **refuted as an XL lever** | cutting beacon airtime is flat-on-XL (same as RERR). XL is structural, not airtime. |
+| TX-time schedule countdown (`apply_schedule_tx_fixup`) | **implemented (uncommitted)** | re-stamp the visit-window countdown byte at the actual `self:tx` instant against `(tx_now + airtime)` instead of pack-time. Anchor error median **342→50ms**, p90 706→98, signed mean **+398→−17ms** (was systematically *late*). 16-seed s15: **CHAN +4.1pp** (89.6→93.7, consistent both batches), **XL +2.4pp = flat-within-noise**, ALL flat, SAME −1.3pp, 0 leaks. A **correctness + channel-reach** win, NOT an XL lever — reconfirms XL is structural. |
 
 ## Open problem & next lever
 **Cross-layer (~77%) is the remaining gap, and it is STRUCTURAL — not airtime.**
@@ -106,8 +107,31 @@ in rough priority:
 - **Gateway presence / second-leg forwarding** — the 2nd-leg "lost downstream"
   and first-leg "never reached gateway" buckets are multi-hop route-quality on a
   part-time gateway, not contention.
+- **Window-edge guard (`gateway_schedule_guard_ms`, default 100ms)** — *new
+  candidate*. With the TX-time countdown fix the advertised window is now
+  accurate, so the old systematic **+398ms-late** anchor (which was an *accidental*
+  guard keeping deferred sends safely inside the window) is gone — senders now
+  fire right at window-open's settle edge (window-defers rose 2→20 on one seed).
+  The guard is now the *explicit* knob to bias sends a few hundred ms into the
+  window. Try widening it and re-gate. (Only worth it as an XL nudge; XL is still
+  structural.)
 - Re-confirm the cross-layer failure taxonomy with `dm_delivery_breakdown
   --failures` after any change; measure 8–16 seeds (XL is noise-dominated).
+
+### Debunked: "gateway countdown is stale by ~5.7s" (do NOT re-chase)
+A prior session hypothesised neighbours fire into the away-gap because the
+advertised schedule countdown was multi-second stale. **Refuted by measurement.**
+The countdown is built at `pack_beacon` time and the beacon's only post-build
+delay is the FLOOD LBT defer, **capped at one beacon airtime**
+(`flood_lbt_max_defer_ms = airtime(routing_sf, beacon_max_bytes=151)` ≈ 780ms at
+SF9) plus the airtime-to-RX. Measured anchor error (predicted window-open vs the
+gateway's true `gateway_layer_active reason=schedule`): **median 342ms, p99
+1135ms, max 1407ms, 0% > 3s.** Of 61 RTS aimed at a gateway, only **6 hit it
+while away — all 6 with the sender *holding* the schedule** (0 no-schedule),
+i.e. window-*close* edge cases from the +398ms-late anchor, not a stale cache.
+The fix above addresses these; the residual XL gap is structural. **8-seed XL
+flipped −2.4pp → +2.4pp at 16 seeds** — a live reminder to gate borderline XL
+results at ≥16 seeds.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`

@@ -1550,6 +1550,34 @@ local function pack_beacon_byte1(node)
   return b
 end
 
+-- Schedule countdown byte (offset_100ms): ms/100 from a reference instant until
+-- this record's next foreign-layer window opens, anchored to the receiver's
+-- BCN-receive time (no shared wall clock needed). Pulled out of
+-- pack_schedule_record so the build-time pack AND the on-air TX-time correction
+-- (apply_schedule_tx_fixup) run identical math -- only `ref_now` differs. Falls
+-- back to the configured offset before the first window is scheduled.
+-- Global: the main chunk is at the 200-local cap (a chunk-level `local` here
+-- would overflow it), matching tx_initiating's reasoning.
+function schedule_countdown_100ms(rec, ref_now)
+  local period_ms = math.floor(rec.period_ms or 0)
+  local countdown_ms
+  if rec.next_visit_ms ~= nil and ref_now ~= nil and period_ms > 0 then
+    -- next_visit_ms is the next window-open, normally within one period ahead.
+    -- At TX-fixup time ref_now = tx_now + airtime can overshoot it by up to one
+    -- airtime (beacon sent just before the window opens) -> raw goes slightly
+    -- negative. Clamp that to 0 (window is opening now / overdue): a bare `%`
+    -- would wrap a small negative to ~period and tell the receiver the gateway
+    -- is a full period away when it is in fact about to be present.
+    countdown_ms = rec.next_visit_ms - ref_now
+    if countdown_ms < 0 then countdown_ms = 0 else countdown_ms = countdown_ms % period_ms end
+  else
+    countdown_ms = rec.offset_ms or 0
+  end
+  local v = math.floor(countdown_ms / 100)
+  if v < 0 then v = 0 elseif v > 255 then v = 255 end
+  return v
+end
+
 local function pack_schedule_record(rec, now)
   local layer_id = math.floor(rec.layer_id or rec.layer or 0) & 0x0f
   local sf = math.floor(rec.routing_sf or rec.sf or 7)
@@ -1557,20 +1585,13 @@ local function pack_schedule_record(rec, now)
   if duration_100ms < 1 then duration_100ms = 1 end
   if duration_100ms > 255 then duration_100ms = 255 end
   local period_ms = math.floor(rec.period_ms or 0)
-  -- Byte 2 is a LIVE countdown: ms from this beacon's send time until the next
-  -- foreign-layer window opens -- NOT a static boot offset. Receivers anchor it
-  -- to their own BCN-receive time, so neither side needs a shared wall clock
-  -- (boot jitter would otherwise desync sender prediction from gateway reality).
-  -- Falls back to the configured offset before the first window is scheduled.
-  local countdown_ms
-  if rec.next_visit_ms ~= nil and now ~= nil and period_ms > 0 then
-    countdown_ms = (rec.next_visit_ms - now) % period_ms
-  else
-    countdown_ms = rec.offset_ms or 0
-  end
-  local offset_100ms = math.floor(countdown_ms / 100)
-  if offset_100ms < 0 then offset_100ms = 0 end
-  if offset_100ms > 255 then offset_100ms = 255 end
+  -- Byte 2 is a LIVE countdown to the next foreign-layer window. It is built
+  -- here at pack time, but the frame is sent later (LBT defer) and then travels
+  -- for one airtime before the receiver stamps heard_ms (= RX-complete) -- both
+  -- shift the receiver's anchor LATE. apply_schedule_tx_fixup re-stamps this byte
+  -- at the actual self:tx instant against (tx_now + airtime) so heard_ms +
+  -- countdown lands on the true window open.
+  local offset_100ms = schedule_countdown_100ms(rec, now)
   -- Period uses seconds for short cadences, and the low bit switches byte 3
   -- to 5-second units for production multi-minute sweeps.
   local period_unit_5s = 0
@@ -3547,6 +3568,47 @@ end
 -- with a max-defer cap: if the channel will be busy longer than
 -- flood_lbt_max_defer_ms, drop this page (tx_flood_skipped emit). The
 -- next periodic / triggered fire rotates the offset and re-broadcasts.
+
+-- On-air TX-time correction of the schedule countdown byte(s). pack_schedule_record
+-- stamps the countdown at beacon BUILD time, but the frame is sent later (LBT
+-- defer) and then travels one airtime before the receiver's heard_ms (= RX-
+-- complete) is recorded -- both shift the receiver's window anchor LATE (measured
+-- ~+400ms mean on s15, up to one beacon-airtime). At the actual self:tx instant we
+-- re-stamp each record's countdown against (now + airtime) so heard_ms + countdown
+-- lands on the true window open (residual = propagation only). Sender-side only;
+-- receivers parse the byte unchanged. The schedule block sits at a FIXED frame
+-- offset -- 8-byte beacon header (B,byte1,id,n_byte,4-byte hash), then the 1-byte
+-- layer_count, then 4-byte records -- so record k's countdown byte (the 3rd byte
+-- of the record) is at 1-based position 12 + (k-1)*4. Global: main chunk at the
+-- 200-local cap.
+function apply_schedule_tx_fixup(self, bytes, opts)
+  if not (opts and opts.schedule_fixup) then return bytes end
+  local recs = self.gateway_schedule_records
+  if not self.self_gateway or recs == nil or #recs == 0 then return bytes end
+  local airtime = airtime_ms(opts.sf or self.routing_sf, self.bw_hz, self.cr,
+                             self.preamble_sym, #bytes)
+  local ref = self:now() + airtime
+  local dbg = debug_emit_allowed(self)
+  local changes = dbg and {} or nil
+  for k = 1, #recs do
+    local pos = 12 + (k - 1) * 4
+    if pos <= #bytes then
+      local newv = schedule_countdown_100ms(recs[k], ref)
+      if dbg then
+        changes[#changes + 1] = {
+          record = k, layer_id = recs[k].layer_id,
+          build_100ms = bytes:byte(pos), tx_100ms = newv,
+        }
+      end
+      bytes = bytes:sub(1, pos - 1) .. string.char(newv & 0xff) .. bytes:sub(pos + 1)
+    end
+  end
+  if dbg then
+    self:emit("schedule_tx_anchor", { airtime_ms = airtime, records = changes })
+  end
+  return bytes
+end
+
 local function tx_flood(self, bytes, opts)
   if self.join_required and not self.joined then
     self:emit("tx_unjoined_blocked", {
@@ -3590,11 +3652,11 @@ local function tx_flood(self, bytes, opts)
         label = opts.label, kind = "flood",
         defer_ms = delay, busy_until_ms = busy_until,
       })
-      self:after(delay, function() self:tx(bytes, opts) end)
+      self:after(delay, function() self:tx(apply_schedule_tx_fixup(self, bytes, opts), opts) end)
       return true
     end
   end
-  self:tx(bytes, opts)
+  self:tx(apply_schedule_tx_fixup(self, bytes, opts), opts)
   return true
 end
 
@@ -7266,6 +7328,7 @@ local function send_beacon_page(self, kind)
   return tx_flood(self, frame, {
     sf    = active_routing_sf(self),
     label = "BCN",
+    schedule_fixup = self.self_gateway == true,   -- re-stamp live countdown at on-air time
     info  = string.format("rt=%d/%d off=%d dirty=%d kind=%s",
       page_n, total, self.beacon_offset, diff.dirty_n, kind),
   })

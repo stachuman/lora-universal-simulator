@@ -39,8 +39,8 @@
     ]
   },
   "commands": [
-    { "at_ms": 20000, "node": "l1_src", "command": "send_layer 2 3405643778 xl2-a" },
-    { "at_ms": 20500, "node": "l1_src", "command": "send_layer 3 3203334146 xl3-a" },
+    { "at_ms": 1000, "node": "l1_src", "command": "send_layer 2 3405643778 xl2-a" },
+    { "at_ms": 1500, "node": "l1_src", "command": "send_layer 3 3203334146 xl3-a" },
     { "at_ms": 45000, "node": "l1_src", "command": "send_layer 2 3405643778 xl2-b" },
     { "at_ms": 45500, "node": "l1_src", "command": "send_layer 3 3203334146 xl3-b" },
     { "at_ms": 70000, "node": "l1_src", "command": "send_layer 2 3405643778 xl2-c" },
