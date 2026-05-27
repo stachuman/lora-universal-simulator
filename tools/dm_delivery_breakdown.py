@@ -794,14 +794,18 @@ def render_table(rows):
     # for two-digit IDs. "*" suffix marks cross-layer rows.
     header = ["pair", "sent", "arr", "arr%", "h1ack", "h1ack%",
               "giveup", "no_gw", "in_flight", "mean_hops"]
-    fmt = "{:<28} {:>4} {:>4} {:>5} {:>5} {:>6} {:>6} {:>5} {:>9} {:>9}"
-    print(fmt.format(*header))
-    print("-" * 86)
+    # Auto-size the (variable, long) pair column from the actual names so the
+    # numeric columns stay aligned. "*" suffix marks cross-layer rows.
+    pairs = [f"{r['origin']} -> {r['dst']}{' *' if r.get('cross_layer') else ''}"
+             for r in rows]
+    pw = max([len(p) for p in pairs] + [len("pair"), len("TOTAL")])
+    fmt = ("{:<%d} {:>4} {:>4} {:>5} {:>5} {:>6} {:>6} {:>5} {:>9} {:>9}" % pw)
+    hdr = fmt.format(*header)
+    print(hdr)
+    print("-" * len(hdr))
     tot = {"sent": 0, "arrived": 0, "acked": 0,
            "giveup": 0, "no_gw": 0, "in_flight": 0}
-    for r in rows:
-        tag = " *" if r.get("cross_layer") else ""
-        pair = f"{r['origin']} -> {r['dst']}{tag}"
+    for r, pair in zip(rows, pairs):
         arr_pct = f"{100*r['arrived']/r['sent']:.0f}%" if r["sent"] else "-"
         ack_pct = f"{100*r['acked']/r['sent']:.0f}%" if r["sent"] else "-"
         mh = f"{r['mean_hops']:.1f}" if r["mean_hops"] is not None else "-"
@@ -810,7 +814,7 @@ def render_table(rows):
                          r.get("no_gw", 0), r["in_flight"], mh))
         for k in tot:
             tot[k] += r.get(k, 0)
-    print("-" * 86)
+    print("-" * len(hdr))
     arr_pct = f"{100*tot['arrived']/tot['sent']:.0f}%" if tot["sent"] else "-"
     ack_pct = f"{100*tot['acked']/tot['sent']:.0f}%" if tot["sent"] else "-"
     print(fmt.format("TOTAL", tot["sent"], tot["arrived"], arr_pct,
