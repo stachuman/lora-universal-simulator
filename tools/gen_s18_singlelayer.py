@@ -35,7 +35,17 @@ def main() -> None:
                    help="concurrent far-W<->far-E multi-hop DM pairs per wave "
                         "(0 = keep the source's original commands)")
     p.add_argument("--waves", type=int, default=3,
-                   help="number of concurrent send waves (150 s apart)")
+                   help="number of concurrent send waves")
+    # Scenario rules (as in s15): NO artificial start-period (warmup_ms=0), and
+    # NO traffic for the first 10 min so the network stabilizes itself first.
+    p.add_argument("--warmup-ms", type=int, default=0)
+    p.add_argument("--jitter-ms", type=int, default=5000,
+                   help="node_startup_jitter_ms (realistic power-on stagger, as s15)")
+    p.add_argument("--first-wave-ms", type=int, default=600000,
+                   help="first send (>=10 min, after stabilization)")
+    p.add_argument("--wave-gap-ms", type=int, default=120000)
+    p.add_argument("--duration-ms", type=int, default=1500000,
+                   help="total sim (10 min stabilize + waves + settle)")
     p.add_argument("--routing-sf", type=int, default=8,
                    help="routing SF for all nodes. The s04 source uses SF10, which "
                         "violates the routing-SF range (6-9; SF10+ is long-range DATA "
@@ -52,6 +62,11 @@ def main() -> None:
     radio = c["simulation"].setdefault("radio", {})
     radio["bw"] = args.bw
     radio["duty_cycle"] = args.duty_cycle
+    # Scenario rules (s15): no artificial relaxed-physics warmup; let the network
+    # stabilize for the first 10 min (traffic starts >= first_wave_ms).
+    c["simulation"]["warmup_ms"] = args.warmup_ms
+    c["simulation"]["node_startup_jitter_ms"] = args.jitter_ms
+    c["simulation"]["duration_ms"] = args.duration_ms
 
     # Heavy CONCURRENT multi-hop traffic so contention actually generates copies
     # (the source's ~50 spread sends among a few named nodes barely contend).
@@ -66,7 +81,7 @@ def main() -> None:
         npairs = min(args.pairs, len(west), len(east))
         cmds = []
         for w in range(args.waves):
-            t = 120_000 + w * 150_000
+            t = args.first_wave_ms + w * args.wave_gap_ms
             for k in range(npairs):
                 a, b = west[k], east[k]
                 cmds.append({"at_ms": t, "node": a,

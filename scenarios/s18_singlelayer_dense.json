@@ -2,12 +2,12 @@
   "_name": "s18_singlelayer_dense",
   "_desc": "Single-layer dense mesh (no gateways/cross-layer), reusable copy-suppression / contention test bed. Derived from s04_seattle_dense topology with static node_id (for dm_delivery_breakdown / --copies) and the production RF config (BW125, 10% duty); the source's BW250+1% duty throttled delivery to ~26% (a duty-cycle artifact). Same-layer DM has a varied wire dst (the final target), so the forward-RTS frame-alive identity is clean \u2014 unlike cross-layer, which funnels to gateway dsts.",
   "simulation": {
-    "duration_ms": 925000,
+    "duration_ms": 1500000,
     "step_ms": 1,
-    "warmup_ms": 30000,
+    "warmup_ms": 0,
     "beacon_period_ms": 900000,
     "seed": 42,
-    "node_startup_jitter_ms": 500,
+    "node_startup_jitter_ms": 5000,
     "radio": {
       "sf": 8,
       "bw": 125,
@@ -19,452 +19,452 @@
   },
   "commands": [
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Magnolia_Hill",
       "command": "send CrossNet_RPT1 sl-w0-Magnolia_Hill-CrossNet_RPT1-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "The_Hideout",
       "command": "send SEA_Bryant_KM7ECH sl-w0-The_Hideout-SEA_Bryant_KM7ECH-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "House_of_Brimstone",
       "command": "send dmatestbednode0 sl-w0-House_of_Brimstone-dmatestbednode0-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "CH_RPTR_Room",
       "command": "send Fremont01_Greenwood3 sl-w0-CH_RPTR_Room-Fremont01_Greenwood3-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "N7TOERPTR",
       "command": "send Capitol_Hill_Prime sl-w0-N7TOERPTR-Capitol_Hill_Prime-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "WA7DASR1",
       "command": "send CrossNet_Room sl-w0-WA7DASR1-CrossNet_Room-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Ballard_Locks_1W_Rep",
       "command": "send usa_narrow_bridge sl-w0-Ballard_Locks_1W_Rep-usa_narrow_bridge-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Magnolia_Central_30t",
       "command": "send dave sl-w0-Magnolia_Central_30t-dave-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "pxi_nest",
       "command": "send bob sl-w0-pxi_nest-bob-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Ballard",
       "command": "send Take_His_Face_Off sl-w0-Ballard-Take_His_Face_Off-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Magnolia_Hill_2",
       "command": "send Fremont01_KF7EGZ_Sol sl-w0-Magnolia_Hill_2-Fremont01_KF7EGZ_Sol-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "QA_Repeater__Hive_0",
       "command": "send University_District sl-w0-QA_Repeater__Hive_0-University_District-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Ballard_Balcony",
       "command": "send Hankest_Extendus sl-w0-Ballard_Balcony-Hankest_Extendus-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Magnolia_W7UUL",
       "command": "send devhackchat sl-w0-Magnolia_W7UUL-devhackchat-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "node",
       "command": "send Wedgwood_Solar sl-w0-node-Wedgwood_Solar-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "carol",
       "command": "send The_Winchester_Repea sl-w0-carol-The_Winchester_Repea-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "MarketMadhouse",
       "command": "send Central_District sl-w0-MarketMadhouse-Central_District-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "CH_RPTR",
       "command": "send DMASpaceMesh sl-w0-CH_RPTR-DMASpaceMesh-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "First_Hill_Skyline",
       "command": "send WedgBreadMesh sl-w0-First_Hill_Skyline-WedgBreadMesh-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Breadheads",
       "command": "send Martin_Room sl-w0-Breadheads-Martin_Room-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "alice",
       "command": "send Washington_Park sl-w0-alice-Washington_Park-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Ballard_W7PEA",
       "command": "send Cafe sl-w0-Ballard_W7PEA-Cafe-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "W7PEA_Repeater",
       "command": "send 2CBA_Repeater_v4 sl-w0-W7PEA_Repeater-2CBA_Repeater_v4-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "McDonalds_Free_WiFi",
       "command": "send Stevens sl-w0-McDonalds_Free_WiFi-Stevens-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Crown_Hill",
       "command": "send RavennaEckstein_CC sl-w0-Crown_Hill-RavennaEckstein_CC-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "K7FSX_Greenwood_Room",
       "command": "send Licton_Springs_Chat sl-w0-K7FSX_Greenwood_Room-Licton_Springs_Chat-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "searep001",
       "command": "send RavennaPark sl-w0-searep001-RavennaPark-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "searep001_2",
       "command": "send 18th__Union sl-w0-searep001_2-18th__Union-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "searep002",
       "command": "send Maple_Leaf_Manor sl-w0-searep002-Maple_Leaf_Manor-the-quick-brown-fox"
     },
     {
-      "at_ms": 120000,
+      "at_ms": 600000,
       "node": "Waterfront",
       "command": "send RooseveltRepeater sl-w0-Waterfront-RooseveltRepeater-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Magnolia_Hill",
       "command": "send CrossNet_RPT1 sl-w1-Magnolia_Hill-CrossNet_RPT1-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "The_Hideout",
       "command": "send SEA_Bryant_KM7ECH sl-w1-The_Hideout-SEA_Bryant_KM7ECH-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "House_of_Brimstone",
       "command": "send dmatestbednode0 sl-w1-House_of_Brimstone-dmatestbednode0-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "CH_RPTR_Room",
       "command": "send Fremont01_Greenwood3 sl-w1-CH_RPTR_Room-Fremont01_Greenwood3-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "N7TOERPTR",
       "command": "send Capitol_Hill_Prime sl-w1-N7TOERPTR-Capitol_Hill_Prime-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "WA7DASR1",
       "command": "send CrossNet_Room sl-w1-WA7DASR1-CrossNet_Room-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Ballard_Locks_1W_Rep",
       "command": "send usa_narrow_bridge sl-w1-Ballard_Locks_1W_Rep-usa_narrow_bridge-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Magnolia_Central_30t",
       "command": "send dave sl-w1-Magnolia_Central_30t-dave-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "pxi_nest",
       "command": "send bob sl-w1-pxi_nest-bob-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Ballard",
       "command": "send Take_His_Face_Off sl-w1-Ballard-Take_His_Face_Off-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Magnolia_Hill_2",
       "command": "send Fremont01_KF7EGZ_Sol sl-w1-Magnolia_Hill_2-Fremont01_KF7EGZ_Sol-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "QA_Repeater__Hive_0",
       "command": "send University_District sl-w1-QA_Repeater__Hive_0-University_District-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Ballard_Balcony",
       "command": "send Hankest_Extendus sl-w1-Ballard_Balcony-Hankest_Extendus-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Magnolia_W7UUL",
       "command": "send devhackchat sl-w1-Magnolia_W7UUL-devhackchat-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "node",
       "command": "send Wedgwood_Solar sl-w1-node-Wedgwood_Solar-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "carol",
       "command": "send The_Winchester_Repea sl-w1-carol-The_Winchester_Repea-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "MarketMadhouse",
       "command": "send Central_District sl-w1-MarketMadhouse-Central_District-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "CH_RPTR",
       "command": "send DMASpaceMesh sl-w1-CH_RPTR-DMASpaceMesh-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "First_Hill_Skyline",
       "command": "send WedgBreadMesh sl-w1-First_Hill_Skyline-WedgBreadMesh-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Breadheads",
       "command": "send Martin_Room sl-w1-Breadheads-Martin_Room-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "alice",
       "command": "send Washington_Park sl-w1-alice-Washington_Park-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Ballard_W7PEA",
       "command": "send Cafe sl-w1-Ballard_W7PEA-Cafe-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "W7PEA_Repeater",
       "command": "send 2CBA_Repeater_v4 sl-w1-W7PEA_Repeater-2CBA_Repeater_v4-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "McDonalds_Free_WiFi",
       "command": "send Stevens sl-w1-McDonalds_Free_WiFi-Stevens-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Crown_Hill",
       "command": "send RavennaEckstein_CC sl-w1-Crown_Hill-RavennaEckstein_CC-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "K7FSX_Greenwood_Room",
       "command": "send Licton_Springs_Chat sl-w1-K7FSX_Greenwood_Room-Licton_Springs_Chat-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "searep001",
       "command": "send RavennaPark sl-w1-searep001-RavennaPark-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "searep001_2",
       "command": "send 18th__Union sl-w1-searep001_2-18th__Union-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "searep002",
       "command": "send Maple_Leaf_Manor sl-w1-searep002-Maple_Leaf_Manor-the-quick-brown-fox"
     },
     {
-      "at_ms": 270000,
+      "at_ms": 720000,
       "node": "Waterfront",
       "command": "send RooseveltRepeater sl-w1-Waterfront-RooseveltRepeater-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Magnolia_Hill",
       "command": "send CrossNet_RPT1 sl-w2-Magnolia_Hill-CrossNet_RPT1-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "The_Hideout",
       "command": "send SEA_Bryant_KM7ECH sl-w2-The_Hideout-SEA_Bryant_KM7ECH-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "House_of_Brimstone",
       "command": "send dmatestbednode0 sl-w2-House_of_Brimstone-dmatestbednode0-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "CH_RPTR_Room",
       "command": "send Fremont01_Greenwood3 sl-w2-CH_RPTR_Room-Fremont01_Greenwood3-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "N7TOERPTR",
       "command": "send Capitol_Hill_Prime sl-w2-N7TOERPTR-Capitol_Hill_Prime-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "WA7DASR1",
       "command": "send CrossNet_Room sl-w2-WA7DASR1-CrossNet_Room-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Ballard_Locks_1W_Rep",
       "command": "send usa_narrow_bridge sl-w2-Ballard_Locks_1W_Rep-usa_narrow_bridge-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Magnolia_Central_30t",
       "command": "send dave sl-w2-Magnolia_Central_30t-dave-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "pxi_nest",
       "command": "send bob sl-w2-pxi_nest-bob-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Ballard",
       "command": "send Take_His_Face_Off sl-w2-Ballard-Take_His_Face_Off-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Magnolia_Hill_2",
       "command": "send Fremont01_KF7EGZ_Sol sl-w2-Magnolia_Hill_2-Fremont01_KF7EGZ_Sol-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "QA_Repeater__Hive_0",
       "command": "send University_District sl-w2-QA_Repeater__Hive_0-University_District-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Ballard_Balcony",
       "command": "send Hankest_Extendus sl-w2-Ballard_Balcony-Hankest_Extendus-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Magnolia_W7UUL",
       "command": "send devhackchat sl-w2-Magnolia_W7UUL-devhackchat-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "node",
       "command": "send Wedgwood_Solar sl-w2-node-Wedgwood_Solar-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "carol",
       "command": "send The_Winchester_Repea sl-w2-carol-The_Winchester_Repea-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "MarketMadhouse",
       "command": "send Central_District sl-w2-MarketMadhouse-Central_District-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "CH_RPTR",
       "command": "send DMASpaceMesh sl-w2-CH_RPTR-DMASpaceMesh-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "First_Hill_Skyline",
       "command": "send WedgBreadMesh sl-w2-First_Hill_Skyline-WedgBreadMesh-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Breadheads",
       "command": "send Martin_Room sl-w2-Breadheads-Martin_Room-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "alice",
       "command": "send Washington_Park sl-w2-alice-Washington_Park-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Ballard_W7PEA",
       "command": "send Cafe sl-w2-Ballard_W7PEA-Cafe-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "W7PEA_Repeater",
       "command": "send 2CBA_Repeater_v4 sl-w2-W7PEA_Repeater-2CBA_Repeater_v4-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "McDonalds_Free_WiFi",
       "command": "send Stevens sl-w2-McDonalds_Free_WiFi-Stevens-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Crown_Hill",
       "command": "send RavennaEckstein_CC sl-w2-Crown_Hill-RavennaEckstein_CC-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "K7FSX_Greenwood_Room",
       "command": "send Licton_Springs_Chat sl-w2-K7FSX_Greenwood_Room-Licton_Springs_Chat-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "searep001",
       "command": "send RavennaPark sl-w2-searep001-RavennaPark-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "searep001_2",
       "command": "send 18th__Union sl-w2-searep001_2-18th__Union-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "searep002",
       "command": "send Maple_Leaf_Manor sl-w2-searep002-Maple_Leaf_Manor-the-quick-brown-fox"
     },
     {
-      "at_ms": 420000,
+      "at_ms": 840000,
       "node": "Waterfront",
       "command": "send RooseveltRepeater sl-w2-Waterfront-RooseveltRepeater-the-quick-brown-fox"
     }
