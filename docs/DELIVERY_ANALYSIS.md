@@ -32,6 +32,15 @@ when a root cause, lever, or measurement changes — don't re-derive from scratc
   the `--failures` buckets can mislabel (e.g. a chained message that dies in the
   inter-gateway transit shows as "binding-unresolved"; `--trace` shows the real
   `hop_budget_exceeded` / loop). e.g. `--trace xl-w015-e020`.
+- **Copy count: `--copies`** — counts copy-creating switches (a forward that
+  abandoned a next-hop which had already `data_rx`'d the frame and switched to a
+  different node → a 2nd live copy), broken down by trigger
+  (`blind_alt`/`silent_alt`/`stale_next`/`ack_giveup`/`silent_next`/`loop_duplicate`/
+  `rts_giveup`) vs legit reroutes (abandoned hop never decoded), plus per-message
+  fan-out (distinct decoders per `origin,ctr`). **Decouples copy-count (robust)
+  from delivery (noisy)** — use it to judge copy/contention levers on their own
+  merits. NB on s17 the dominant copy source is `blind_alt` (cts-timeout), NOT the
+  `ack_giveup` cascade the reverted grace targeted.
 
 ## Current state (after commit f467346)
 8–16 seed s15: aggregate DM ~**90%**, same-layer ~**97%**, cross-layer ~**77–78%**,

@@ -1874,6 +1874,95 @@ def render_trace(events_path, substr, slot_to_id, id_to_name):
         print(f"  t={e.get('time_ms', 0):>8}  {node:16s} {e['emit_type']:30s} {' '.join(parts)}")
 
 
+def analyse_copies(events_path, slot_to_id):
+    """Count COPY-CREATING SWITCHES.
+
+    A copy-creating switch is a forward that abandoned a next-hop which had
+    ALREADY decoded the frame (emitted data_rx for that origin,ctr) and switched
+    to a DIFFERENT node -> a 2nd live copy of a frame the abandoned hop already
+    holds (and will forward). The four switch events that move a flight to a
+    fresh next-hop are: path_cascade, tx_blind_alt, tx_silent_alt,
+    tx_stale_next_alt. A switch whose abandoned hop never decoded is a legit
+    reroute, NOT a copy.
+
+    Also tallies per-message fan-out = distinct nodes that decoded each
+    (origin,ctr) — copies inflate this above the delivering path length.
+
+    Returns (decoders, payloads, switches, copies, reroutes):
+      decoders[(origin,ctr)] = {node_id: earliest_data_rx_ms}
+      payloads[(origin,ctr)] = a payload sample (str) for display
+      switches / copies      = [(t, origin, ctr, from_next, to_next, label, payload)]
+      reroutes               = int
+    """
+    SWITCH = {"path_cascade", "tx_blind_alt", "tx_silent_alt", "tx_stale_next_alt"}
+    LABEL = {"tx_blind_alt": "blind_alt", "tx_silent_alt": "silent_alt",
+             "tx_stale_next_alt": "stale_next"}
+    decoders = defaultdict(dict)
+    payloads = {}
+    switches = []
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        if et == "data_rx":
+            key = (d.get("origin"), d.get("ctr"))
+            if key[0] is None or key[1] is None:
+                continue
+            prev = decoders[key].get(fid)
+            if prev is None or t_ms < prev:
+                decoders[key][fid] = t_ms
+            if key not in payloads and isinstance(d.get("payload"), str):
+                payloads[key] = d["payload"]
+        elif et in SWITCH:
+            label = d.get("trigger") if et == "path_cascade" else LABEL[et]
+            switches.append((t_ms, d.get("origin"), d.get("ctr"),
+                             d.get("from_next"), d.get("to_next"),
+                             label or et, d.get("payload")))
+    copies, reroutes = [], 0
+    for sw in switches:
+        t, o, c, frm = sw[0], sw[1], sw[2], sw[3]
+        rx = decoders.get((o, c), {})
+        if frm in rx and rx[frm] <= t:   # abandoned hop decoded BEFORE the switch
+            copies.append(sw)
+        else:
+            reroutes += 1
+    return decoders, payloads, switches, copies, reroutes
+
+
+def render_copies(events_path, slot_to_id, id_to_name, top=12):
+    def nm(nid):
+        n = id_to_name.get(nid)
+        return f"{n}({nid})" if n is not None else str(nid)
+
+    decoders, payloads, switches, copies, reroutes = analyse_copies(
+        events_path, slot_to_id)
+    by_label = Counter(sw[5] for sw in copies)
+
+    print("=== Copies (copy-creating switches) ===")
+    print("A copy-creating switch abandons a next-hop that had ALREADY decoded")
+    print("the frame (data_rx for that origin,ctr) and forwards to a DIFFERENT")
+    print("node -> a 2nd live copy. Switch events: path_cascade / tx_blind_alt /")
+    print("tx_silent_alt / tx_stale_next_alt.\n")
+    print(f"copy-creating switches : {len(copies)}")
+    for label, n in sorted(by_label.items(), key=lambda kv: (-kv[1], kv[0])):
+        print(f"    {label:<16} {n}")
+    print(f"reroute switches (abandoned hop never decoded — not a copy) : {reroutes}")
+    print(f"total switches         : {len(switches)}")
+
+    fan = sorted(((k, len(v)) for k, v in decoders.items()), key=lambda kv: -kv[1])
+    if fan:
+        mean = sum(n for _, n in fan) / len(fan)
+        print(f"\nfan-out (distinct decoders per origin,ctr): {len(fan)} messages, "
+              f"mean {mean:.1f} decoders/msg")
+        print(f"    {'(origin,ctr)':>14}  {'decoders':>8}  payload")
+        for (o, c), n in fan[:top]:
+            pl = payloads.get((o, c), "")
+            print(f"    {str((o, c)):>14}  {n:>8}  {str(pl)[:28]}")
+
+    if copies:
+        print(f"\n  copy detail (first {min(top, len(copies))} of {len(copies)}):")
+        print(f"    {'t_ms':>8}  {'abandoned':>14} -> {'to':<14} {'trigger':<12} payload")
+        for (t, o, c, frm, to, label, pl) in sorted(copies)[:top]:
+            print(f"    {t:>8}  {nm(frm):>14} -> {nm(to):<14} {label:<12} {str(pl)[:24]}")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
@@ -1911,6 +2000,12 @@ def main():
                         "resolve to. Shows where a cross-layer message dies "
                         "(transit / handoff / no_binding / H-query). "
                         "e.g. --trace xl-w015-e020")
+    p.add_argument("--copies", action="store_true",
+                   help="count copy-creating switches: a forward that abandoned "
+                        "a next-hop which already decoded the frame (data_rx) and "
+                        "switched to a different node -> a 2nd live copy. Reports "
+                        "total + breakdown by trigger + per-message fan-out. "
+                        "Re-analyses existing ndjson (no re-sim).")
     args = p.parse_args()
 
     if args.events is None:
@@ -1928,6 +2023,10 @@ def main():
 
     if args.trace:
         render_trace(args.events, args.trace, slot_to_id, id_to_name)
+        return
+
+    if args.copies:
+        render_copies(args.events, slot_to_id, id_to_name)
         return
 
     msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg = analyse(
