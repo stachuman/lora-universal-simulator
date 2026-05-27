@@ -7,6 +7,26 @@ shape of the problem, not the solution. Linked-to-from
 
 ---
 
+## Status — routing & delivery (updated 2026-05-27)
+
+Several design sections below (§7.0 hops encoding, §7.6 hop budget) describe the
+**superseded** 8-hop design. As-built reality (see `docs/PROTOCOL.md` §3.1/§3.4 for
+the wire spec, `docs/DELIVERY_ANALYSIS.md` for the living delivery analysis):
+
+- **DV hop cap = 16** (`dv_hop_cap`). Route entries are **4 bytes** with `hops` in
+  its own byte (not the old 3-bit `hops-1`); DATA `hop_budget` is **5-bit** (0..31);
+  RREQ/H-query TTLs track 16. Raising the cap is now a one-constant change.
+- **Loop prevention shipped** (PROTOCOL §3.1a): prev-hop split-horizon + **origin-drop**
+  + a **6-byte visited-set window** in the DATA header (loop-free at the data plane) +
+  a **soft hop-gradient**. This moved `DATA_HDR_LEN` 8→14 (payload hard-cap 241→235).
+- **Cross-layer**: source-routed gateway-envelope chaining (suburb↔suburb via center)
+  + **gateway-doorstep hold** (hold+retry the egress gateway window-aware instead of
+  fanning out to siblings).
+- **Latest s17 (252-node metro) 4-seed delivery:** same-layer **92%**, all-DM **69%**
+  (was 59%). Next target: cross-layer **2-gw transit** (~42%, Stage-2 across the center).
+
+---
+
 ## 1. Anti-spam: rate-limit at the 1st-hop neighbour (IMPLEMENTED)
 
 **Status — IMPLEMENTED** as silent-drop + originator self-monitoring.

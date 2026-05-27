@@ -1,7 +1,17 @@
-# Delivery Analysis — s15 cross-layer DM + channels
+# Delivery Analysis — s15 / s17 cross-layer DM + channels
 
 Living analysis doc. **Read this before re-investigating delivery.** Update it
 when a root cause, lever, or measurement changes — don't re-derive from scratch.
+
+> **STATUS (2026-05-27).** s17 (252-node metro) 4-seed delivery by class:
+> same-layer **92%** · XL 1-gw **59%** · XL 2-gw **42%** · ALL **69%** (was 59%).
+> **Same-layer is resolved** (anti-loop package: origin-drop + soft hop-gradient +
+> 6-byte visited-set DATA window — see "Same-layer anti-loop package" below + PROTOCOL
+> §3.1a/§3.4). **Next target: cross-layer 2-gw (Stage-2 inter-gateway transit, ~42%,
+> the worst class)**; minor open item: the XL 1-gw dip (65→59) from the visited window
+> occasionally over-constraining a gateway-bound first leg. Use `dm_delivery_breakdown.py
+> --failures` (per-stage funnel) before guessing. Measure-gate: sweep ≥4 seeds, s17/s15
+> XL is single-seed-noisy.
 
 ## Measurement protocol (use consistently)
 - **s15 is noise-dominated (±~2.4pp); sweep 8–16 seeds**, never judge from one run.

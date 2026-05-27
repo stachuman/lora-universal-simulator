@@ -424,6 +424,35 @@ Phase 2 packed entries to 3 bytes (−24.5% airtime). Phase 3 (this spec)
 repacked byte 1 to add flag bits and repacked entry byte 2 to add the
 `is_gateway` bit and use the `hops-1` encoding.
 
+### 3.1a Loop guards (forwarding-loop prevention)
+
+DV without destination sequence numbers can form multi-node routing loops,
+especially in the dense center and toward time-shared gateways (stale/loopy
+routes). Four layered, complementary guards prevent/kill them — loop-freedom is a
+**data-plane** property (so the alternate-route search can be liberal without
+risking cycles):
+
+1. **prev-hop split-horizon** — never forward back to the immediate predecessor.
+2. **origin-drop** — a node that receives a frame it *originated* drops it (never
+   re-forwards); kills the return-to-origin loop directly. (`origin_loop_drop`)
+3. **visited-set window** (DATA §3.4): never forward to any node already on the
+   message's recent path (last `VISITED_LEN`=6 carriers, `visited_check_depth`-deep).
+   Generalizes guard 1 from 1 carrier to 6 — the main structural loop-killer.
+4. **hop-gradient** (`gradient_max_uphill_hops`, default 1): the cascade / blind-alt
+   / loop-dup alternate search prefers routes within N hops of the best, so it
+   doesn't wander into longer cycles. **Soft** (2-pass): if no near route is usable
+   it falls back to an uphill one rather than stranding (sparse suburbs / gateway
+   legs need this) — safe because guards 1–3 make the fallback loop-free.
+
+Reactive backstops: a returning duplicate from a *different* prev-hop triggers a
+`loop_duplicate` NACK; the `hop_budget` bounds any residual loop. s17 4-seed result
+of the full package: same-layer 82→92%, all-DM 59→69% (see DELIVERY_ANALYSIS.md).
+
+**Gateway-doorstep hold** (cross-layer first leg): a node RTSing a known gateway
+directly that gets no CTS does **not** fan out to sibling gateway-neighbours (that
+loops); it holds the single copy and retries window-aware + jittered until
+`gateway_send_giveup_ms` (150 s). See §3.4 `visited` reset on gateway re-issue.
+
 ### 3.2 RTS (`'R'`) — 8 bytes (in-leaf)
 
 Per ROADMAP §7.0.3. `origin` removed from wire — destination identifies the
@@ -506,22 +535,20 @@ Per ROADMAP §7.0.1. E2E flags moved from inner payload header to wire byte 1.
 added (crypto stub, will carry Poly1305-truncated under §8).
 
 ```
-byte:  0    1                        2     3    4    5     6...(5+n)  last 4
-       ┌────┬────────────────────────┬─────┬────┬────┬──── ┬──────────┬───────┐
-       │'D' │ addr_len (3 hi)        │ next│ dst│ctr │ ctr │ciphertext│  MAC  │
-       │    │ rsv (1)                │     │    │ lo │ hi  │ (n+2 B)  │ (4 B) │
-       │    │ E2E_ACK_REQ (1)        │     │    │    │     │          │ zeros │
-       │    │ E2E_IS_ACK (1)         │     │    │    │     │          │       │
-       │    │ PRIORITY (1)           │     │    │    │     │          │       │
-       │    │ PAYLOAD_TYPE_M (1)     │     │    │    │     │          │       │
-       └────┴────────────────────────┴─────┴────┴────┴─────┴──────────┴───────┘
+byte:  0    1        2     3    4           5          6      7      8..13         14..(13+2+n)   last 4
+       ┌────┬────────┬─────┬────┬───────────┬──────────┬──────┬──────┬─────────────┬──────────────┬───────┐
+       │'D' │addr_len│ next│ dst│ hop_budget│ prev_fwd  │ctr_lo│ctr_hi│ visited[6]  │ ciphertext   │  MAC  │
+       │    │(3 hi)  │     │    │ remaining │ _rt_hops  │      │      │ (loop win)  │ (n+2 B)      │ (4 B) │
+       │    │+flags  │     │    │ (5)|cmtd(3)│ (8)       │      │      │ (6 B)       │              │ zeros │
+       └────┴────────┴─────┴────┴───────────┴──────────┴──────┴──────┴─────────────┴──────────────┴───────┘
 
-Total: 10 + n bytes for in-leaf (addr_len=0). n = body bytes.
+Total: DATA_HDR_LEN(14) + (n+2) inner + MAC_LEN(4) = 20 + n bytes for in-leaf
+(addr_len=0). n = body bytes. DATA_HDR_LEN = 8 fixed header bytes + VISITED_LEN(6).
 
-ciphertext slot for normal DATA:
-  byte 6  : src_addr_len (= 0 for in-leaf / flat addresses this phase)
-  byte 7  : src_addr     (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
-  bytes 8+: body         (user text for normal DATA; [acked_ctr_lo, acked_ctr_hi] for E2E ACK)
+ciphertext slot for normal DATA (starts at byte 14):
+  byte 14 : src_addr_len (= 0 for in-leaf / flat addresses this phase)
+  byte 15 : src_addr     (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
+  bytes 16+: body        (user text for normal DATA; [acked_ctr_lo, acked_ctr_hi] for E2E ACK)
 
 byte 1 flag bits (low to high):
   bit 0 (0x01): PAYLOAD_TYPE_M (channel gossip message; ciphertext slot
@@ -556,10 +583,24 @@ elevation. Receivers MAY drop frames with both bits set.
   - `E2E_IS_ACK=0` (normal DATA): body is opaque user text.
   - `E2E_IS_ACK=1` (E2E ACK return frame): body is exactly 2 bytes —
     `[acked_ctr_lo, acked_ctr_hi]` — the 16-bit ctr being acked.
+- `hop_budget` (byte 4): `hops_remaining` (5 bits, hi) `| committed_hops` (3 bits).
+  Decremented each hop; `hops_remaining < 0` at a non-destination triggers a
+  `HOP_BUDGET` NACK (§ NACK). 5 bits so the TTL reaches the 16-hop `dv_hop_cap`.
+- `prev_fwd_rt_hops` (byte 5): the previous forwarder's claim of `dst`'s hop count
+  (8 bits); used for the §7.6 forwarder rt-cost overwrite.
+- `visited` (bytes 8..13, `VISITED_LEN`=6): **loop-guard window** — the most-recent
+  carrier short-ids on this message's path (0 = empty slot). The originator seeds it
+  with `[self]`; each forwarder appends its own id (sliding, keep last 6). A node
+  **refuses to forward to any id in the window** (`next_hop_selectable`, up to
+  `visited_check_depth`) — prev-hop split-horizon generalized 1→6, making the
+  routing-loop class impossible at the data plane. Reset (restarts at `[gateway]`)
+  on a cross-layer gateway re-issue (new path on the next layer). See § Loop guards.
 - `MAC` (4 bytes, all-zero placeholder): will carry Poly1305-truncated tag
   once §8 crypto lands. Receiver ignores MAC bytes today.
-- In-leaf size: 10 + n bytes (vs 8 + n before §7.0.1). The +2 B overhead
-  is the crypto/privacy stub cost; wire layout is identical once §8 lands.
+- In-leaf size: **20 + n bytes** (DATA_HDR_LEN 14 = 8 fixed + 6 visited; + 2 B inner
+  src-addr header + n body + 4 B MAC). `payload_hard_max = LORA_MAX_FRAME_BYTES(255)
+  - DATA_HDR_LEN(14) - DATA_INNER_OVERHEAD(6) = 235`; `max_payload_bytes` (default
+  230) is clamped to it (see `max_payload_clamped`).
 
 #### 3.4.1 Channel-message payload (`PAYLOAD_TYPE_M`)
 
@@ -2781,7 +2822,7 @@ expectations) subscribe by event_type.
 | `hash_bind_response_enqueued` | Resolver queued the routed-DATA binding response back to the querying gateway | `to`, `node`, `key_hash32`, `target_layer_id`, `ctr` |
 | `q_hash_binding_rx` | Gateway received a binding response (routed DATA, `HASH_BIND_MAGIC` body) and updated `id_bind` + `gateway_remote_bind`, then drained handoffs | `from`, `node`, `key_hash32`, `layer_id`, `source` (`h_query`) |
 | `table_cap_hit` | Bounded-state cap reached on a growing table. The current insert is refused; the event surfaces pathological growth so it's visible before the C++ port hits a flash/RAM wall. Capped tables: `q_queried`, `q_responded_to`, `route_request_seen`, `route_request_last`, `seen_origins`, `deferred_sends`, `gateway_deferred_handoffs`, `id_bind` | `table`, `size`, `cap`, `action` (`refuse`), plus a table-specific identifier (`key` for keyed maps; `origin`/`dst`/`ctr`/`reason` for arrays) |
-| `max_payload_clamped` | Init-time guard. Configured `max_payload_bytes` exceeds the LoRa PHY 255-byte frame minus fixed overhead (`DATA_HDR_LEN + DATA_INNER_OVERHEAD` = 14); clamped to the hard cap (241) | `requested`, `clamped_to`, `lora_max_frame`, `fixed_overhead` |
+| `max_payload_clamped` | Init-time guard. Configured `max_payload_bytes` exceeds the LoRa PHY 255-byte frame minus fixed overhead (`DATA_HDR_LEN(14) + DATA_INNER_OVERHEAD(6)` = 20); clamped to the hard cap (235) | `requested`, `clamped_to`, `lora_max_frame`, `fixed_overhead` |
 | `send_oversized` | Originator-side rejection of a user payload exceeding `max_payload_bytes`. The send never enters `tx_queue`; runtime `tx_oversized` remains the radio-side backstop for frames built outside this path | `dst`, `dst_name`, `len`, `max`, optional `e2e`, optional `target_layer_id` / `dst_key_hash32` / `envelope_overhead` for `send_layer` |
 | `channel_msg_received` | A `PAYLOAD_TYPE_M` DATA frame was merged into our `channel_buffer` (either because we were the `to=` target of a pull response, or via promiscuous overhearing of someone else's pull response) | `id`, `channel_id`, `flavor`, `source` (`pull_target` / `overheard`), `from` (immediate radio sender) |
 | `channel_msg_pulled` | We responded to a `Q_CHANNEL_PULL` by emitting one or more PAYLOAD_TYPE_M DATA frames | `to`, `ids[]` (those we had), `missing[]` (requested but absent in our buffer) |
@@ -2848,7 +2889,11 @@ The full T-class surface. Every other knob folds into PROTOCOL.
 
 | Key | Default | Description |
 |---|---|---|
-| `max_payload_bytes` | 230 | Max user-payload byte length. Network-wide convention — all nodes must agree. Hard-clamped at init to LoRa PHY ceiling (`LORA_MAX_FRAME_BYTES - DATA_HDR_LEN - DATA_INNER_OVERHEAD` = 241); see `max_payload_clamped` event. Originator emits `send_oversized` and rejects sends > cap. |
+| `max_payload_bytes` | 230 | Max user-payload byte length. Network-wide convention — all nodes must agree. Hard-clamped at init to LoRa PHY ceiling (`LORA_MAX_FRAME_BYTES - DATA_HDR_LEN - DATA_INNER_OVERHEAD` = 235, after the 6-byte visited window); see `max_payload_clamped` event. Originator emits `send_oversized` and rejects sends > cap. |
+| `gradient_max_uphill_hops` | 1 | Loop guard: cap on how many hops "uphill" of the best route an alternate may be in `next_hop_selectable` (soft — 2-pass falls back to uphill rather than strand). nil disables. |
+| `visited_check_depth` | 6 | Loop guard: how many of the DATA frame's `VISITED_LEN`(6)-deep carrier window to test (1..6). Tunes coverage without a wire change. |
+| `gateway_send_giveup_ms` | 150000 | Gateway-doorstep hold: a cross-layer envelope that can't reach its egress gateway is held + retried window-aware until this, then a real `send_giveup` (instead of fanning out to sibling neighbours). |
+| `gateway_doorstep_retry_jitter_ms` | 2000 | Burst-avoidance spread for in-window gateway-doorstep retries. |
 
 #### Beacon / boot
 
