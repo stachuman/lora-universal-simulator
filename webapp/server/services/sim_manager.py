@@ -176,6 +176,35 @@ class SimManager:
         asyncio.create_task(self._run_sim(sim_id))
         return sim_id
 
+    async def import_sim(self, config: dict, events_path: str) -> str:
+        """Register a *completed* sim from an existing config + events file.
+
+        Writes config.json, copies the events file into the sim dir as
+        events.ndjson, and marks the sim completed — no lus run. The caller
+        (router) is responsible for validating config and events_path.
+        """
+        sim_id = self._generate_id()
+        sim_dir = self._sim_dir(sim_id)
+        sim_dir.mkdir(parents=True, exist_ok=True)
+
+        config_path = sim_dir / "config.json"
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+        shutil.copyfile(events_path, sim_dir / "events.ndjson")
+
+        now = time.time()
+        record = SimRecord(
+            id=sim_id,
+            status="completed",
+            created_at=now,
+            completed_at=now,
+            config=config,
+        )
+        self._sims[sim_id] = record
+        self._save_status(sim_id)
+        return sim_id
+
     def get_sim(self, sim_id: str) -> Optional[SimRecord]:
         """Return the SimRecord for a simulation, or None."""
         return self._sims.get(sim_id)
