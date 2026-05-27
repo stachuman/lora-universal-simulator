@@ -528,7 +528,7 @@ No `leaf_id` — CTS is matched at the originator by
 `to`, responder source, and `pending_tx.ctr_lo`, which was set after the
 originator's already-validated RTS.
 
-### 3.4 DATA (`'D'`) — 10 + n bytes (in-leaf, addr_len=0)
+### 3.4 DATA (`'D'`) — 20 + n bytes (in-leaf, addr_len=0)
 
 Per ROADMAP §7.0.1. E2E flags moved from inner payload header to wire byte 1.
 16-bit `ctr` replaces the 3-byte inner origin-header. 4-byte zero MAC placeholder
