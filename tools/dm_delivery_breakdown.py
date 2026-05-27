@@ -1875,10 +1875,13 @@ def render_trace(events_path, substr, slot_to_id, id_to_name):
     rows.sort(key=lambda e: e.get("time_ms", 0))
 
     print(f"TRACE '{substr}': {len(rows)} events; following hashes {sorted(hashes)}")
+
+    def _node(e):
+        idx = e.get("node")
+        return nm(slot_to_id.get(idx, idx)) if isinstance(idx, int) else str(idx)
+    node_w = max([len(_node(e)) for e in rows] + [4])   # auto-size for long names
     for e in rows:
         d = e.get("data", {})
-        idx = e.get("node")
-        node = nm(slot_to_id.get(idx, idx)) if isinstance(idx, int) else str(idx)
         parts = []
         for k in _TRACE_FIELDS:
             if k in d:
@@ -1889,7 +1892,8 @@ def render_trace(events_path, substr, slot_to_id, id_to_name):
         pl = d.get("payload")
         if isinstance(pl, str):
             parts.append(f"pl={pl[:20]}")
-        print(f"  t={e.get('time_ms', 0):>8}  {node:16s} {e['emit_type']:30s} {' '.join(parts)}")
+        print(f"  t={e.get('time_ms', 0):>8}  {_node(e):{node_w}s} "
+              f"{e['emit_type']:30s} {' '.join(parts)}")
 
 
 def analyse_copies(events_path, slot_to_id):
@@ -1975,10 +1979,13 @@ def render_copies(events_path, slot_to_id, id_to_name, top=12):
             print(f"    {str((o, c)):>14}  {n:>8}  {str(pl)[:28]}")
 
     if copies:
-        print(f"\n  copy detail (first {min(top, len(copies))} of {len(copies)}):")
-        print(f"    {'t_ms':>8}  {'abandoned':>14} -> {'to':<14} {'trigger':<12} payload")
-        for (t, o, c, frm, to, label, pl) in sorted(copies)[:top]:
-            print(f"    {t:>8}  {nm(frm):>14} -> {nm(to):<14} {label:<12} {str(pl)[:24]}")
+        det = sorted(copies)[:top]
+        w = max([len(nm(s[3])) for s in det] + [len(nm(s[4])) for s in det]
+                + [len("abandoned"), len("to")])   # auto-size for long names
+        print(f"\n  copy detail (first {len(det)} of {len(copies)}):")
+        print(f"    {'t_ms':>8}  {'abandoned':>{w}} -> {'to':<{w}} {'trigger':<12} payload")
+        for (t, o, c, frm, to, label, pl) in det:
+            print(f"    {t:>8}  {nm(frm):>{w}} -> {nm(to):<{w}} {label:<12} {str(pl)[:24]}")
 
 
 def analyse_airtime(events_path, slot_to_id):
@@ -2063,19 +2070,22 @@ def render_airtime(events_path, slot_to_id, id_to_name, top=20):
     s_a = sum(r["ack_air"] for _, _, _, r, _ in rows)
     s_t = s_rc + s_d + s_a
     n = len(rows) or 1
+    disp = rows[:top]
+    labels = [f"{nm(o)} -> {nm(r['dst'])} ({c})" for _, o, c, r, _ in disp]
+    w = max([len(x) for x in labels] + [len("origin -> dst (ctr)"),
+                                        len("TOTAL (%d msgs)" % len(rows))])
     print("=== Airtime per message (ms; *_tx events + LoRa formula) ===")
     print(f"bw={bw_hz}Hz cr=4/{cr} preamble={PREAMBLE_SYM}. RTS/CTS/ACK on routing SF, "
           f"DATA on data SF.\n")
-    print(f"  {'origin -> dst (ctr)':30} {'rsf':>3} {'RTS+CTS':>8} {'DATA':>7} "
+    print(f"  {'origin -> dst (ctr)':{w}} {'rsf':>3} {'RTS+CTS':>8} {'DATA':>7} "
           f"{'ACK':>6} {'TOTAL':>7}")
-    for tot, o, c, r, rtscts in rows[:top]:
-        lbl = f"{nm(o)} -> {nm(r['dst'])} ({c})"
-        print(f"  {lbl[:30]:30} {str(r['rsf'] or '?'):>3} {rtscts:>8} "
+    for (tot, o, c, r, rtscts), lbl in zip(disp, labels):
+        print(f"  {lbl:{w}} {str(r['rsf'] or '?'):>3} {rtscts:>8} "
               f"{r['data_air']:>7} {r['ack_air']:>6} {tot:>7}")
-    print(f"  {'-' * 66}")
-    print(f"  {('TOTAL (%d msgs)' % len(rows)):30} {'':>3} {s_rc:>8} {s_d:>7} "
+    print(f"  {'-' * (w + 35)}")
+    print(f"  {('TOTAL (%d msgs)' % len(rows)):{w}} {'':>3} {s_rc:>8} {s_d:>7} "
           f"{s_a:>6} {s_t:>7}")
-    print(f"  {'mean / msg':30} {'':>3} {s_rc // n:>8} {s_d // n:>7} "
+    print(f"  {'mean / msg':{w}} {'':>3} {s_rc // n:>8} {s_d // n:>7} "
           f"{s_a // n:>6} {s_t // n:>7}")
     print(f"\n  split: RTS+CTS {100 * s_rc // max(s_t, 1)}%  "
           f"DATA {100 * s_d // max(s_t, 1)}%  ACK {100 * s_a // max(s_t, 1)}%")
