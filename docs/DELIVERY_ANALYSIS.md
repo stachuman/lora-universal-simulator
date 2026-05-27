@@ -404,14 +404,34 @@ far/loopy path. That same fallback is what *rescues* cross-layer (sparse/gateway
 genuinely need the longer path). So: **hard** → same-layer loops die / cross-layer
 strands; **soft** → cross-layer recovers / same-layer loops return.
 
-**Refinement (planned):** the discriminator isn't hard-vs-soft, it's *does a short
-path exist?* Gate pass-2 (uphill) on **"no non-uphill candidate exists at all"**; when
-a short path exists but is merely busy (dense center), return nil → the existing
-requeue **backs off and retries the short path** instead of going uphill. Expected to
-recover same-layer (toward the hard-gradient 90s) while keeping the cross-layer gain.
-Regression test for the loop guards lands with this (the guards fire under
-dense-contention *scale* — s17 — not in a toy topology, so it's validated by the
-sweep, not a unit test, until the refined behavior is final).
+**Refinement — SHIPPED: visited-set loop guard on the DATA frame.** Rather than the
+"no short path exists" gate (which fails — the *best* route is non-uphill by
+definition, so that gate disables the fallback entirely), the fix carries a **6-byte
+visited window** (last 6 carrier short-ids) in the DATA header: the originator seeds
+it with [self], each forwarder appends itself (sliding), and `next_hop_selectable`
+**refuses to forward to any node already in the window** (prev-hop split-horizon
+generalized 1→6, independent of the gradient — an uphill fallback still can't pick a
+visited node). This makes the soft gradient's fallback **loop-safe at the source**:
+loops can't form, so recovering same-layer doesn't require stranding cross-layer.
+Frame budget: `DATA_HDR_LEN` 8→14, so `payload_hard_max` 241→235 (the 6 bytes come
+out of the payload, keeping total ≤ the 255 LoRa cap). Config `visited_check_depth`
+(1–6) tunes coverage without a wire change.
+
+**4-seed sweep (vs the doorstep-only baseline, and the soft-gradient-only step):**
+
+| class | base | soft only | **+visited-set** |
+|---|---|---|---|
+| same-layer | 82% | 77% | **92%** |
+| XL 1-gw | 51% | 65% | 59% |
+| XL 2-gw | 25% | 31% | **42%** |
+| ALL | 59% | 64% | **69%** |
+
+Same-layer **recovered + exceeded** (77→92%, the goal — loops killed; variance also
+tightened to 87–97% from the old 70–93% swings), 2-gw **+11pp** (31→42), ALL **+5pp**
+(64→69). Only 1-gw dipped (65→59, still +8 over base) — the window occasionally
+over-constrains a cross-layer first leg; minor, net hugely positive. `origin_loop_drop`
+fires 3–12×/seed (real loops caught). Guarded by **t81** (window accumulates
+`[1]→[1,2]→[1,2,3]` along a chain + delivers); suite 99/99 (t62 clamp updated 241→235).
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`

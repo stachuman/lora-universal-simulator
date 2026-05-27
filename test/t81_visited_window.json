@@ -1,0 +1,38 @@
+{
+  "_name": "t81_visited_window",
+  "_desc": "Regression for the visited-set loop guard's DATA-frame window (frame-format threading). A 4-node linear chain a-b-c-d; a sends to d. The 6-byte visited window must accumulate carrier short-ids as the frame is forwarded: the originator a seeds it with [a]; b appends itself -> [a,b]; c appends -> [a,b,c]. Verify each forwarder's data_tx carries the expected window AND d delivers (window threading didn't break forwarding). node_ids: a=1,b=2,c=3,d=4. Send at t=20000 so the 3-hop route converges first. This guards the wire-format (pack_data/parse_data) + the per-hop append; the loop-rejection itself is validated at scale on s17 (sweep).",
+  "simulation": {
+    "duration_ms": 40000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 81,
+    "node_startup_jitter_ms": 0,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "a", "node_id": 1, "key_hash32": "0x0A000001", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "b", "node_id": 2, "key_hash32": "0x0A000002", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "c", "node_id": 3, "key_hash32": "0x0A000003", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } },
+    { "name": "d", "node_id": 4, "key_hash32": "0x0A000004", "script": "scenarios/dv_dual_sf.lua",
+      "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "a", "to": "b", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "b", "to": "c", "snr": 22.0, "rssi": -68.0, "bidir": true },
+      { "from": "c", "to": "d", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 20000, "node": "a", "command": "send d loopguard-w0" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "a", "emit_type": "data_tx", "value": "\"visited\":[1]" },
+    { "type": "script_emit_contains", "node": "b", "emit_type": "data_tx", "value": "\"visited\":[1,2]" },
+    { "type": "script_emit_contains", "node": "c", "emit_type": "data_tx", "value": "\"visited\":[1,2,3]" },
+    { "type": "script_emit_contains", "node": "d", "emit_type": "delivered", "value": "loopguard-w0" }
+  ]
+}

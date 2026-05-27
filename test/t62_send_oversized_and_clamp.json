@@ -1,6 +1,6 @@
 {
   "_name": "t62_send_oversized_and_clamp",
-  "_desc": "Two-phase test for the LoRa-frame payload guard. Phase 1 (init): alice's config requests max_payload_bytes=300, which exceeds the LoRa PHY 255-byte frame ceiling minus DATA_HDR_LEN (8) + DATA_INNER_OVERHEAD (6) = 241 hard cap. on_init emits max_payload_clamped with clamped_to=241 and overrides the request. Phase 2 (send-time): alice tries to send a 250-byte payload to bob. With the effective cap now 241, the originator rejects the send before queueing and emits send_oversized with len=250 and max=241. No DATA frame ever hits the radio.",
+  "_desc": "Two-phase test for the LoRa-frame payload guard. Phase 1 (init): alice's config requests max_payload_bytes=300, which exceeds the LoRa PHY 255-byte frame ceiling minus DATA_HDR_LEN (14 = 8 fixed + 6-byte visited window) + DATA_INNER_OVERHEAD (6) = 235 hard cap. on_init emits max_payload_clamped with clamped_to=235 and overrides the request. Phase 2 (send-time): alice tries to send a 250-byte payload to bob. With the effective cap now 235, the originator rejects the send before queueing and emits send_oversized with len=254 and max=235. No DATA frame ever hits the radio.",
   "simulation": {
     "duration_ms": 5000,
     "step_ms": 1,
@@ -26,9 +26,9 @@
   ],
   "expect": [
     { "type": "script_emit_contains", "node": "alice", "emit_type": "max_payload_clamped", "value": "\"requested\":300" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "max_payload_clamped", "value": "\"clamped_to\":241" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "max_payload_clamped", "value": "\"clamped_to\":235" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "max_payload_clamped", "value": "\"lora_max_frame\":255" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "send_oversized", "value": "\"max\":241" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "send_oversized", "value": "\"max\":235" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "send_oversized", "value": "\"len\":254" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "send_oversized", "value": "\"dst_name\":\"bob\"" },
     { "type": "cmd_reply_contains", "node": "alice", "value": "ERROR: payload too large" }

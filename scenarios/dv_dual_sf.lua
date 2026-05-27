@@ -1029,6 +1029,10 @@ PROTOCOL = {
   -- through to a slightly-longer usable alternate. nil disables. Loop-freedom
   -- backstop is the data-plane origin/prev-hop guards, not this. Tune 0/1/2.
   gradient_max_uphill_hops       = 1,
+  -- Visited-set loop guard: how many of the DATA frame's VISITED_LEN-deep
+  -- carrier window to actually test in next_hop_selectable (1..VISITED_LEN).
+  -- Lets us tune coverage without a wire-format change. Default = full window.
+  visited_check_depth            = 6,
 
   -- ---- Q frames ----
   q_query_ttl_ms                 = 5000,
@@ -2767,8 +2771,10 @@ end
 --   byte 8   : src_addr_len (= 0 for in-leaf / flat addresses)
 --   byte 9   : src_addr (origin's 8-bit mesh id; 1 byte when src_addr_len=0)
 --   bytes 10+ : body (user_text for normal DATA; [acked_ctr_lo, acked_ctr_hi, ?] for E2E ACK)
-local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
+local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget, visited)
   -- inner = pre-assembled bytes: src_addr_len(1) | src_addr(1) | body
+  -- visited = optional list of up to VISITED_LEN recent carrier short-ids (the
+  --   loop-guard window); encoded as VISITED_LEN bytes, 0-padded.
   -- hop_budget = optional table { remaining, committed, prev_fwd_rt_hops }
   --   remaining: hops_remaining (5 bits, 0-31); default 31 = no enforcement.
   --     5 bits so the TTL reaches the 16-hop cap (+slack).
@@ -2784,6 +2790,11 @@ local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
   local prev_fwd_rt_hops = math.min(255, math.max(0, hb.prev_fwd_rt_hops or 0))
   local ctr_lo_byte = ctr & 0xff
   local ctr_hi_byte = (ctr >> 8) & 0xff
+  local vis = visited or {}
+  local vbytes = {}
+  for i = 1, VISITED_LEN do
+    vbytes[i] = string.char((vis[i] or 0) & 0xff)
+  end
   local mac = string.rep("\0", MAC_LEN)
   return "D" .. string.char(byte1)
               .. string.char(next_hop)
@@ -2792,12 +2803,13 @@ local function pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
               .. string.char(prev_fwd_rt_hops)
               .. string.char(ctr_lo_byte)
               .. string.char(ctr_hi_byte)
+              .. table.concat(vbytes)
               .. inner
               .. mac
 end
 
 local function parse_data(frame)
-  if #frame < 12 or frame:sub(1,1) ~= "D" then return nil end
+  if #frame < (DATA_HDR_LEN + MAC_LEN) or frame:sub(1,1) ~= "D" then return nil end
   local b1 = frame:byte(2)
   local addr_len = (b1 >> 5) & 0x07
   if addr_len ~= 0 then return nil end        -- hierarchy deferred
@@ -2811,10 +2823,17 @@ local function parse_data(frame)
   local ctr_lo_byte = frame:byte(7)
   local ctr_hi_byte = frame:byte(8)
   local ctr      = ctr_lo_byte | (ctr_hi_byte << 8)
-  -- inner spans byte 9 .. (#frame - MAC_LEN)
+  -- visited window: bytes 9 .. 8+VISITED_LEN (0 = empty slot). inner follows.
+  local visited = {}
+  for i = 1, VISITED_LEN do
+    local v = frame:byte(8 + i)
+    if v and v ~= 0 then visited[#visited + 1] = v end
+  end
+  -- inner spans byte (9+VISITED_LEN) .. (#frame - MAC_LEN)
+  local inner_start = 9 + VISITED_LEN
   local inner_end = #frame - MAC_LEN
-  if inner_end < 9 then return nil end
-  local inner    = frame:sub(9, inner_end)
+  if inner_end < inner_start then return nil end
+  local inner    = frame:sub(inner_start, inner_end)
 
   local out = {
     flags         = flags,
@@ -2829,6 +2848,7 @@ local function parse_data(frame)
     prev_fwd_rt_hops = prev_fwd_rt_hops,
     ctr           = ctr,
     ctr_lo        = ctr & 0xf,
+    visited       = visited,
     inner         = inner,
   }
 
@@ -2868,7 +2888,8 @@ local CTS_LEN = 3       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | already_received) + to
 -- originator instead of after queueing.
 LORA_MAX_FRAME_BYTES = 255
 
-local DATA_HDR_LEN = 8  -- 'D' + byte1 + next + dst + hop_budget + prev_fwd_rt_hops + ctr_lo + ctr_hi (inner+MAC follow)
+VISITED_LEN = 6   -- visited-set loop guard: up to 6 recent carrier short-ids (8-bit each), 0=empty slot. GLOBAL (200-local chunk limit).
+DATA_HDR_LEN = 8 + VISITED_LEN  -- GLOBAL (referenced by parse_data above it; also dodges the 200-local limit). D|byte1|next|dst|hop_budget|prev_fwd|ctr_lo|ctr_hi (8) + visited(6); inner+MAC follow
 -- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
 -- RTS payload_len = #body + DATA_INNER_OVERHEAD for in-leaf frames.
 local DATA_INNER_OVERHEAD = 2 + MAC_LEN  -- src_addr_len(1) + src_addr(1) + MAC(4) = 6
@@ -3072,28 +3093,26 @@ end
 -- previous_hop, when non-nil (forwarder context), is the upstream node we
 -- received the DATA from — never alt-switch back through it (that would
 -- create a 2-hop loop).
-local function classify_blind(self, dst_id, current_next_hop, alts_tried, previous_hop)
+local function classify_blind(self, dst_id, current_next_hop, alts_tried, previous_hop, visited)
   local blind, remaining = is_blind(self, current_next_hop)
   if not blind then return "ok" end
   local entry = refresh_route_order(self, dst_id, "blind_alt_order")
   if not entry then return "defer", remaining + 1 end
   -- Walk the candidates list; skip the current next_hop, the previous_hop
   -- loop guard, any next_hop already tried (per pending_tx.alts_tried),
-  -- stale/silent next-hops, and any candidate currently in a blind window.
-  -- alts_tried is a table-as-set keyed by next_hop id; nil/empty means
-  -- "nothing tried yet" so the first non-blind alt qualifies.
+  -- stale/silent next-hops, visited carriers, and any candidate in a blind window.
   for _, c in ipairs(entry.candidates) do
     if next_hop_selectable(self, dst_id, c, previous_hop, alts_tried,
-                           current_next_hop, "blind_alt")
+                           current_next_hop, "blind_alt", false, visited)
        and not is_blind(self, c.next_hop) then
       return "alt", c.next_hop
     end
   end
   -- Fallback: no near (gradient-respecting) alt; allow an uphill one rather
-  -- than strand. Loop-freedom backstop = data-plane origin/prev-hop guards.
+  -- than strand. Still avoids visited nodes (loop guard is independent).
   for _, c in ipairs(entry.candidates) do
     if next_hop_selectable(self, dst_id, c, previous_hop, alts_tried,
-                           current_next_hop, "blind_alt", true)
+                           current_next_hop, "blind_alt", true, visited)
        and not is_blind(self, c.next_hop) then
       return "alt", c.next_hop
     end
@@ -3906,13 +3925,24 @@ local function emit_stale_next_skip(self, dst_id, next_hop, source)
 end
 
 next_hop_selectable = function(self, dst_id, c, previous_hop, alts_tried,
-                               current_next_hop, source, allow_uphill)
+                               current_next_hop, source, allow_uphill, visited)
   if not c or c.next_hop == nil then return false end
   if current_next_hop ~= nil and c.next_hop == current_next_hop then
     return false
   end
   if previous_hop ~= nil and c.next_hop == previous_hop then
     return false
+  end
+  -- Visited-set loop guard: never forward to a node already on this message's
+  -- path (the last visited_check_depth carriers, carried in the DATA frame).
+  -- Generalizes prev-hop split-horizon from 1 carrier to N. Independent of the
+  -- gradient (allow_uphill): an uphill fallback must still avoid visited nodes.
+  if visited ~= nil then
+    local depth = self.visited_check_depth or VISITED_LEN
+    local n = #visited
+    for i = math.max(1, n - depth + 1), n do
+      if visited[i] == c.next_hop then return false end
+    end
   end
   if alts_tried and alts_tried[c.next_hop] then
     return false
@@ -5332,16 +5362,16 @@ local function pick_next_cascade_hop(self, px)
   if not entry then return nil end
   for _, c in ipairs(entry.candidates) do
     if next_hop_selectable(self, px.dst, c, px.previous_hop, px.alts_tried,
-                           nil, "cascade_order")
+                           nil, "cascade_order", false, px.visited)
        and not is_blind(self, c.next_hop) then
       return c.next_hop
     end
   end
   -- Fallback: no near (gradient-respecting) alt; allow an uphill one rather
-  -- than strand. Loop-freedom backstop = data-plane origin/prev-hop guards.
+  -- than strand. Still avoids visited nodes (loop guard is independent).
   for _, c in ipairs(entry.candidates) do
     if next_hop_selectable(self, px.dst, c, px.previous_hop, px.alts_tried,
-                           nil, "cascade_order", true)
+                           nil, "cascade_order", true, px.visited)
        and not is_blind(self, c.next_hop) then
       return c.next_hop
     end
@@ -5900,7 +5930,7 @@ local function tx_rts_retry(self, reason)
   -- F1 mitigation: if next-hop is now known-blind, defer the retry or
   -- switch to alt. Reset retries budget on alt-switch (fresh path).
   local action_b, val_b = classify_blind(self, px.dst, px.next, px.alts_tried,
-                                          px.previous_hop)
+                                          px.previous_hop, px.visited)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = px.origin, payload = px.user_text, ctr = px.ctr,
@@ -6247,7 +6277,8 @@ local function rts_timeout_fire(self, captured_ctr_lo)
                                           self.pending_tx.dst,
                                           self.pending_tx.next,
                                           self.pending_tx.alts_tried,
-                                          self.pending_tx.previous_hop)
+                                          self.pending_tx.previous_hop,
+                                          self.pending_tx.visited)
   if action_b == "defer" then
     self:emit("tx_blind_defer", {
       origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
@@ -6849,7 +6880,7 @@ function start_data_tx_for_broadcast(self, px)
       return
     end
     local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0,
-                         px.payload, px.hop_budget)
+                         px.payload, px.hop_budget, px.visited)
     self:emit("data_tx", {
       origin = px.origin, payload = px.user_text, ctr = px.ctr,
       dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
@@ -6937,12 +6968,29 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     return
   end
   entry = refresh_route_order(self, dst_id, "issue_send_order") or entry
+  -- Visited-set loop window for this hop: carriers received so far + self
+  -- (sliding, last VISITED_LEN). recv_visited rides queue_meta on a forward;
+  -- nil on origination / gateway re-issue => window restarts at {self}.
+  local vis = {}
+  do
+    local rv = queue_meta and queue_meta.recv_visited
+    if rv then for _, id in ipairs(rv) do vis[#vis + 1] = id end end
+    vis[#vis + 1] = self.id
+    while #vis > VISITED_LEN do table.remove(vis, 1) end
+  end
   local primary_next = entry.candidates[1].next_hop
-  if previous_hop ~= nil and primary_next == previous_hop then
+  local primary_blocked = (previous_hop ~= nil and primary_next == previous_hop)
+  if not primary_blocked then
+    local depth = self.visited_check_depth or VISITED_LEN
+    for i = math.max(1, #vis - depth + 1), #vis do
+      if vis[i] == primary_next then primary_blocked = true; break end
+    end
+  end
+  if primary_blocked then
     local replacement = nil
     for _, c in ipairs(entry.candidates) do
       if next_hop_selectable(self, dst_id, c, previous_hop, nil, nil,
-                             "issue_send_previous_hop_alt")
+                             "issue_send_previous_hop_alt", false, vis)
          and route_candidate_layer_ok(c, requested_tx_layer_id)
          and not is_blind(self, c.next_hop) then
         replacement = c.next_hop
@@ -7064,7 +7112,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   -- the issue. Defer re-queues at the head so ordering is preserved.
   -- previous_hop (forwarder context) prevents alt-switching back to
   -- the upstream node that just gave us the DATA — that would loop.
-  local action_b, val_b = classify_blind(self, dst_id, primary_next, nil, previous_hop)
+  local action_b, val_b = classify_blind(self, dst_id, primary_next, nil, previous_hop, vis)
   -- Captures the original primary if F1 blind-alt fires below; that
   -- next_hop is then pre-populated into pending_tx.alts_tried so a
   -- later cascade doesn't bounce back to it before the blind window
@@ -7194,6 +7242,8 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     chosen_data_sf = m_chosen_data_sf,  -- set immediately for M-broadcast; otherwise CTS fills it in
     m_broadcast  = m_broadcast,         -- triggers the no-CTS / no-ACK fire-and-forget DATA-tx path
     previous_hop = previous_hop, -- upstream node (nil at originator); blocks alt-loops
+    visited      = vis,          -- loop-window written to the DATA frame + checked at next-hop select (carriers + self)
+    recv_visited = (queue_meta and queue_meta.recv_visited) or nil,  -- received window (input), preserved across requeues
     -- Cascade-requeue accounting: enqueue_time_ms is the original tx_queue
     -- enqueue time (preserved across requeues); requeue_count is how many
     -- times this same e2e message has bounced through the cascade-requeue
@@ -10104,7 +10154,7 @@ function on_recv(self, frame, meta)
         return
       end
       -- pack_data(origin, next_hop, dst, ctr, flags, inner, hop_budget)
-      local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0, px.payload, px.hop_budget)
+      local d = pack_data(px.origin, px.next, px.dst, px.ctr, px.flags or 0, px.payload, px.hop_budget, px.visited)
       self:emit("data_tx", {
         origin = px.origin, payload = px.user_text, ctr = px.ctr,
         dst = px.dst, next = px.next, ctr_lo = px.ctr_lo, len = #px.payload,
@@ -10113,6 +10163,7 @@ function on_recv(self, frame, meta)
         tx_layer_id = px.tx_layer_id,
         tx_leaf_id = px.tx_leaf_id,
         tx_routing_sf = px.tx_routing_sf or active_routing_sf(self),
+        visited = px.visited,   -- loop-guard window written to this frame (carriers + self)
       })
       self:log(string.format("data_tx -> %s ctr_lo=%d ctr=%d payload=%q on SF%d (ACK on SF%d)",
         name_of(self, px.next), px.ctr_lo, px.ctr, px.user_text, px.chosen_data_sf,
@@ -10938,6 +10989,7 @@ function on_recv(self, frame, meta)
     local d_src       = rx_from            -- predecessor (for forward loop guard)
     local d_dst       = d.dst
     local d_inner     = d.inner            -- inner bytes verbatim for forwarding
+    local d_visited   = d.visited          -- received visited-window (carriers so far) for the loop guard
     local d_ctr       = d.ctr
     local d_flags     = d.flags
     local d_user_text = event_payload
@@ -11264,7 +11316,8 @@ function on_recv(self, frame, meta)
         return
       end
       issue_send(self, d_origin, d_dst, dst_name,
-                 d_inner, d_user_text, d_ctr, d_flags, d_src, nil, forward_hop_budget)
+                 d_inner, d_user_text, d_ctr, d_flags, d_src,
+                 { recv_visited = d_visited }, forward_hop_budget)
     end)
     return
   end
