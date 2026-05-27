@@ -236,6 +236,16 @@
         <span id="file-name" style="font-size:11px; color:var(--text-dim)"></span>
       </div>
 
+      <!-- Import an existing run (skip lus) -->
+      <div class="file-row" style="border-top:1px solid var(--border); padding-top:10px; margin-top:4px; flex-wrap:wrap; gap:8px;">
+        <label for="result-file-path" style="width:100%; margin-bottom:4px; font-size:11px; color:var(--text-muted);">
+          Or import an existing run — server path to an events.ndjson. If set, lus is NOT run; the file is imported as a completed simulation:
+        </label>
+        <input type="text" id="result-file-path" class="form-input"
+               placeholder="/tmp/s13_analyze.ndjson"
+               style="flex:1; min-width:240px; font-size:11px;">
+      </div>
+
       <!-- Load from saved topology -->
       <div class="file-row" style="border-top:1px solid var(--border); padding-top:10px; margin-top:4px; flex-wrap:wrap; gap:8px;">
         <label style="width:100%; margin-bottom:4px; font-size:11px; color:var(--text-muted);">
@@ -525,19 +535,23 @@
       return;
     }
 
-    try {
-      const result = await postJSON('/api/sims', { config_json });
-      const id = result.id;
+    const resultPath = document.getElementById('result-file-path').value.trim();
 
-      // Always land on the per-sim progress page after submit. From there
-      // the user can watch the run complete and click "View Map" /
-      // "View Timeline" once the events file is fully written. Previously
-      // we redirected straight to map_live for geo-enabled sims, but
-      // long-running sims would arrive there with only the first few
-      // hundred ms of events written, making the map view useless.
+    try {
+      // If a result path is given, import it as a completed sim (no lus run);
+      // otherwise run lus as usual. Either way we land on the per-sim page,
+      // which handles both pending and completed states.
+      let result;
+      if (resultPath) {
+        result = await postJSON('/api/sims/import',
+                                { config_json, events_path: resultPath });
+      } else {
+        result = await postJSON('/api/sims', { config_json });
+      }
+      const id = result.id;
       window.location.href = '/static/simulation.html?id=' + encodeURIComponent(id);
     } catch (e) {
-      errDiv.textContent = 'Failed to start simulation: ' + e.message;
+      errDiv.textContent = (resultPath ? 'Failed to import run: ' : 'Failed to start simulation: ') + e.message;
       errDiv.classList.remove('hidden');
     }
   };
