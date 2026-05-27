@@ -89,11 +89,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 from collections import defaultdict, Counter
+
+# --- LoRa airtime (mirrors dv_dual_sf.lua airtime_ms) + frame sizes ---
+RTS_LEN, CTS_LEN, ACK_LEN, NACK_LEN, MAC_LEN = 8, 3, 3, 4, 4
+DATA_HDR_LEN = 14          # 8 + 6-byte visited window
+PREAMBLE_SYM = 16          # PROTOCOL default
+
+
+def lora_airtime_ms(sf, bw_hz, cr, len_bytes, preamble_sym=PREAMBLE_SYM):
+    """Port of dv_dual_sf.lua:airtime_ms — verified to match the PHY tx airtime
+    (e.g. SF7/BW125, 76 B -> 146 ms)."""
+    t_sym = (2 ** sf) / (bw_hz / 1000.0)
+    t_pre = (preamble_sym + 4.25) * t_sym
+    de = 1 if t_sym >= 16 else 0
+    num = 8 * len_bytes - 4 * sf + 44
+    den = 4 * (sf - 2 * de)
+    pay_sym = 8 + max(math.ceil(num / den) * cr, 0)
+    return math.floor(t_pre + pay_sym * t_sym)
 
 
 def maybe_run(cfg_path, events_path, lus_path):
@@ -1963,6 +1981,106 @@ def render_copies(events_path, slot_to_id, id_to_name, top=12):
             print(f"    {t:>8}  {nm(frm):>14} -> {nm(to):<14} {label:<12} {str(pl)[:24]}")
 
 
+def analyse_airtime(events_path, slot_to_id):
+    """Per-message airtime (ms), computed from the *_tx script_emits + the LoRa
+    formula, split by category/SF: RTS+CTS (routing SF), DATA (data SF), ACK/NACK
+    (routing SF). RTS/DATA/ACK/NACK carry (origin,ctr); CTS carries only
+    (to,ctr_lo), so it's attributed to the most recent RTS from `to`. bw_hz/cr are
+    read from a PHY tx event (uniform across a run)."""
+    bw_hz, cr = 125000, 5
+    with open(events_path) as f:
+        for line in f:
+            if '"type":"tx"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "tx":
+                bw_hz = e.get("bw_hz", bw_hz)
+                cr = e.get("cr", cr)
+                break
+
+    msgs = {}
+
+    def m(o, c):
+        k = (o, c)
+        if k not in msgs:
+            msgs[k] = {"dst": None, "rsf": None, "rts_air": 0, "cts_air": 0,
+                       "data_air": 0, "ack_air": 0}
+        return msgs[k]
+
+    recent_rts = {}   # (rts_sender_id, ctr_lo) -> (origin, ctr)
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        if et == "rts_tx" or et == "rts_retry":
+            o, c = d.get("origin"), d.get("ctr")
+            if o is None or c is None:
+                continue
+            rsf = d.get("tx_routing_sf") or 8
+            r = m(o, c)
+            r["dst"] = r["dst"] if r["dst"] is not None else d.get("dst")
+            r["rsf"] = r["rsf"] or rsf
+            r["rts_air"] += lora_airtime_ms(rsf, bw_hz, cr, RTS_LEN)
+            recent_rts[(fid, d.get("ctr_lo"))] = (o, c)
+        elif et == "cts_tx":
+            k = recent_rts.get((d.get("to"), d.get("ctr_lo")))
+            if k is None:
+                continue
+            r = m(*k)
+            r["cts_air"] += lora_airtime_ms(r["rsf"] or 8, bw_hz, cr, CTS_LEN)
+        elif et == "data_tx":
+            o, c = d.get("origin"), d.get("ctr")
+            if o is None or c is None:
+                continue
+            dsf = d.get("data_sf") or d.get("sf") or 7
+            nbytes = DATA_HDR_LEN + len(str(d.get("payload", ""))) + MAC_LEN
+            r = m(o, c)
+            r["dst"] = r["dst"] if r["dst"] is not None else d.get("dst")
+            r["data_air"] += lora_airtime_ms(dsf, bw_hz, cr, nbytes)
+        elif et == "ack_tx" or et == "nack_tx":
+            o, c = d.get("origin"), d.get("ctr")
+            if o is None or c is None:
+                continue
+            r = m(o, c)
+            r["ack_air"] += lora_airtime_ms(r["rsf"] or 8, bw_hz, cr,
+                                            ACK_LEN if et == "ack_tx" else NACK_LEN)
+    return msgs, bw_hz, cr
+
+
+def render_airtime(events_path, slot_to_id, id_to_name, top=20):
+    def nm(nid):
+        n = id_to_name.get(nid)
+        return f"{n}({nid})" if n is not None else str(nid)
+
+    msgs, bw_hz, cr = analyse_airtime(events_path, slot_to_id)
+    rows = []
+    for (o, c), r in msgs.items():
+        rtscts = r["rts_air"] + r["cts_air"]
+        rows.append((rtscts + r["data_air"] + r["ack_air"], o, c, r, rtscts))
+    rows.sort(reverse=True)
+    s_rc = sum(r["rts_air"] + r["cts_air"] for _, _, _, r, _ in rows)
+    s_d = sum(r["data_air"] for _, _, _, r, _ in rows)
+    s_a = sum(r["ack_air"] for _, _, _, r, _ in rows)
+    s_t = s_rc + s_d + s_a
+    n = len(rows) or 1
+    print("=== Airtime per message (ms; *_tx events + LoRa formula) ===")
+    print(f"bw={bw_hz}Hz cr=4/{cr} preamble={PREAMBLE_SYM}. RTS/CTS/ACK on routing SF, "
+          f"DATA on data SF.\n")
+    print(f"  {'origin -> dst (ctr)':30} {'rsf':>3} {'RTS+CTS':>8} {'DATA':>7} "
+          f"{'ACK':>6} {'TOTAL':>7}")
+    for tot, o, c, r, rtscts in rows[:top]:
+        lbl = f"{nm(o)} -> {nm(r['dst'])} ({c})"
+        print(f"  {lbl[:30]:30} {str(r['rsf'] or '?'):>3} {rtscts:>8} "
+              f"{r['data_air']:>7} {r['ack_air']:>6} {tot:>7}")
+    print(f"  {'-' * 66}")
+    print(f"  {('TOTAL (%d msgs)' % len(rows)):30} {'':>3} {s_rc:>8} {s_d:>7} "
+          f"{s_a:>6} {s_t:>7}")
+    print(f"  {'mean / msg':30} {'':>3} {s_rc // n:>8} {s_d // n:>7} "
+          f"{s_a // n:>6} {s_t // n:>7}")
+    print(f"\n  split: RTS+CTS {100 * s_rc // max(s_t, 1)}%  "
+          f"DATA {100 * s_d // max(s_t, 1)}%  ACK {100 * s_a // max(s_t, 1)}%")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
@@ -2000,6 +2118,11 @@ def main():
                         "resolve to. Shows where a cross-layer message dies "
                         "(transit / handoff / no_binding / H-query). "
                         "e.g. --trace xl-w015-e020")
+    p.add_argument("--airtime", action="store_true",
+                   help="per-message airtime (ms) by category/SF: RTS+CTS (routing "
+                        "SF), DATA (data SF), ACK (routing SF). Computed from the "
+                        "*_tx emits + the LoRa formula (matches PHY airtime). "
+                        "Re-analyses existing ndjson, no re-sim.")
     p.add_argument("--copies", action="store_true",
                    help="count copy-creating switches: a forward that abandoned "
                         "a next-hop which already decoded the frame (data_rx) and "
@@ -2027,6 +2150,10 @@ def main():
 
     if args.copies:
         render_copies(args.events, slot_to_id, id_to_name)
+        return
+
+    if args.airtime:
+        render_airtime(args.events, slot_to_id, id_to_name)
         return
 
     msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg = analyse(
