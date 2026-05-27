@@ -5941,7 +5941,7 @@ local function tx_rts_retry(self, reason)
       px.ctr_lo, name_of(self, px.next), val_b))
     self:after(val_b, function() tx_rts_retry(self, reason) end)
     return
-  elseif action_b == "alt" then
+  elseif action_b == "alt" and reason ~= "ack_timeout" then
     self:emit("tx_blind_alt", {
       origin = px.origin, payload = px.user_text, ctr = px.ctr,
       ctr_lo = px.ctr_lo, from_next = px.next, to_next = val_b,
@@ -5951,6 +5951,19 @@ local function tx_rts_retry(self, reason)
     px.alts_tried[px.next] = true   -- mark previous next_hop as tried
     px.next = val_b
     px.retries_left = effective_rts_max_retries(self, px.requeue_count)
+  elseif action_b == "alt" then
+    -- reason == "ack_timeout": we already got a CTS and sent the DATA, so the
+    -- receiver decoded it — a missing ACK is almost always a LOST ACK, not a
+    -- blind/gone receiver. Switching to a fresh next-hop here is the #1 source of
+    -- duplicate copies (the fresh node never saw the frame, so it forwards a 2nd
+    -- copy → center copy-storm on the 2-gw transit). Retry the SAME next-hop: its
+    -- last_acked_from re-ACKs (CTS already_received) without re-forwarding, so we
+    -- learn success with no copy. Genuine unreachability still falls through to
+    -- the K=3 cascade in ack_timeout_fire once retries_left hits 0.
+    self:emit("ack_retry_same_hop", {
+      origin = px.origin, payload = px.user_text, ctr = px.ctr,
+      ctr_lo = px.ctr_lo, next = px.next, suppressed_alt = val_b,
+    })
   end
 
   local gateway_delay_ms = gateway_schedule_defer_ms(self, px.next)

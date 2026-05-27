@@ -4,14 +4,15 @@ Living analysis doc. **Read this before re-investigating delivery.** Update it
 when a root cause, lever, or measurement changes — don't re-derive from scratch.
 
 > **STATUS (2026-05-27).** s17 (252-node metro) 4-seed delivery by class:
-> same-layer **92%** · XL 1-gw **59%** · XL 2-gw **42%** · ALL **69%** (was 59%).
-> **Same-layer is resolved** (anti-loop package: origin-drop + soft hop-gradient +
-> 6-byte visited-set DATA window — see "Same-layer anti-loop package" below + PROTOCOL
-> §3.1a/§3.4). **Next target: cross-layer 2-gw (Stage-2 inter-gateway transit, ~42%,
-> the worst class)**; minor open item: the XL 1-gw dip (65→59) from the visited window
-> occasionally over-constraining a gateway-bound first leg. Use `dm_delivery_breakdown.py
-> --failures` (per-stage funnel) before guessing. Measure-gate: sweep ≥4 seeds, s17/s15
-> XL is single-seed-noisy.
+> same-layer **89%** · XL 1-gw **63%** · XL 2-gw **60%** · ALL **73%** (was 59% pre-work).
+> **Same-layer resolved** (anti-loop package: origin-drop + soft hop-gradient + 6-byte
+> visited-set DATA window). **2-gw transit copy-storm fixed** (retry-same-hop on
+> ACK-timeout — see "2-gw Stage-2 transit" below + PROTOCOL §3.1a). 2-gw went 42→60%.
+> **Next levers (diminishing):** residual 2-gw loss is the inherent long-crossing
+> reliability (~0.95^11) + center contention → shorter transit via closest-gateway-pair
+> selection; and same-layer dipped 92→89 (retry-same adds a little latency). Use
+> `dm_delivery_breakdown.py --failures` (per-stage funnel) before guessing. Measure-gate:
+> sweep ≥4 seeds, s17/s15 XL is single-seed-noisy.
 
 ## Measurement protocol (use consistently)
 - **s15 is noise-dominated (±~2.4pp); sweep 8–16 seeds**, never judge from one run.
@@ -460,15 +461,27 @@ multiply (trace: `c060` spawned branches to `c173`, `c091`, `c164`) and self-con
 → more ACK loss → more switches. A positive-feedback **copy storm**, worst on the
 longest/most-contended forward (the transit).
 
-**Two complementary fixes (copies must be addressed; passive-ACK alone won't suffice):**
-1. **Passive (implicit) ACK** — the next hop B sends its ACK *then its own forwarding
-   RTS* (to node+2). The original sender A is still listening on the routing SF, so it
-   **overhears B's RTS** and matches it to its `pending_tx` (`src==next && dst && ctr_lo`)
-   → treats it as the hop ACK → **never retries → no copy**. Prevents the retry. (4-bit
-   `ctr_lo` aliasing mitigated by `src` + timing — same granularity as `last_acked_from`.)
-2. **Retry-same-next-hop on ACK-timeout** — if A must still retry (B was the dst / A
-   missed both ACK and RTS), retry the *same* B (its dedup re-ACKs without re-forwarding)
-   rather than switching to a fresh node. The fallback that keeps any retry copy-free.
+**Two complementary fixes:**
+1. **Passive (implicit) ACK — ALREADY EXISTED** (`implicit_ack_from_forward`, fires
+   ~168×/run): A overhears next-hop B's forwarding RTS (`src==next && dst && ctr_lo &&
+   payload_len`) and treats it as the hop ACK. **But it's not enough** — under center
+   contention B's forward RTS is LBT-blocked (`rts_tx_blocked channel_busy`) and goes
+   out *after* A's ACK-timeout, so A retries before it can fire. (Confirmed in trace:
+   `c060` ack-timed-out while `c173`'s forward was still channel-busy-deferred.)
+2. **Retry-same-next-hop on ACK-timeout — SHIPPED (the fix).** In `tx_rts_retry`, when
+   `reason=="ack_timeout"` the blind-alt switch-to-fresh-node is suppressed (emits
+   `ack_retry_same_hop`): we already got a CTS + sent DATA, so the receiver decoded it
+   — a missing ACK is a *lost ACK*, not a blind receiver. Retry the SAME hop (its
+   `last_acked_from` re-ACKs via CTS-already-received, no re-forward, no copy). Genuine
+   unreachability still cascades once `retries_left` hits 0.
+
+**4-seed sweep (vs visited-set baseline):** XL **2-gw 42→60%** (the target, +18pp),
+ALL **69→73%**, XL 1-gw 59→63%, same-layer 92→89% (−3, noise-range). The transit is
+near-lossless on good seeds (reached-gw1 ≈ transited). `ack_retry_same_hop` ~350×/run
+(copies prevented). Suite 100/100. **Residual 2-gw loss** (transit still lossy on some
+seeds, e.g. 1703 4/9) is the inherent long-crossing reliability (~0.95^11) + center
+contention — the copy-storm itself is fixed; further gains need a shorter transit
+(closest-gateway-pair selection) or less center contention.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`

@@ -453,6 +453,19 @@ directly that gets no CTS does **not** fan out to sibling gateway-neighbours (th
 loops); it holds the single copy and retries window-aware + jittered until
 `gateway_send_giveup_ms` (150 s). See §3.4 `visited` reset on gateway re-issue.
 
+**Copy-control on ACK-timeout (anti-duplication).** Two layers stop a lost *hop ACK*
+from spawning a duplicate copy: (a) **passive ACK** — the sender overhears the
+next-hop's *forwarding* RTS (matching `src==next && dst && ctr_lo && payload_len`) and
+treats it as the ACK (`implicit_ack_from_forward`); (b) **retry-same-hop** — on
+`ack_timeout` the retry does **not** blind-alt to a fresh next-hop (the receiver got a
+CTS+DATA from us, so a missing ACK is a *lost ACK*, not a blind receiver; switching to
+a fresh node makes it forward a 2nd copy). Instead it re-RTSes the *same* hop, whose
+`last_acked_from` returns CTS-`already_received` with no re-forward (`ack_retry_same_hop`).
+Genuine unreachability still cascades after `retries_left` exhausts. This is what tamed
+the 2-gw inter-gateway-transit copy-storm (2-gw 42→60% on s17). passive-ACK alone is
+insufficient because under contention the next-hop's forward RTS is LBT-deferred past
+the sender's ack-timeout.
+
 ### 3.2 RTS (`'R'`) — 8 bytes (in-leaf)
 
 Per ROADMAP §7.0.3. `origin` removed from wire — destination identifies the
