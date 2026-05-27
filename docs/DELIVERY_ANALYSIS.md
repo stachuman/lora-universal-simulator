@@ -505,6 +505,33 @@ bound for intermittent gateways (the cascade is load-bearing recovery). Reverted
 RERR/short-TTL pattern. **The copies are the price of fast cascade-recovery on s17; XL is
 structural, so removing copy-contention doesn't raise delivery here.**
 
+**Copy sources — measured (`dm_delivery_breakdown.py --copies`).** The copy population is
+NOT dominated by the `ack_giveup` cascade (~10/run) the grace targeted — it's **`blind_alt`
+(~176/run, the cts-timeout blind switch)**, then `loop_duplicate` (~76). Characterising the
+176 blind_alt copies (s17_metro fixture): **95% cross-layer** (168/176); **108/176 the
+abandoned next-hop had already FORWARDED the frame** (decoded + relaying), only **65 were
+genuine dead-ends** (decoded, never forwarded); gap decode→blind_alt **median 3.4 s / p90
+48 s / max 34 min** — long-tail re-attempts kept alive by cascade-requeue, NOT tight cascades.
+
+**Mechanism (traced: gw_e0 ctr=2, c163→c139).** The next-hop decodes our frame and
+*immediately forwards it* (`data_rx`+`ack_tx`+`rts_tx next=…` within ~80 ms), but (a) its ACK
+collides at the sender, (b) the sender misses the implicit-ACK because it is **mid-retransmit
+(half-duplex)** when the forward goes out, and (c) the next-hop is now **busy forwarding our
+own frame** → unresponsive to the retry (`cts_timeout`) → `classify_blind` marks it blind →
+the sender fans a copy to a fresh node. **The next-hop's success is misread as failure.** Same
+root as `ack_giveup` (lost hop-confirmation on a contended XL leg); blind_alt is the dominant
+path and operates over **seconds-to-minutes**, which is exactly why the ~677 ms grace couldn't
+touch it.
+
+**Lever implication.** A short grace is the wrong tool. Real levers: (1) **don't re-attempt a
+frame whose next-hop is actively forwarding it** (the 108 cases — needs longer-horizon
+"delivered-to-next-hop" memory); (2) **better implicit-ACK capture** (the sender blinds itself
+by retransmitting over the next-hop's forward). BUT **65/176 were genuine dead-ends** needing a
+reroute — blanket suppression strands those (the grace lesson). Any fix must distinguish
+"forwarding" from "dead-end" with evidence the sender cheaply has — and, since XL is structural
+on s17, **gate copy-reduction on the `--copies` metric + a dense scenario (s16), not s17
+delivery.**
+
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
   = config `node_id`.
