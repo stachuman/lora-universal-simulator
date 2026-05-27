@@ -443,6 +443,33 @@ over-constrains a cross-layer first leg; minor, net hugely positive. `origin_loo
 fires 3–12×/seed (real loops caught). Guarded by **t81** (window accumulates
 `[1]→[1,2]→[1,2,3]` along a chain + delivers); suite 99/99 (t62 clamp updated 241→235).
 
+### 2-gw Stage-2 transit — root cause: COPY CREATION under ACK loss (NEXT TARGET)
+Post-anti-loop, the worst class is 2-gw suburb↔suburb (~42%). Funnel pins it to the
+**inter-gateway transit**, not the legs: `12 sent · 11 reached gw1 · 6 transited to gw2
+· 6 delivered` — first leg now fine (11/12), final leg perfect (6/6), but only **~45%
+transit** the center. (Trace `w015→e020`: clean 4-hop first leg → `gateway_envelope_transit`
+→ the gw_w1→gw_e0 forward across the diam-11 center.)
+
+**Mechanism (this is the thing to fix — distinct from the loop class):** the transit
+is a long forward across the dense, contended center. A hop ACK gets lost
+(contention on the return); the sender can't tell DATA-loss from ACK-loss; the retry
+logic **switches to a *different* next-hop**; that fresh node has **never seen the
+message → it forwards it → a 2nd live copy**. The visited-set stops *loops* (revisits)
+but NOT *fan-out to fresh nodes*. This happens at **every forwarder**, so copies
+multiply (trace: `c060` spawned branches to `c173`, `c091`, `c164`) and self-congest
+→ more ACK loss → more switches. A positive-feedback **copy storm**, worst on the
+longest/most-contended forward (the transit).
+
+**Two complementary fixes (copies must be addressed; passive-ACK alone won't suffice):**
+1. **Passive (implicit) ACK** — the next hop B sends its ACK *then its own forwarding
+   RTS* (to node+2). The original sender A is still listening on the routing SF, so it
+   **overhears B's RTS** and matches it to its `pending_tx` (`src==next && dst && ctr_lo`)
+   → treats it as the hop ACK → **never retries → no copy**. Prevents the retry. (4-bit
+   `ctr_lo` aliasing mitigated by `src` + timing — same granularity as `last_acked_from`.)
+2. **Retry-same-next-hop on ACK-timeout** — if A must still retry (B was the dst / A
+   missed both ACK and RTS), retry the *same* B (its dedup re-ACKs without re-forwarding)
+   rather than switching to a fresh node. The fallback that keeps any retry copy-free.
+
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
   = config `node_id`.
