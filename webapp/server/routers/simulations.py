@@ -32,6 +32,11 @@ class CreateSimRequest(BaseModel):
     config_json: dict
 
 
+class ImportSimRequest(BaseModel):
+    config_json: dict
+    events_path: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -124,6 +129,37 @@ async def create_sim(body: CreateSimRequest, request: Request):
     sim_manager: SimManager = request.app.state.sim_manager
     sim_id = await sim_manager.create_sim(body.config_json)
     return {"id": sim_id, "status": "pending"}
+
+
+@router.post("/import", status_code=201, include_in_schema=True)
+async def import_sim(body: ImportSimRequest, request: Request):
+    """Register a completed sim from an existing config + server-side events
+    file, skipping lus. The events file is copied into the sim dir."""
+    parsed, errors = validate_lus_config(body.config_json)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    path = body.events_path
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=400,
+                            detail=f"events file not found: {path}")
+    if os.path.getsize(path) == 0:
+        raise HTTPException(status_code=400, detail="events file is empty")
+    try:
+        with open(path) as f:
+            first = ""
+            for line in f:
+                if line.strip():
+                    first = line
+                    break
+        json.loads(first)
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=400,
+                            detail=f"not an NDJSON events file: {path}")
+
+    sim_manager: SimManager = request.app.state.sim_manager
+    sim_id = await sim_manager.import_sim(body.config_json, path)
+    return {"id": sim_id}
 
 
 @router.get("", include_in_schema=True)
