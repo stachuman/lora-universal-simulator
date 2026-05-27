@@ -114,6 +114,7 @@ chasing airtime/contention for XL.
 | Beacon-overhead → cross-layer | **refuted as an XL lever** | cutting beacon airtime is flat-on-XL (same as RERR). XL is structural, not airtime. |
 | TX-time schedule countdown (`apply_schedule_tx_fixup`) | **shipped** (eb3ec76) | re-stamp the visit-window countdown byte at the actual `self:tx` instant against `(tx_now + airtime)` instead of pack-time. Anchor error median **342→50ms**, p90 706→98, signed mean **+398→−17ms** (was systematically *late*). 16-seed s15: **CHAN +4.1pp** (89.6→93.7, consistent both batches), **XL +2.4pp = flat-within-noise**, ALL flat, SAME −1.3pp, 0 leaks. A **correctness + channel-reach** win, NOT an XL lever — reconfirms XL is structural. |
 | Adaptive schedule guard (`gateway_schedule_guard_sparse_bonus_ms`) | **implemented (uncommitted)** | add the guard bonus only for SPARSE-herd gateways (advertised spread nibble 0 → 100+200=300ms); dense gateways (nibble>0) keep base 100. Captures the sparse-herd settle-margin win while protecting dense herds. 32-seed s15 **XL +3.1pp** (72.5→75.6); dense **s16 byte-identical** (10.0/10.9 both arms, 0 regression); 0 leaks. The **first timing-alignment lever to move XL** (airtime levers were all flat). Conservative vs flat-300 (+6.7pp on s15) because s15 also has nibble>0 gateways that the binary rule leaves at base — a graduated rule could capture more but risks s16. |
+| ACK-exhaustion grace (hold-then-cascade) | **REVERTED — refuted** | on `retries_left<=0` in `ack_timeout_fire`, wait a calculated quiet window (~677ms, for the next-hop's LBT-delayed forward = implicit ACK) + one more same-hop try BEFORE cascading to a fresh node. **Kills the residual ack-exhaustion copy** (s17 seed-1700 `ack_giveup` 22→1; reliably 0–1 across seeds) — but **4-seed delivery −5pp** (1700 +13 / 1701 −27 / 1702 −9 / 1703 +3). Traced to ground: the regression is **all cross-layer** (where the grace exclusively fires; same-layer −2 only), the **hold strands XL messages** (seed-1701 in-flight 5→14, giveup 0→4, XL 33→14/48). The cascade is **load-bearing recovery** to intermittent gateways; delaying it misses windows / runs out of runway. **Same family as RERR + short-TTL: suppressing a recovery mechanism trades copies for strands.** Grace tuning is chaotic (g340 best for 1701/worst for 1700, `auto` opposite — no universal value) and the hold is intrinsic (must wait to learn if the next-hop has the frame), so it can't be cheaply salvaged. **Do not re-add without a non-blocking copy/recovery distinction.** Copy-prevention ≠ delivery on s17 (XL is structural, not contention — consistent with the airtime levers). |
 
 ## Open problem & next lever
 **Cross-layer (~77%) is the remaining gap, and it is STRUCTURAL — not airtime.**
@@ -482,6 +483,18 @@ near-lossless on good seeds (reached-gw1 ≈ transited). `ack_retry_same_hop` ~3
 seeds, e.g. 1703 4/9) is the inherent long-crossing reliability (~0.95^11) + center
 contention — the copy-storm itself is fixed; further gains need a shorter transit
 (closest-gateway-pair selection) or less center contention.
+
+**Residual ack-exhaustion copy — attempted & REVERTED (see levers table).** After
+`ack_retry_same_hop` exhausts (`retries_left<=0`), `ack_timeout_fire` cascades the copy
+to a *fresh* next-hop (`path_cascade trigger=ack_giveup`) even when the next-hop already
+decoded+forwarded the frame — validated on s17 seed-1700 as **13/22 true duplicates**
+(next-hop decoded AND forwarded; cascade target also did) + 4 fizzled attempts, 5 genuine
+reroutes. A *hold-then-cascade grace* (wait ~677ms for the next-hop's LBT-delayed forward /
+re-ACK, then one more same-hop try, then cascade) **eliminated the copies** (`ack_giveup`
+22→1) but **regressed cross-layer delivery −5pp/4-seed** — the hold strands XL messages
+bound for intermittent gateways (the cascade is load-bearing recovery). Reverted; it's the
+RERR/short-TTL pattern. **The copies are the price of fast cascade-recovery on s17; XL is
+structural, so removing copy-contention doesn't raise delivery here.**
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
