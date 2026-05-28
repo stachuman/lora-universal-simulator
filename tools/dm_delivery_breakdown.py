@@ -2095,6 +2095,136 @@ def render_airtime(events_path, slot_to_id, id_to_name, top=20):
           f"DATA {100 * s_d // max(s_t, 1)}%  ACK {100 * s_a // max(s_t, 1)}%")
 
 
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(h))
+
+
+def analyse_tail(events_path, slot_to_id):
+    """Per-message routing-stress metrics for the airtime tail. Keyed by
+    (origin, dst, ctr) — the same key the breakdown's per-pair table uses (ctr
+    is per-(origin,dst) in this firmware). Counts: rts_tx + rts_retry at origin
+    + intermediates, data_tx + distinct data-TX nodes (= chain length),
+    tx_blind_alt + path_cascade (copy creation), ack_tx, delivered.
+    Use with render_tail to read against geographic distance."""
+    msgs = {}
+
+    def m(o, dst, c):
+        k = (o, dst, c)
+        if k not in msgs:
+            msgs[k] = {
+                "rts_tx": 0, "rts_retry": 0,
+                "data_tx": 0, "data_tx_nodes": set(),
+                "ack_tx": 0,
+                "blind_alt": 0, "path_cascade": 0,
+                "delivered": False,
+                "first_t": None, "last_t": None,
+            }
+        return msgs[k]
+
+    for t_ms, fid, et, d in walk_events(events_path, slot_to_id):
+        o, c, dst = d.get("origin"), d.get("ctr"), d.get("dst")
+        if o is None or c is None or dst is None:
+            continue
+        r = m(o, dst, c)
+        if r["first_t"] is None:
+            r["first_t"] = t_ms
+        r["last_t"] = t_ms
+        if et == "rts_tx":
+            r["rts_tx"] += 1
+        elif et == "rts_retry":
+            r["rts_retry"] += 1
+        elif et == "data_tx":
+            r["data_tx"] += 1
+            r["data_tx_nodes"].add(fid)
+        elif et == "ack_tx":
+            r["ack_tx"] += 1
+        elif et == "delivered":
+            r["delivered"] = True
+        elif et == "tx_blind_alt":
+            r["blind_alt"] += 1
+        elif et == "path_cascade":
+            r["path_cascade"] += 1
+    return msgs
+
+
+def render_tail(events_path, slot_to_id, id_to_name, id_to_ll, top=10,
+                link_km=2.0):
+    """Airtime-tail profile: top N messages by total airtime, with hop counts
+    + retry/copy stress + geographic distance. The `min_h` column is the
+    minimum plausible hop count (= ceil(km / link_km), where link_km is the
+    expected single-hop range; default 2 km is a reasonable urban SF8 figure).
+    Compare `chain` (distinct DATA forwarders, = actual hop count) to `min_h`
+    to see if a route is geographically inflated. `data_tx` ≥ `chain` if any
+    forwarder retransmitted; `retr` = rts_retry events anywhere along the
+    chain (origin retries + intermediate retries). `D` = delivered flag."""
+    def nm(nid):
+        n = id_to_name.get(nid)
+        return f"{n}({nid})" if n is not None else str(nid)
+
+    # Reuse analyse_airtime for airtime totals (its key is (origin, ctr) — but
+    # (origin, dst, ctr) uniquely refines it since ctr is per-(origin,dst)).
+    air_msgs, _, _ = analyse_airtime(events_path, slot_to_id)
+    tail_msgs = analyse_tail(events_path, slot_to_id)
+
+    # Cross-reference: for each (o, c) in air_msgs, the dst is in air_msgs[k]["dst"]
+    rows = []
+    for (o, c), ar in air_msgs.items():
+        dst = ar["dst"]
+        if dst is None:
+            continue
+        total_air = ar["rts_air"] + ar["cts_air"] + ar["data_air"] + ar["ack_air"]
+        tail = tail_msgs.get((o, dst, c), {})
+        rows.append((total_air, o, dst, c, ar, tail))
+    rows.sort(reverse=True)
+
+    print("=== Airtime-tail profile (top {} by airtime) ===".format(top))
+    print("min_h = ceil(km / {:.1f}); chain = distinct DATA forwarders "
+          "(= actual hops); retr = rts_retry events; blind/casc = copy-creating "
+          "switches; D = delivered.\n".format(link_km))
+    labels = [f"{nm(o)} -> {nm(dst)} ({c})" for _, o, dst, c, _, _ in rows[:top]]
+    w = max([len(x) for x in labels] + [len("origin -> dst (ctr)")])
+    hdr = (f"  {'origin -> dst (ctr)':{w}} {'km':>5} {'min_h':>5} {'chain':>5} "
+           f"{'data_tx':>7} {'retr':>4} {'blind':>5} {'casc':>4} "
+           f"{'air_ms':>7} {'D':>2}")
+    print(hdr)
+    for (total_air, o, dst, c, _, tail), lbl in zip(rows[:top], labels):
+        if not tail:
+            continue
+        ll_o = id_to_ll.get(o)
+        ll_d = id_to_ll.get(dst)
+        km = (_haversine_km(*ll_o, *ll_d) if ll_o and ll_d else 0.0)
+        min_h = max(1, math.ceil(km / link_km))
+        chain = len(tail["data_tx_nodes"])
+        d_flag = "Y" if tail["delivered"] else "n"
+        print(f"  {lbl:{w}} {km:>5.1f} {min_h:>5d} {chain:>5d} "
+              f"{tail['data_tx']:>7d} {tail['rts_retry']:>4d} "
+              f"{tail['blind_alt']:>5d} {tail['path_cascade']:>4d} "
+              f"{total_air:>7d} {d_flag:>2}")
+
+    # Summary stats over the top-N: airtime share + retry tax.
+    top_rows = [(tot, o, dst, c, tail) for tot, o, dst, c, _, tail in rows[:top]
+                if tail]
+    tail_air = sum(t for t, *_ in top_rows)
+    tail_retr = sum(r[4]["rts_retry"] for r in top_rows)
+    tail_chain = sum(len(r[4]["data_tx_nodes"]) for r in top_rows)
+    total_air = sum(r[0] for r in rows)
+    total_retr = sum(t.get("rts_retry", 0) for t in tail_msgs.values())
+    print()
+    print(f"  top-{top} share of total airtime: {100 * tail_air / max(total_air, 1):.1f}%  "
+          f"({tail_air} / {total_air} ms)")
+    print(f"  top-{top} retries / total retries: {tail_retr} / {total_retr}  "
+          f"(mean {tail_retr / max(len(top_rows), 1):.1f}/msg)")
+    if tail_chain:
+        # Tail airtime per hop is the simplest "is each hop expensive?" probe.
+        print(f"  top-{top} airtime per chain-hop: {tail_air // tail_chain} ms  "
+              f"(nominal single-hop RTS+CTS+DATA+ACK ≈ 500–700 ms at SF8)")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("config")
@@ -2143,6 +2273,18 @@ def main():
                         "switched to a different node -> a 2nd live copy. Reports "
                         "total + breakdown by trigger + per-message fan-out. "
                         "Re-analyses existing ndjson (no re-sim).")
+    p.add_argument("--tail", nargs="?", const=10, default=None, type=int,
+                   metavar="N",
+                   help="profile the airtime tail: top-N messages by airtime "
+                        "with hop count (= distinct DATA forwarders), retries, "
+                        "copy-creating switches, and geographic distance "
+                        "(km src->dst, min_h at --tail-link-km). Tells you "
+                        "whether airtime is dominated by inflated routes "
+                        "(chain >> min_h) or by retry tax (retr/chain high). "
+                        "Default N=10.")
+    p.add_argument("--tail-link-km", type=float, default=2.0,
+                   help="assumed single-hop range (km) for --tail's min_h "
+                        "estimate (default 2.0 km, urban SF8 ballpark).")
     args = p.parse_args()
 
     if args.events is None:
@@ -2168,6 +2310,14 @@ def main():
 
     if args.airtime:
         render_airtime(args.events, slot_to_id, id_to_name)
+        return
+
+    if args.tail is not None:
+        id_to_ll = {n["node_id"]: (n["lat"], n["lon"])
+                    for n in cfg["nodes"]
+                    if n.get("lat") is not None and n.get("lon") is not None}
+        render_tail(args.events, slot_to_id, id_to_name, id_to_ll,
+                    top=args.tail, link_km=args.tail_link_km)
         return
 
     msgs, arrival_by_payload, drops, gw_giveup, gw_layers, second_leg = analyse(
