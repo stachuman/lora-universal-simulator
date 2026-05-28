@@ -3245,11 +3245,22 @@ preserves rate-limiting under T2), §5 E2E ACK (return-cookie design),
 
 ---
 
-## 10. Wire-format refactor v2 — 4-bit command + flag nibble (proposal)
+## 10. Wire-format refactor v2 — 4-bit command + flag nibble
 
-**Status — proposal.** Supersedes the §7.0 LOCKED 2026-05-12 layout.
-Backwards-incompatible; requires a coordinated v2 protocol bump (no
-mixed-version coexistence is possible — see §10.5 Migration).
+**Status (2026-05-28).** Spec refreshed against current frame layouts
+(includes the 6-B visited window in DATA, sf_index in RTS as of `c20585b`,
+mandatory `key_hash32` in BCN, and the two post-original-§10 frames
+`H` and `F`). Supersedes the §7.0 LOCKED 2026-05-12 layout.
+Backwards-incompatible — flag-day required in any single deployment, no
+clean mixed-version mode possible (see §10.5).
+
+**Air-savings reality check (per `DELIVERY_ANALYSIS.md`):**
+the headline 1-B-saving on RTS (8 → 7) **does not change SF8 airtime** —
+both fall in the `pay_sym=23` symbol bucket. Crossing the L=6 bucket
+(saves ~10.2 ms/RTS = ~4% s18 airtime) requires RTS ≤ 6 B, which is
+blocked because `payload_len` is load-bearing for receiver-side
+`pending_rx_expiry` sizing. So §10 lands for **structural clarity +
+extension headroom**, not airtime gain.
 
 **Goal.** Reshape byte 0 of every frame so it always carries
 `cmd(4 hi) | flag_nibble(4 lo)` — uniform across primary AND extended
@@ -3277,19 +3288,22 @@ the 8-bit sub-command code lives in **byte 1**. This:
 whichever byte holds it. Single-byte layer-filter dispatch wherever
 `leaf_id` exists.
 
-### 10.1 Command code allocation
+### 10.1 Command code allocation (refreshed 2026-05-28)
 
 | Code | Tag | Frame | Status |
 |---|---|---|---|
-| `0x0` | B | Beacon | implemented |
-| `0x1` | R | RTS | implemented |
-| `0x2` | C | CTS | implemented |
-| `0x3` | D | DATA | implemented |
-| `0x4` | K | ACK | implemented |
-| `0x5` | N | NACK | implemented |
-| `0x6` | Q | Query | implemented |
-| `0x7` – `0xE` | — | reserved (8 free primary slots) | future |
-| `0xF` | EXT | extended command escape (8-bit sub-code in byte 1; byte 0 low nibble remains a flag nibble) | new |
+| `0x0` | B | Beacon | implemented (8-B header, mandatory `key_hash32`) |
+| `0x1` | R | RTS | implemented (8 B, sf_index 2-bit since `c20585b`) |
+| `0x2` | C | CTS | implemented (3 B) |
+| `0x3` | D | DATA | implemented (**14 + n + 4 B**, header includes 6-B visited window) |
+| `0x4` | K | ACK | implemented (3 B) |
+| `0x5` | N | NACK | implemented (4 B, 4 reasons used: BUSY_RX/BUDGET/HOP_BUDGET/LOOP_DUP) |
+| `0x6` | Q | Query | implemented (4 B header + opcode-specific body) |
+| `0x7` | H | Hash-locate flood (PROTOCOL §3.7a) | implemented (8 B) — **added since original §10**, was unallocated |
+| `0x8` | F | Route Find / RREQ-RREP (§3.7b) | implemented (6 B) — **added since original §10**, was unallocated |
+| `0x9` | J | Join family (§2a) | implemented (6/8/11/15 B for DISCOVER/OFFER/CLAIM/DENY) — §10 originally deferred this to EXT; now first-class |
+| `0xA` – `0xE` | — | reserved (5 free primary slots) | future |
+| `0xF` | EXT | extended command escape (8-bit sub-code in byte 1; byte 0 low nibble remains a flag nibble) | reserved |
 
 ### 10.2 Extended sub-command allocation (byte 1 when byte 0 high nibble = `0xF`)
 
@@ -3314,98 +3328,92 @@ extended commands.
 primary command. J frames are rare events (one per node-boot/rejoin),
 so the byte is amortized to near-zero per-flight overhead.
 
-### 10.3 Per-frame layouts — deferred/superseded proposal
+### 10.3 Per-frame layouts (refreshed 2026-05-28)
 
-**Status.** This section is historical design material for a future
-command-nibble compaction. It is **not** the implemented wire format. The
-current implementation still uses literal ASCII tag bytes (`'B'`, `'R'`,
-`'C'`, ...), and the authoritative current frame layouts are in
-`docs/PROTOCOL.md` plus §7.0 above. In particular, implemented BCN uses an
-8-byte fixed header with mandatory `key_hash32`; the 4-byte "New" BCN layout
-below was never adopted.
+**Status.** Current implementation uses literal ASCII tag bytes
+(`'B'`, `'R'`, `'C'`, `'D'`, `'F'`, `'H'`, `'J'`, `'K'`, `'N'`, `'Q'`).
+This section documents BOTH the current implemented layout (authoritative)
+AND the proposed cmd-nibble layout that the §10 refactor would land. Per-byte
+field positions are as of `c20585b` (sf_index landed) and include the
+visited-window expansion to DATA (commit `65f9c8a`).
 
-#### B — Beacon
+#### B — Beacon (cmd=`0x0`)
 
-Current implemented reality:
+Current (8-B header + variable body):
 ```
-byte 0: 'B'
+byte 0: 'B' (0x42)
 byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
 byte 2: src(8)
 byte 3: has_seen_bitmap(1) | has_ext(1) | n_entries(6)
-bytes 4..7: key_hash32(32 LE)
+bytes 4..7: key_hash32(32 LE)                  [mandatory since §2a identity model]
 [has_schedule] layer_count(1) + 4×L schedule records
 n_entries × 3 B route entries
 [has_seen_bitmap] 32 B bitmap
 [has_ext] ext_len(1) + TLVs
 ```
 
-Historical pre-identity layout:
+Proposed cmd-nibble (8 B header):
 ```
-byte 0: 'B' (0x42)
-byte 1: leaf_id(4 hi) | has_schedule(1) | self_gateway(1) | is_mobile(1) | rsv(1)
-byte 2: src(8)
-byte 3: seen_bm(1) | has_ext(1) | n_entries(6)
-[has_schedule] layer_count(1) + 4×L schedule records
-n_entries × 3 B route entries
-[seen_bm] 32 B bitmap
-[has_ext] ext_len(1) + TLVs
-```
-
-Deferred nibble-command proposal (not implemented):
-```
-byte 0: cmd=0x0(4 hi) | leaf_id(4 lo)
+byte 0: cmd=0x0(4 hi) | leaf_id(4 lo)         [leaf filter in cmd byte → 1-byte dispatch]
 byte 1: src(8)
 byte 2: has_schedule(1) | self_gateway(1) | is_mobile(1)
-        | has_seen_bm(1) | has_ext(1) | rsv(3)
-byte 3: n_entries(7 hi) | rsv(1 lo)
-[has_schedule] layer_count(1) + 4×L schedule records
-n_entries × 3 B route entries
-[has_seen_bm] 32 B bitmap
-[has_ext] ext_len(1) + TLVs
+        | has_seen_bitmap(1) | has_ext(1) | n_entries(3 lo)   [n_entries reduces to 3 bits = 0..7;
+                                                                 fits typical beacon (BCN_N_ENTRIES_MASK)]
+byte 3: n_entries(3 hi extension if needed) | rsv(5)
+bytes 4..7: key_hash32(32 LE)
+...body as today
 ```
 
-The deferred proposal would make layer filter 1-byte and recover some flag
-bits, but it is parked until current gateway/JOIN behavior stabilizes.
+Δ: 0 B. The cmd byte now folds in `leaf_id` (was in byte 1). Byte 1
+no longer needs `leaf_id`, gains room for `src` to move up — net result
+is one byte saved that's reclaimed for the existing `key_hash32` + flag
+fields. Net header size unchanged at 8 B.
 
-#### R — RTS
+#### R — RTS (cmd=`0x1`)
 
-Old (8 B in-leaf):
+Current (8 B in-leaf, sf_index landed in `c20585b`):
 ```
 byte 0: 'R' (0x52)
 byte 1: src(8)
 byte 2: next(8)
 byte 3: addr_len(3 hi) | rsv(1) | leaf_id(4 lo)
 byte 4: dst(8)  [longer when addr_len>0]
-byte 5: ctr_lo(4 hi) | rsv(4 lo)
-byte 6: sf_bitmap(8)
+byte 5: ctr_lo(4 hi) | rts_flags(4 lo)    [flags: M_BROADCAST, RELAY, rsv(2)]
+byte 6: sf_index(2 hi) | rsv(6 lo)        [c20585b: was sf_bitmap(8); see §10.4]
 byte 7: payload_len(8)
+[M_BROADCAST extension: +2 B id_lo16(BE) appended]
 ```
 
-New (**7 B** in-leaf):
+Proposed cmd-nibble (**7 B** in-leaf):
 ```
 byte 0: cmd=0x1(4 hi) | leaf_id(4 lo)
 byte 1: src(8)
 byte 2: next(8)
 byte 3: ctr_lo(4 hi) | addr_len(3) | rsv(1 lo)
 byte 4: dst(8)  [longer when addr_len>0]
-byte 5: sf_bitmap(8)
+byte 5: sf_index(2 hi) | rts_flags(4 lo) | rsv(2)
 byte 6: payload_len(8)
+[M_BROADCAST extension: +2 B id_lo16(BE) appended]
 ```
 
-Δ: **−1 B**. Layer filter is 1-byte. Each hierarchy level still costs +1 B.
+Δ: **−1 B**. Byte 3 of old layout (addr_len+leaf_id) is absorbed: leaf_id
+moves to cmd byte, addr_len moves to byte 3 (which now also holds
+ctr_lo). Byte 6 (was sf_bitmap, now sf_index) collapses with rts_flags
+into a single byte. Notes for the C++ port: the M_BROADCAST extension's
+offset shifts from byte 8 to byte 7.
 
-#### C — CTS
+#### C — CTS (cmd=`0x2`)
 
-Old (3 B):
+Current (3 B):
 ```
 byte 0: 'C' (0x43)
 byte 1: ctr_lo(4 hi) | (sf-5)(3) | already_received(1 lo)
 byte 2: to(8)
 ```
 
-New (3 B):
+Proposed cmd-nibble (3 B):
 ```
-byte 0: cmd=0x2(4 hi) | ctr_lo(4 lo)
+byte 0: cmd=0x2(4 hi) | ctr_lo(4 lo)        [ctr_lo in cmd byte → 1-byte ctr_lo dispatch]
 byte 1: (sf-5)(3 hi) | already_received(1) | rsv(4 lo)
 byte 2: to(8)
 ```
@@ -3413,47 +3421,53 @@ byte 2: to(8)
 Δ: 0 B. `ctr_lo` in cmd-byte for fast match against `pending_tx.ctr_lo`.
 Byte 1 has 4 spare bits.
 
-#### D — DATA
+#### D — DATA (cmd=`0x3`)
 
-Old (12 + n B in-leaf, addr_len=0):
+Current (**14 + n + 4 B = 18 + n B** with `VISITED_LEN=6` window;
+header expansion shipped `65f9c8a`):
 ```
 byte 0: 'D' (0x44)
-byte 1: addr_len(3) | rsv(1) | E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(1)
+byte 1: addr_len(3 hi) | flags(4 lo) | rsv(1)
+        [flags: PAYLOAD_TYPE_M, PRIORITY, E2E_IS_ACK, E2E_ACK_REQ]
 byte 2: next(8)
 byte 3: dst(8)  [longer when addr_len>0]
-byte 4: hops_remaining(4) | committed_hops(4)
+byte 4: hops_remaining(5 hi) | committed_hops(3 lo)   [5-bit remaining = 16-hop cap + slack]
 byte 5: prev_fwd_rt_hops(8)
-bytes 6-7: ctr(16, LE)
-bytes 8..(7+n): ciphertext(n)
-bytes (8+n)..(11+n): MAC(4)
+byte 6: ctr_lo_byte(8)               [low 8 bits of 16-bit ctr]
+byte 7: ctr_hi_byte(8)               [high 8 bits of 16-bit ctr]
+bytes 8..13: visited(6)              [VISITED_LEN=6 short-ids, 0=empty slot]
+bytes 14..(13+n): inner(n)
+bytes (14+n)..(17+n): MAC(4)
 ```
 
-New (12 + n B in-leaf):
+Proposed cmd-nibble (**14 + n + 4 B**, header unchanged):
 ```
 byte 0: cmd=0x3(4 hi) | addr_len(3) | rsv(1 lo)
-byte 1: E2E_ACK_REQ(1) | E2E_IS_ACK(1) | IS_MULTICAST(1) | rsv(5)
+byte 1: flags(4 hi) | rsv(4 lo)
 byte 2: next(8)
 byte 3: dst(8)  [longer when addr_len>0]
-byte 4: hops_remaining(4) | committed_hops(4)
+byte 4: hops_remaining(5 hi) | committed_hops(3 lo)
 byte 5: prev_fwd_rt_hops(8)
-bytes 6-7: ctr(16, LE)
-bytes 8..(7+n): ciphertext(n)
-bytes (8+n)..(11+n): MAC(4)
+byte 6: ctr_lo_byte(8)
+byte 7: ctr_hi_byte(8)
+bytes 8..13: visited(6)
+bytes 14..(13+n): inner(n)
+bytes (14+n)..(17+n): MAC(4)
 ```
 
-Δ: 0 B. `addr_len` moves to cmd-byte flags (parser-dispatch first byte);
-byte 1 still holds the semantic flags with 5 spare bits.
+Δ: 0 B. `addr_len` moves to cmd-byte (parser-dispatch first byte); byte 1
+now holds only the 4 semantic flags with 4 spare bits.
 
-#### K — ACK
+#### K — ACK (cmd=`0x4`)
 
-Old (3 B):
+Current (3 B):
 ```
 byte 0: 'K' (0x4B)
-byte 1: ctr_lo(4 hi) | budget_hint(2) | snr_bucket(2 lo)
+byte 1: ctr_lo(4 hi) | budget_hint(2) | snr_bucket_coarse(2 lo)
 byte 2: to(8)
 ```
 
-New (3 B):
+Proposed cmd-nibble (3 B):
 ```
 byte 0: cmd=0x4(4 hi) | ctr_lo(4 lo)
 byte 1: budget_hint(2 hi) | snr_bucket(2) | rsv(4 lo)
@@ -3462,17 +3476,19 @@ byte 2: to(8)
 
 Δ: 0 B. `ctr_lo` in cmd-byte (same reasoning as CTS). 4 reserved bits in byte 1.
 
-#### N — NACK
+#### N — NACK (cmd=`0x5`)
 
-Old (4 B):
+Current (4 B; 4 of 16 reason codes used):
 ```
 byte 0: 'N' (0x4E)
 byte 1: reason(4 hi) | ctr_lo(4 lo)
-byte 2: payload(8)
+byte 2: payload(8)               [reason-specific: busy_for_ms/16, budget_tier|headroom, committed_hops, prior_from]
 byte 3: to(8)
 ```
+Reasons in use: `0=BUSY_RX`, `1=BUDGET`, `2=HOP_BUDGET`, `3=LOOP_DUP`.
+(`4=BUSY_TX` was attempted 2026-05-28 and reverted.)
 
-New (4 B):
+Proposed cmd-nibble (4 B):
 ```
 byte 0: cmd=0x5(4 hi) | reason(4 lo)
 byte 1: ctr_lo(4 hi) | rsv(4 lo)
@@ -3480,110 +3496,182 @@ byte 2: payload(8)
 byte 3: to(8)
 ```
 
-Δ: 0 B. `reason` in cmd-byte enables first-byte reason-dispatch (BUDGET vs
-BUSY_RX vs HOP_BUDGET vs LOOP_DUP branch immediately).
+Δ: 0 B. `reason` in cmd-byte enables first-byte reason-dispatch.
 
-#### Q — Query
+#### Q — Query (cmd=`0x6`)
 
-Old (4 B):
+Current (4 B header + opcode-specific body):
 ```
 byte 0: 'Q' (0x51)
 byte 1: src(8)
 byte 2: dest(8)
 byte 3: leaf_id(4 hi) | opcode(2) | mobile(1) | rsv(1 lo)
+[CHANNEL_PULL opcode: +1 B count + 4 B × N IDs]
 ```
 
-New (4 B):
+Proposed cmd-nibble (4 B header):
 ```
 byte 0: cmd=0x6(4 hi) | leaf_id(4 lo)
 byte 1: src(8)
 byte 2: dest(8)
 byte 3: opcode(2 hi) | mobile(1) | rsv(5 lo)
+[body unchanged]
 ```
 
 Δ: 0 B. Layer filter is 1-byte. 5 reserved bits in byte 3.
 
-#### J family
+#### H — Hash-locate flood (cmd=`0x7`) — NEW frame, post-original-§10
 
-Superseded by the implemented tag-byte `J` family in §2a and
-`docs/PROTOCOL.md`.
-
-Earlier drafts placed join under the future `EXT` escape with sub-codes
-`J_DISCOVER/J_CLAIM/J_DENY/J_CONFLICT`. The implemented first slice instead
-uses byte 0 as literal tag `'J'` and byte 1 as:
-
-```text
-leaf_id(4 hi) | gateway_capable(1) | is_mobile(1) | opcode(2 lo)
+Current (8 B, multi-hop forwardable):
+```
+byte 0: 'H'
+byte 1: origin(8)                  [the querying gateway's node_id; PRESERVED across forwards]
+byte 2: leaf_id(4 hi) | flags(4 lo, rsv)
+bytes 3..6: key_hash32(32 LE)       [identity hash to resolve]
+byte 7: ttl(8)                      [decremented per forward; dropped at 0]
 ```
 
-Implemented opcodes:
+Proposed cmd-nibble (**7 B**):
+```
+byte 0: cmd=0x7(4 hi) | leaf_id(4 lo)
+byte 1: origin(8)
+byte 2: flags(4 hi, rsv) | rsv(4 lo)   [becomes rsv since leaf_id moved up]
+bytes 3..6: key_hash32(32 LE)
+byte 7: ttl(8)
+```
+*Or — collapsed (6 B) — drop the now-unused byte 2 since flags are
+currently rsv:*
+```
+byte 0: cmd=0x7(4 hi) | leaf_id(4 lo)
+byte 1: origin(8)
+bytes 2..5: key_hash32(32 LE)
+byte 6: ttl(8)
+```
 
-- `0 = J_DISCOVER` (6 B)
-- `1 = J_CLAIM` (11 B)
-- `2 = J_DENY` (15 B)
-- `3 = J_OFFER` (8 B)
+Δ: **−1 to −2 B** depending on whether we keep a reserved flag byte.
+Decision deferred to implementation (favor −2 B if no flags planned).
 
-`J_CONFLICT` remains a future post-adoption conflict concept but has no
-on-wire opcode in the current protocol.
+#### F — Route Find / RREQ-RREP (cmd=`0x8`) — NEW frame, post-original-§10
 
-### 10.4 Net wire-cost summary
+Current (6 B):
+```
+byte 0: 'F'
+byte 1: origin(8)                  [querier's node_id; PRESERVED across forwards]
+byte 2: leaf_id(4 hi) | flags(4 lo: is_reply(1) + rsv(3))
+byte 3: dst_id(8)
+byte 4: RREQ → ttl(8) (decremented per forward) | RREP → next_hop(8) (toward origin)
+byte 5: hops(8)                    [RREQ: hops-from-origin (increments); RREP: hops-to-dst]
+```
 
-| Frame | Old size | New size | Δ |
-|---|---|---|---|
-| B header | 4 + var | 4 + var | 0 |
-| R (in-leaf, addr_len=0) | 8 | **7** | **−1** |
-| R (addr_len=1) | 9 | 8 | −1 |
-| C | 3 | 3 | 0 |
-| D (in-leaf) | 12 + n | 12 + n | 0 |
-| K | 3 | 3 | 0 |
-| N | 4 | 4 | 0 |
-| Q | 4 | 4 | 0 |
-| J_DISCOVER | n/a | 6 | implemented tag-byte J |
-| J_OFFER | n/a | 8 | implemented tag-byte J |
-| J_CLAIM | n/a | 11 | implemented tag-byte J |
-| J_DENY | n/a | 15 | implemented tag-byte J |
-| J_CONFLICT | n/a | n/a | future concept, no current opcode |
+Proposed cmd-nibble (6 B):
+```
+byte 0: cmd=0x8(4 hi) | leaf_id(4 lo)
+byte 1: origin(8)
+byte 2: flags(4 hi: is_reply(1) + rsv(3)) | rsv(4 lo)
+byte 3: dst_id(8)
+byte 4: ttl-or-next_hop(8)
+byte 5: hops(8)
+```
 
-Per-flight typical RTS savings: a 1-RTS clean send saves 1 B; a failed
-3-retry × 3-alt cascade saves up to 9 B of channel air per flight.
-Aggregate at dense-mesh scale where RTSes dominate routing-SF airtime.
+Δ: 0 B. Byte 2's leaf_id moves up to cmd byte; byte 2 now holds only
+the 1-bit is_reply with 7 rsv. Could collapse to 5 B if we accept a
+1-bit `is_reply` packed into byte 1's flag nibble (4 free bits there).
 
-### 10.5 Migration
+#### J — Join family (cmd=`0x9`)
 
-This is a backwards-incompatible wire change — there is no clean
-mixed-version mode. Byte 0 = `0x42` (old `'B'`) parses as v2
-`cmd=0x4` (= K, ACK) with garbage flag bits and a foreign body; every
-old frame would be misparsed as a different frame type.
+Current (tag byte `'J'`, opcodes packed in byte 1, sizes per opcode):
+```
+byte 0: 'J'
+byte 1: leaf_id(4 hi) | gateway_capable(1) | is_mobile(1) | opcode(2 lo)
+[opcode-specific body]
+```
+Opcodes: `0=J_DISCOVER` (6 B total), `1=J_CLAIM` (11 B), `2=J_DENY` (15 B),
+`3=J_OFFER` (8 B). `J_CONFLICT` reserved (no on-wire opcode).
 
-Three viable paths:
+Proposed cmd-nibble (size unchanged per opcode):
+```
+byte 0: cmd=0x9(4 hi) | leaf_id(4 lo)
+byte 1: gateway_capable(1) | is_mobile(1) | opcode(2) | rsv(4)
+[opcode-specific body unchanged]
+```
 
-1. **Big-bang flag day.** Coordinate the upgrade across the whole
-   deployment. Easiest in single-operator meshes.
-2. **Skip this refactor entirely.** ASCII-letter tags work today;
-   the 1 B/RTS saving and clean-extension benefits may not justify
-   the disruption. Tracked here as a documented option, not lost.
-3. **Bundle with another major wire bump.** The §2a join landing
-   AND §8.1 crypto integration both already require coordinated
-   upgrades. Bundling the byte-0 refactor with either spreads the
-   coordination cost.
+Δ: 0 B. Byte 1's leaf_id moves to cmd-byte; the freed nibble becomes
+rsv (or reserved for opcode-extension via EXT later if 4 opcodes prove
+insufficient).
 
-**Recommendation: option 3.** Defer until either §2a or §8.1 is
-ready to land, then refactor in one coordinated bump. Spreading the
-disruption across one v2 break is better than two.
+### 10.4 Net wire-cost summary (refreshed 2026-05-28)
 
-### 10.6 Open questions
+| Frame | Current size | Proposed (cmd-nibble) | Δ | Notes |
+|---|---|---|---|---|
+| B header | 8 + var | 8 + var | 0 | cmd byte folds leaf_id; mandatory key_hash32 unchanged |
+| R (in-leaf, addr_len=0) | 8 | **7** | **−1** | sf_index + rts_flags packed in one byte |
+| R (addr_len=1) | 9 | 8 | −1 | each hierarchy level still +1 B |
+| C | 3 | 3 | 0 | ctr_lo in cmd byte for dispatch |
+| D (in-leaf, with visited) | **14 + n + 4** | 14 + n + 4 | 0 | addr_len in cmd byte; 6-B visited window unchanged |
+| K | 3 | 3 | 0 | ctr_lo in cmd byte |
+| N | 4 | 4 | 0 | reason in cmd byte for first-byte dispatch |
+| Q | 4 + body | 4 + body | 0 | leaf_id in cmd byte |
+| **H** | **8** | **6–7** | **−1 to −2** | NEW post-§10 |
+| **F** | **6** | **5–6** | **0 to −1** | NEW post-§10 |
+| J_DISCOVER | 6 | 6 | 0 | leaf_id in cmd byte |
+| J_OFFER | 8 | 8 | 0 | |
+| J_CLAIM | 11 | 11 | 0 | |
+| J_DENY | 15 | 15 | 0 | |
+
+**Per-flight RTS air-savings:** at SF8/BW125/CR5, RTS at 8 B and 7 B both
+fall in the `pay_sym=23` symbol bucket (88.6 ms), so the 1 B saved
+**does not change airtime**. The L=6 bucket boundary (78.4 ms, ~10.2 ms/RTS
+≈ ~4% of total airtime on s18) would require RTS ≤ 6 B — gated on
+`payload_len` byte savings, which are blocked because that byte is
+load-bearing for receiver-side `pending_rx_expiry` sizing (see
+`DELIVERY_ANALYSIS.md` "Wire-format compaction" section).
+
+**Structural benefits regardless of air:** uniform first-byte dispatch
+(no string compare), 5 free primary command codes (`0xA`–`0xE`) for
+future protocol growth, 4-bit flag nibble per frame becomes a consistent
+extension surface, EXT escape (`0xF`) reserved for the 256-code extension
+space.
+
+### 10.5 Migration (refreshed 2026-05-28)
+
+Backwards-incompatible wire change — there is no clean mixed-version
+mode. Byte 0 = `0x42` (old `'B'`) parses as v2 `cmd=0x4` (= K, ACK)
+with garbage flag bits; every old frame would be misparsed.
+
+**Simulator vs deployed mesh:**
+
+- **Simulator:** flag-day is free. The Lua firmware is updated atomically,
+  every node reloads with the new format; there is no coexistence problem.
+- **Deployed mesh (future C++ port):** still backwards-incompatible.
+  The original 2026-05-12 §10 doc recommended bundling with another
+  major wire bump (§2a join, §8.1 crypto). §2a J-family has now landed
+  in the Lua spec (tag-byte form). The bundle point is now §8.1 crypto
+  or any future deployed-network rollout.
+
+For the in-Lua / simulator port, the recommendation is **proceed with
+the refactor in one commit** once §10.3 is updated to current frame
+realities (this section). The C++ port spec follows.
+
+### 10.6 Open questions (refreshed 2026-05-28)
 
 - Should the J_CLAIM `nonce` be 8 B (per typical crypto-nonce width)
   or 4 B (compact)? Decided at §8.1 lock-in.
-- Is it worth allocating one of the 8 reserved primary command codes
-  (`0x7`–`0xE`) to a future *identity card* frame, or should that
-  live behind the EXT escape like J? Identity-card use is rare
-  (during join + on demand); EXT is appropriate.
+- The original §10 reserved 8 primary command codes. As of 2026-05-28,
+  three of them are claimed: `0x7=H`, `0x8=F`, `0x9=J`. Only
+  **`0xA`–`0xE` (5 codes)** remain unallocated; EXT (`0xF`) reserved.
+  Is the future identity-card frame worth a primary slot, or should
+  it stay behind EXT? Identity-card use is rare (during join + on
+  demand); EXT is appropriate.
 - More aggressive optimization for BCN: eliminate `n_entries`
   entirely by reordering optional sections to come BEFORE route
   entries, so the entry count is derivable from frame length /
   3. Would save another 1 B per BCN at the cost of reordering
   wire fields. Tracked as a follow-up.
+- **H and F minimal sizes** (see §10.3): both have a currently-rsv flag
+  byte that could be collapsed to land H at 6 B and F at 5 B (an
+  additional −1 B beyond the cmd-nibble pack). Decision deferred to
+  implementation: keep flags byte for future flag space, or collapse
+  for size?
 
 ---
 
