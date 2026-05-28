@@ -909,11 +909,24 @@ airtime is symbol-quantized: 7 B and 8 B both fall in `pay_sym=23` bucket
 (88.6 ms); the bucket boundary is at L=6 (78.4 ms, saves ~10.2 ms/RTS ≈ ~4%
 total air on s18 seed 42). So byte savings only register when RTS hits ≤6 B.
 
-**What landed (committed):**
-- **Step 2 — `sf_bitmap` (8 b) → `sf_index` (2 b).** `allowed_data_sfs` is a
-  leaf-wide config invariant, so the bitmap is unnecessary on the wire. 4-seed
-  s18 sweep: byte-for-byte identical to HEAD (delivery, airtime, every event).
-  Frees 6 bits in byte 6 for future packing. (Commit: `11320bd`.)
+**What landed then REVERTED (committed 2026-05-28, reverted same day):**
+- **Step 2 — `sf_bitmap` (8 b) → `sf_index` (2 b).** Committed as `11320bd`
+  on the assumption that `allowed_data_sfs` is leaf-wide; **but multi-leaf
+  scenarios have DIFFERENT lists per leaf**, so the 2-bit index breaks the
+  moment an RTS crosses a leaf boundary. s15_three_layer has L1=`[7,9]`,
+  L2=`[6,10]`, L3=`[10,11]` (disjoint). When an L1 RTS encodes
+  `bitmap_to_sf_index([7,9], {SF7,SF9}) = 3` ("any") and forwards through a
+  gateway to L2, the L2 receiver decodes `sf_index_to_bitmap([6,10], 3) =
+  {SF6,SF10}` — picks an SF the sender doesn't speak, sender rejects via
+  `cts_invalid_sf`, handshake fails. s15 measurement: DM **87% → 53%
+  (−34pp)**, channels **89% → 54% (−35pp)**. Reverted as `4f05370`.
+- **Lesson:** the 8-bit `sf_bitmap` is load-bearing for cross-leaf SF
+  negotiation. Any encoding narrower than the SF number itself (5..12 = 3
+  bits per SF, ×N) needs a global-SF-space encoding, not an
+  index-into-local-list. The "leaf-wide config invariant" reasoning was
+  correct only for SINGLE-LEAF scenarios — and s18 (where step 2 looked
+  clean) is exactly that. **MULTI-LEAF SCENARIOS (s15, s17) MUST BE IN THE
+  SWEEP FOR ANY WIRE-FORMAT CHANGE.**
 
 **What didn't ship (rejected with data):**
 - **Dropping `payload_len` entirely** (step 1): −2.5pp delivery. Forwarder-keyed
