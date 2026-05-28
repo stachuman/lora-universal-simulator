@@ -17,6 +17,10 @@
       "duty_cycle": 0.1
     }
   },
+  "config": {
+    "debug_start_ms": 0,
+    "debug_end_ms": 2700000
+  },
   "commands": [
     {
       "at_ms": 600000,

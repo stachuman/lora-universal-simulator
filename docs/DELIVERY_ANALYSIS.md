@@ -3,16 +3,16 @@
 Living analysis doc. **Read this before re-investigating delivery.** Update it
 when a root cause, lever, or measurement changes — don't re-derive from scratch.
 
-> **STATUS (2026-05-27).** s17 (252-node metro) 4-seed delivery by class:
-> same-layer **89%** · XL 1-gw **63%** · XL 2-gw **60%** · ALL **73%** (was 59% pre-work).
-> **Same-layer resolved** (anti-loop package: origin-drop + soft hop-gradient + 6-byte
-> visited-set DATA window). **2-gw transit copy-storm fixed** (retry-same-hop on
-> ACK-timeout — see "2-gw Stage-2 transit" below + PROTOCOL §3.1a). 2-gw went 42→60%.
-> **Next levers (diminishing):** residual 2-gw loss is the inherent long-crossing
-> reliability (~0.95^11) + center contention → shorter transit via closest-gateway-pair
-> selection; and same-layer dipped 92→89 (retry-same adds a little latency). Use
-> `dm_delivery_breakdown.py --failures` (per-stage funnel) before guessing. Measure-gate:
-> sweep ≥4 seeds, s17/s15 XL is single-seed-noisy.
+> **STATUS (2026-05-28).** s17 4-seed delivery by class: same-layer **89%** · XL 1-gw
+> **63%** · XL 2-gw **60%** · ALL **73%** (was 59% pre-work). Same-layer resolved
+> (anti-loop package). 2-gw transit copy-storm fixed (retry-same-hop on ACK-timeout).
+> **Vector reassessment (2026-05-28, see "Copy prevention reassessed" below):** further
+> copy-suppression attempts (dedup-on-overhear prototype) were tried on s18 realistic
+> traffic and **reverted** — copies are 2–6% of airtime and uncorrelated with the
+> airtime total. Right vectors, ranked: **(1) hop-count reduction, (2) retry reduction,
+> (3) decode-overhead surface (fanout × handshake), (4) copy prevention (last).** Use
+> `dm_delivery_breakdown.py --failures` + `--airtime` + `--copies` before guessing.
+> Measure-gate: sweep ≥4 seeds, s17/s15 XL is single-seed-noisy.
 
 ## Measurement protocol (use consistently)
 - **s15 is noise-dominated (±~2.4pp); sweep 8–16 seeds**, never judge from one run.
@@ -41,6 +41,49 @@ when a root cause, lever, or measurement changes — don't re-derive from scratc
   from delivery (noisy)** — use it to judge copy/contention levers on their own
   merits. NB on s17 the dominant copy source is `blind_alt` (cts-timeout), NOT the
   `ack_giveup` cascade the reverted grace targeted.
+
+## Design constraint: control vs data SF — handshake is the bottleneck (READ FIRST)
+
+The collision model is **SF-orthogonal** (`SimController.cpp:1429`) — only same-SF
+frames collide. The protocol uses two SF tiers:
+
+- **Routing / control SF** (SF8 on L1): `RTS`, `CTS`, `ACK`, `NACK`, `BCN`, `F`, `Q`,
+  channel-M `RTS` (announcement only). This is the contended SF.
+- **Data SF** (`chosen_data_sf` per link, e.g. SF7/SF9): unicast `DATA` payloads
+  and `DATA-M` (channel-M payload). Carries one frame type, much lighter.
+
+**Empirical claim that should constrain every future design (validated on s18
+seed 42 baseline 2026-05-28):** once the RTS-CTS handshake completes, the rest
+of the hop succeeds ~90% of the time, and the 9% gap is **ACK-on-routing-SF
+loss**, not DATA-on-data-SF loss:
+
+| stage | rate | what's on routing SF | what's on data SF |
+|---|---|---|---|
+| CTS reaches sender | 883/920 = **96%** | RTS, CTS | — |
+| handshake → DATA TX | 870/883 = **98.5%** | — | — |
+| DATA → ACK round-trip | 793/870 = **91%** | ACK | DATA |
+
+The DATA layer is essentially solving its own problem; the bottleneck is the
+handshake on the contended routing SF.
+
+**This eliminates several design directions:**
+- ✗ Improving DATA-layer reliability (DATA-level dedup, FEC, retransmits, larger
+  margins) — solving a problem that isn't there.
+- ✗ Moving control frames to data SF — disproven by CTS-on-data-SF revert
+  (−8pp delivery on 4-seed sweep; sender deafness on routing SF dwarfed any
+  savings). Don't re-try this without a fundamentally different design.
+- ✗ Tools that improve "DATA reliability" or "data SF coding" — same trap.
+
+**The remaining lever space is inside the handshake itself, on routing SF:**
+1. **Each handshake more likely to succeed** — RTS or CTS surviving routing-SF
+   contention. Mechanisms: shorter RTS/CTS frames, smarter LBT, capture-effect
+   tuning, better blind_until prediction.
+2. **Fewer handshakes** — per-hop RTSes multiply by hop count. Mechanisms that
+   touch this: forwarder-skip-RTS (use cached route), batched / source-routed
+   DATA, per-flow setup.
+
+Note: ACK loss is also a real ~9% pool but it lives in the same SF/contention
+class, so anything that lifts handshake reliability tends to lift ACK too.
 
 ## Current state (after commit f467346)
 8–16 seed s15: aggregate DM ~**90%**, same-layer ~**97%**, cross-layer ~**77–78%**,
@@ -531,6 +574,378 @@ reroute — blanket suppression strands those (the grace lesson). Any fix must d
 "forwarding" from "dead-end" with evidence the sender cheaply has — and, since XL is structural
 on s17, **gate copy-reduction on the `--copies` metric + a dense scenario (s16), not s17
 delivery.**
+
+### Copy prevention reassessed (2026-05-28) — dedup-on-overhear attempted & REVERTED
+
+**Prototype.** In-tree only, never committed. Each node overheard forward-RTSes on
+the routing SF and recorded `(dst, ctr_lo, payload_len) → ts` in a 60 s sliding
+table (`seen_fwd`). Two suppression triggers:
+- **STEP 2 (drop-held):** on each new overhear, drop any matching `pending_tx` /
+  `tx_queue` entry already held for forwarding (target: blind_alt parallel copies).
+- **STEP 3 (drop-incoming):** on DATA receive, if the frame's key is in `seen_fwd`,
+  send ACK then suppress the forward (target: "frame already propagating elsewhere").
+
+**Why STEP 3 broke chains (correctness bug, user-identified).** In a linear chain
+`A→B→C→D`, RTS travels on long-range routing SF so C overhears `A→B`'s forward-RTS
+before C is even the intended forwarder. C records `(D, ctr_lo, len)`. Then DATA
+arrives from B; STEP 3 fires; C ACKs B and silently drops. D never receives. The
+key `(dst, ctr_lo, len)` cannot distinguish "I'm next in line" from "parallel
+chain". Empirical signature on s18 seed 42: first-hop **ACKs up +2** while
+**deliveries down −15** (68→55%) — exactly silent-drop-after-ACK.
+
+**Vector check via `--copies` + `--airtime`.** 4-seed s18 realistic (STEP 3 removed,
+STEP 2 retained but never fired):
+
+| seed | delivered | copies | RTS+CTS | DATA | ACK | total airtime |
+|---|---|---|---|---|---|---|
+| 42  | 68% | 21 (8 blind / 12 loop / 1 giveup) | 52% | 26% | 21% | 308,642 ms |
+| 17  | 87% | 3  | 51% | 27% | 21% | 346,348 ms |
+| 91  | 81% | 3  | 52% | 25% | 21% | 293,807 ms |
+| 123 | 90% | 3  | 51% | 26% | 21% | 324,731 ms |
+
+Copy count spans 7× (3↔21), total airtime spans only 1.2× — **uncorrelated**. Seed
+17 has the *most* airtime with only 3 copies; seed 42 has 7× more copies but
+mid-pack airtime. A single copy ≈ one extra handshake at SF8 ≈ 250–600 ms; the 18
+surplus copies on seed 42 ≈ ~2–3% of that run's airtime. STEP 2 fired 0× on all 4
+seeds — the conditions (hold AND overhear a *parallel* forward of the same key) are
+narrow on realistic traffic; the OFF baseline's `blind_alt` copies are mostly
+genuine reroutes after a real failure, not parallel-copy storms.
+
+**Airtime composition is invariant: RTS+CTS 51–52% / DATA 25–27% / ACK 21%** across
+*all* seeds despite delivery ranging 68→90%. The structural cost is fanout
+(mean 8.5 decoders per message) × hop count × retry count, dominated by the
+RTS/CTS exchange every neighbour decodes. Copies live in the noise.
+
+**Decision.** Removed all copy-suppression code (in-tree changes only, file
+reverted to `8e4c54b` HEAD). Future copy work would need (a) a copy-cost scenario
+where copies actually correlate with airtime/delivery delta (i.e. dense XL like
+s16/s17), and (b) a chain-safe discriminator — at minimum extra wire info in RTS
+(e.g. hops-from-origin) since cached `(src, next)` alone breaks on >2-hop chains.
+
+**Next vector (right lever).** Pivot from copy prevention to:
+1. **Hop-count reduction** — the airtime table is dominated by long-haul messages
+   (e.g. `dave→First_Hill_Skyline` = 14.5 s on a single message). If those paths
+   are geographically inflated, route audit + better next-hop selection is the
+   biggest pool.
+2. **Retry reduction** — RTS+CTS is 52% of airtime; every CTS-timeout retry
+   doubles that slice. LBT tuning, longer `rts_timeout` on dense regimes, CTS
+   reliability.
+3. **Decode-overhead surface** — fanout 8.5 means every RTS occupies airtime at
+   8 neighbours. Range tuning, RTS shortening, or selective listen would move
+   the floor more than any per-message lever.
+4. **Copy prevention** — last, only if (a) and (b) above are addressed and the
+   chain-safe discriminator question is solved.
+
+### Copy prevention — second attempt (2026-05-28): HALT cancellation-on-retry, REVERTED
+
+**Prototype.** A retry-cancellation protocol designed to prevent copy creation
+*at the source* rather than dropping in-flight duplicates. RTS gained
+`RTS_FLAG_IS_RETRY` (0x04) set on every `tx_rts_retry`. A new 2-byte HALT frame
+(`'X' + target`) was sent by any node holding `(origin, ctr_lo)` when it
+overheard an RTS-rty for that message. The RTS-rty receiver deferred CTS by
+`airtime(routing_sf, HALT_LEN) + slack` (~54 ms @ SF8/BW250, ~90 ms @ SF8/BW125).
+On HALT, the would-be CTS-er dropped the CTS and the retry sender cancelled its
+pending TX (treated as a confirmed delivery). Gateway cross-layer forwards
+(`gw_relay`) were exempt to preserve visit-schedule timing.
+
+**Why it didn't work — three nested measurement findings on s18 seed 42:**
+
+1. **`(dst, ctr_lo, payload_len)` aliases catastrophically.** First run gave
+   **39/42 (93 %) false cancellations, −14 pp delivery (54 % vs 68 %).** The
+   4-bit `ctr_lo` cycles every 16 messages per sender; same-dst messages with
+   similar payload sizes collide constantly within the 60 s holder TTL — the
+   problem is structurally identical to the dedup-on-overhear key issue.
+2. **Adding origin to the wire (1 B IS_RETRY-only RTS extension) didn't fix
+   the cancellation problem.** With precise `(origin, ctr_lo)` keying the
+   false-cancel rate was unchanged: **39/42 cancellations still hit messages
+   that didn't deliver.** The real cause: **mid-chain `fwd_confirmed` holders
+   are unsafe.** A forwarder's `ack_rx` ("I passed it one hop") doesn't mean
+   delivered — the next-hop can still drop it, and the cancelled retry was the
+   salvage path.
+3. **Restricting holder predicate to `delivered_set` only** (final-dst
+   confirmed delivery is the only unambiguous signal) is safe — delivery
+   76/113 vs baseline 77/113 — but **the mechanism barely engages: 3 halt_tx
+   on the whole s18 run, 0 successful cancellations, `tx_blind_alt` count 13
+   vs baseline ~12.** The final dst is usually out of range of the retry
+   sender on multi-hop paths, so safe-HALT can't actually prevent copies.
+
+| variant | delivery | halt_tx | cancellations (true / false) | tx_blind_alt |
+|---|---:|---:|---:|---:|
+| no HALT (baseline) | 77/113 (68 %) | — | — | ~12 |
+| HALT raw — keyed (dst,ctr_lo,len) | 61/113 (54 %) | 54 | 2 / 38 | 4 |
+| HALT origin-keyed (`fwd_confirmed` on) | 66/113 (58 %) | 87 | 3 / 39 | 7 |
+| HALT origin-keyed (`delivered_set` only) | **76/113 (67 %)** | **3** | **0 / 0** | **13** |
+
+**Costs the mechanism added during the experiment.** Every RTS-rty receiver
+deferred CTS by T_delay (~54–90 ms depending on routing SF / BW) — pure
+latency on every retry with no benefit. 4 t-suite tests regressed initially
+(t72/t73/t74 from gateway visit-schedule timing, t78 long-chain) until gateway
+forwards were exempted via `gw_relay`-skip and `pending_rx_expiry` was moved
+inside the deferred-CTS closure. The originator marking `fwd_confirmed` on her
+own first-hop ACK caused her to HALT her own next-hop's forward (t37 plain-msg
+regression) until an `origin == self.id` guard was added.
+
+**Why the design can't be patched into working.** The fundamental tension:
+- Mid-chain holders are unsafe (can't confirm delivery from one hop ACK).
+- Stronger evidence than `delivered_set` doesn't exist short of e2e ACK.
+- But by the time the originator gets e2e ACK she already knows delivery
+  succeeded — HALT isn't needed for that case.
+- The safe variant (`delivered_set` only) fires only when dst is in range of
+  retry sender, which is the easy 1-hop case where copies don't form anyway.
+
+The asymmetry kills it: the cases where HALT could help (mid-chain copy
+storms) are exactly where the holder signal is too weak; the cases where the
+holder signal is strong (e2e-confirmed delivery) are where copies are not the
+problem.
+
+**Decision.** Reverted in-tree, never committed. `scenarios/dv_dual_sf.lua`
+restored to `43c45a9`; 75/75 t-tests pass; s18 delivery 77/113 = 68 %.
+
+**Next vector (NOT HALT v2).** Don't reattempt with more holders or stronger
+signals — the issue is intrinsic. The next lever for *copy reduction* (not
+prevention via cancellation) is **next-hop-liveness defer** — gate
+`tx_blind_alt` creation when the abandoned hop showed recent activity
+(`cts_tx` within ~1 s ≈ "busy, not dead"). Measured on s18 to be preventable
+for **4/5 (80 %) flag-ON / 8/12 (67 %) flag-OFF blind_alts**, with evidence
+always being a recent `cts_tx` from the abandoned hop. No wire-format change,
+no holder signal needed — purely a sender-side decision. That work is the
+right next attempt.
+
+### Retry pool — cts_timeout dominates; airtime tail is retries × hops, not inflated routes (2026-05-28)
+
+After copy-prevention reassessment (above), the **retry pool** turned out to be the
+actual airtime lever. On s18 seed 42: **178 rts_retry events for 113 sends ≈ 1.6
+retries/msg**, and **52% of run airtime is RTS+CTS** with the split invariant
+(51–52% / 25–27% / 21%) across seeds 17/42/91/123.
+
+**Hop-count tail profile (added `dm_delivery_breakdown --tail`).** Top-10 messages
+= 29.7% of total run airtime. Across those 10 messages, **chain length is at or
+below the 2 km/hop geographic minimum** (`Fremont01→CH_RPTR` 21.8 km in 10 hops =
+2.2 km/hop; `dave→First_Hill_Skyline` 10.4 km in 5 hops = 2.1 km/hop). Routing is
+near-optimal on s18's explicit-link topology. **Top-10 airtime per chain-hop =
+1453 ms vs nominal RTS+CTS+DATA+ACK ≈ 500–700 ms → ~2–3× tax per hop, paid in
+retries not extra hops.** Top-10 retries / total retries = 19 / 178 = 10.7% — retry
+tax is **uniform, not tail-concentrated**. Reducing per-message retry rate ~50%
+would save ~25% of total airtime.
+
+Single routing outlier worth a separate look (not in top-10 but flagged): on seed
+42, `Martin_Room→alice (2)` took 13 hops for 6.7 km (~0.5 km/hop) and did not
+deliver. A routing bug, not a normal long-haul.
+
+**cts_timeout breakdown (instrumented; 110 of 178 retries on seed 42).** Categorized
+by inspecting the next-hop's events in `[t_rts, t_retry]`:
+
+| category | count | % | meaning |
+|---|---|---|---|
+| `silent_no_rx` | 56 | **51%** | RTS never decoded at receiver — routing-SF collision direction A→R. |
+| `cts_sent_but_lost` | 35 | **32%** | Receiver decoded RTS, emitted CTS; CTS lost on routing-SF return. |
+| `busy_pending_tx` | 10 | 9% | Receiver had its own pending_tx, silent-dropped our RTS. |
+| `next_hop_changed` | 7 | 6% | Sender's retry switched next-hop — not same-hop cts_timeout. |
+| `busy_other_tx` / `busy_other_rts` | 1+1 | 2% | Receiver was TXing / RXing other traffic. |
+| `silent_blind_§8.4` | 0 | 0% | No detected case where receiver was in CTS→data_sf deaf window. The existing `blind_until` mitigation catches §8.4 cases before they become cts_timeout. |
+
+**Implication:** 83% of cts_timeouts are **routing-SF collision** in one direction or
+the other (RTS or CTS), not receiver-busy and not §8.4 deaf window. The lever is
+the routing-SF contention itself. CTS-on-data-SF targets the 32% `cts_sent_but_lost`
+class directly (≈6% total airtime). The 51% `silent_no_rx` class is bigger but
+needs a different fix — sender-side awareness of receiver-availability before TX,
+RTS shortening, or fanout reduction.
+
+### NACK_BUSY_TX (re-add, with safeguards) — attempted & REVERTED (2026-05-28)
+
+Targeted the 9% `busy_pending_tx` class. Mechanism: when a receiver has its own
+pending_tx and an inbound RTS arrives, instead of the historic silent drop, send
+a NACK with `NACK_REASON_BUSY_TX` carrying an airtime-derived `busy_for_ms`
+estimate. Sender's existing busy_rx handler (line 10535) treats both reason codes
+identically (cancel rts_timeout, set `blind_until`, wait-or-requeue per
+`NACK_WAIT_THRESHOLD_MS`).
+
+**Chesterton's fence the diff inherited.** The exact behavior existed historically
+and was removed (line 9889 comment): on s03 a stuck ACK-loss-loop node predicted
+busy_for_ms = 5 s but was actually busy 60+ s → 28 s of NACK chain per stuck node.
+After `8e4c54b` (ack_retry_same_hop) the stuck-loop pathology should be less severe;
+re-attempted with safeguards (fresh-pending_tx only: `requeue_count==0 AND
+last_rts_attempt_seq<=1`, estimate capped at 2 s == `NACK_WAIT_THRESHOLD_MS`).
+
+**4-seed s18 sweep (ON vs OFF override per node):**
+
+| seed | mode | delivered | airtime (ms) | nack_busy_tx | silent_drop | retries |
+|---|---|---|---|---|---|---|
+| 42  | ON  | 77 (68%) | 308,642 | 0 | 13 | 178 |
+| 42  | OFF | 77 (68%) | 308,642 | 0 | 13 | 178 |
+| 17  | ON  | 98 (87%) | 348,276 | **1** | 19 | 217 |
+| 17  | OFF | 98 (87%) | 346,348 | 0 | 13 | 194 |
+| 91  | ON  | 89 (79%) | 286,118 | 0 | 9 | 164 |
+| 91  | OFF | 89 (79%) | 286,118 | 0 | 9 | 164 |
+| 123 | ON  | 101 (89%) | 322,355 | 0 | 4 | 186 |
+| 123 | OFF | 101 (89%) | 322,355 | 0 | 4 | 186 |
+
+**Result.** The safeguards correctly identified that all 13 pending_tx-drop events
+on seed 42 (and the equivalents on other seeds) involve receivers whose pending_tx
+is on **attempt_seq 5–52** — deeply mid-retry, not fresh. NACK_BUSY_TX fired **1×
+across 4 runs** (seed 17 only). That single fire produced **+23 retries, +6 silent
+drops, +1,928 ms airtime (+0.5%)** — a small regression, not an improvement.
+Delivery unchanged. **Confirms the original silent-drop decision was correct for
+the stuck-receiver case.** Reverted; no commit.
+
+**Lever decision.** Pivot to CTS-on-data-SF (the 32% `cts_sent_but_lost` class — see
+next section for scope).
+
+### CTS-on-data-SF — attempted & REVERTED (2026-05-28)
+
+Targeted the `cts_sent_but_lost` class (32% of cts_timeouts = ~6% airtime
+budget). Design: move the RTS→CTS response off the contended routing SF onto a
+"rendezvous SF" = min(sender's RTS bitmap) (the lowest data SF — shortest CTS
+airtime, link guaranteed to support it). Both sides compute the rendezvous SF
+from the bitmap already in the RTS — no wire-format change. After RTS TX,
+sender retunes RX to rendezvous_sf; on CTS RX, restore RX to routing_sf for
+ACK. Existing `blind_until` mitigation (overheard CTS on routing_sf bumps the
+deafness window of every neighbor) broke under this change — CTS lives on
+rendezvous_sf, so routing_sf overhearers don't see it. Rebuilt as a
+**prediction-from-overheard-RTS** path: every node that overhears an RTS to
+some other receiver bumps `blind_until[receiver]` for `airtime(rendezvous_sf,
+CTS) + cts_to_data_gap + airtime(max_data_sf, max DATA)`.
+
+**4-seed s18 sweep:**
+
+| seed | ON | OFF | Δ |
+|---|---|---|---|
+| 42  | 79 (70%) | 79 (70%) | 0 |
+| 17  | 79 (**70%**) | 97 (**86%**) | **−16pp** |
+| 91  | 85 (75%) | 87 (77%) | −2 |
+| 123 | 82 (**73%**) | 101 (**89%**) | **−16pp** |
+| mean | **72%** | **80%** | **−8pp** |
+
+Retries 195 → 447 mean (+128%). Airtime −6% mean — but the savings came from
+messages *failing to deliver*, not from being more efficient.
+
+**Root cause of the regression — sender deafness on routing_sf during CTS
+wait.** With fanout 8.5, every sender retuned to rendezvous_sf for the
+CTS-wait window (~50 ms at SF7 CTS + DATA airtime) drops every neighbor's
+RTS that arrives in that window as `drop_sf_mismatch`. cts_timeout breakdown
+on seed 42 (ON, with RTS-prediction blind_until): `silent_no_rx` 56 → 217
+(+161 cases). We attacked the 32% `cts_sent_but_lost` bucket and converted
+it (plus more) into the larger `silent_no_rx` bucket via sender deafness —
+net negative.
+
+**Structural finding worth keeping (the reason this isn't fixable by Option A
+either).** Frame distribution on s18 seed 42:
+- Routing SF (SF8): 178 RTS + 422 RTS-rty + 622 RTS-fwd + 920 CTS + ~750 ACK = ~2900 frames
+- Data SF7 (DATA): 837 frames (~96% of all DATA on the min SF)
+- Data SF9: 33 DATA + 0 channel-M on s18 (other scenarios have channel-M here)
+
+There's **no SF that's clearly less busy than routing SF** by frame count, and
+no matter which we pick we trade the cts_sent_but_lost class for a new
+sender-deafness class. The "routing SF is the bottleneck" framing was right
+about the 32% pool living there but wrong about there being a cheaper place
+to put CTS.
+
+**Lever implication.** Of the 110 cts_timeouts on seed 42:
+- 51% `silent_no_rx` (RTS direction) — needs receiver-availability signal *before* RTS, not SF migration.
+- 32% `cts_sent_but_lost` (CTS direction) — moving SF doesn't help; needs collision-avoidance for CTS itself (e.g., schedule-aware CTS, capture-effect tuning, or a fundamentally different MAC).
+- 9% `busy_pending_tx` — silent-drop is correct (validated by NACK_BUSY_TX revert).
+
+The cheapest remaining lever is probably **NOT in the cts_timeout pool**.
+Total cts_timeout retries cost ~55 s/run (18% airtime); the rest of the
+retry tax (the other 80%+) and the multi-hop forwarding overhead dominate.
+Re-examine the airtime tail (already in `--tail`) with fresh eyes:
+hop-count was already optimal on s18 explicit-link, but the *per-hop
+retry tax* on intermediate hops is uniform across all messages. The next
+lever may be **inside the forwarder cascade**, not the originator's first
+hop. Concrete candidate: read the airtime composition of the forwarder
+half of multi-hop messages — does the cts_timeout tax fall harder on
+forwarders than originators? If yes, the lever is there.
+
+### Peer-busy prediction (`rts_sender_busy` blind_until extension) — attempted & REVERTED (2026-05-28)
+
+Targeted the 51% `silent_no_rx` cts_timeout class. Mechanism: every overheard
+RTS on routing SF tells us its SENDER is now mid-handshake; mark
+`blind_until[r.src] = now + rts_timeout_base_ms` so classify_blind defers /
+alts our own RTSes addressed to that sender. Used the existing blind_until
+table (no new state machinery) and the existing three consult sites
+(issue_send / tx_rts_retry / rts_timeout_fire).
+
+**Two attempts, both reverted:**
+
+1. **Wide window** (full handshake = rts_timeout + cts_to_data_gap + DATA + ACK
+   ≈ 800 ms): seed 42 −2pp delivery, `tx_blind_alt` +317% (excess copy
+   creation from over-aggressive alt-switching).
+2. **Narrow window** (just rts_timeout ≈ 250 ms — confident CTS-wait lower
+   bound): mean across 4 seeds **−7pp delivery** with one seed (17) dropping
+   **−28pp** (87% → 59%). Mechanism causes a **defer-cascade**: a node's
+   neighbor is overheard active → marked busy → node defers → defer expires →
+   retries → neighbor still active → marked busy again → loop. Without the
+   prediction the node would have hit `silent_no_rx` then `blind_alt`-switched
+   to a fresh next-hop after `rts_max_retries`, eventually delivering. With
+   the prediction, the message stays in pending_tx until the simulation ends
+   ("in-flight at end" failure category). 25 of 46 failures on seed 17 hit
+   this pattern; every one of dave(138)'s 14 messages failed.
+
+**Meta-pattern across the four reverted attempts in this session.** Each
+attempt added either a PROACTIVE PREDICTION (peer_busy, predicted_from_rts) or
+a NEW RESPONSE (NACK_BUSY_TX) that disrupted the existing reactive recovery
+chain (cts_timeout → retry → blind_alt → cascade). The existing protocol is
+tuned around "fail fast, recover via the cascade machinery." Predictive
+interventions that try to *prevent* the cts_timeout end up preventing the
+recovery too, and messages get stuck.
+
+**Implication for future handshake-reliability levers.** Stick to changes that
+improve raw handshake success WITHOUT touching the reactive recovery path.
+That rules out anything in the blind_until / classify_blind family. Concrete
+remaining candidates:
+- **Shorter RTS / CTS frames** (fewer routing-SF bytes = less collision
+  window). RTS is already 8 B and CTS 3 B — limited shrink room.
+- **Tighter LBT before RTS TX** (PHY-level sense, not a state-machine
+  prediction; doesn't enter classify_blind).
+- **Capture-effect tuning** (SimController parameter, not firmware).
+- **Volume reduction** (forwarder route-cached fast handshake — fewer
+  handshakes period; biggest pool but biggest design surface). Option A from
+  the scope discussion.
+
+### Wire-format compaction — what's actually possible (2026-05-28)
+
+**Goal evaluated:** shrink RTS from 8 B to save air. At SF8/BW125/CR5,
+airtime is symbol-quantized: 7 B and 8 B both fall in `pay_sym=23` bucket
+(88.6 ms); the bucket boundary is at L=6 (78.4 ms, saves ~10.2 ms/RTS ≈ ~4%
+total air on s18 seed 42). So byte savings only register when RTS hits ≤6 B.
+
+**What landed (committed):**
+- **Step 2 — `sf_bitmap` (8 b) → `sf_index` (2 b).** `allowed_data_sfs` is a
+  leaf-wide config invariant, so the bitmap is unnecessary on the wire. 4-seed
+  s18 sweep: byte-for-byte identical to HEAD (delivery, airtime, every event).
+  Frees 6 bits in byte 6 for future packing. (Commit: `11320bd`.)
+
+**What didn't ship (rejected with data):**
+- **Dropping `payload_len` entirely** (step 1): −2.5pp delivery. Forwarder-keyed
+  `(src, dst, ctr_lo)` collides across distinct originators in the implicit-ACK
+  match → wrongly cleared pending_tx → "in-flight at end" failures.
+- **CRC8(origin, ctr) replaces payload_len** (step 1'): −4pp delivery. CRC8
+  fixes implicit-ACK uniqueness BUT receiver-side `pending_rx_expiry` now
+  falls back to worst-case `max_payload_bytes=230` (was actual). Receivers
+  hold pending_rx ~2× longer → `drop_pending_tx` 4-6× more → other senders'
+  RTSes silently dropped. The `start_pending_rx_expiry` comment (line ~6747)
+  explicitly flags this trap.
+- **CRC4 + payload_len_q4 packed in 1 byte** (step 1'' compromise): −1pp,
+  closer but still net negative. 16-byte quantization over-estimates s18's
+  19-byte median payload → expiry still inflated, `drop_pending_tx` still
+  elevated (especially seed 17: 62 vs HEAD's 13).
+
+**Load-bearing finding:** `payload_len` in RTS serves *two* concurrent purposes
+that can't both be cheapened. Match-key discrimination (CRC works) AND
+receiver-expiry sizing (needs real bytes, not buckets) both need 1 byte's
+worth of information. The current `payload_len` byte already efficiently
+serves both — replacing it with anything ≤1 byte loses one function.
+
+**Remaining preparation work that could land:**
+- **§10 cmd-nibble pack (step 3).** Reshapes byte 0 to `cmd(4)|leaf_id(4)`.
+  RTS goes 8 → 7 B. No airtime savings at SF8 (same symbol bucket). Worth it
+  only for code clarity + extension headroom, not air.
+
+**Conclusion.** The realistic ceiling on s18 RTS air via field-level compaction
+on the current protocol design is roughly the step 2 result — zero air saved
+but bits freed for future packing. Reaching 6 B / 10 ms-per-RTS savings would
+need a deeper protocol change (e.g. encoding payload_len's two roles into
+side-channel state, or a different MAC entirely). Not pursued.
 
 ## Tooling gotchas (so they aren't rediscovered)
 - `script_emit` `node` field = **0-based array index**; data `origin`/`dst`/`next`
