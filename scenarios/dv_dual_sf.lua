@@ -2030,16 +2030,22 @@ RTS_FLAG_M_BROADCAST = 0x01
 -- flag and are throttled normally.
 RTS_FLAG_RELAY = 0x02
 
-local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_len, rts_flags, m_payload_id)
+-- pack_rts (step-2 2026-05-28): the formerly-8-bit sf_bitmap byte now carries a
+-- 2-bit sf_index (top of byte; bottom 6 bits rsv). Caller passes the bitmap
+-- in `sf_bitmap` for API compat; we convert via bitmap_to_sf_index using the
+-- caller's `allowed_data_sfs` list (every leaf-shared by config).
+local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, allowed_data_sfs, payload_len, rts_flags, m_payload_id)
   local addr_len = 0
   local b3 = ((addr_len & 0x07) << 5) | (leaf_id & 0x0f)
   local b5 = ((ctr_lo & 0x0f) << 4) | ((rts_flags or 0) & 0x0f)
+  local sf_index = bitmap_to_sf_index(allowed_data_sfs or {}, sf_bitmap)
+  local b6 = (sf_index & 0x03) << 6   -- top 2 bits; bottom 6 rsv (zeros)
   local base = "R" .. string.char(src)
                    .. string.char(next_hop)
                    .. string.char(b3)
                    .. string.char(dst)
                    .. string.char(b5)
-                   .. string.char(sf_bitmap)
+                   .. string.char(b6)
                    .. string.char(payload_len % 256)
   -- Extension: when M_BROADCAST flag is set, append the low 16 bits of
   -- the channel msg id (2 bytes BE). Receivers use this to check their
@@ -2058,13 +2064,19 @@ local function pack_rts(leaf_id, src, dst, next_hop, ctr_lo, sf_bitmap, payload_
   return base
 end
 
-local function parse_rts(frame)
+-- parse_rts (step-2): the formerly-8-bit sf_bitmap byte now carries a 2-bit
+-- sf_index in its high 2 bits. We return both `sf_index` (raw) and
+-- `sf_bitmap` (derived) — callers that consume r.sf_bitmap keep working
+-- unchanged. `receiver_allowed_data_sfs` is the receiver's local config;
+-- intra-leaf this matches the sender's (config invariant).
+local function parse_rts(frame, receiver_allowed_data_sfs)
   if #frame < 8 or frame:sub(1,1) ~= "R" then return nil end
   local b3 = frame:byte(4)
   local addr_len = (b3 >> 5) & 0x07
   if addr_len ~= 0 then return nil end          -- hierarchy support deferred
   local leaf_id = b3 & 0x0f
   local b5 = frame:byte(6)
+  local sf_index = (frame:byte(7) >> 6) & 0x03
   local out = {
     leaf_id      = leaf_id,
     src          = frame:byte(2),
@@ -2074,7 +2086,8 @@ local function parse_rts(frame)
     rts_flags    = b5 & 0x0f,
     m_broadcast  = (b5 & RTS_FLAG_M_BROADCAST) ~= 0,
     relay        = (b5 & RTS_FLAG_RELAY) ~= 0,
-    sf_bitmap    = frame:byte(7),
+    sf_index     = sf_index,
+    sf_bitmap    = sf_index_to_bitmap(receiver_allowed_data_sfs or {}, sf_index),
     payload_len  = frame:byte(8),
   }
   if out.m_broadcast and #frame >= 10 then
@@ -2958,6 +2971,47 @@ local function sf_bitmap_to_set(bm)
     if sf_in_bitmap(bm or 0, sf) then table.insert(out, sf) end
   end
   return out
+end
+
+-- sf_index ↔ bitmap helpers (RTS wire-format 2026-05-28).
+-- The RTS byte that used to hold an 8-bit `sf_bitmap` now carries a 2-bit
+-- `sf_index` (top 2 bits, bottom 6 rsv). The index resolves against the
+-- leaf-wide `allowed_data_sfs` list (all nodes in a leaf share this config —
+-- enforced by the network/J-register protocol). Encoding:
+--   0..2 : singleton bitmap of allowed_data_sfs[i+1] (M-broadcast / forced SF)
+--   3    : "any" (full allowed_data_sfs bitmap; receiver picks by SNR)
+-- Only full-set and singleton encodings are supported on the wire because
+-- those are the only patterns the protocol uses in practice (unicast=full,
+-- M-broadcast=singleton-of-max). Arbitrary subsets fall back to "any" (3).
+SF_INDEX_ANY = 3   -- GLOBAL (200-locals chunk-limit defensive)
+
+-- GLOBALS (200-locals chunk-limit defensive — see feedback_inline_for_delicate_firmware).
+function bitmap_to_sf_index(allowed_data_sfs, bitmap)
+  if bitmap == nil or bitmap == 0 then return SF_INDEX_ANY end
+  local set = sf_bitmap_to_set(bitmap)
+  if #set == 1 then
+    for i, sf in ipairs(allowed_data_sfs) do
+      if sf == set[1] and (i - 1) <= 2 then return i - 1 end
+    end
+  elseif #set == #allowed_data_sfs then
+    local match = true
+    for i, sf in ipairs(allowed_data_sfs) do
+      if set[i] ~= sf then match = false; break end
+    end
+    if match then return SF_INDEX_ANY end
+  end
+  return SF_INDEX_ANY   -- conservative fallback: "any" never strands a frame
+end
+
+function sf_index_to_bitmap(allowed_data_sfs, sf_index)
+  sf_index = sf_index or SF_INDEX_ANY
+  if sf_index == SF_INDEX_ANY then
+    return sf_set_to_bitmap(allowed_data_sfs)
+  end
+  if sf_index + 1 <= #allowed_data_sfs then
+    return sf_set_to_bitmap({ allowed_data_sfs[sf_index + 1] })
+  end
+  return sf_set_to_bitmap(allowed_data_sfs)  -- out-of-range → fall back to full
 end
 
 -- Choose the fastest (lowest) SF in the bitmap whose demod threshold leaves
@@ -4643,6 +4697,17 @@ local function active_allowed_sf_bitmap(self)
   return self.active_allowed_sf_bitmap or self.allowed_sf_bitmap
 end
 
+-- Cross-leaf sf_index correctness: gateways switch active layer per-flight via
+-- activate_primary_layer / activate_gateway_layer, which updates
+-- self.active_allowed_data_sfs to match the leaf they're TXing/RXing on. The
+-- 2-bit sf_index in RTS resolves against THIS list — using
+-- self.allowed_data_sfs (static home-leaf config) caused the s15 −34pp
+-- regression behind the 4f05370 revert. Always use this helper at the
+-- pack_rts / parse_rts boundaries.
+local function active_allowed_data_sfs(self)
+  return self.active_allowed_data_sfs or self.allowed_data_sfs
+end
+
 function ensure_layer_state(self, layer_id)
   layer_id = math.floor(layer_id or self.layer_id or 0)
   self.layer_state = self.layer_state or {}
@@ -5999,7 +6064,8 @@ local function tx_rts_retry(self, reason)
   end
   if px.gw_relay then _rts_flags = _rts_flags | RTS_FLAG_RELAY end   -- gateway forward (§10a exempt)
   local rts = pack_rts(px.tx_leaf_id or active_leaf_id(self), self.id, px.dst, px.next, px.ctr_lo,
-                       px.tx_sf_bitmap or active_allowed_sf_bitmap(self), #px.payload + MAC_LEN,
+                       px.tx_sf_bitmap or active_allowed_sf_bitmap(self),
+                       active_allowed_data_sfs(self), #px.payload + MAC_LEN,
                        _rts_flags, _m_id)
   px.retry_reason = reason
   local attempt_seq = emit_rts_attempt_detail(self, "retry", px)
@@ -6833,7 +6899,7 @@ function fire_m_broadcast_rts(self, px)
     m_id = channel_msg_id_from_bytes(px.payload, 1)
   end
   local rts = pack_rts(px.tx_leaf_id, self.id, px.dst, px.next, px.ctr_lo,
-                       px.tx_sf_bitmap, payload_len,
+                       px.tx_sf_bitmap, active_allowed_data_sfs(self), payload_len,
                        RTS_FLAG_M_BROADCAST, m_id)
   local label = (px.origin == self.id) and "RTS" or "RTS-fwd"
   local kind = (px.m_broadcast_attempt_gen == 1) and "initial" or "m_retry"
@@ -7199,14 +7265,17 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
   local tx_leaf_id = nil
   local tx_routing_sf = nil
   local tx_sf_bitmap = nil
+  local tx_allowed_data_sfs = nil
   if tx_on_primary_layer then
     tx_leaf_id = self.leaf_id
     tx_routing_sf = self.routing_sf
     tx_sf_bitmap = self.allowed_sf_bitmap
+    tx_allowed_data_sfs = self.allowed_data_sfs
   else
     tx_leaf_id = tx_layer_rec and tx_layer_rec.leaf_id or active_leaf_id(self)
     tx_routing_sf = tx_layer_rec and tx_layer_rec.routing_sf or active_routing_sf(self)
     tx_sf_bitmap = tx_layer_rec and tx_layer_rec.allowed_sf_bitmap or active_allowed_sf_bitmap(self)
+    tx_allowed_data_sfs = tx_layer_rec and tx_layer_rec.allowed_data_sfs or active_allowed_data_sfs(self)
   end
   -- M-payload (channel gossip): broadcast variant. The RTS carries an
   -- M_BROADCAST flag PLUS the chosen_data_sf encoded in sf_bitmap (only
@@ -7302,7 +7371,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     rts_flags = rts_flags | RTS_FLAG_RELAY        -- gateway cross-layer forward (§10a exempt)
   end
   local rts = pack_rts(tx_leaf_id, self.id, dst_id, primary_next, mid,
-                       tx_sf_bitmap, payload_len, rts_flags, m_id)
+                       tx_sf_bitmap, tx_allowed_data_sfs, payload_len, rts_flags, m_id)
   local label = (origin == self.id) and "RTS" or "RTS-fwd"
   if m_broadcast then
     -- Initial broadcast attempt and retries share fire_m_broadcast_rts.
@@ -9617,7 +9686,7 @@ function on_recv(self, frame, meta)
   end
 
   if tag == "R" then
-    local r = parse_rts(frame)
+    local r = parse_rts(frame, active_allowed_data_sfs(self))
     if not r then return end
     -- Cross-network filter — drop foreign-network RTSes before any routing,
     -- anti-spam, or implicit-ACK side effects.
