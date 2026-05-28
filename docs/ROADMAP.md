@@ -7,7 +7,7 @@ shape of the problem, not the solution. Linked-to-from
 
 ---
 
-## Status — routing & delivery (updated 2026-05-27)
+## Status — routing & delivery (updated 2026-05-28)
 
 Several design sections below (§7.0 hops encoding, §7.6 hop budget) describe the
 **superseded** 8-hop design. As-built reality (see `docs/PROTOCOL.md` §3.1/§3.4 for
@@ -22,8 +22,17 @@ the wire spec, `docs/DELIVERY_ANALYSIS.md` for the living delivery analysis):
 - **Cross-layer**: source-routed gateway-envelope chaining (suburb↔suburb via center)
   + **gateway-doorstep hold** (hold+retry the egress gateway window-aware instead of
   fanning out to siblings).
-- **Latest s17 (252-node metro) 4-seed delivery:** same-layer **92%**, all-DM **69%**
-  (was 59%). Next target: cross-layer **2-gw transit** (~42%, Stage-2 across the center).
+- **Copy prevention closure (2026-05-27/28):** same-layer **resolved (92%)** via
+  the anti-loop package (origin-drop + soft hop-gradient + visited-set DATA window);
+  2-gw transit copy-storm fixed (42→60%) by `ack_retry_same_hop` on ACK-timeout.
+- **Wire-format compaction (2026-05-28):** RTS `sf_bitmap` → `sf_index` (2 bits,
+  cross-leaf-safe via `active_allowed_data_sfs`) shipped as `c20585b`. Further
+  byte savings are gated on `payload_len`'s receiver-expiry role — see
+  `DELIVERY_ANALYSIS.md` "Wire-format compaction" for the boundary analysis.
+  §10 cmd-nibble pack documented for the future C++ port.
+- **Latest s17 (252-node metro) 4-seed delivery:** same-layer **89%**, XL 1-gw
+  **63%**, XL 2-gw **60%**, all-DM **73%** (was 59% pre-anti-loop). Remaining
+  gap on 2-gw is structural (long-crossing reliability + center contention).
 
 ---
 
@@ -1615,7 +1624,15 @@ larger hierarchy.
 - Compose with §8 cryptography: gateways should see routing headers and target
   identity, but not user plaintext once encryption lands.
 
-### 7.0 Wire-format decisions (LOCKED 2026-05-12)
+### 7.0 Wire-format decisions (LOCKED 2026-05-12 — SUPERSEDED by §10 2026-05-28)
+
+**Status (2026-05-28):** Per-frame bit layouts in §7.0/§7.1/§7.2/§7.4 were
+the locked 2026-05-12 baseline. They have since drifted: DATA grew the 6-B
+visited-set window (`65f9c8a`), RTS replaced `sf_bitmap` with `sf_index`
+(`c20585b`), BCN added the mandatory `key_hash32`. The authoritative
+current wire spec lives in **`docs/PROTOCOL.md` §3** (per-frame implemented
+layouts) and **ROADMAP §10** (the cmd-nibble pack target for the C++
+port). §7.0 is retained as historical record of the lock-in decision.
 
 The §7.1 DATA, §7.2 BCN, and §7.4 control-plane (RTS/CTS/ACK/NACK) layouts
 below are finalized at bit level. §7.5 multicast wire bits are reserved in
@@ -3253,6 +3270,20 @@ mandatory `key_hash32` in BCN, and the two post-original-§10 frames
 `H` and `F`). Supersedes the §7.0 LOCKED 2026-05-12 layout.
 Backwards-incompatible — flag-day required in any single deployment, no
 clean mixed-version mode possible (see §10.5).
+
+**Implementation status: DEFERRED to the C++ port phase.** A 2026-05-28
+all-frames-at-once attempt in Lua was reverted after a multi-leaf sweep
+caught a non-trivial regression (s15: channel reach 89% → 0%, DM 87% →
+60%; symptom traced to BCN/M-broadcast decode breaking under the
+combined byte-shift changes, root cause not bisected before revert).
+The wholesale 500-line migration didn't bisect cleanly. The right
+implementation shape is **frame-by-frame** (one commit per pack/parse +
+its dispatch site, with s18+s15+s17 smoke after each), which is the
+natural cadence during the C++ port — each frame gets reimplemented in
+C++ separately, the cmd-nibble layout shipped at that point in one
+coherent C++-side wire format. Lua stays on the literal-tag-byte format
+until then. The §10 doc here is the implementation spec for the C++
+port; no further Lua work needed.
 
 **Air-savings reality check (per `DELIVERY_ANALYSIS.md`):**
 the headline 1-B-saving on RTS (8 → 7) **does not change SF8 airtime** —

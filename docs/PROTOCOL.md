@@ -473,13 +473,18 @@ originator from the inner DATA payload (Phase 4). Forwarders never needed origin
 on the RTS wire. Future cross-layer hops add +1 byte per boundary; addr_len
 encodes depth.
 
+`sf_bitmap` was replaced by a 2-bit `sf_index` in `c20585b` (2026-05-28). The
+index resolves against the receiver's active leaf's `allowed_data_sfs` list —
+see `bitmap_to_sf_index` / `sf_index_to_bitmap` for the encoding, and the
+"SF index — cross-leaf safety" note below for the gateway-active-layer rule.
+
 ```
-byte:  0   1    2    3                        4    5                   6           7
-       ┌───┬────┬────┬────────────────────────┬────┬───────────────────┬───────────┬─────────────┐
-       │'R'│ src│next│ addr_len (3 hi)        │dst │ ctr_lo (4 hi)     │ sf_bitmap │ payload_len │
-       │   │    │    │ rsv (1)                │    │ flags (4 lo)      │           │             │
-       │   │    │    │ leaf_id (4 lo)         │    │                   │           │             │
-       └───┴────┴────┴────────────────────────┴────┴───────────────────┴───────────┴─────────────┘
+byte:  0   1    2    3                        4    5                   6                            7
+       ┌───┬────┬────┬────────────────────────┬────┬───────────────────┬─────────────────────────────┬─────────────┐
+       │'R'│ src│next│ addr_len (3 hi)        │dst │ ctr_lo (4 hi)     │ sf_index (2 hi)             │ payload_len │
+       │   │    │    │ rsv (1)                │    │ flags (4 lo)      │ rsv (6 lo)                  │             │
+       │   │    │    │ leaf_id (4 lo)         │    │                   │                             │             │
+       └───┴────┴────┴────────────────────────┴────┴───────────────────┴─────────────────────────────┴─────────────┘
 ```
 
 - `src` (8 bits): immediate sender of THIS RTS frame (the previous hop).
@@ -508,11 +513,22 @@ byte:  0   1    2    3                        4    5                   6        
     forwards; the addressed next-hop skips the originator throttle for it
     (§10a). A gateway's *own* originations carry no flag and are throttled
     normally. bits 2-3 reserved.
-- `sf_bitmap` (8 bits): bit `i` set means SF `i+5` is acceptable for
-  the data leg. e.g., `0b00001110` = {SF6, SF7, SF8}.
+- `sf_index` (2 bits, top of byte 6): index into the **active leaf's
+  `allowed_data_sfs`** list. Codes 0..2 = singleton bitmap of the SF at
+  that index; code 3 ("ANY") = full allowed bitmap (receiver picks by SNR).
+  See `bitmap_to_sf_index` for sender-side encoding; the cross-leaf
+  correctness rule is that pack and parse both use
+  `active_allowed_data_sfs(self)` (which the gateway switches per-flight
+  via `activate_primary_layer` / `activate_gateway_layer`), NOT
+  `self.allowed_data_sfs` (the static home-leaf config).
+- byte 6 lo (6 bits): reserved, set to 0. Available for future packing
+  (ROADMAP §10 cmd-nibble target uses 4 of these for `rts_flags`).
 - `payload_len` (8 bits): byte count of the upcoming DATA inner bytes
   plus MAC (= `#inner + MAC_LEN`). Lets the receiver size
-  `pending_rx_expiry` to actual airtime instead of worst-case.
+  `pending_rx_expiry` to actual airtime instead of worst-case. This byte
+  is load-bearing — dropping it forces `pending_rx_expiry` to fall back
+  to worst-case `max_payload_bytes`, which regresses throughput (see
+  `DELIVERY_ANALYSIS.md` "Wire-format compaction" for the analysis).
 
 ### 3.3 CTS (`'C'`) — 3 bytes
 
@@ -1118,14 +1134,15 @@ hears it regardless of which SF it is listening on at that moment.
 |---|---|---|
 | BCN | 8 + 3n (plain leaf); 8 + [1 + 4L] + 3n (gateway w/ L upper-layer schedule records) | n entries (3 B each, bit-packed) plus fixed `key_hash32`; default 151 B cap fits 47 entries |
 | Q   | 4 (+ 1 + 4×N for CHANNEL_PULL body) | one-hop query/control: REQ_SYNC, CHANNEL_PULL |
+| H   | 8      | hash-locate flood; multi-hop, forwardable (§3.7a) |
 | F   | 6      | route-Find flood (RREQ/RREP); multi-hop, forwardable (§3.7b) |
 | J_DISCOVER | 6 | join discovery; carries `key_hash32` |
 | J_OFFER | 8 | join bootstrap response; carries DATA SF bitmap |
 | J_CLAIM | 11 | short-address claim with lease age, epoch, nonce |
 | J_DENY | 15 | conflict/lease denial with owner and claimant hashes |
-| RTS | 8 | fixed |
+| RTS | 8 | fixed; `sf_bitmap` byte replaced by `sf_index(2) + rsv(6)` in `c20585b` |
 | CTS | 3 | fixed; addressed response |
-| DATA | 10 + n | in-leaf (addr_len=0): 6 B hdr + 2 B inner-hdr + n B body + 4 B MAC |
+| DATA | **20 + n** | in-leaf (addr_len=0): `DATA_HDR_LEN=14` (8 base + 6 visited) + 2 B inner-hdr + n B body + 4 B MAC. The 6-B visited-set loop guard shipped as `65f9c8a`. |
 | ACK | 3 | fixed; addressed response |
 | NACK | 4 | fixed; addressed response |
 
