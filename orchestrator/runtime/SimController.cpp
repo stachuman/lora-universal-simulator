@@ -423,8 +423,12 @@ void SimController::initialize() {
             ? _cfg.nodes[i].node_id
             : i;
         _nodes[i]->setProtocolId(protocol_node_id);
-        _host.registerNode(i, _nodes[i].get(), protocol_node_id,
-                           _cfg.nodes[i].key_hash32);
+        // registerNode binds the Lua self:* methods to a ScriptedNode*, so it
+        // needs the concrete type. Safe today: every node is a ScriptedNode.
+        // TODO(S1): wrap in `if (engine == "lua")` once FirmwareNode lands —
+        // firmware nodes skip Lua binding + loadScript entirely.
+        _host.registerNode(i, static_cast<ScriptedNode*>(_nodes[i].get()),
+                           protocol_node_id, _cfg.nodes[i].key_hash32);
         std::string resolved =
             resolveScriptPath(_cfg.nodes[i].script_path, _cfg.source_path);
         _host.loadScript(i, resolved);

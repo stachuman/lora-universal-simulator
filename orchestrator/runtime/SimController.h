@@ -24,6 +24,7 @@
 #include "core/physics/LbtModel.h"
 #include "core/radio/SimRadio.h"
 #include "core/topology/JsonConfig.h"
+#include "orchestrator/runtime/INode.h"
 #include "orchestrator/runtime/LuaHost.h"
 #include "orchestrator/runtime/ScriptedNode.h"
 
@@ -154,7 +155,11 @@ private:
     CollisionConfig                  _coll_cfg;
 
     std::vector<std::unique_ptr<SimRadio>>     _radios;
-    std::vector<std::unique_ptr<ScriptedNode>> _nodes;
+    // Polymorphic over INode so a future FirmwareNode (MeshRoute C++ firmware
+    // in-loop) can sit beside the Lua-backed ScriptedNode. Today every node is
+    // a ScriptedNode; the only site needing the concrete type is the Lua
+    // binding in initialize() (see the static_cast there).
+    std::vector<std::unique_ptr<INode>>        _nodes;
 
     std::unordered_map<std::string, int> _name_to_id;
     std::vector<bool>                    _command_fired;
