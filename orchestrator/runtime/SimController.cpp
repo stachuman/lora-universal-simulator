@@ -25,6 +25,7 @@
 #include "orchestrator/runtime/SimController.h"
 
 #include "orchestrator/runtime/LuaHost.h"
+#include "orchestrator/runtime/FirmwareNode.h"
 #include "orchestrator/runtime/ScriptedNode.h"
 #include "orchestrator/test_runner/ExpectRunner.h"
 
@@ -379,9 +380,17 @@ void SimController::initialize() {
         // once the loop honours startSendRaw failure paths instead of always
         // staging InFlight entries unconditionally.
 
-        _nodes.emplace_back(std::make_unique<ScriptedNode>(
-            i, _cfg.nodes[i].name,
-            _host, *_radios[i], _events_out, _clock, _rng));
+        if (_cfg.nodes[i].engine == "meshroute") {
+            // FirmwareNode: the MeshRoute C++ port run in-loop (sim-integration
+            // track). S1 is a skeleton; lib/core + TX/RX wiring lands in S2.
+            _nodes.emplace_back(std::make_unique<FirmwareNode>(
+                i, _cfg.nodes[i].name,
+                *_radios[i], _events_out, _clock, _rng));
+        } else {
+            _nodes.emplace_back(std::make_unique<ScriptedNode>(
+                i, _cfg.nodes[i].name,
+                _host, *_radios[i], _events_out, _clock, _rng));
+        }
         // Hand the node a stable pointer to its sf_rx_set slot so scripts
         // can retune at runtime via self:set_rx_sf(...). _node_sf_rx_set
         // was sized once via assign() above; the outer vector never
@@ -423,15 +432,17 @@ void SimController::initialize() {
             ? _cfg.nodes[i].node_id
             : i;
         _nodes[i]->setProtocolId(protocol_node_id);
-        // registerNode binds the Lua self:* methods to a ScriptedNode*, so it
-        // needs the concrete type. Safe today: every node is a ScriptedNode.
-        // TODO(S1): wrap in `if (engine == "lua")` once FirmwareNode lands —
-        // firmware nodes skip Lua binding + loadScript entirely.
-        _host.registerNode(i, static_cast<ScriptedNode*>(_nodes[i].get()),
-                           protocol_node_id, _cfg.nodes[i].key_hash32);
-        std::string resolved =
-            resolveScriptPath(_cfg.nodes[i].script_path, _cfg.source_path);
-        _host.loadScript(i, resolved);
+        // Lua-only wiring: bind the self:* methods + load the script.
+        // FirmwareNode (engine=="meshroute") runs C++ logic and skips both.
+        // The static_cast is safe inside this branch — the node was built as a
+        // ScriptedNode by the engine switch above.
+        if (_cfg.nodes[i].engine == "lua") {
+            _host.registerNode(i, static_cast<ScriptedNode*>(_nodes[i].get()),
+                               protocol_node_id, _cfg.nodes[i].key_hash32);
+            std::string resolved =
+                resolveScriptPath(_cfg.nodes[i].script_path, _cfg.source_path);
+            _host.loadScript(i, resolved);
+        }
     }
 
     // Expose the global `sim` table so scripts can drive the stepper. Bound

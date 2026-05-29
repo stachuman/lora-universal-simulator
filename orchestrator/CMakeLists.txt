@@ -4,6 +4,7 @@ add_executable(lus
     runtime/TimerWheel.cpp
     runtime/LuaHost.cpp
     runtime/ScriptedNode.cpp
+    runtime/FirmwareNode.cpp
     runtime/SimController.cpp
     runtime/InteractiveRepl.cpp
     runtime/Loop.cpp

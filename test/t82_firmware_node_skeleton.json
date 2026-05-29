@@ -1,0 +1,24 @@
+{
+  "_name": "t82_firmware_node_skeleton",
+  "_desc": "S1: a node with engine=\"meshroute\" boots as a FirmwareNode (skeleton) and fires its one-shot 1 s tick, while a lua no-op peer coexists. Asserts the firmware node emits firmware_node_boot once and firmware_node_tick once. Proves the engine switch + the non-Lua INode path + host clock/timer/emit wiring.",
+  "simulation": {
+    "duration_ms": 2000,
+    "step_ms": 1,
+    "seed": 42,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "fw1",  "engine": "meshroute" },
+    { "name": "lua1", "script": "examples/quiet.lua" }
+  ],
+  "topology": {
+    "links": [
+      { "from": "fw1", "to": "lua1", "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "script_emit_contains", "node": "fw1", "emit_type": "firmware_node_boot", "value": "meshroute" },
+    { "type": "script_emit_contains", "node": "fw1", "emit_type": "firmware_node_tick", "value": "" }
+  ]
+}

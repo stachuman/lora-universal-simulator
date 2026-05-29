@@ -228,6 +228,18 @@ static SimConfig parseJson(const json& j) {
                 }
                 def.config = nd["config"];
             }
+            if (nd.contains("engine")) {
+                if (!nd["engine"].is_string()) {
+                    throw std::runtime_error(
+                        "config error at " + ctx + ": field \"engine\" must be a string");
+                }
+                def.engine = nd["engine"].get<std::string>();
+                if (def.engine != "lua" && def.engine != "meshroute") {
+                    throw std::runtime_error(
+                        "config error at " + ctx + ": unknown engine \"" + def.engine
+                        + "\" (expected \"lua\" or \"meshroute\")");
+                }
+            }
 
             // Per-node radio overrides (nested or flat).
             if (nd.contains("radio")) {

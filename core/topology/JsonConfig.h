@@ -228,6 +228,11 @@ struct SimConfig {
         std::string    script_path;
         nlohmann::json config = nlohmann::json::object();
 
+        // Node engine: "lua" (default) -> ScriptedNode runs script_path;
+        // "meshroute" -> FirmwareNode (the C++ port run in-loop in the sim).
+        // See ~/MeshRoute/docs/PORT_PLAN.md §2.1 (sim-integration track).
+        std::string    engine = "lua";
+
         // Per-node radio overrides. -1 means "fall back to simulation.radio".
         int sf = -1;
         int bw = -1;
