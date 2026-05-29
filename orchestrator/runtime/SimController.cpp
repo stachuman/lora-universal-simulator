@@ -25,7 +25,9 @@
 #include "orchestrator/runtime/SimController.h"
 
 #include "orchestrator/runtime/LuaHost.h"
+#ifdef MESHROUTE_ENABLED
 #include "orchestrator/runtime/FirmwareNode.h"
+#endif
 #include "orchestrator/runtime/ScriptedNode.h"
 #include "orchestrator/test_runner/ExpectRunner.h"
 
@@ -381,11 +383,17 @@ void SimController::initialize() {
         // staging InFlight entries unconditionally.
 
         if (_cfg.nodes[i].engine == "meshroute") {
-            // FirmwareNode: the MeshRoute C++ port run in-loop (sim-integration
-            // track). S1 is a skeleton; lib/core + TX/RX wiring lands in S2.
+#ifdef MESHROUTE_ENABLED
+            // FirmwareNode: the MeshRoute C++ firmware (lib/core meshroute::Node)
+            // run in-loop, implementing meshroute::Hal over the sim's services.
             _nodes.emplace_back(std::make_unique<FirmwareNode>(
-                i, _cfg.nodes[i].name,
+                i, _cfg.nodes[i].name, _cfg.nodes[i].key_hash32,
                 *_radios[i], _events_out, _clock, _rng));
+#else
+            throw std::runtime_error(
+                "node '" + _cfg.nodes[i].name + "': engine \"meshroute\" requires "
+                "building with MeshRoute (not found at configure time; set -DMESHROUTE_DIR)");
+#endif
         } else {
             _nodes.emplace_back(std::make_unique<ScriptedNode>(
                 i, _cfg.nodes[i].name,

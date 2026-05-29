@@ -19,4 +19,38 @@ find_package(Threads REQUIRED)
 
 # Subdirectories (added incrementally as Tasks 4..N populate them)
 add_subdirectory(core)
+
+# --- MeshRoute C++ firmware core (optional; sim-integration track S2) ---------
+# Build the platform-neutral MeshRoute lib/core as a C++20 static lib so
+# engine:"meshroute" nodes (FirmwareNode) run the real firmware in-loop. Only
+# this target is C++20 (D-S2a = B); the sim stays C++17 and includes the
+# C++17-clean hal.h/node.h. Build-optional: if MeshRoute isn't found, the sim
+# still builds (Lua-only) and meshroute nodes error at runtime.
+set(MESHROUTE_DIR "${CMAKE_SOURCE_DIR}/../MeshRoute" CACHE PATH
+    "Path to the MeshRoute repo (for engine:meshroute firmware nodes)")
+if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
+    message(STATUS "MeshRoute found at ${MESHROUTE_DIR} — engine:meshroute ENABLED (meshroute_core)")
+    add_library(meshroute_core STATIC
+        ${MESHROUTE_DIR}/lib/core/airtime.cpp
+        ${MESHROUTE_DIR}/lib/core/frame_codec.cpp
+        ${MESHROUTE_DIR}/lib/core/node.cpp
+    )
+    target_compile_features(meshroute_core PRIVATE cxx_std_20)
+    target_compile_definitions(meshroute_core PRIVATE
+        PROTOCOL_VERSION=1
+        LORA_FREQ_HZ=869462500
+        LORA_BW_HZ=125000
+        LORA_SF=8
+        LORA_CR=5
+        LORA_PREAMBLE_SYM=16
+        LORA_DUTY_CYCLE_PCT=10
+    )
+    target_include_directories(meshroute_core PUBLIC ${MESHROUTE_DIR}/lib/core)
+    set(MESHROUTE_ENABLED ON)
+else()
+    message(WARNING "MeshRoute not found at ${MESHROUTE_DIR} — building WITHOUT engine:meshroute "
+                    "(scenarios using it error at runtime). Override with -DMESHROUTE_DIR=<path>.")
+    set(MESHROUTE_ENABLED OFF)
+endif()
+
 add_subdirectory(orchestrator)

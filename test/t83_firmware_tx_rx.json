@@ -1,0 +1,26 @@
+{
+  "_name": "t83_firmware_tx_rx",
+  "_desc": "S2: two engine=meshroute FirmwareNodes drive the real MeshRoute lib/core meshroute::Node via the meshroute::Hal, and exchange a raw placeholder frame across the real SimRadio channel. fw0 TXes at ~1s, fw1 at ~2s (id-staggered, no self-collision); each receives the other. Asserts both TX and both RX via the lib/core Node's mr_node_tx / mr_node_rx emits - proving the full Node -> Hal.tx -> SimRadio -> peer onRecv -> Node.on_recv path. Supersedes the S1 t82 skeleton.",
+  "simulation": {
+    "duration_ms": 3000,
+    "step_ms": 1,
+    "seed": 42,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "fw0", "engine": "meshroute" },
+    { "name": "fw1", "engine": "meshroute" }
+  ],
+  "topology": {
+    "links": [
+      { "from": "fw0", "to": "fw1", "snr": 10.0, "rssi": -70.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": [
+    { "type": "script_emit_contains", "node": "fw0", "emit_type": "mr_node_tx", "value": "" },
+    { "type": "script_emit_contains", "node": "fw1", "emit_type": "mr_node_tx", "value": "" },
+    { "type": "script_emit_contains", "node": "fw0", "emit_type": "mr_node_rx", "value": "" },
+    { "type": "script_emit_contains", "node": "fw1", "emit_type": "mr_node_rx", "value": "" }
+  ]
+}
