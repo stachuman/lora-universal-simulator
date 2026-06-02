@@ -55,6 +55,16 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
         cfg.rt_aging_ttl_remote_ms   = config.value("rt_aging_ttl_remote_ms",   cfg.rt_aging_ttl_remote_ms);
         cfg.rt_aging_check_period_ms = config.value("rt_aging_check_period_ms", cfg.rt_aging_check_period_ms);
         cfg.data_sf                  = config.value("data_sf",                  cfg.data_sf);   // R3 data plane
+        // allowed_data_sfs: [7,9] -> allowed_sf_bitmap (bit = sf), matching the Lua config key. The DATA-SF
+        // selector picks the fastest SF in this set the link SNR supports; absent/empty -> the single data_sf.
+        if (config.contains("allowed_data_sfs") && config["allowed_data_sfs"].is_array()) {
+            uint16_t bm = 0;
+            for (const auto& v : config["allowed_data_sfs"]) {
+                const int s = v.get<int>();
+                if (s >= 5 && s <= 12) bm |= static_cast<uint16_t>(1u << s);
+            }
+            cfg.allowed_sf_bitmap = bm;
+        }
         // R4.0 duty-cycle budget. Mirror the Lua precedence EXACTLY (dv_dual_sf.lua:8495-8496):
         //   self.duty_cycle = config.duty_cycle or config._sim_duty_cycle or 0.01
         // SimController injects _sim_duty_cycle = simulation.radio.duty_cycle (default 0.01) into every
