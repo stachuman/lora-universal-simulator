@@ -4502,6 +4502,14 @@ end
 -- propagate within one beacon period instead of waiting for the
 -- sliding-offset rotation to come around.
 local function rt_merge(self, rt, dest_id, cand, viab_db)
+  -- Never store a route whose dest or next-hop is an invalid/unknown node id (valid 0..254;
+  -- 255/0xFF reserved). Guards the meta.src = -1 sentinel (no PHY link source on metal) from
+  -- leaking in as a dest/next_hop — it poisons rt and crashes beacon pack's string.char. This
+  -- is the single route-insert choke point, so it catches every learning path at once.
+  if (dest_id and (dest_id < 0 or dest_id > 254))
+     or (cand and cand.next_hop and (cand.next_hop < 0 or cand.next_hop > 254)) then
+    return "invalid_route"
+  end
   if route_uses_mobile_as_transit(self, dest_id, cand and cand.next_hop) then
     self:emit("rt_skip_mobile_transit", {
       dest = dest_id,
@@ -7560,7 +7568,10 @@ end
 
 -- Takes Q4 SNR (caller converts from runtime meta.snr float).
 local function learn_direct_from_frame(self, src_id, snr_q4, source)
-  if src_id == nil or src_id == self.id or snr_q4 == nil then return "no_src" end
+  -- src_id < 0 / > 254 = unknown or invalid sender (e.g. meta.src = -1 when the PHY carries
+  -- no link source): never learn a route to it — it poisons rt and crashes beacon pack's
+  -- string.char. Matches the >=0 and <=254 node-id convention used elsewhere in this file.
+  if src_id == nil or src_id < 0 or src_id > 254 or src_id == self.id or snr_q4 == nil then return "no_src" end
   local route_score_q4 = route_score_from_snr(self, snr_q4)
   local cand = {
     next_hop = src_id,
@@ -10758,7 +10769,7 @@ function on_recv(self, frame, meta)
     -- route_strictly_better with tier penalty (§5.7). No new merge
     -- logic. Bounded by MAX_HOP_LIMIT (8); claims that would yield
     -- hops > 8 are dropped (same guard BCN-merged entries face).
-    if self.rt_learn_from_data and meta.src ~= nil and meta.src ~= self.id then
+    if self.rt_learn_from_data and meta.src ~= nil and meta.src >= 0 and meta.src <= 254 and meta.src ~= self.id then
       local carrier = meta.src
       local carrier_claim = d.prev_fwd_rt_hops or 0
       local candidate_hops = carrier_claim + 1
