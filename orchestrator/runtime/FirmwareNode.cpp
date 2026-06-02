@@ -94,8 +94,11 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
 void FirmwareNode::onRecv(std::string_view bytes, float snr, float rssi,
                           int link_id, int src_id, uint64_t sim_ms) {
     (void)link_id;
+    // god-view sender id intentionally discarded: real LoRa carries no link source,
+    // so the firmware must run with src_hint = -1 (unknown) exactly as it does on metal.
+    (void)src_id;
     if (!_initialized || !_node) return;
-    meshroute::RxMeta meta{snr, rssi, sim_ms, static_cast<int16_t>(src_id)};
+    meshroute::RxMeta meta{snr, rssi, sim_ms, /*src_hint=*/-1};
     _node->on_recv(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), meta);
 }
 

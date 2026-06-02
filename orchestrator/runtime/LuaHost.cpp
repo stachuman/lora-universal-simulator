@@ -287,7 +287,10 @@ void LuaHost::callOnRecv(int node_id, std::string_view bytes,
     meta["snr"]     = snr;
     meta["rssi"]    = rssi;
     meta["link_id"] = link_id;
-    meta["src"]     = src_id;
+    // god-view sender id intentionally discarded (mirrors FirmwareNode::onRecv):
+    // real LoRa carries no link source, so meta.src must be the -1 "unknown" sentinel.
+    (void)src_id;
+    meta["src"]     = -1;
     meta["recv_ms"] = sim_ms;
     sol::protected_function_result r = fn.call(self, std::string(bytes), meta);
     if (!r.valid()) {
