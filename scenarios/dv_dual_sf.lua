@@ -9732,7 +9732,7 @@ function on_recv(self, frame, meta)
     -- Cross-network filter — drop foreign-network RTSes before any routing,
     -- anti-spam, or implicit-ACK side effects.
     if r.leaf_id ~= active_leaf_id(self) then return end
-    learn_rx_source("rts_frame")
+    learn_rx_source("rts_frame", r.src)
     -- Anti-spam observation FIRST: track this RTS in r.src's sliding
     -- window even when the RTS isn't addressed to us (we're overhearing
     -- broadcasts on routing_sf). All 1st-hop neighbours of an originator
@@ -9743,12 +9743,12 @@ function on_recv(self, frame, meta)
     -- no preceding CTS, so counting it would mis-read the gateway as a
     -- runaway originator (§10a). Don't observe it; don't throttle it.
     if not r.relay then
-      track_originator_observation(self, meta.src, "rts", r.ctr_lo,
+      track_originator_observation(self, r.src, "rts", r.ctr_lo,
         airtime_ms(active_routing_sf(self), self.bw_hz, self.cr,
                    self.preamble_sym, #frame))
     else
       -- Gateway cross-layer forward: exempt from the §10a originator metric.
-      self:emit("rts_relay_exempt", { from = meta.src, ctr_lo = r.ctr_lo })
+      self:emit("rts_relay_exempt", { from = r.src, ctr_lo = r.ctr_lo })
     end
     -- If we are waiting for a hop ACK from our selected next-hop and we
     -- overhear that next-hop forwarding the same DATA onward, that RTS-fwd is
@@ -9756,7 +9756,6 @@ function on_recv(self, frame, meta)
     -- the upstream retry from colliding with the forwarder's downstream DATA
     -- after a lost hop ACK.
     if self.pending_tx ~= nil
-       and meta.src == self.pending_tx.next
        and r.src == self.pending_tx.next
        and r.dst == self.pending_tx.dst
        and r.ctr_lo == self.pending_tx.ctr_lo
@@ -9770,7 +9769,7 @@ function on_recv(self, frame, meta)
         self.ack_timeout_handle = nil
       end
       self:emit("implicit_ack_from_forward", {
-        from = meta.src,
+        from = r.src,
         origin = self.pending_tx.origin,
         dst = self.pending_tx.dst,
         next = self.pending_tx.next,
@@ -9782,7 +9781,7 @@ function on_recv(self, frame, meta)
       })
       self:log(string.format(
         "implicit_ack_from_forward <- %s ctr_lo=%d forwarding to %s -> hop complete",
-        name_of(self, meta.src), r.ctr_lo, name_of(self, r.next)))
+        name_of(self, r.src), r.ctr_lo, name_of(self, r.next)))
       self.pending_tx = nil
       become_free(self)
       return
@@ -10025,7 +10024,7 @@ function on_recv(self, frame, meta)
     -- and their RTS-without-CTS on this layer would otherwise trip the metric.
     if not r.relay then
       local app_orig, total_air, rts_n, cts_n =
-        compute_originator_metric(self, meta.src)
+        compute_originator_metric(self, r.src)
       local airtime_cap_ms = math.floor(
         self.originator_airtime_share * (self.duty_cycle_budget_ms or 36000))
       -- The airtime BACKSTOP needs a real budget to derive a share: with duty disabled
@@ -10037,7 +10036,7 @@ function on_recv(self, frame, meta)
       if app_orig > self.originator_max_per_window
          or over_airtime then
         self:emit("rts_drop_originator_throttle", {
-          from = meta.src, ctr_lo = r.ctr_lo,
+          from = r.src, ctr_lo = r.ctr_lo,
           apparent_origination = app_orig,
           airtime_ms           = total_air,
           rts_count            = rts_n,
@@ -10048,7 +10047,7 @@ function on_recv(self, frame, meta)
         })
         self:log(string.format(
           "rts_drop_originator_throttle <- %s ctr_lo=%d (R-C=%d/%d over %dms, air=%dms/%dms)",
-          name_of(self, meta.src), r.ctr_lo,
+          name_of(self, r.src), r.ctr_lo,
           app_orig, self.originator_max_per_window,
           self.originator_window_ms, total_air, airtime_cap_ms))
         return  -- silent drop; no CTS, no NACK
@@ -10344,7 +10343,7 @@ function on_recv(self, frame, meta)
       })
       return
     end
-    if meta.src ~= nil and meta.src ~= self.pending_tx.next then
+    if meta.src ~= nil and meta.src >= 0 and meta.src ~= self.pending_tx.next then
       self:emit("ack_drop_unexpected_src", {
         expected = self.pending_tx.next,
         from = meta.src,
@@ -10415,7 +10414,7 @@ function on_recv(self, frame, meta)
     if n.to ~= self.id then return end
     if self.pending_tx == nil then return end
     if n.ctr_lo ~= self.pending_tx.ctr_lo then return end
-    if meta.src ~= nil and meta.src ~= self.pending_tx.next then
+    if meta.src ~= nil and meta.src >= 0 and meta.src ~= self.pending_tx.next then
       self:emit("nack_drop_unexpected_src", {
         expected = self.pending_tx.next,
         from = meta.src,
