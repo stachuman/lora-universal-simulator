@@ -55,6 +55,7 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
         cfg.rt_aging_ttl_remote_ms   = config.value("rt_aging_ttl_remote_ms",   cfg.rt_aging_ttl_remote_ms);
         cfg.rt_aging_check_period_ms = config.value("rt_aging_check_period_ms", cfg.rt_aging_check_period_ms);
         cfg.data_sf                  = config.value("data_sf",                  cfg.data_sf);   // R3 data plane
+        cfg.dv_hop_cap               = config.value("dv_hop_cap",               cfg.dv_hop_cap); // network-wide (J-join distributes it in Slice 3)
         // allowed_data_sfs: [7,9] -> allowed_sf_bitmap (bit = sf), matching the Lua config key. The DATA-SF
         // selector picks the fastest SF in this set the link SNR supports; absent/empty -> the single data_sf.
         if (config.contains("allowed_data_sfs") && config["allowed_data_sfs"].is_array()) {
