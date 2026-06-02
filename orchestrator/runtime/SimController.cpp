@@ -743,21 +743,23 @@ void SimController::processCommandsAtStep() {
         // host resolves "send <name> <text>" -> "send <id> <text>" here so scenarios
         // stay readable and dm_delivery's configured_pairs still resolves the pair.
         std::string command = cmd.command;
-        if (_cfg.nodes[target].engine == "meshroute" && command.rfind("send ", 0) == 0) {
-            size_t s = 5;
-            while (s < command.size() && command[s] == ' ') ++s;
-            const size_t e = command.find(' ', s);
-            if (e != std::string::npos) {
-                const std::string name = command.substr(s, e - s);
-                const auto nit = _name_to_id.find(name);
-                if (nit != _name_to_id.end())
-                    // Resolve to the PROTOCOL id the firmware routes by, NOT the
-                    // array index — they differ when a scenario sets an explicit
-                    // node_id != slot, and a name->index rewrite would target the
-                    // wrong id (silent send_no_route). protocolId()==index when
-                    // node_id is unset, so existing scenarios are unchanged.
-                    command = "send " + std::to_string(_nodes[nit->second]->protocolId())
-                              + command.substr(e);
+        if (_cfg.nodes[target].engine == "meshroute") {
+            // Resolve "send <name>" / "send_e2e <name>" -> "<verb> <id>", rebuilding with the SAME verb.
+            // PROTOCOL id, not the array index (they differ when a scenario sets node_id != slot).
+            size_t plen = 0;
+            if      (command.rfind("send_e2e ", 0) == 0) plen = 9;
+            else if (command.rfind("send ", 0) == 0)     plen = 5;
+            if (plen) {
+                size_t s = plen;
+                while (s < command.size() && command[s] == ' ') ++s;
+                const size_t e = command.find(' ', s);
+                if (e != std::string::npos) {
+                    const std::string name = command.substr(s, e - s);
+                    const auto nit = _name_to_id.find(name);
+                    if (nit != _name_to_id.end())
+                        command = command.substr(0, plen) + std::to_string(_nodes[nit->second]->protocolId())
+                                  + command.substr(e);
+                }
             }
         }
         std::string reply = _nodes[target]->onCommand(command);

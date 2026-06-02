@@ -119,8 +119,10 @@ std::string FirmwareNode::onCommand(std::string_view cmd_str) {
     // The sim TRANSPORT parses its command string into a TYPED meshroute::Command
     // (a device backend parses its binary frames into the SAME Command). lib/core
     // never sees a command string. SimController has already resolved name -> id.
-    if (cmd.rfind("send ", 0) == 0) {
-        size_t s = 5; while (s < cmd.size() && cmd[s] == ' ') ++s;
+    const bool is_e2e = (cmd.rfind("send_e2e ", 0) == 0);
+    const size_t pfx  = is_e2e ? 9 : (cmd.rfind("send ", 0) == 0 ? 5 : 0);
+    if (pfx) {
+        size_t s = pfx; while (s < cmd.size() && cmd[s] == ' ') ++s;
         unsigned dst = 0; size_t e = s; bool got = false;
         while (e < cmd.size() && cmd[e] >= '0' && cmd[e] <= '9') { dst = dst * 10 + (cmd[e] - '0'); ++e; got = true; }
         if (got && dst <= 254 && e < cmd.size() && cmd[e] == ' ') {
@@ -128,7 +130,7 @@ std::string FirmwareNode::onCommand(std::string_view cmd_str) {
             meshroute::Command c{};
             c.kind = meshroute::CmdKind::send;
             c.u.send.dst_id = static_cast<uint8_t>(dst);
-            c.u.send.flags  = 0;
+            c.u.send.flags  = is_e2e ? 0x08 : 0;   // 0x08 = meshroute DATA_FLAG_E2E_ACK_REQ (frame_codec.h is C++20-only)
             const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
             c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
