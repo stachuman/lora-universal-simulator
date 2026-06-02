@@ -38,6 +38,7 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         ${MESHROUTE_DIR}/lib/core/node_routing.cpp
         ${MESHROUTE_DIR}/lib/core/node_mac.cpp
         ${MESHROUTE_DIR}/lib/core/node_mac_rx.cpp
+        ${MESHROUTE_DIR}/lib/core/node_route_discovery.cpp
         ${MESHROUTE_DIR}/lib/core/node_budget.cpp
         ${MESHROUTE_DIR}/lib/core/node_cascade.cpp
     )
