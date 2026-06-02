@@ -7,15 +7,17 @@
 -- | ----- | ------ | ------------------------------------------------------------------------------- |
 -- | `'B'` | Beacon | `B`, [leaf_id(4)|has_schedule(1)|self_gateway(1)|is_mobile(1)|rsv(1)](1), src(1), [seen_bm(1)|has_ext(1)|n_entries(6)](1), key_hash32(4), [layer_count(1)+sched×L×4B]?, entries × n × {dest(1), next(1), [bucket(4)|rsv(3)|is_gateway(1)](1), hops(1)}, seen_bitmap(32B)?, ext_len(1)+TLVs?  →  8 + [1+4L]? + 4n + [32]? + [1+ext]? B |
 -- | `'R'` | RTS    | `R`, src(1), next(1), [addr_len(3)|rsv(1)|leaf_id(4)](1), dst(1 when addr_len=0), [ctr_lo(4)|rsv(4)](1), sf_bitmap(1), payload_len(1)  →  8 B (in-leaf) |
--- | `'C'` | CTS    | `C`, [ctr_lo(4)|(sf-5)(3)|already_received(1)](1)  →  2 B                      |
+-- | `'C'` | CTS    | `C`, [(sf-5)(3)|already_received(1)](1), tx_id(1), rx_id(1)  →  4 B (3 B C++)                      |
 -- | `'D'` | DATA   | `D`, [addr_len(3)\|rsv(1)\|E2E_ACK_REQ(1)\|E2E_IS_ACK(1)\|IS_MULTICAST(1)\|rsv(1)](1), next(1), dst(1 when addr_len=0), ctr_lo(1), ctr_hi(1), ciphertext(n+2), MAC(4)  →  10+n B (in-leaf) |
 -- | `'K'` | ACK    | `K`, [ctr_lo(4)|snr_bucket(4)](1)  →  2 B                                       |
 -- | `'N'` | NACK   | `N`, [reason(4)|ctr_lo(4)](1), payload(1)  →  3 B  |
 -- | `'Q'` | RREQ-route | `Q`, src(1), dest(1), [leaf_id(4)|reserved(4)](1)  →  4 B (one-hop route query) |
 -- | `'H'` | hash-locate | `H`, origin(1), [leaf_id(4)|flags(4)](1), key_hash32(4 LE), ttl(1)  →  8 B (multi-hop TTL flood; only forwardable control frame; §3.7a) |
 --
--- All control frames carry a 4-bit ctr_lo (per-(originator) flight
--- counter, wraps at 16; dedup tolerated by last_acked_from's 10s TTL).
+-- All control frames EXCEPT CTS carry a 4-bit ctr_lo (per-(originator)
+-- flight counter, wraps at 16; dedup tolerated by last_acked_from's 10s
+-- TTL). CTS drops ctr_lo — its tx_id+rx_id pair pins the flight under
+-- single-slot stop-and-wait (see the CTS row above).
 -- leaf_id (4 bits, externally managed) appears in BCN and RTS — the
 -- two frames that gate routing decisions. Receivers reject foreign-
 -- network BCN/RTS before doing any work, preventing duplicate-CTS,
@@ -33,9 +35,10 @@
 -- to actual airtime instead of max_payload_bytes worst-case — important
 -- when bodies vary 10–200 bytes, since the worst-case budget would freeze
 -- pending_rx ~2× longer than needed.
--- CTS's last byte is the receiver's chosen data SF (single value, 5..12),
--- plus already_received=1 when the receiver already has this DATA from
--- a previous try whose ACK was lost. The SNR fed into select_data_sf is the
+-- CTS's flags byte carries the receiver's chosen data SF (single value,
+-- 5..12, encoded as sf-5) plus already_received=1 when the receiver already
+-- has this DATA from a previous try whose ACK was lost; bytes 2-3 carry
+-- tx_id (CTS sender) and rx_id (the requester cleared). The SNR fed into select_data_sf is the
 -- per-neighbour inbound EWMA (`snr_ewma_in[r.src]`), updated at the top
 -- of every on_recv with the most recent meta.snr from that neighbour —
 -- so the SF pick rides on a smoothed ~10-sample estimate instead of a
@@ -521,6 +524,13 @@
 --   R[X] = total RTS-tx events from X (any tag 'R' — RTS, RTS-fwd,
 --          RTS-rty all count, they're indistinguishable on the wire)
 --   C[X] = total CTS-tx events from X (tag 'C')
+--
+-- Sender identity X is the frame's self-asserted sender: CTS now carries
+-- tx_id (this change), RTS carries src (its counting migrates off the sim
+-- god-view meta.src next). Once migrated, "from X's radio" becomes "claims
+-- to be X" on real hardware — modified firmware can spoof the sender id.
+-- This is a statistical guard against honest-but-chatty originators, NOT an
+-- adversarial defense; spoof resistance needs an authenticated header (§9).
 --
 -- A legitimate forwarder emits one CTS per inbound flight and one RTS
 -- per outbound forward, so R[X] ≈ C[X] over time. An originator emits
@@ -2097,25 +2107,31 @@ local function parse_rts(frame, receiver_allowed_data_sfs)
   return out
 end
 
--- CTS — 3 bytes, addressed response:
+-- CTS — 4 bytes (Lua literal-tag layout; 3 B in the §10 cmd-nibble C++ wire),
+-- addressed response. ctr_lo is DROPPED vs the legacy 3-byte CTS: with an
+-- explicit tx_id+rx_id and single-slot stop-and-wait, the (tx_id, rx_id) pair
+-- pins the flight, and tx_id — not ctr_lo — is what disambiguates cascade
+-- alts answering the same RTS. tx_id also makes the CTS addressable and
+-- attributable on real hardware (no sim god-view of the PHY sender).
 --   byte 0 : tag 'C'
---   byte 1 : ctr_lo (4 hi nibble) | (chosen_data_sf - 5) (3) | already_received (1)
---   byte 2 : intended requester id
-local function pack_cts(ctr_lo, chosen_data_sf, already_received, to_id)
+--   byte 1 : (chosen_data_sf - 5) (bits 3..1) | already_received (bit 0)   [hi nibble reserved]
+--   byte 2 : tx_id — CTS sender (the forwarder clearing the requester)
+--   byte 3 : rx_id — intended requester id (the RTS sender being cleared)
+local function pack_cts(chosen_data_sf, already_received, tx_id, rx_id)
   local sf_off = (chosen_data_sf - 5) & 0x7
   local ack_bit = already_received and 1 or 0
-  local b1 = ((ctr_lo & 0xf) << 4) | (sf_off << 1) | ack_bit
-  return "C" .. string.char(b1) .. string.char(to_id or 255)
+  local b1 = (sf_off << 1) | ack_bit
+  return "C" .. string.char(b1) .. string.char(tx_id or 255) .. string.char(rx_id or 255)
 end
 
 local function parse_cts(frame)
-  if #frame < 3 or frame:sub(1,1) ~= "C" then return nil end
+  if #frame < 4 or frame:sub(1,1) ~= "C" then return nil end
   local b1 = frame:byte(2)
   return {
-    ctr_lo         = (b1 >> 4) & 0xf,
-    chosen_data_sf = ((b1 >> 1) & 0x7) + 5,
+    chosen_data_sf   = ((b1 >> 1) & 0x7) + 5,
     already_received = (b1 & 0x1) ~= 0,
-    to             = frame:byte(3),
+    tx_id            = frame:byte(3),
+    rx_id            = frame:byte(4),
   }
 end
 
@@ -2893,7 +2909,7 @@ end
 -- table at top of file so airtime predictions stay precise as we extend the
 -- protocol — bump these if the frame layout changes.
 local RTS_LEN = 8       -- 'R' + src + next + [addr_len|rsv|leaf_id] + dst + [ctr_lo<<4|rsv] + sf_bitmap + payload_len
-local CTS_LEN = 3       -- 'C' + (ctr_lo<<4 | (sf-5)<<1 | already_received) + to
+local CTS_LEN = 4       -- 'C' + [(sf-5)<<1 | already_received] flags + tx_id + rx_id  (ctr_lo dropped; tx_id added — see pack_cts)
 -- SX126x / SX127x LoRa PHY length register is 8-bit → 255 bytes max for
 -- the *entire* on-air frame. Anything longer is physically untransmittable.
 -- The runtime enforces this at TX with a `tx_oversized` event; the script
@@ -3256,8 +3272,9 @@ local function compute_originator_metric(self, sender_id)
   -- a multi-second congestion stall (e.g. a relay hammering a busy next-hop on
   -- the cross-layer second leg) spaces them past that, so each escaped retry
   -- used to bump rts. Dedup by ctr_lo across the whole window here instead.
-  -- (ctr_lo is 4-bit on the wire, so this caps at 16 distinct — far above the
-  -- ~6 threshold, so a genuine spammer cycling ctr_lo still trips it.) Airtime
+  -- (RTS dedups by 4-bit ctr_lo -> caps at 16 distinct; CTS dedups by rx_id
+  -- since it dropped ctr_lo -> caps at ~256. Both far above the ~6 threshold,
+  -- so a genuine spammer cycling the key still trips it.) Airtime
   -- stays cumulative: retries really do burn channel time, so the airtime
   -- backstop keeps catching high-volume spam regardless of ctr_lo reuse.
   local rts_seen, cts_seen = {}, {}
@@ -9181,16 +9198,21 @@ function on_recv(self, frame, meta)
   -- known to belong to the active leaf/layer, otherwise a gateway listening
   -- on one layer can pollute that layer's rt[] with a foreign-layer sender
   -- before the later per-frame leaf filter rejects the payload.
-  local function learn_rx_source(source)
-    if meta.src == nil or meta_snr_q4 == nil then return false end
-    local pre_action = learn_direct_from_frame(self, meta.src, meta_snr_q4, source or "direct_frame")
+  local function learn_rx_source(source, sender)
+    -- `sender` is the direct PHY transmitter. Frames that carry the sender on
+    -- the wire pass it explicitly (CTS tx_id today; RTS/beacon src, DATA
+    -- visited-tail to follow); the rest still fall back to the sim god-view
+    -- meta.src until they are migrated off it per-frame.
+    sender = sender or meta.src
+    if sender == nil or meta_snr_q4 == nil then return false end
+    local pre_action = learn_direct_from_frame(self, sender, meta_snr_q4, source or "direct_frame")
     learned_direct_pre = (pre_action == "new"
                           or pre_action == "promote"
                           or pre_action == "primary_refresh"
                           or pre_action == "alt_install")
-    id_bind_refresh_plain(self, meta.src, source or "rx_frame")
-    mark_dest_seen(self, meta.src, "direct")
-    clear_peer_suspect(self, meta.src, "rx_frame")
+    id_bind_refresh_plain(self, sender, source or "rx_frame")
+    mark_dest_seen(self, sender, "direct")
+    clear_peer_suspect(self, sender, "rx_frame")
     return learned_direct_pre
   end
   local tag = frame:sub(1, 1)
@@ -9884,7 +9906,7 @@ function on_recv(self, frame, meta)
         end
       end
       if chosen_sf == nil then return end
-      local cts = pack_cts(r.ctr_lo, chosen_sf, true, r.src)
+      local cts = pack_cts(chosen_sf, true, self.id, r.src)
       self:emit("cts_tx", {
         to = r.src, ctr_lo = r.ctr_lo,
         chosen_data_sf = chosen_sf,
@@ -9918,7 +9940,7 @@ function on_recv(self, frame, meta)
         self:log(string.format("rts_rx_dup <- %s dst=%s ctr_lo=%d len=%d -> resending CTS (sf=%d)",
           name_of(self, r.src), name_of(self, r.dst), r.ctr_lo, r.payload_len,
           self.pending_rx.chosen_data_sf))
-        local cts = pack_cts(r.ctr_lo, self.pending_rx.chosen_data_sf, false, r.src)
+        local cts = pack_cts(self.pending_rx.chosen_data_sf, false, self.id, r.src)
         self:emit("cts_tx", {
           to = r.src, ctr_lo = r.ctr_lo, dup = true,
           chosen_data_sf = self.pending_rx.chosen_data_sf,
@@ -10089,7 +10111,7 @@ function on_recv(self, frame, meta)
     -- Arm the expiry timer so a never-arriving DATA can't freeze us.
     start_pending_rx_expiry(self)
 
-    local cts = pack_cts(r.ctr_lo, chosen_sf, false, r.src)
+    local cts = pack_cts(chosen_sf, false, self.id, r.src)
     self:emit("cts_tx", {
       to = r.src, ctr_lo = r.ctr_lo,
       chosen_data_sf = chosen_sf,
@@ -10115,13 +10137,17 @@ function on_recv(self, frame, meta)
   if tag == "C" then
     local c = parse_cts(frame)
     if not c then return end
-    -- Anti-spam: track this CTS in meta.src's sliding window. CTS is the
-    -- forwarder fingerprint — a legitimate forwarder emits ~1 CTS per
-    -- inbound flight, so over the window R[X] ≈ C[X] for forwarders;
-    -- an originator never CTSes (no inbound RTS to respond to) so
-    -- C[X] ≈ 0. See header doc block "Anti-spam: 1st-hop statistical
-    -- rate-limit".
-    track_originator_observation(self, meta.src, "cts", c.ctr_lo,
+    -- Anti-spam: track this CTS in the CTS sender's (c.tx_id) sliding window.
+    -- CTS is the forwarder fingerprint — a legitimate forwarder emits ~1 CTS
+    -- per inbound flight, so over the window R[X] ≈ C[X] for forwarders; an
+    -- originator never CTSes (no inbound RTS to respond to) so C[X] ≈ 0. See
+    -- header doc block "Anti-spam: 1st-hop statistical rate-limit".
+    -- Dedup tag is rx_id (the cleared requester), not the dropped ctr_lo: a
+    -- CTS retry is driven by the upstream re-sending its RTS, so "same rx_id
+    -- within retry_window" == that flight's re-CTS. Coarser than ctr_lo (two
+    -- distinct flights from one upstream inside the window would merge) —
+    -- flagged for simulation.
+    track_originator_observation(self, c.tx_id, "cts", c.rx_id,
       airtime_ms(self.routing_sf, self.bw_hz, self.cr,
                  self.preamble_sym, #frame))
 
@@ -10130,34 +10156,35 @@ function on_recv(self, frame, meta)
     -- (cts_to_data_gap + airtime of the chosen data_sf, max payload).
     -- Stash that absolute end-time so future RTS attempts toward this
     -- sender either alt-switch or defer instead of hitting drop_sf_mismatch.
-    if meta.src ~= nil then
+    if c.tx_id ~= nil then
       local now = self:now()
       local blind_window = self.cts_to_data_gap_ms +
         airtime_ms(c.chosen_data_sf, self.bw_hz, self.cr,
                    self.preamble_sym,
                    DATA_HDR_LEN + self.max_payload_bytes + DATA_INNER_OVERHEAD)
       local end_ms = now + blind_window
-      local prev = self.blind_until[meta.src]
+      local prev = self.blind_until[c.tx_id]
       if prev == nil or end_ms > prev then
-        self.blind_until[meta.src] = end_ms
+        self.blind_until[c.tx_id] = end_ms
         self:emit("blind_observed", {
-          node           = meta.src,
+          node           = c.tx_id,
           until_ms       = end_ms,
           chosen_data_sf = c.chosen_data_sf,
         })
       end
     end
 
-    if c.to ~= self.id then
+    if c.rx_id ~= self.id then
       return
     end
 
     if self.pending_tx == nil then return end
-    if c.ctr_lo ~= self.pending_tx.ctr_lo then return end
+    -- ctr_lo flight-match dropped: rx_id==self.id (above) + tx_id==pending_tx.next
+    -- (below) pin the flight under single-slot stop-and-wait.
     if self.pending_tx.awaiting_cts == false then
       self:emit("cts_drop_no_active_rts", {
-        from = meta.src,
-        ctr_lo = c.ctr_lo,
+        from = c.tx_id,
+        ctr_lo = self.pending_tx.ctr_lo,
         origin = self.pending_tx.origin,
         dst = self.pending_tx.dst,
         next = self.pending_tx.next,
@@ -10166,18 +10193,18 @@ function on_recv(self, frame, meta)
       })
       return
     end
-    if meta.src ~= nil and meta.src ~= self.pending_tx.next then
+    if c.tx_id ~= self.pending_tx.next then
       self:emit("cts_drop_unexpected_src", {
         expected = self.pending_tx.next,
-        from = meta.src,
-        ctr_lo = c.ctr_lo,
+        from = c.tx_id,
+        ctr_lo = self.pending_tx.ctr_lo,
         origin = self.pending_tx.origin,
         dst = self.pending_tx.dst,
         payload = self.pending_tx.user_text,
       })
       return
     end
-    learn_rx_source("cts_frame")
+    learn_rx_source("cts_frame", c.tx_id)
 
     -- CTS matched — cancel the rts_timeout. Without this, the timer fires
     -- on the same tick (rts_timeout_ms = exact RTS+CTS airtime) before the
@@ -10196,7 +10223,7 @@ function on_recv(self, frame, meta)
     if not sf_in_bitmap(cts_allowed_bitmap, c.chosen_data_sf) then
       self:emit("cts_invalid_sf", {
         origin = self.pending_tx.origin, payload = self.pending_tx.user_text,
-        from = c.src or self.pending_tx.next, ctr_lo = c.ctr_lo,
+        from = c.tx_id, ctr_lo = self.pending_tx.ctr_lo,
         chosen_data_sf = c.chosen_data_sf,
         allowed_sf_bitmap = cts_allowed_bitmap,
       })
@@ -10209,7 +10236,7 @@ function on_recv(self, frame, meta)
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
       ctr = self.pending_tx.ctr,
-      from = self.pending_tx.next, ctr_lo = c.ctr_lo,
+      from = self.pending_tx.next, ctr_lo = self.pending_tx.ctr_lo,
       chosen_data_sf = c.chosen_data_sf,
       already_received = c.already_received,
     })
@@ -10225,12 +10252,12 @@ function on_recv(self, frame, meta)
         payload = self.pending_tx.user_text,
         ctr = self.pending_tx.ctr,
         from = self.pending_tx.next,
-        ctr_lo = c.ctr_lo,
+        ctr_lo = self.pending_tx.ctr_lo,
         chosen_data_sf = c.chosen_data_sf,
       })
       self:log(string.format(
         "cts_rx <- %s ctr_lo=%d already_received=1 -> hop complete without DATA",
-        name_of(self, self.pending_tx.next), c.ctr_lo))
+        name_of(self, self.pending_tx.next), self.pending_tx.ctr_lo))
       self.pending_tx = nil
       become_free(self)
       return
@@ -10238,7 +10265,7 @@ function on_recv(self, frame, meta)
 
     local gap = self.cts_to_data_gap_ms or 5
     self:log(string.format("cts_rx <- %s ctr_lo=%d chose SF%d -> waiting %dms then DATA",
-      name_of(self, self.pending_tx.next), c.ctr_lo, c.chosen_data_sf, gap))
+      name_of(self, self.pending_tx.next), self.pending_tx.ctr_lo, c.chosen_data_sf, gap))
     -- Capture the snapshot so the timer fire still has the right
     -- pending_tx context if anything mutates it (e.g., a forward dance
     -- starting concurrently — shouldn't happen in scenario A, but be safe).
