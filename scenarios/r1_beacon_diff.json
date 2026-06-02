@@ -1,0 +1,23 @@
+{
+  "_name": "r1_beacon_diff",
+  "_desc": "S3 differential BASE for R1 — drive via tools/s3_diff.py, which injects script=dv_dual_sf.lua (the Lua REFERENCE) or engine=meshroute per node and compares beacon-plane convergence. Not runnable directly (nodes carry no engine/script). quiet_threshold_ms=0 keeps both engines on the unthrottled fast path so the RNG streams stay aligned.",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 1 } },
+    { "name": "bob",   "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 1 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 5.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": []
+}

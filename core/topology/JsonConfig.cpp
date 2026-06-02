@@ -344,6 +344,27 @@ static SimConfig parseJson(const json& j) {
         }
     }
 
+    // Deterministic forced-frame drops (R3.x lossy gate). Top-level
+    // "forced_drops": [ {from,to,label,nth,count}, ... ]. Parsed only when
+    // present, so existing scenarios are untouched.
+    if (j.contains("forced_drops")) {
+        size_t fd_idx = 0;
+        for (auto& fd : j["forced_drops"]) {
+            const std::string ctx = "forced_drops[" + std::to_string(fd_idx++) + "]";
+            SimConfig::DropDirective def;
+            if (fd.contains("from"))  def.from  = fd["from"].get<std::string>();
+            if (fd.contains("to"))    def.to    = fd["to"].get<std::string>();
+            if (fd.contains("label")) def.label = fd["label"].get<std::string>();
+            if (fd.contains("nth"))   def.nth   = fd["nth"].get<int>();
+            if (fd.contains("count")) def.count = fd["count"].get<int>();
+            if (def.nth < 1)
+                throw std::runtime_error("config error at " + ctx + ": nth must be >= 1");
+            if (def.count < 1)
+                throw std::runtime_error("config error at " + ctx + ": count must be >= 1");
+            cfg.drop_directives.push_back(std::move(def));
+        }
+    }
+
     if (j.contains("commands")) {
         size_t cmd_idx = 0;
         for (auto& cd : j["commands"]) {
@@ -576,6 +597,14 @@ static void validateConfig(const SimConfig& cfg) {
         if (node_names.find(cd.node) == node_names.end())
             errors.push_back("command at " + std::to_string(cd.at_ms)
                              + "ms references unknown node \"" + cd.node + "\"");
+    }
+
+    // Forced-drop cross-validation (empty from/to == wildcard, skip those).
+    for (const auto& dd : cfg.drop_directives) {
+        if (!dd.from.empty() && node_names.find(dd.from) == node_names.end())
+            errors.push_back("forced_drop from \"" + dd.from + "\" references unknown node");
+        if (!dd.to.empty() && node_names.find(dd.to) == node_names.end())
+            errors.push_back("forced_drop to \"" + dd.to + "\" references unknown node");
     }
 
     if (!errors.empty()) {

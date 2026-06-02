@@ -61,6 +61,9 @@ public:
     void attachLbtModel(LbtModel* lbt) override { _lbt = lbt; }
     void setClockDriftPpm(float ppm) override { _clock_drift_ppm = ppm; }
     void setSfSwitchDelayMs(float ms) override { _sf_switch_delay_ms = ms; }
+    // R3.x: host knob (config "lbt_enabled", default true). Read by the sim's
+    // LBT-defer gate so a lossy gate can run with LBT off.
+    bool lbtEnabled() const override { return _lbt_enabled; }
     void     recordTxAirtime(uint64_t end_ms, uint32_t airtime_ms) override;
     uint64_t airtimeUsedInWindow(uint64_t now, uint64_t window_ms) override;
     uint64_t oldestTxEndMs() const override;
@@ -84,6 +87,7 @@ public:
 
 private:
     void     armSfSwitchBlindWindow();
+    void     drainPushes();          // pull the Node's async push ring -> telemetry
     uint64_t nowWall() const { return _clock.getMillis(); }
 
     int               _id;
@@ -104,6 +108,7 @@ private:
     std::vector<int>* _sf_rx_set = nullptr;
     uint64_t*         _tx_in_flight_until = nullptr;
     LbtModel*         _lbt = nullptr;
+    bool              _lbt_enabled = true;   // R3.x host knob (config "lbt_enabled")
     float             _clock_drift_ppm = 0.0f;
     uint64_t          _rx_blind_until_ms = 0;
     float             _sf_switch_delay_ms = 0.0f;

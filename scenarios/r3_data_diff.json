@@ -1,0 +1,25 @@
+{
+  "_name": "r3_data_diff",
+  "_desc": "R3 dm_delivery differential BASE (single hop) — drive via tools/dm_diff.py (lua vs meshroute). alice sends to bob (direct). Idle + lossless (sigma_db=0) so the happy path is rand-free and lua==meshroute is deterministic. Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 40000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance", "alpha": 3.0, "sigma_db": 0.0,
+      "ref_distance_m": 1.0, "ref_loss_db": 40.0, "noise_floor_db": -120.0, "tx_power_dbm": 14.0
+    }
+  },
+  "nodes": [
+    { "name": "alice", "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 1 },
+      "lat": 41.3900, "lon": 2.1600 },
+    { "name": "bob",   "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 1 },
+      "lat": 41.4035, "lon": 2.1600 }
+  ],
+  "topology": { "links": [] },
+  "commands": [ { "at_ms": 20000, "node": "alice", "command": "send bob hello-bob" } ],
+  "expect": []
+}

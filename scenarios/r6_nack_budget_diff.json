@@ -1,0 +1,28 @@
+{
+  "_name": "r6_nack_budget_diff",
+  "_desc": "R4.0/R4.1 budget-integration gate — drive via tools/dm_diff_band.py --band 0 --funnel report --min-delivery full. A 2-hop alice -> relay -> bob where the relay carries a GENEROUS duty_cycle (0.1 over a 1h window -> budget 360000ms) it never approaches, so compute_budget_tier() runs on REAL sim airtime and returns HEALTHY all run: the relay CTSes normally (NO spurious BUDGET NACK) and delivery is 1/1 identical lua-vs-meshroute. This exercises the enabled-but-healthy tier path (airtime_used_ms -> pct < strained) that the FakeHal unit tests can't, and proves the R4.0 config plumb + R4.1 emit guard are INERT when budget is healthy. GATE REALITY (why no forced-CRITICAL delivery gate): (1) the BUDGET NACK only changes the PATH, not delivery success — a budget-refused RTS reroutes via the cascade-to-alt that the rts_timeout would have taken anyway, so delivery is 1/1 with OR without the NACK (delivery-band is structurally blind to it, same family as the BUSY_RX/LOOP_DUP gates declared intractable); (2) the SIM hard-enforces duty-cycle at the SAME per-node duty_cycle the firmware reads (SimController.cpp:1347), so a budget tiny enough to reach CRITICAL also blocks the node's own beacons -> peers never learn its route, and the firmware-CRITICAL band (80-100%) can't be hit robustly across engines (beacon-jitter airtime differs). => the BUDGET NACK emit + blind+requeue react are UNIT-tested (test_node_r3.cpp R4.0/R4.1, deterministic FakeHal airtime). Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "hardware": { "rx_preamble_miss_prob": 0.0, "decode_margin_steepness_db": 0.0 }
+    }
+  },
+  "nodes": [
+    { "name": "alice", "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 2 } },
+    { "name": "relay", "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 2, "duty_cycle": 0.1, "duty_cycle_window_ms": 3600000 } },
+    { "name": "bob",   "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 2 } }
+  ],
+  "topology": { "links": [
+    { "from": "alice", "to": "relay", "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "relay", "to": "bob",   "snr": 16.0, "loss": 0.0, "bidir": true }
+  ] },
+  "commands": [
+    { "at_ms": 30000, "node": "alice", "command": "send bob budget-healthy" }
+  ],
+  "expect": []
+}

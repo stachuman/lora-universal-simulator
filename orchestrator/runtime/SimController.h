@@ -163,6 +163,11 @@ private:
 
     std::unordered_map<std::string, int> _name_to_id;
     std::vector<bool>                    _command_fired;
+    // Per-directive match tally for _cfg.drop_directives (R3.x forced-drop
+    // gate); the tally lives here (not in the const _cfg). Sized in
+    // initialize(), incremented in deliverReceptionsForStep. Empty when no
+    // forced_drops are configured (the common case — zero overhead).
+    std::vector<int>                     _drop_match_count;
     // Mutable per-node positions. Initialized from _cfg.nodes[].lat/lon at
     // initialize(); advanced by rebuildLinksFromPathLoss() at each
     // asymmetry_coherence_ms tick for nodes with velocity_mps > 0.

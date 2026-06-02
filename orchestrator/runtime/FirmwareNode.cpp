@@ -39,8 +39,53 @@ FirmwareNode::FirmwareNode(int id, std::string name, uint32_t key_hash32,
 // =============================================================================
 
 void FirmwareNode::onInit(const nlohmann::json& config) {
-    (void)config;  // S2: NodeConfig defaulted; real config plumbing at R1.
-    meshroute::NodeConfig cfg;  // defaults
+    meshroute::NodeConfig cfg;  // defaults from node.h
+    if (config.is_object()) {
+        cfg.routing_sf          = config.value("routing_sf",          cfg.routing_sf);
+        cfg.beacon_period_ms    = config.value("beacon_period_ms",    cfg.beacon_period_ms);
+        cfg.beacon_max_idle_ms  = config.value("beacon_max_idle_ms",  cfg.beacon_max_idle_ms);
+        cfg.quiet_threshold_ms  = config.value("quiet_threshold_ms",  cfg.quiet_threshold_ms);
+        cfg.beacon_silence_jitter_ms = config.value("beacon_silence_jitter_ms", cfg.beacon_silence_jitter_ms);  // R4.3
+        cfg.seen_bitmap_enabled = config.value("seen_bitmap_enabled", cfg.seen_bitmap_enabled);
+        cfg.is_gateway          = config.value("is_gateway",          cfg.is_gateway);
+        cfg.is_mobile           = config.value("is_mobile",           cfg.is_mobile);
+        cfg.leaf_id             = config.value("leaf_id",             cfg.leaf_id);
+        // R2 route-aging TTLs (config-overridable so a gate can shrink 45min/3h to seconds).
+        cfg.rt_aging_ttl_neighbor_ms = config.value("rt_aging_ttl_neighbor_ms", cfg.rt_aging_ttl_neighbor_ms);
+        cfg.rt_aging_ttl_remote_ms   = config.value("rt_aging_ttl_remote_ms",   cfg.rt_aging_ttl_remote_ms);
+        cfg.rt_aging_check_period_ms = config.value("rt_aging_check_period_ms", cfg.rt_aging_check_period_ms);
+        cfg.data_sf                  = config.value("data_sf",                  cfg.data_sf);   // R3 data plane
+        // R4.0 duty-cycle budget. Mirror the Lua precedence EXACTLY (dv_dual_sf.lua:8495-8496):
+        //   self.duty_cycle = config.duty_cycle or config._sim_duty_cycle or 0.01
+        // SimController injects _sim_duty_cycle = simulation.radio.duty_cycle (default 0.01) into every
+        // node's config, so a scenario that sets only the GLOBAL radio.duty_cycle leaves Lua nodes ENABLED
+        // (0.01) — the meshroute node MUST inherit the same, or the engines disagree on the budget and a
+        // node crossing CRITICAL would NACK on one engine but CTS on the other (lua-vs-meshroute review #00).
+        cfg.duty_cycle               = config.value("duty_cycle",
+                                          config.value("_sim_duty_cycle", 0.01));
+        cfg.duty_cycle_window_ms     = config.value("duty_cycle_window_ms",
+                                          config.value("_sim_duty_cycle_window_ms", 3600000u));
+        // Radio bw/cr seam (cleanup #C, [[project_firmwarenode_sim_config_seam]]): mirror the Lua precedence
+        // (dv_dual_sf.lua:8490-8491) `config.bw_hz or config._sim_bw_hz or 250000` / `config.cr or config._sim_cr
+        // or 5`. SimController injects _sim_bw_hz (= node.bw*1000) + _sim_cr; without this the firmware uses the
+        // struct-default 250000/5 and a NON-default-bw scenario diverges on every airtime calc (_flood_lbt_max_defer,
+        // rts/ack-timeout, the #2 duty pre-check). Gate-inert (the gates run bw=250kHz/cr=5 = the defaults).
+        // preamble_sym is NOT sim-injected -> a fixed protocol constant on both engines, no plumb needed.
+        cfg.radio_bw_hz              = config.value("bw_hz", config.value("_sim_bw_hz", cfg.radio_bw_hz));
+        cfg.radio_cr                 = config.value("cr",    config.value("_sim_cr",    cfg.radio_cr));
+        // R4.4 anti-spam threshold (T-class, Lua on_init `config.originator_max_per_window or 6`).
+        cfg.originator_max_per_window = config.value("originator_max_per_window", cfg.originator_max_per_window);
+        // peer_count is a host-set sim-telemetry knob (N-1); the device has no
+        // sim:nodes(), so rt_full convergence is sim-only. 0 = no rt_full emit.
+        cfg.peer_count          = config.value("peer_count",          cfg.peer_count);
+        // lbt_enabled gates BOTH the HOST channel_busy_until() primitive (off => reports idle, so the firmware
+        // LBT never defers) AND, from R4.5, the FIRMWARE's own tx_initiating/tx_flood LBT pre-check. Both read the
+        // same config key (matching the Lua's config.lbt_enabled, default true). Off => no LBT-backoff rand.
+        _lbt_enabled            = config.value("lbt_enabled",         _lbt_enabled);
+        cfg.lbt_enabled         = config.value("lbt_enabled",         cfg.lbt_enabled);   // R4.5 firmware LBT
+        cfg.lbt_backoff_ms      = config.value("lbt_backoff_ms",      cfg.lbt_backoff_ms);        // 0 = derive
+        cfg.flood_lbt_max_defer_ms = config.value("flood_lbt_max_defer_ms", cfg.flood_lbt_max_defer_ms);  // 0 = derive
+    }
     _node = std::make_unique<meshroute::Node>(
         *this, static_cast<uint8_t>(_protocol_id), _key_hash32, _name.c_str());
     _node->on_init(cfg);
@@ -50,16 +95,36 @@ void FirmwareNode::onRecv(std::string_view bytes, float snr, float rssi,
                           int link_id, int src_id, uint64_t sim_ms) {
     (void)link_id;
     if (!_initialized || !_node) return;
-    meshroute::RxMeta meta{snr, rssi, sim_ms, static_cast<int8_t>(src_id)};
+    meshroute::RxMeta meta{snr, rssi, sim_ms, static_cast<int16_t>(src_id)};
     _node->on_recv(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), meta);
 }
 
 std::string FirmwareNode::onCommand(std::string_view cmd_str) {
     if (!_initialized || !_node) return "ERROR: node not initialized yet";
-    char reply[256] = {0};
-    std::string cmd(cmd_str);  // ensure null-terminated for the C ABI
-    _node->on_command(cmd.c_str(), reply, sizeof(reply));
-    return std::string(reply);
+    std::string cmd(cmd_str);
+    // The sim TRANSPORT parses its command string into a TYPED meshroute::Command
+    // (a device backend parses its binary frames into the SAME Command). lib/core
+    // never sees a command string. SimController has already resolved name -> id.
+    if (cmd.rfind("send ", 0) == 0) {
+        size_t s = 5; while (s < cmd.size() && cmd[s] == ' ') ++s;
+        unsigned dst = 0; size_t e = s; bool got = false;
+        while (e < cmd.size() && cmd[e] >= '0' && cmd[e] <= '9') { dst = dst * 10 + (cmd[e] - '0'); ++e; got = true; }
+        if (got && dst <= 254 && e < cmd.size() && cmd[e] == ' ') {
+            const std::string body = cmd.substr(e + 1);
+            meshroute::Command c{};
+            c.kind = meshroute::CmdKind::send;
+            c.u.send.dst_id = static_cast<uint8_t>(dst);
+            c.u.send.flags  = 0;
+            const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
+            c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
+            c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
+            const meshroute::CmdResult r = _node->on_command(c);
+            const char* code = (r.code == meshroute::CmdCode::queued) ? "queued" : "error";
+            return std::string("OK ") + code + " ctr=" + std::to_string(r.ctr) +
+                   " depth=" + std::to_string(r.queue_depth);
+        }
+    }
+    return "ERROR: unparsed command";
 }
 
 void FirmwareNode::onRadioBusy(const RadioBusyInfo& info) {
@@ -68,7 +133,7 @@ void FirmwareNode::onRadioBusy(const RadioBusyInfo& info) {
     if      (info.reason == "self_tx_in_flight")    reason = meshroute::BusyReason::self_tx_in_flight;
     else if (info.reason == "oversized")            reason = meshroute::BusyReason::oversized;
     else if (info.reason == "duty_cycle_exceeded")  reason = meshroute::BusyReason::duty_cycle_exceeded;
-    meshroute::BusyInfo bi{reason, /*tag=*/0,
+    meshroute::BusyInfo bi{reason, /*tag=*/info.tag,
                            static_cast<int16_t>(info.sf), info.busy_until_ms};
     _node->on_radio_busy(bi);
 }
@@ -90,6 +155,26 @@ void FirmwareNode::tickTimers(uint64_t sim_ms) {
             _id_to_handle.erase(timer_id);
         }
         if (_node) _node->on_timer(timer_id);
+    }
+    drainPushes();   // surface the Node's async app-channel pushes as telemetry
+}
+
+void FirmwareNode::drainPushes() {
+    if (!_node) return;
+    meshroute::Push p;
+    while (_node->next_push(p)) {
+        const char* kind = (p.kind == meshroute::PushKind::msg_recv)   ? "msg_recv"
+                         : (p.kind == meshroute::PushKind::send_acked) ? "send_acked"
+                                                                       : "send_failed";
+        nlohmann::json j;
+        j["kind"] = kind;
+        j["ctr"]  = p.ctr;
+        j["dst"]  = p.dst;
+        if (p.kind == meshroute::PushKind::msg_recv) {
+            j["origin"]  = p.origin;
+            j["payload"] = std::string(reinterpret_cast<const char*>(p.body), p.body_len);
+        }
+        EventLog::logScriptEmit(_id, _clock.getMillis(), "push", j.dump());
     }
 }
 
@@ -142,6 +227,7 @@ meshroute::TxResult FirmwareNode::tx(const uint8_t* bytes, size_t len,
     t.preamble_sym = p.preamble_sym;
     if (p.label) t.label = p.label;
     if (p.info)  t.info  = p.info;
+    t.tag = p.tag;                                  // R4.5b: carry the frame-type tag for on_radio_busy
     _pending_txs.push_back(std::move(t));
     return meshroute::TxResult::ok;
 }
@@ -155,7 +241,9 @@ void FirmwareNode::set_rx_sf(int sf) {
 }
 
 uint64_t FirmwareNode::channel_busy_until() {
-    return _lbt ? _lbt->busyUntil(_id) : 0;
+    // Gate-1 (inert at R3.x — the Node doesn't call this until R4): honour the
+    // lbt_enabled host knob so a disabled-LBT gate reports an idle channel.
+    return (_lbt_enabled && _lbt) ? _lbt->busyUntil(_id) : 0;
 }
 
 uint64_t FirmwareNode::airtime_used_ms(uint64_t window_ms) {

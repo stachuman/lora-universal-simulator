@@ -1,0 +1,48 @@
+{
+  "_name": "r4_data_diff_bernoulli",
+  "_desc": "R3.x lossy gate (BERNOULLI, distribution sample) — drive via tools/dm_diff_band.py --band <calibrated> --funnel report. alice sends N msgs to bob over a link with per-frame Bernoulli loss, so RTS/CTS/DATA/ACK are stochastically dropped and the retry paths fire repeatedly. Unlike the FORCED gate (deterministic single retry, band 0), here the shared-_rng loss stream diverges across engines, so this is a DISTRIBUTION band — calibrate the tolerance from a multi-seed sweep before locking it as a hard gate (R3.x pin P2). NOT wired into run_tests; a manual/calibration tool. The EWMA data-SF divergence (lua picks data SF by SNR; the C++ port pins data_sf, the EWMA deferred) means a lost CTS desyncs the SF, so expect a non-trivial band. Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 130000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "hardware": {
+        "rx_preamble_miss_prob": 0.0,
+        "decode_margin_steepness_db": 0.0
+      }
+    }
+  },
+  "nodes": [
+    { "name": "alice", "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 1 } },
+    { "name": "bob",   "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 1 } }
+  ],
+  "topology": { "links": [
+    { "from": "alice", "to": "bob", "snr": 9.0, "loss": 0.15, "bidir": true }
+  ] },
+  "commands": [
+    { "at_ms": 16000, "node": "alice", "command": "send bob bern-01" },
+    { "at_ms": 21000, "node": "alice", "command": "send bob bern-02" },
+    { "at_ms": 26000, "node": "alice", "command": "send bob bern-03" },
+    { "at_ms": 31000, "node": "alice", "command": "send bob bern-04" },
+    { "at_ms": 36000, "node": "alice", "command": "send bob bern-05" },
+    { "at_ms": 41000, "node": "alice", "command": "send bob bern-06" },
+    { "at_ms": 46000, "node": "alice", "command": "send bob bern-07" },
+    { "at_ms": 51000, "node": "alice", "command": "send bob bern-08" },
+    { "at_ms": 56000, "node": "alice", "command": "send bob bern-09" },
+    { "at_ms": 61000, "node": "alice", "command": "send bob bern-10" },
+    { "at_ms": 66000, "node": "alice", "command": "send bob bern-11" },
+    { "at_ms": 71000, "node": "alice", "command": "send bob bern-12" },
+    { "at_ms": 76000, "node": "alice", "command": "send bob bern-13" },
+    { "at_ms": 81000, "node": "alice", "command": "send bob bern-14" },
+    { "at_ms": 86000, "node": "alice", "command": "send bob bern-15" },
+    { "at_ms": 91000, "node": "alice", "command": "send bob bern-16" },
+    { "at_ms": 96000, "node": "alice", "command": "send bob bern-17" },
+    { "at_ms": 101000, "node": "alice", "command": "send bob bern-18" },
+    { "at_ms": 106000, "node": "alice", "command": "send bob bern-19" },
+    { "at_ms": 111000, "node": "alice", "command": "send bob bern-20" }
+  ],
+  "expect": []
+}

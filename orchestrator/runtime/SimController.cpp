@@ -227,6 +227,9 @@ void SimController::initialize() {
         _name_to_id.emplace(_cfg.nodes[i].name, i);
     }
 
+    // Forced-drop match tally (R3.x). Zeroed; empty when no forced_drops.
+    _drop_match_count.assign(_cfg.drop_directives.size(), 0);
+
     // ---- Mutable per-node positions for mobility ----------------------------
     _node_lat.assign(static_cast<size_t>(n), 0.0);
     _node_lon.assign(static_cast<size_t>(n), 0.0);
@@ -736,7 +739,28 @@ void SimController::processCommandsAtStep() {
             }
             continue;
         }
-        std::string reply = _nodes[target]->onCommand(cmd.command);
+        // R3 (Q1=b): meshroute nodes take a NUMERIC dst (no name map on-device); the
+        // host resolves "send <name> <text>" -> "send <id> <text>" here so scenarios
+        // stay readable and dm_delivery's configured_pairs still resolves the pair.
+        std::string command = cmd.command;
+        if (_cfg.nodes[target].engine == "meshroute" && command.rfind("send ", 0) == 0) {
+            size_t s = 5;
+            while (s < command.size() && command[s] == ' ') ++s;
+            const size_t e = command.find(' ', s);
+            if (e != std::string::npos) {
+                const std::string name = command.substr(s, e - s);
+                const auto nit = _name_to_id.find(name);
+                if (nit != _name_to_id.end())
+                    // Resolve to the PROTOCOL id the firmware routes by, NOT the
+                    // array index — they differ when a scenario sets an explicit
+                    // node_id != slot, and a name->index rewrite would target the
+                    // wrong id (silent send_no_route). protocolId()==index when
+                    // node_id is unset, so existing scenarios are unchanged.
+                    command = "send " + std::to_string(_nodes[nit->second]->protocolId())
+                              + command.substr(e);
+            }
+        }
+        std::string reply = _nodes[target]->onCommand(command);
         EventLog::cmdReply(static_cast<unsigned long>(now),
                            _nodes[target]->name().c_str(),
                            cmd.command.c_str(),
@@ -774,6 +798,15 @@ void SimController::deliverReceptionsForStep() {
         // entries, so we shouldn't see this branch — defensive guard
         // only.
         if (!_node_alive[tx.sender_id]) continue;
+
+        // Forced-drop bookkeeping (R3.x): a directive's counter must advance
+        // ONCE per physical frame, not once per (frame,receiver) — else a
+        // broadcast reaching M receivers (or a wildcard `to`) would consume M
+        // from `count`. Per-frame: dd_counted[k] = this frame already advanced
+        // directive k; dd_drop[k] = this frame fell in k's drop window (so drop
+        // it to EVERY receiver matching `to`). Only sized when directives exist.
+        const size_t n_dd = _cfg.drop_directives.size();
+        std::vector<uint8_t> dd_counted(n_dd, 0), dd_drop(n_dd, 0);
 
         for (int rcv = 0; rcv < n; ++rcv) {
             if (rcv == tx.sender_id) continue;
@@ -1042,6 +1075,45 @@ void SimController::deliverReceptionsForStep() {
                 continue;
             }
 
+            // Deterministic forced drop (R3.x lossy gate). Placed AFTER all
+            // physics gates so it composes with (and is independent of)
+            // sigma_db / Bernoulli loss: a surviving reception matching a
+            // forced_drops directive is dropped here, firing exactly one
+            // protocol retry reproducibly. The loop never runs when
+            // drop_directives is empty (no _rng draws, existing scenarios
+            // byte-identical). Each directive's counter advances once per
+            // physical FRAME (see dd_counted above); the Nth..Nth+count-1
+            // frames are dropped to every receiver matching `to`.
+            {
+                bool forced_drop = false;
+                for (size_t k = 0; k < n_dd; ++k) {
+                    const auto& dd = _cfg.drop_directives[k];
+                    if (!dd.from.empty()  && dd.from  != _nodes[tx.sender_id]->name()) continue;
+                    if (!dd.to.empty()    && dd.to    != _nodes[rcv]->name())          continue;
+                    if (!dd.label.empty() && dd.label != tx.label)                     continue;
+                    if (!dd_counted[k]) {                           // count ONCE per physical frame
+                        dd_counted[k] = 1;
+                        const long long mi = ++_drop_match_count[k];   // 1-based; 64-bit window math
+                        dd_drop[k] = (mi >= dd.nth &&
+                                      mi < static_cast<long long>(dd.nth) + dd.count) ? 1 : 0;
+                    }
+                    if (dd_drop[k]) {                               // drop this frame -> this receiver
+                        EventLog::dropForced(
+                            static_cast<unsigned long>(now),
+                            _nodes[tx.sender_id]->name().c_str(),
+                            _nodes[rcv]->name().c_str(),
+                            reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                            static_cast<int>(tx.bytes.size()),
+                            static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                            tx.sf, tx.bw_hz,
+                            tx.label.empty() ? nullptr : tx.label.c_str());
+                        forced_drop = true;
+                        break;
+                    }
+                }
+                if (forced_drop) continue;
+            }
+
             // Deliver to the script.
             const int protocol_sender_id = _nodes[tx.sender_id]->protocolId();
             _nodes[rcv]->onRecv(tx.bytes, snr_at_rcv, lp.rssi,
@@ -1209,6 +1281,7 @@ void SimController::registerTransmissionsForStep() {
                 bi.sf            = sf;
                 bi.label         = p.label;
                 bi.tx_info       = p.info;
+                        bi.tag           = p.tag;            // R4.5b frame-type echo
                 bi.busy_until_ms = 0;   // not a wait — the frame is rejected outright
                 _nodes[i]->onRadioBusy(bi);
                 continue;
@@ -1231,6 +1304,7 @@ void SimController::registerTransmissionsForStep() {
                 bi.sf            = sf;
                 bi.label         = p.label;
                 bi.tx_info       = p.info;
+                        bi.tag           = p.tag;            // R4.5b frame-type echo
                 bi.busy_until_ms = busy_until;
                 EventLog::txDeferred(static_cast<unsigned long>(now),
                                      _nodes[i]->name().c_str(),
@@ -1247,13 +1321,14 @@ void SimController::registerTransmissionsForStep() {
             // this TX. Emit tx_deferred + notify the script via
             // on_radio_busy and skip the InFlight push entirely. The
             // script chooses retry policy.
-            if (_lbt->isChannelBusy(i, now)) {
+            if (_nodes[i]->lbtEnabled() && _lbt->isChannelBusy(i, now)) {
                 RadioBusyInfo bi;
                 bi.reason        = "channel_busy";
                 bi.len           = static_cast<int>(p.bytes.size());
                 bi.sf            = sf;
                 bi.label         = p.label;
                 bi.tx_info       = p.info;
+                        bi.tag           = p.tag;            // R4.5b frame-type echo
                 bi.busy_until_ms = _lbt->busyUntil(i);
                 EventLog::txDeferred(static_cast<unsigned long>(now),
                                      _nodes[i]->name().c_str(),
@@ -1311,6 +1386,7 @@ void SimController::registerTransmissionsForStep() {
                         bi.sf            = sf;
                         bi.label         = p.label;
                         bi.tx_info       = p.info;
+                        bi.tag           = p.tag;            // R4.5b frame-type echo
                         bi.busy_until_ms = busy_until;
                         EventLog::txDeferred(static_cast<unsigned long>(now),
                                              _nodes[i]->name().c_str(),

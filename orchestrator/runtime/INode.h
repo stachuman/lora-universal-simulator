@@ -42,6 +42,7 @@ struct PendingTx {
     // own protocol semantics to the timeline / map views.
     std::string label;      // short tag, e.g., "RTS", "CTS", "DATA"
     std::string info;       // detail string, e.g., "dst=dave via bob msg=1"
+    uint16_t    tag = 0;    // R4.5b opaque frame-type token (firmware-set); echoed in RadioBusyInfo for heap-free retry match
 };
 
 // Reason + context bundle passed to on_radio_busy(self, info) in Lua. Built
@@ -55,6 +56,7 @@ struct RadioBusyInfo {
     std::string label;         // PendingTx::label, echoed back
     std::string tx_info;       // PendingTx::info, echoed back (renamed for Lua)
     uint64_t    busy_until_ms = 0;  // absolute simtime when free
+    uint16_t    tag = 0;       // R4.5b PendingTx::tag, echoed back (firmware heap-free retry match)
 };
 
 class INode {
@@ -95,4 +97,11 @@ public:
     virtual uint64_t airtimeUsedInWindow(uint64_t now, uint64_t window_ms) = 0;
     virtual uint64_t oldestTxEndMs() const = 0;
     virtual uint64_t rxBlindUntilMs() const = 0;
+
+    // Whether the sim's Listen-Before-Talk defer applies to this node. Default
+    // true (real-hardware behaviour); a FirmwareNode may disable it via the
+    // "lbt_enabled" host config so the R3.x lossy gate runs without an LBT
+    // backoff perturbing the firmware's rand stream. Non-pure so ScriptedNode
+    // and any future node inherit the true default unchanged.
+    virtual bool lbtEnabled() const { return true; }
 };

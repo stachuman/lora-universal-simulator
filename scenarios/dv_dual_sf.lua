@@ -2930,9 +2930,14 @@ local MAX_RT_CANDIDATES = 3
 --   • Result is floored to integer ms to match SimRadio's (uint32_t) cast.
 local function airtime_ms(sf, bw_hz, cr, preamble_sym, len_bytes)
   local t_sym = (2 ^ sf) / (bw_hz / 1000)            -- ms per symbol
-  local t_pre = (preamble_sym + 4.25) * t_sym        -- preamble + sync
+  -- SX126x datasheet §6.1.4: SF5/SF6 use a 6.25-symbol sync offset (not 4.25)
+  -- and drop the +8 header-symbol constant from the payload numerator (+36,
+  -- not +44). SF7-12 unchanged. Matches RadioLib SX126x::calculateTimeOnAir so
+  -- airtime is realistic for low-SF (SF5/SF6) data frames.
+  local low_sf = (sf == 5 or sf == 6)
+  local t_pre = (preamble_sym + (low_sf and 6.25 or 4.25)) * t_sym   -- preamble + sync
   local de    = (t_sym >= 16) and 1 or 0
-  local num   = 8 * len_bytes - 4 * sf + 44
+  local num   = 8 * len_bytes - 4 * sf + (low_sf and 36 or 44)
   local den   = 4 * (sf - 2 * de)
   local pay_sym = 8 + math.max(math.ceil(num / den) * cr, 0)
   return math.floor(t_pre + pay_sym * t_sym)
@@ -3605,6 +3610,9 @@ local function tx_with_retry(self, bytes, opts)
       bytes        = bytes,
       opts         = opts,
       retries_left = TX_DEFER_MAX_RETRIES,
+      -- DATA giveup guard (#3): the flight this stash belongs to, so a giveup that
+      -- outlives its flight does NOT release a since-installed unrelated flight.
+      ctr_lo       = self.pending_tx and self.pending_tx.ctr_lo,
     }
   end
   -- Pre-check duty cycle. If over budget, defer via self:after — the
@@ -7335,7 +7343,7 @@ issue_send = function(self, origin, dst_id, dst_name, payload, user_text, ctr, f
     requeue_count   = (queue_meta and queue_meta.requeue_count) or 0,
     -- §7.6 hop budget. Two paths:
     --   • Originator (forward_hop_budget == nil): initialize to
-    --     rt[dst].hops + slack, capped at hop_budget_max_initial (15).
+    --     rt[dst].hops + slack, capped at hop_budget_max_initial (31).
     --   • Forwarder (forward_hop_budget ~= nil): inherit the decremented
     --     budget computed at on_recv DATA time.
     -- prev_fwd_rt_hops is overwritten with self's rt view so the wire
@@ -9987,8 +9995,14 @@ function on_recv(self, frame, meta)
         compute_originator_metric(self, meta.src)
       local airtime_cap_ms = math.floor(
         self.originator_airtime_share * (self.duty_cycle_budget_ms or 36000))
+      -- The airtime BACKSTOP needs a real budget to derive a share: with duty disabled
+      -- (budget 0) there is no share to enforce, so skip it — matching the duty-disabled
+      -- guard the sibling consumers have (compute_budget_tier, check_duty_cycle) but this
+      -- drop originally lacked (without the guard, budget=0 -> cap 0 -> drops every RTS).
+      -- The COUNT threshold below is budget-independent and stays always-active.
+      local over_airtime = (self.duty_cycle_budget_ms or 0) > 0 and total_air > airtime_cap_ms
       if app_orig > self.originator_max_per_window
-         or total_air > airtime_cap_ms then
+         or over_airtime then
         self:emit("rts_drop_originator_throttle", {
           from = meta.src, ctr_lo = r.ctr_lo,
           apparent_origination = app_orig,
@@ -12181,6 +12195,17 @@ function on_radio_busy(self, info)
     self:log(string.format("tx_giveup %s reason=%s (max retries exhausted)",
       info.label, info.reason))
     self.tx_stash[info.label] = nil
+    -- SHARED-BUG FIX (#1): a DATA giveup STRANDS the flight — the DATA branch above (12109-12130) cleared
+    -- awaiting_ack + cancelled ack_timeout, leaving pending_tx with no recovery timer, and become_free is blocked
+    -- behind it -> the TX queue stalls. Release it (mirror the DATA-M giveup, 12151-12152) so the queue drains.
+    -- DATA only: a CTS/ACK/NACK giveup is a receiver-side response (pending_rx freed by pending_rx_expiry).
+    -- ctr_lo-guarded (#3): if the DATA stash outlived its flight and an unrelated flight was since installed, do
+    -- NOT destroy that flight (every other pending_tx mutation here is ctr_lo-guarded; this matches the C++).
+    if info.label == "DATA" and self.pending_tx ~= nil
+       and self.pending_tx.ctr_lo == stash.ctr_lo then
+      self.pending_tx = nil
+      become_free(self)
+    end
     return
   end
   stash.retries_left = stash.retries_left - 1

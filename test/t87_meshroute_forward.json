@@ -1,0 +1,41 @@
+{
+  "_name": "t87_meshroute_forward",
+  "_desc": "R3 T2 gate: three engine=meshroute FirmwareNodes in a line a-b-c. After routes converge, alice sends to carol (2 hops). Exercises the FORWARD leg: bob receives+ACKs alice's DATA then relays a fresh RTS-CTS-DATA-ACK to carol, who delivers. Idle + lossless (sigma_db=0).",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 100,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance", "alpha": 3.0, "sigma_db": 0.0,
+      "ref_distance_m": 1.0, "ref_loss_db": 40.0, "noise_floor_db": -120.0, "tx_power_dbm": 14.0
+    }
+  },
+  "nodes": [
+    { "name": "alice", "engine": "meshroute",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 2 } },
+    { "name": "bob",   "engine": "meshroute",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 2 } },
+    { "name": "carol", "engine": "meshroute",
+      "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0, "peer_count": 2 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms": 25000, "node": "alice", "command": "send carol hello" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_tx",    "value": "\"dst\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx",   "value": "\"dst\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "data_rx",   "value": "\"from\":0" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rts_tx",    "value": "\"dst\":2" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "data_rx",   "value": "\"from\":1" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "delivered", "value": "hello" }
+  ]
+}

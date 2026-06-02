@@ -314,6 +314,31 @@ struct SimConfig {
     };
     TopologyConfig topology;
 
+    // Deterministic forced-frame drops (R3.x lossy gate). Each directive
+    // drops the matching frame(s) just before delivery to the receiver —
+    // AFTER all physics gates — so it composes with, and is independent of,
+    // sigma_db / Bernoulli `loss`. This is the only seed/sigma-independent
+    // way to fire EXACTLY one protocol retry. Empty => OFF (zero overhead,
+    // zero RNG draws; existing scenarios are byte-identical). Parsed from the
+    // top-level "forced_drops" array. A drop emits a distinct `drop_forced`
+    // event (not an RF-loss masquerade).
+    //   from / to : sender / receiver node name ("" = any)
+    //   label     : the TX frame label, e.g. "RTS"/"CTS"/"DATA"/"ACK" ("" = any)
+    //   nth       : 1-based index of the first matching FRAME to drop
+    //   count     : how many consecutive matching frames to drop
+    // The counter advances once per physical FRAME (not per receiver): a
+    // broadcast that reaches M nodes consumes 1 from `count`, and a frame in the
+    // drop window is dropped to every receiver matching `to`. With a specific
+    // `to`, that is the one reception by `to`.
+    struct DropDirective {
+        std::string from;
+        std::string to;
+        std::string label;
+        int nth   = 1;
+        int count = 1;
+    };
+    std::vector<DropDirective> drop_directives;
+
     // Scheduled commands. Either a node command (node + command non-empty)
     // or a Lua callback (lua_fn non-empty, node/command empty). Real
     // execution is wired up in T15.

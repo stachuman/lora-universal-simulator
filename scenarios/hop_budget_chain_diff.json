@@ -1,0 +1,36 @@
+{
+  "_name": "hop_budget_chain_diff",
+  "_desc": "HOP_BUDGET chain gate — drive via tools/dm_diff_band.py --band 0 --funnel report --min-delivery full. A 6-hop chain alice -> r1 -> r2 -> r3 -> r4 -> r5 -> dave: the originator budget = min(31, rt_hops(6) + slack(3)) = 9; the five forwarders decrement (9->8->7->6->5->4); dave (the destination) is exempt -> delivered. LOAD-BEARING (review #02): the 6-hop length means a per-hop decrement scaled >=2x would exhaust the last forwarder r5 (9->7->5->3->1->-1 -> HOP_BUDGET NACK, no delivery) and a budget under-computed by >=5 would also fail -> either flips delivery to 0/1 and trips the band. What this gate does NOT assert is a SINGLE-off decrement (the +3 slack + exempt-dst keep a valid route delivering for any decrement in [0..1] per hop) — that exact per-hop value (hops_remaining/committed_hops on the forwarded DATA) is the UNIT tests' job (test_node_r3.cpp 'forwarder decrements'). Budget enforcement is purely SUBTRACTIVE (it only ever KILLS a delivery at a forwarder; the dst is always exempt), so no delivery-band gate can be tight on a single decrement; this gate proves delivery-NEUTRALITY on a valid route + catches gross budget/decrement regressions, identical lua-vs-meshroute. Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 90000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "hardware": { "rx_preamble_miss_prob": 0.0, "decode_margin_steepness_db": 0.0 }
+    }
+  },
+  "nodes": [
+    { "name": "alice", "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r1",    "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r2",    "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r3",    "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r4",    "node_id": 4, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r5",    "node_id": 5, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "dave",  "node_id": 6, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } }
+  ],
+  "topology": { "links": [
+    { "from": "alice", "to": "r1",   "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "r1",    "to": "r2",   "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "r2",    "to": "r3",   "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "r3",    "to": "r4",   "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "r4",    "to": "r5",   "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "r5",    "to": "dave", "snr": 16.0, "loss": 0.0, "bidir": true }
+  ] },
+  "commands": [
+    { "at_ms": 45000, "node": "alice", "command": "send dave hb-chain" }
+  ],
+  "expect": []
+}

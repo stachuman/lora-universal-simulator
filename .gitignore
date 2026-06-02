@@ -19,3 +19,4 @@ webapp/server/services/__pycache__/
 webapp/server/models/__pycache__/
 webapp/tests/__pycache__/
 .pytest_cache/
+.claude/

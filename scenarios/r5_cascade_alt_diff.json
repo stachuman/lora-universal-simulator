@@ -1,0 +1,40 @@
+{
+  "_name": "r5_cascade_alt_diff",
+  "_desc": "Cascade-to-alt gate (full K=3 walk) — drive via tools/dm_diff_band.py --band 0 --funnel report --expect-drops 1 --min-delivery full. alice has THREE 1-hop relays to dave (relay_p best = candidates[0], relay_a = [1], relay_b worst = [2]); well-separated SNRs so the candidate order is unambiguous and identical on both engines. forced_drops kill EVERY CTS from relay_p->alice AND relay_a->alice (CTS is labelled 'CTS' on both engines incl. re-CTS, unlike RTS whose Lua retries are 'RTS-rty'), so alice never gets a CTS from the primary or the first alt: it exhausts rts_max_retries on relay_p, cascades to relay_a, exhausts again, cascades to relay_b, and the DATA is delivered to dave ONLY via the second alternate. relay_p/relay_a stay alive as candidates, so the ALT-WALK (not aging) is the exclusive path. Channel kept quiet (long beacon_period, probabilistic losses off). Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 100000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "hardware": { "rx_preamble_miss_prob": 0.0, "decode_margin_steepness_db": 0.0 }
+    }
+  },
+  "nodes": [
+    { "name": "alice",   "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 4 } },
+    { "name": "relay_p", "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 4 } },
+    { "name": "relay_a", "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 4 } },
+    { "name": "relay_b", "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 4 } },
+    { "name": "dave",    "node_id": 4, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 4 } }
+  ],
+  "topology": { "links": [
+    { "from": "alice",   "to": "relay_p", "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "alice",   "to": "relay_a", "snr": 12.0, "loss": 0.0, "bidir": true },
+    { "from": "alice",   "to": "relay_b", "snr":  8.0, "loss": 0.0, "bidir": true },
+    { "from": "relay_p", "to": "dave",    "snr": 20.0, "loss": 0.0, "bidir": true },
+    { "from": "relay_a", "to": "dave",    "snr": 20.0, "loss": 0.0, "bidir": true },
+    { "from": "relay_b", "to": "dave",    "snr": 20.0, "loss": 0.0, "bidir": true }
+  ] },
+  "forced_drops": [
+    { "from": "relay_p", "to": "alice", "label": "CTS", "nth": 1, "count": 99 },
+    { "from": "relay_a", "to": "alice", "label": "CTS", "nth": 1, "count": 99 }
+  ],
+  "commands": [
+    { "at_ms": 30000, "node": "alice", "command": "send dave casc-01" },
+    { "at_ms": 55000, "node": "alice", "command": "send dave casc-02" },
+    { "at_ms": 80000, "node": "alice", "command": "send dave casc-03" }
+  ],
+  "expect": []
+}

@@ -1,0 +1,31 @@
+{
+  "_name": "r7_lbt_neutral_diff",
+  "_desc": "R4.5/R4.5b lbt_enabled=true delivery-NEUTRALITY gate — drive via tools/dm_diff_band.py --band 0 --funnel report --min-delivery full. A single deterministic alice -> relay -> bob flow with lbt_enabled=true on every node, plus a 'spammer' node that beacons every 900ms on routing_sf (heard by alice+relay) to keep the channel intermittently busy. WHAT THIS GATE ASSERTS: lbt_enabled=true is delivery-NEUTRAL cross-engine — the LBT machinery does NOT cost a delivery; both lua and meshroute still deliver 1/1 (--band 0 + --min-delivery full forbid a per-pair delta AND a common-mode 0/N collapse). WHAT IT EXERCISES (active, not stubbed): the firmware's R4.5a LBT PRE-CHECK (tx_initiating / tx_flood checking channel_busy_until before an initiating/flood TX, then self-defer past busy_until + a backoff draw) — on seed 42 BOTH engines emit tx_lbt_defer x2. ROBUSTNESS: a single flow + 60s post-send window means alice ALWAYS completes (no competing sender to race), so this holds band-0 full across a 10-seed sweep (42/7/123/999/2024/31337/55/808/1/65535); only the funnel (defer interleaving) diverges by wire-airtime, so it is reported, not asserted. WHAT IT DOES *NOT* EXERCISE (measured — review finding): meshroute's on_radio_busy (the R4.5b SAFETY-NET retry path) NEVER fires on this gate — the R4.5a pre-check absorbs the busy channel before the sim's safety-net is reached (meshroute emits ZERO radio_busy; lua's lone radio_busy is a non-retry-eligible BCN that takes only the no-retry return). This is FUNDAMENTAL, not a tuning miss: a retry-eligible response frame (CTS/DATA/ACK does NOT pre-check LBT) only reaches on_radio_busy under strong contention, and the contention needed to force that ALSO makes delivery non-deterministic cross-engine (measured: a 150ms spammer fires meshroute on_radio_busy x2 but diverges delivery on 3/6 seeds — same non-determinism as the 2-sender race below). So the R4.5b on_radio_busy retry MECHANICS are validated by DETERMINISTIC UNIT TESTS, not this gate: blocked-DATA stash retry + retries_left 3->giveup + one rand draw per retry, the blocked-RTS re-RTS via the armed rts_timeout (PORT DIVERGENCE FIX: Lua clears awaiting_cts but its rts_timeout ignores it; ours keeps awaiting_cts so the armed timeout retries), and the DATA-retry ACK-wait re-arm (PORT DIVERGENCE FIX: Lua's on_handed re-arms; ours must too) — all in test_node_r3.cpp R4.5b. GATE REALITY (why no contention/2-sender gate): a 2-sender/1-receiver race is NON-DETERMINISTIC cross-engine — the winner depends on each engine's distinct rand stream + wire airtime, so it can legitimately resolve 2/2 on one engine and 1/2 on the other (observed: a two-direct-sender variant gave meshroute 2/2 vs lua 1/2, |d|=100pp, NEITHER buggy). Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 90000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "hardware": { "rx_preamble_miss_prob": 0.0, "decode_margin_steepness_db": 0.0 }
+    }
+  },
+  "nodes": [
+    { "name": "alice",   "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
+    { "name": "relay",   "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
+    { "name": "bob",     "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
+    { "name": "spammer", "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 900,    "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 2 } }
+  ],
+  "topology": { "links": [
+    { "from": "alice",   "to": "relay", "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "relay",   "to": "bob",   "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "spammer", "to": "alice", "snr": 16.0, "loss": 0.0, "bidir": true },
+    { "from": "spammer", "to": "relay", "snr": 16.0, "loss": 0.0, "bidir": true }
+  ] },
+  "commands": [
+    { "at_ms": 30000, "node": "alice", "command": "send bob lbt-neutral" }
+  ],
+  "expect": []
+}

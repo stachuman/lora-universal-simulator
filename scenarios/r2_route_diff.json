@@ -1,0 +1,32 @@
+{
+  "_name": "r2_route_diff",
+  "_desc": "S3 differential BASE for R2 — drive via tools/s3_diff.py (lua vs meshroute). 3-node line a-b-c, carol dies at 20000, short config TTLs (15000) so aging fires in ~15-20s. Exercises aging/eviction + triggered + dirty-only steady beacons + discovery-exit. Not runnable directly (nodes carry no engine/script). Mirror of t29_route_aging.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 5000,
+    "seed": 42,
+    "node_startup_jitter_ms": 100,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+  },
+  "nodes": [
+    { "name": "alice", "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0,
+        "rt_aging_ttl_neighbor_ms": 15000, "rt_aging_ttl_remote_ms": 15000, "rt_aging_check_period_ms": 5000,
+        "seen_bitmap_enabled": false, "peer_count": 2 } },
+    { "name": "bob",   "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0,
+        "rt_aging_ttl_neighbor_ms": 15000, "rt_aging_ttl_remote_ms": 15000, "rt_aging_check_period_ms": 5000,
+        "seen_bitmap_enabled": false, "peer_count": 2 } },
+    { "name": "carol", "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 5000, "quiet_threshold_ms": 0,
+        "rt_aging_ttl_neighbor_ms": 15000, "rt_aging_ttl_remote_ms": 15000, "rt_aging_check_period_ms": 5000,
+        "seen_bitmap_enabled": false, "peer_count": 2 },
+      "dies_at_ms": 20000 }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 8.0, "rssi": -80.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 8.0, "rssi": -80.0, "bidir": true }
+    ]
+  },
+  "commands": [],
+  "expect": []
+}

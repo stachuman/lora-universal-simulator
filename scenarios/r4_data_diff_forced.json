@@ -1,0 +1,36 @@
+{
+  "_name": "r4_data_diff_forced",
+  "_desc": "R3.x lossy gate (FORCED, deterministic) — drive via tools/dm_diff_band.py --band 0 --funnel report --expect-drops 1 --min-delivery full. alice sends N msgs to bob (direct, explicit link) but the FIRST RTS (alice->bob) is force-dropped, so msg #1 fires EXACTLY one RTS retry (the retry-jitter draw) and recovers via a clean fresh handshake on BOTH engines. The channel is kept QUIET during the send window (long beacon_period suppresses steady beacons after discovery exit ~13.5s; first send at 18s clears the last discovery beacon ~17.7s; probabilistic per-frame losses disabled) so the ONLY loss is the forced drop -> both engines deliver N/N. The retry FUNNEL is REPORTED not asserted (it diverges by wire-airtime design: lua emits a retry as the distinct RTS-rty event, meshroute re-emits rts_tx); the gate asserts per-pair delivery (band 0 + min-delivery full) and that the drop fired (expect-drops). Not runnable directly (nodes carry no engine/script).",
+  "simulation": {
+    "duration_ms": 48000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 42,
+    "node_startup_jitter_ms": 500,
+    "radio": {
+      "sf": 7, "bw": 250, "cr": 5,
+      "hardware": {
+        "rx_preamble_miss_prob": 0.0,
+        "decode_margin_steepness_db": 0.0
+      }
+    }
+  },
+  "nodes": [
+    { "name": "alice", "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 1 } },
+    { "name": "bob",   "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 1 } }
+  ],
+  "topology": { "links": [
+    { "from": "alice", "to": "bob", "snr": 9.0, "loss": 0.0, "bidir": true }
+  ] },
+  "forced_drops": [
+    { "from": "alice", "to": "bob", "label": "RTS", "nth": 1, "count": 1 }
+  ],
+  "commands": [
+    { "at_ms": 18000, "node": "alice", "command": "send bob lossy-01" },
+    { "at_ms": 24000, "node": "alice", "command": "send bob lossy-02" },
+    { "at_ms": 30000, "node": "alice", "command": "send bob lossy-03" },
+    { "at_ms": 36000, "node": "alice", "command": "send bob lossy-04" },
+    { "at_ms": 42000, "node": "alice", "command": "send bob lossy-05" }
+  ],
+  "expect": []
+}
