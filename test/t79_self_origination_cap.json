@@ -1,0 +1,121 @@
+{
+  "_name": "t79_self_origination_cap",
+  "_desc": "DM Inc 4 self-cap (enforcing). sender issues 10 DM originations; the self-cap (originator_self_cap_per_window=5 here; production default 20) lets the first 5 transmit then PARKS the rest (originator_self_defer) until the oldest ages out of the window. Checked at become_free transmit time so the count never exceeds the cap. Forwarders/others exempt; receiver-side airtime backstop is the hard floor. Verifies: sender emits originator_self_defer (proactive good-citizen throttle) AND rcvr still receives the early ones (delivered) -> rate-limit, not all-drop.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": {
+      "sf": 8,
+      "bw": 125,
+      "cr": 5
+    }
+  },
+  "nodes": [
+    {
+      "name": "sender",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          9
+        ],
+        "beacon_period_ms": 5000,
+        "quiet_threshold_ms": 0,
+        "originator_self_cap_per_window": 5
+      }
+    },
+    {
+      "name": "rcvr",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          9
+        ],
+        "beacon_period_ms": 5000,
+        "quiet_threshold_ms": 0,
+        "originator_self_cap_per_window": 5
+      }
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "sender",
+        "to": "rcvr",
+        "snr": 12.0,
+        "rssi": -78.0,
+        "bidir": true
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at_ms": 5000,
+      "node": "sender",
+      "command": "send rcvr m0"
+    },
+    {
+      "at_ms": 6000,
+      "node": "sender",
+      "command": "send rcvr m1"
+    },
+    {
+      "at_ms": 7000,
+      "node": "sender",
+      "command": "send rcvr m2"
+    },
+    {
+      "at_ms": 8000,
+      "node": "sender",
+      "command": "send rcvr m3"
+    },
+    {
+      "at_ms": 9000,
+      "node": "sender",
+      "command": "send rcvr m4"
+    },
+    {
+      "at_ms": 10000,
+      "node": "sender",
+      "command": "send rcvr m5"
+    },
+    {
+      "at_ms": 11000,
+      "node": "sender",
+      "command": "send rcvr m6"
+    },
+    {
+      "at_ms": 12000,
+      "node": "sender",
+      "command": "send rcvr m7"
+    },
+    {
+      "at_ms": 13000,
+      "node": "sender",
+      "command": "send rcvr m8"
+    },
+    {
+      "at_ms": 14000,
+      "node": "sender",
+      "command": "send rcvr m9"
+    }
+  ],
+  "expect": [
+    {
+      "type": "script_emit_contains",
+      "node": "sender",
+      "emit_type": "originator_self_defer",
+      "value": ""
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "rcvr",
+      "emit_type": "delivered",
+      "value": ""
+    }
+  ]
+}

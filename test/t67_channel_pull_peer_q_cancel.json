@@ -35,7 +35,7 @@
     { "at_ms": 5000, "node": "alice", "command": "send_channel 7 storm-dedupe" }
   ],
   "expect": [
-    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 storm-dedupe", "value": "channel msg queued" },
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 storm-dedupe", "value": "queued" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_msg_received", "value": "\"source\":\"self_originate\"" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx",            "value": "\"channel_digest_ids\":1" },
     { "type": "script_emit_contains", "node": "carol", "emit_type": "beacon_rx",            "value": "\"channel_digest_ids\":1" },

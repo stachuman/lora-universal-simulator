@@ -38,11 +38,11 @@
     { "type": "script_emit_contains", "node": "alice", "emit_type": "bcn_discovery_exit", "value": "" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "bcn_discovery_exit", "value": "" },
     { "type": "script_emit_contains", "node": "carol", "emit_type": "bcn_discovery_exit", "value": "" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_update",          "value": "\"dest\":2" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_update",          "value": "\"dest\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_update",          "value": "\"dest\":3" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_update",          "value": "\"dest\":3" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_full",            "value": "\"peers\":2" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_full",            "value": "\"peers\":2" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_aged",            "value": "\"dest\":2" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_aged",            "value": "\"dest\":2" }
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_aged",            "value": "\"dest\":3" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_aged",            "value": "\"dest\":3" }
   ]
 }

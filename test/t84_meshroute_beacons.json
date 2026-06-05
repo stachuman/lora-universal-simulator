@@ -26,10 +26,10 @@
     { "type": "event_count_min", "event_type": "script_emit", "node": "bob",   "min": 2 },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "beacon_tx", "value": "" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_tx", "value": "" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "beacon_rx", "value": "\"src\":1" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx", "value": "\"src\":0" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_update", "value": "\"dest\":1" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_update", "value": "\"dest\":0" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "beacon_rx", "value": "\"src\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx", "value": "\"src\":1" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_update", "value": "\"dest\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_update", "value": "\"dest\":1" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_full",   "value": "\"peers\":1" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_full",   "value": "\"peers\":1" }
   ]

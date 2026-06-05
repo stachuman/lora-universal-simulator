@@ -23,6 +23,7 @@
 
 #include "json/json.hpp"
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -223,6 +224,12 @@ struct SimConfig {
         // deterministic hash from the node name.
         std::string public_key;
         uint32_t key_hash32 = 0;
+        // Slice A2: a 32-byte identity seed (hex, zero-padded). When present, the harness
+        // DERIVES key_hash32 = ed_pub[:4] via the device's lib/core/identity (so sim and
+        // device share one derivation) and feeds the derived value to BOTH engines. The
+        // literal key_hash32 above stays as a transitional fallback for un-migrated scenarios.
+        std::array<uint8_t, 32> seed{};
+        bool                    has_seed = false;
 
         // New: script + config (replace firmware/role from MeshCore).
         std::string    script_path;

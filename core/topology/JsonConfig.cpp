@@ -103,6 +103,35 @@ static uint32_t parseKeyHash32(const json& value, const std::string& ctx) {
         + ": field \"key_hash32\" must be an integer or hex string");
 }
 
+// Slice A2: parse an identity seed -> 32 bytes (MSB-first hex string, 1..64 digits, left-aligned +
+// zero-padded; or an unsigned integer placed little-endian in the low bytes). Crypto-agnostic — the
+// seed->key_hash32 derivation (lib/core/identity) happens in SimController, so JsonConfig stays dep-free.
+static void parseSeed32(const json& value, const std::string& ctx, std::array<uint8_t, 32>& out) {
+    out.fill(0);
+    auto nib = [&](char c) -> uint32_t {
+        if (c >= '0' && c <= '9') return static_cast<uint32_t>(c - '0');
+        if (c >= 'a' && c <= 'f') return static_cast<uint32_t>(c - 'a' + 10);
+        if (c >= 'A' && c <= 'F') return static_cast<uint32_t>(c - 'A' + 10);
+        throw std::runtime_error("config error at " + ctx + ": field \"seed\" must be hex");
+    };
+    if (value.is_string()) {
+        std::string s = value.get<std::string>();
+        if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0) s = s.substr(2);
+        if (s.empty() || s.size() > 64)
+            throw std::runtime_error("config error at " + ctx + ": field \"seed\" hex must be 1..64 digits");
+        if (s.size() % 2) s = "0" + s;                              // even-length, MSB-first
+        for (size_t i = 0; i < s.size() / 2; ++i)                   // left-aligned: "01" -> {0x01, 0, ...}
+            out[i] = static_cast<uint8_t>((nib(s[2 * i]) << 4) | nib(s[2 * i + 1]));
+    } else if (value.is_number_unsigned() || value.is_number_integer()) {
+        long long vv = value.get<long long>();
+        if (vv < 0) throw std::runtime_error("config error at " + ctx + ": field \"seed\" must be non-negative");
+        uint64_t v = static_cast<uint64_t>(vv);
+        for (int i = 0; i < 8; ++i) out[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xffu);   // LE
+    } else {
+        throw std::runtime_error("config error at " + ctx + ": field \"seed\" must be a hex string or integer");
+    }
+}
+
 // --- main parse -----------------------------------------------------------
 
 static SimConfig parseJson(const json& j) {
@@ -216,6 +245,12 @@ static SimConfig parseJson(const json& j) {
                 def.key_hash32 = parseKeyHash32(nd["key_hash32"], ctx);
             } else {
                 def.key_hash32 = fnv1a32(def.public_key);
+            }
+            // Slice A2: an identity seed (preferred). Parsed here; key_hash32 is DERIVED from it in
+            // SimController (lib/core/identity), overriding the literal/fnv fallback above for BOTH engines.
+            if (nd.contains("seed")) {
+                parseSeed32(nd["seed"], ctx, def.seed);
+                def.has_seed = true;
             }
 
             // New universal fields: script + config.

@@ -969,7 +969,9 @@ PROTOCOL = {
 
   -- ---- Anti-spam originator rate-limit (P-class only) ----
   originator_window_ms           = 300000,     -- 5 min sliding window
-  originator_airtime_share       = 0.25,       -- backstop
+  originator_airtime_share       = 0.35,       -- backstop: DROP when a sender's observed airtime > share×budget (0.25->0.35: C++ delivers more -> higher per-sender airtime; s18 heaviest legit hit 77% of the old 0.25 cap, only 96% of the warn -> bumped for headroom)
+  originator_airtime_warn_fraction = 0.8,      -- WARN (no drop) at 0.8×drop cap; Inc 3 carries it in the ACK warn bit
+  originator_ack_warn_backoff_ms = 10000,      -- DM Inc 3: park new DM originations this long after a warn'd ACK
   originator_retry_dedup_ms      = 10000,
 
   -- ---- Priority unicast (ROADMAP §3a) ----
@@ -985,6 +987,15 @@ PROTOCOL = {
   -- nRF52840's 256 KB RAM.
   cap_channel_buffer            = 128,
   channel_msg_max_payload_bytes = 200,
+  -- Anti-spam: per-origin channel-message COUNT throttle (ROADMAP §3). Channels
+  -- expose the origin (channel_msg_id high byte), so we cap DISTINCT messages
+  -- per origin per window at DATA-M ingestion — an over-budget origin is dropped
+  -- mesh-wide (not buffered -> never advertised/pulled/re-broadcast), containing
+  -- the gossip amplification. DM uses an airtime backstop; channels use a count
+  -- (origin is explicit so count is robust + simple). Configurable per node/leaf;
+  -- calibrate the cap just above the heaviest legit origin (see s12).
+  channel_origin_window_ms      = 300000,   -- 5 min sliding window
+  channel_origin_max_per_window = 20,       -- distinct msgs/origin/window before silent drop
   -- BCN extension TLV body cap is 15 bytes (4-bit length field). With
   -- 1-byte count + 4-byte IDs that's max 3 IDs per BCN digest.
   channel_dirty_max_per_bcn     = 3,
@@ -2135,22 +2146,29 @@ local function parse_cts(frame)
   }
 end
 
--- ACK — 3 bytes, addressed response:
+-- ACK — 4 bytes, addressed response:
 --   byte 0 : tag 'K'
 --   byte 1 : ctr_lo (4 hi) | budget_hint (2) | snr_bucket_coarse (2 lo)
 --   byte 2 : intended previous-hop id
+--   byte 3 : flags — bit0 AIRTIME_WARN (DM Inc 3: "you're near my airtime cap");
+--                    bits 1-7 reserved.
+-- The Lua ACK GROWS by 1 byte to carry the warn (its literal 'K' tag eats a full
+-- byte, leaving byte1 fully packed). The C++ cmd-nibble wire fits the warn in
+-- byte0's spare nibble with no size change — same Lua-verbose / C++-compact split
+-- as the other frames.
 -- snr_q4 is Q4 SNR (1/16 dB) of the DATA leg as measured by the receiver.
-local function pack_ack(ctr_lo, snr_q4, budget_hint, to_id)
+local function pack_ack(ctr_lo, snr_q4, budget_hint, to_id, warn)
   local bucket = bucket_of_snr_2b(snr_q4)
   local hint = budget_hint or 0
   if hint < 0 then hint = 0 end
   if hint > 3 then hint = 3 end
   local b1 = ((ctr_lo & 0xf) << 4) | ((hint & 0x3) << 2) | (bucket & 0x3)
-  return "K" .. string.char(b1) .. string.char(to_id or 255)
+  local flags = warn and 0x01 or 0x00
+  return "K" .. string.char(b1) .. string.char(to_id or 255) .. string.char(flags)
 end
 
 local function parse_ack(frame)
-  if #frame < 3 or frame:sub(1,1) ~= "K" then return nil end
+  if #frame < 4 or frame:sub(1,1) ~= "K" then return nil end
   local b1 = frame:byte(2)
   local bucket = b1 & 0x3
   return {
@@ -2160,6 +2178,7 @@ local function parse_ack(frame)
     snr_bucket        = bucket,
     snr_bucket_coarse = bucket,
     to                = frame:byte(3),
+    warn              = (frame:byte(4) & 0x01) ~= 0,  -- DM Inc 3 airtime warn
   }
 end
 
@@ -2922,7 +2941,7 @@ DATA_HDR_LEN = 8 + VISITED_LEN  -- GLOBAL (referenced by parse_data above it; al
 -- DATA wire overhead beyond inner body: 2 inner-header bytes (src_addr_len + src_addr) + MAC_LEN.
 -- RTS payload_len = #body + DATA_INNER_OVERHEAD for in-leaf frames.
 local DATA_INNER_OVERHEAD = 2 + MAC_LEN  -- src_addr_len(1) + src_addr(1) + MAC(4) = 6
-local ACK_LEN = 3       -- 'K' + (ctr_lo<<4 | hint_2 | snr_bucket_2) + to
+local ACK_LEN = 4       -- 'K' + (ctr_lo<<4|hint_2|snr_2) + to + flags(warn)  [+1B Lua-only for DM Inc-3 warn; C++ cmd-nibble fits w/o growth]
 local NACK_LEN = 4      -- 'N' + (reason_4|ctr_lo_4) + payload + to
 local Q_LEN    = 4      -- 'Q' + src + dest + (leaf_id_4|reserved_4)
 
@@ -3294,6 +3313,19 @@ local function compute_originator_metric(self, sender_id)
   return app_orig, air, rts, cts
 end
 
+-- DM Inc 3: is this sender in the airtime WARN band (observed airtime ≥
+-- warn_fraction × cap)? Computed at ACK-send so the freshest (post-DATA)
+-- airtime drives the ACK warn bit. False when duty is disabled (no budget →
+-- no share to warn against). Covers ≥cap too (if this DATA pushed the sender
+-- over, the next RTS gets hard-dropped anyway — warn it now regardless).
+-- Global (not local) to dodge the 200-locals-per-main-function limit.
+function originator_airtime_warn(self, sender_id)
+  if (self.duty_cycle_budget_ms or 0) <= 0 then return false end
+  local _, air = compute_originator_metric(self, sender_id)
+  local cap = self.originator_airtime_share * self.duty_cycle_budget_ms
+  return air > (self.originator_airtime_warn_fraction or 0.8) * cap
+end
+
 -- Originator self-rate-monitor: track count of this node's own
 -- issue_send calls in the sliding window. Used by the on-failure
 -- check that emits originator_self_over_budget so the app can surface
@@ -3408,6 +3440,44 @@ function channel_buffer_mark_seen_by(self, id, neighbour_id)
     return true
   end
   return false
+end
+
+-- Channel anti-spam (ROADMAP §3): per-origin DISTINCT-message count over a
+-- sliding window. Channels carry the origin in the clear (channel_msg_id high
+-- byte) so — unlike DM, which keys on the physical neighbour to preserve origin
+-- privacy — we throttle the true source globally. Counting distinct
+-- channel_msg_ids (not airtime): origin is explicit so the count is robust, and
+-- bounded payloads make count ~ airtime. Returns (admit, count): admit=false
+-- when origin is at/over channel_origin_max_per_window (caller drops the frame
+-- -> not buffered -> gossip amplification contained). A repeat id (re-broadcast
+-- after buffer eviction) refreshes its timestamp, is always admitted, and is
+-- not re-counted. origin==self bypasses (own posts use the origination self-cap).
+-- Global (not local) to dodge the 200-locals-per-main-function limit.
+function channel_origin_admit(self, origin, msg_id)
+  if not self.per_origin_channel then return true, 0 end
+  if origin == self.id then return true, 0 end
+  local now = self:now()
+  local cutoff = now - (self.channel_origin_window_ms or 300000)
+  local entry = self.per_origin_channel[origin]
+  if entry == nil then entry = { events = {} }; self.per_origin_channel[origin] = entry end
+  local kept, seen, dup = {}, {}, false
+  for _, ev in ipairs(entry.events) do
+    if ev.t >= cutoff then
+      if ev.id == msg_id then ev.t = now; dup = true end
+      table.insert(kept, ev)
+      seen[ev.id] = true
+    end
+  end
+  local count = 0
+  for _ in pairs(seen) do count = count + 1 end
+  if dup then entry.events = kept; return true, count end
+  if count >= (self.channel_origin_max_per_window or 20) then
+    entry.events = kept
+    return false, count
+  end
+  table.insert(kept, { t = now, id = msg_id })
+  entry.events = kept
+  return true, count + 1
 end
 
 -- Pick the oldest entry whose seen_by covers all live direct neighbours.
@@ -7522,6 +7592,28 @@ become_free = function(self)
     self.queue_wakeup_handle = nil
   end
   local item = table.remove(self.tx_queue, best_idx)
+  -- Inc 4 self-cap (enforcing): cap our OWN DM originations per window. Checked
+  -- here at transmit time — become_free serializes sends, so the count never
+  -- exceeds the cap (no enqueue-race overshoot). Exempt: forwards (origin ~=
+  -- self / previous_hop set, so we stay a good relay) AND channel broadcasts
+  -- (M_BROADCAST — the per-origin channel COUNT plane governs those; channel
+  -- originations only CONTRIBUTE to this count via send_channel, so a
+  -- channel-heavy node's DM still defers). Defer = re-queue until the oldest
+  -- origination ages out; the receiver-side airtime backstop is the hard floor.
+  if item.origin == self.id and item.previous_hop == nil
+     and ((item.flags or 0) & DATA_FLAG_PAYLOAD_TYPE_M) == 0
+     and self_originate_count(self) >= (self.originator_self_cap_per_window or 20) then
+    local oldest = self.own_origination_events and self.own_origination_events[1]
+    item.next_attempt_ms = math.max((oldest or now) + (self.originator_window_ms or 300000), now + 1)
+    table.insert(self.tx_queue, item)
+    self:emit("originator_self_defer", {
+      origin = self.id, dst = item.dst_id, ctr = item.ctr,
+      own_count = self_originate_count(self),
+      cap = (self.originator_self_cap_per_window or 20),
+      until_ms = item.next_attempt_ms, window_ms = self.originator_window_ms,
+    })
+    return become_free(self)
+  end
   self:emit("tx_dequeue", {
     origin = item.origin, payload = item.user_text, ctr = item.ctr,
     dst = item.dst_id, depth = #self.tx_queue,
@@ -8548,7 +8640,14 @@ function on_init(self, config)
   -- stays D (diagnostic hint).
   self.per_sender_originator        = {}
   self.own_origination_events       = {}
+  self.per_origin_channel           = {}   -- channel anti-spam: per-origin distinct-msg window
   self.originator_max_per_window    = config.originator_max_per_window    or 6
+  -- Inc 4: enforcing self-origination cap (DM + channel originations, unified)
+  -- per window. SEPARATE from originator_max_per_window (which stays the
+  -- advisory self-warn knob + the now-vestigial R−C threshold some tests set
+  -- low) so reusing it doesn't false-defer those senders. Calibrated above the
+  -- s18 heaviest legit per-window count (7) + s12 channel max (6) → 20 (~2.8×).
+  self.originator_self_cap_per_window = config.originator_self_cap_per_window or 20
   self.originator_self_warn_fraction = config.originator_self_warn_fraction or 0.5
   -- Priority unicast (ROADMAP §3a): two parallel ledgers, keyed on the
   -- sender's role at this node.
@@ -9210,12 +9309,13 @@ function on_recv(self, frame, meta)
   -- on one layer can pollute that layer's rt[] with a foreign-layer sender
   -- before the later per-frame leaf filter rejects the payload.
   local function learn_rx_source(source, sender)
-    -- `sender` is the direct PHY transmitter. Frames that carry the sender on
-    -- the wire pass it explicitly (CTS tx_id today; RTS/beacon src, DATA
-    -- visited-tail to follow); the rest still fall back to the sim god-view
-    -- meta.src until they are migrated off it per-frame.
+    -- `sender` is the direct PHY transmitter, passed from the wire/pending state per frame
+    -- type: beacon/rts/q src, cts tx_id, ack/nack pending_tx.next, data visited-tail. Frames
+    -- with no on-wire immediate sender (h/r AODV flood/relay, j join) pass nothing -> meta.src
+    -- (-1 on metal), which the range guard turns into a clean no-op — can't learn/bind an
+    -- unknown or invalid node id (and -1 would poison id_bind / dest_seen / rt).
     sender = sender or meta.src
-    if sender == nil or meta_snr_q4 == nil then return false end
+    if sender == nil or sender < 0 or sender > 254 or meta_snr_q4 == nil then return false end
     local pre_action = learn_direct_from_frame(self, sender, meta_snr_q4, source or "direct_frame")
     learned_direct_pre = (pre_action == "new"
                           or pre_action == "promote"
@@ -9473,7 +9573,7 @@ function on_recv(self, frame, meta)
     -- 4-bit space. Silent drop (no event spam — expected during
     -- enhanced propagation events).
     if b.leaf_id ~= active_leaf_id(self) then return end
-    learn_rx_source("beacon_frame")
+    learn_rx_source("beacon_frame", b.src)
     id_bind_set(self, b.src, b.key_hash32, "bcn", "claimed")
     remember_gateway_schedule(self, b.src, b)
     -- PROTOCOL §3.1 type 4: ingest propagated cross-layer routing.
@@ -9742,13 +9842,18 @@ function on_recv(self, frame, meta)
     -- 1st-hop origination — on the target layer the gateway re-injects with
     -- no preceding CTS, so counting it would mis-read the gateway as a
     -- runaway originator (§10a). Don't observe it; don't throttle it.
-    if not r.relay then
+    if r.relay then
+      -- Gateway cross-layer forward: exempt from the §10a originator metric.
+      self:emit("rts_relay_exempt", { from = r.src, ctr_lo = r.ctr_lo })
+    elseif r.m_broadcast then
+      -- Channel M_BROADCAST RTS: channel traffic is governed by the per-origin
+      -- COUNT plane (channel_origin_admit at DATA-M ingestion), not the DM
+      -- airtime ledger. Folding it in here would throttle honest holders' DM
+      -- traffic for relaying channels — keep the planes separate.
+    else
       track_originator_observation(self, r.src, "rts", r.ctr_lo,
         airtime_ms(active_routing_sf(self), self.bw_hz, self.cr,
                    self.preamble_sym, #frame))
-    else
-      -- Gateway cross-layer forward: exempt from the §10a originator metric.
-      self:emit("rts_relay_exempt", { from = r.src, ctr_lo = r.ctr_lo })
     end
     -- If we are waiting for a hop ACK from our selected next-hop and we
     -- overhear that next-hop forwarding the same DATA onward, that RTS-fwd is
@@ -10009,19 +10114,14 @@ function on_recv(self, frame, meta)
       return
     end
 
-    -- Anti-spam 1st-hop check: if this sender's apparent-origination
-    -- rate (R-C over the sliding window) is over threshold, silently
-    -- drop the RTS — no CTS, no NACK. The sender experiences
-    -- rts_timeout, the cascade tries other next-hops, all 1st-hop
-    -- neighbours converge on the same rate-limit, and the spammer is
-    -- effectively capped at ~72 originations/hr regardless of how
-    -- many next-hops they try. Emit rts_drop_originator_throttle so
-    -- the analyzer can measure activity without the protocol paying
-    -- airtime. See header doc block "Anti-spam: 1st-hop statistical
-    -- rate-limit" for the full argument.
+    -- Anti-spam 1st-hop backstop: if this sender's overheard airtime over the
+    -- sliding window exceeds originator_airtime_share of our duty budget, silently
+    -- drop the RTS — no CTS, no NACK. The sender rts_timeouts, its cascade tries
+    -- other next-hops, and all 1st-hop neighbours converge on the same airtime cap,
+    -- bounding a flooder regardless of how many next-hops it tries. Emit
+    -- rts_drop_originator_throttle for the analyzer.
     -- Gateway cross-layer forwards (RTS_FLAG_RELAY) are exempt — they aren't
-    -- 1st-hop originations (the gateway is relaying for the cross-layer origin),
-    -- and their RTS-without-CTS on this layer would otherwise trip the metric.
+    -- 1st-hop originations (the gateway relays for the cross-layer origin).
     if not r.relay then
       local app_orig, total_air, rts_n, cts_n =
         compute_originator_metric(self, r.src)
@@ -10031,10 +10131,28 @@ function on_recv(self, frame, meta)
       -- (budget 0) there is no share to enforce, so skip it — matching the duty-disabled
       -- guard the sibling consumers have (compute_budget_tier, check_duty_cycle) but this
       -- drop originally lacked (without the guard, budget=0 -> cap 0 -> drops every RTS).
-      -- The COUNT threshold below is budget-independent and stays always-active.
       local over_airtime = (self.duty_cycle_budget_ms or 0) > 0 and total_air > airtime_cap_ms
-      if app_orig > self.originator_max_per_window
-         or over_airtime then
+      -- WARN band (Inc 2): airtime in [warn_fraction × cap, cap) — flag, don't drop.
+      -- Inc 3 carries this to the sender in the ACK warn bit so an honest node
+      -- backs off BEFORE it crosses the hard cap. Emitted here for calibration:
+      -- how close does legitimate traffic come to the cap?
+      local airtime_warn_ms = math.floor(
+        (self.originator_airtime_warn_fraction or 0.8) * airtime_cap_ms)
+      if (self.duty_cycle_budget_ms or 0) > 0 and not over_airtime
+         and total_air > airtime_warn_ms then
+        self:emit("rts_originator_airtime_warn", {
+          from = r.src, ctr_lo = r.ctr_lo,
+          airtime_ms           = total_air,
+          warn_airtime_ms      = airtime_warn_ms,
+          threshold_airtime_ms = airtime_cap_ms,
+          window_ms            = self.originator_window_ms,
+        })
+      end
+      -- R-C apparent-origination COUNT clause removed: it over-fired on legit bursts (a missed
+      -- CTS makes a forwarder look like an originator — 168 false-drops on s18, 63%->69% delivery
+      -- once removed). The airtime backstop is the robust half: independent of firmware honesty
+      -- and of CTS-overhearing loss.
+      if over_airtime then
         self:emit("rts_drop_originator_throttle", {
           from = r.src, ctr_lo = r.ctr_lo,
           apparent_origination = app_orig,
@@ -10046,10 +10164,9 @@ function on_recv(self, frame, meta)
           window_ms            = self.originator_window_ms,
         })
         self:log(string.format(
-          "rts_drop_originator_throttle <- %s ctr_lo=%d (R-C=%d/%d over %dms, air=%dms/%dms)",
+          "rts_drop_originator_throttle <- %s ctr_lo=%d (air=%dms/%dms over %dms; R-C=%d info-only)",
           name_of(self, r.src), r.ctr_lo,
-          app_orig, self.originator_max_per_window,
-          self.originator_window_ms, total_air, airtime_cap_ms))
+          total_air, airtime_cap_ms, self.originator_window_ms, app_orig))
         return  -- silent drop; no CTS, no NACK
       end
     end
@@ -10354,7 +10471,7 @@ function on_recv(self, frame, meta)
       })
       return
     end
-    learn_rx_source("ack_frame")
+    learn_rx_source("ack_frame", self.pending_tx and self.pending_tx.next)
 
     -- ACK matched. Cancel the ack_timeout, clear pending_tx, drain the
     -- queue. The ack_timeout retry path (re-RTS on ack-loss) is what
@@ -10389,6 +10506,17 @@ function on_recv(self, frame, meta)
       if tier > BUDGET_TIER_CRITICAL then tier = BUDGET_TIER_CRITICAL end
       ack_budget_reranked = mark_neighbor_budget_tier(self, ack_src, tier, "ack_budget", true)
     end
+    -- DM Inc 3: a warn'd ACK means a downstream neighbour considers us near its
+    -- airtime cap. Honest back-off — park new DM originations until the warn
+    -- window expires (the hard receiver-side drop is the backstop). The window
+    -- self-clears: as our airtime ages out of the neighbour's 5-min window it
+    -- stops setting the bit, so ack_warn_until simply lapses.
+    if k.warn then
+      self.ack_warn_until = self:now() + (self.originator_ack_warn_backoff_ms or 10000)
+      self:emit("originator_warned_by_ack", {
+        from = ack_src, ctr_lo = k.ctr_lo, backoff_until_ms = self.ack_warn_until,
+      })
+    end
     self:emit("ack_rx", {
       origin = self.pending_tx.origin,
       payload = self.pending_tx.user_text,
@@ -10398,6 +10526,7 @@ function on_recv(self, frame, meta)
       snr_bucket_coarse = k.snr_bucket_coarse,
       budget_hint = k.budget_hint,
       budget_reranked = ack_budget_reranked,
+      airtime_warn = k.warn,
     })
     self:log(string.format("ack_rx <- %s ctr_lo=%d data_snr=%s budget_hint=%d -> hop complete",
       name_of(self, self.pending_tx.next), k.ctr_lo,
@@ -10426,7 +10555,7 @@ function on_recv(self, frame, meta)
       })
       return
     end
-    learn_rx_source("nack_frame")
+    learn_rx_source("nack_frame", self.pending_tx and self.pending_tx.next)
 
     -- NACK matched: chosen next-hop can't take us right now. Cancel the
     -- rts_timeout (NACK is a faster, definitive signal). NACK rides on
@@ -10756,7 +10885,7 @@ function on_recv(self, frame, meta)
   if tag == "D" then
     local d = parse_data(frame)
     if not d then return end
-    learn_rx_source("data_frame")
+    learn_rx_source("data_frame", d.visited[#d.visited])
 
     -- §7.6 Phase C: opportunistic rt-learning from the carried
     -- `prev_fwd_rt_hops` claim. Applies to EVERY successful DATA decode
@@ -10812,6 +10941,25 @@ function on_recv(self, frame, meta)
     -- from the gossip propagation.
     if d.payload_type_m then
       local id = d.channel_msg_id
+      -- Channel anti-spam (ROADMAP §3): per-origin distinct-message count.
+      -- Origin is exposed (channel_msg_id high byte) so we throttle the true
+      -- source globally. Over budget -> drop the frame ENTIRELY here: not
+      -- buffered (so never advertised in a digest, pulled, or re-broadcast) and
+      -- not forwarded. Contains the gossip amplification at every node, gateways
+      -- included. Hard-edge (channels have no ACK -> no warn-back path).
+      local ch_admit, ch_count = channel_origin_admit(self, d.origin, id)
+      if not ch_admit then
+        self:emit("channel_drop_originator_throttle", {
+          origin = d.origin, channel_id = d.channel_id, msg_id = id,
+          count = ch_count, threshold = self.channel_origin_max_per_window,
+          window_ms = self.channel_origin_window_ms,
+        })
+        self:log(string.format(
+          "channel_drop_originator_throttle <- origin=%s id=0x%08x (%d msgs over cap %d / %dms)",
+          name_of(self, d.origin), id, ch_count,
+          self.channel_origin_max_per_window, self.channel_origin_window_ms))
+        return
+      end
       -- Principle 11: channels are local-by-design. Gateways carry DM
       -- across layers via the envelope handoff, but they do NOT
       -- participate in channel gossip — otherwise an L1 channel
@@ -10847,6 +10995,7 @@ function on_recv(self, frame, meta)
             id = id, channel_id = d.channel_id, flavor = d.channel_flavor,
             source = source_label, from = meta.src,
             buffer_depth = #self.channel_buffer,
+            origin_msg_count = ch_count,  -- this origin's windowed count (anti-spam calibration)
           })
           if source_label == "overheard" then
             self:emit("channel_msg_overheard", {
@@ -10897,6 +11046,21 @@ function on_recv(self, frame, meta)
     if d.next ~= self.id then return end
     if self.pending_rx == nil or d.ctr_lo ~= self.pending_rx.ctr_lo then return end
 
+    -- Anti-spam (Inc 2): record this inbound DATA's airtime in the sender's
+    -- sliding window. RTS-only airtime (a few ms) never approached the share
+    -- cap, so the backstop had no teeth; DATA is the dominant airtime a sender
+    -- imposes on us. Key on pending_rx.from (== this hop's RTS r.src, so RTS
+    -- and DATA accumulate in one entry) and cost it at pending_rx.chosen_data_sf
+    -- (the SF we picked in the CTS and the sender therefore used).
+    track_originator_observation(self, self.pending_rx.from, "data", d.ctr_lo,
+      airtime_ms(self.pending_rx.chosen_data_sf, self.bw_hz, self.cr,
+                 self.preamble_sym, #frame))
+    -- Calibration diagnostic: the sender's total observed airtime in the window
+    -- AFTER this DATA. Emitted on data_rx (below) so a run's per-sender airtime
+    -- distribution is visible even when no warn/drop fires — that's the number
+    -- that sets originator_airtime_share (cap just above the heaviest legit sender).
+    local _, orig_airtime_ms = compute_originator_metric(self, self.pending_rx.from)
+
     -- parse_data already extracted origin, body, ctr, flags from the new
     -- wire format. E2E flag bits are on wire byte 1 (not inner payload).
     local is_e2e_ack  = d.e2e_is_ack
@@ -10926,6 +11090,7 @@ function on_recv(self, frame, meta)
       dst        = d.dst,
       ctr_lo     = d.ctr_lo,
       len        = #d.inner,
+      orig_airtime_ms = orig_airtime_ms,  -- this sender's windowed airtime (anti-spam calibration)
     })
 	    self:log(string.format(
 	      "data_rx <- %s (origin=%s ctr=%d dst=%s ctr_lo=%d, %d inner bytes) -> back to SF%d",
@@ -11098,9 +11263,14 @@ function on_recv(self, frame, meta)
     local my_budget_tier = compute_budget_tier(self)
     local ack_budget_hint = my_budget_tier
     if ack_budget_hint > BUDGET_TIER_CRITICAL then ack_budget_hint = BUDGET_TIER_CRITICAL end
-    local ack = pack_ack(d.ctr_lo, meta_snr_q4, ack_budget_hint, rx_from)
+    -- DM Inc 3: warn the sender (via the ACK warn bit) when its observed
+    -- airtime is in the warn band — the soft, sender-side precursor to the
+    -- hard receiver-side drop.
+    local ack_warn = originator_airtime_warn(self, rx_from)
+    local ack = pack_ack(d.ctr_lo, meta_snr_q4, ack_budget_hint, rx_from, ack_warn)
     self:emit("ack_tx", {
       origin = d.origin, payload = event_payload, ctr = d.ctr,
+      airtime_warn = ack_warn,
       to = rx_from, ctr_lo = d.ctr_lo, data_snr = meta.snr,
       budget_tier = my_budget_tier,
       budget_hint = ack_budget_hint,
@@ -11599,7 +11769,7 @@ function on_recv(self, frame, meta)
     if not q then return end
     -- Cross-network filter — drop foreign Q before any work.
     if q.leaf_id ~= active_leaf_id(self) then return end
-    learn_rx_source("q_frame")
+    learn_rx_source("q_frame", q.src)
     -- Don't respond to ourselves (loop guard).
     if q.src == self.id then return end
     -- Dedup: if we recently responded to the same query, skip.
@@ -11986,6 +12156,11 @@ function on_command(self, cmd_str)
       origin       = self.id,
     }
     local added, evicted = channel_buffer_add(self, entry)
+    -- Inc 4: channel originations count toward the unified self-origination
+    -- budget (same ledger as DM), so the self-cap measures the node's TOTAL
+    -- origination rate. (Channels are also throttled receiver-side by the
+    -- per-origin count plane; this is the sender-side self-accounting.)
+    self_originate_observe(self)
     self:emit("channel_msg_received", {
       id = id, channel_id = ch_id, flavor = CHANNEL_FLAVOR_PUBLIC,
       source = "self_originate",
@@ -12085,6 +12260,18 @@ function on_command(self, cmd_str)
     self:log(string.format("send_e2e: pending_e2e[%s] dst=%s ctr=%d ttl=%dms",
       e2e_key, dst_name, ctr, self.e2e_ack_ttl_ms))
   end
+  -- DM Inc 3: honest-sender back-off. A warn'd ACK (a downstream neighbour says
+  -- we're near its airtime cap) parks new DM originations until the warn window
+  -- expires, relieving that neighbour. The hard receiver-side airtime drop is the
+  -- backstop; this is the polite sender-side half. Uses the existing queue
+  -- scheduler (next_attempt_ms) — no new chokepoint.
+  local backoff_next = 0
+  if self.ack_warn_until and self:now() < self.ack_warn_until then
+    backoff_next = self.ack_warn_until
+    self:emit("origination_backoff_ack_warn", {
+      origin = self.id, dst = dst_id, ctr = ctr, until_ms = self.ack_warn_until,
+    })
+  end
   table.insert(self.tx_queue, {
     origin     = self.id,
     dst_id     = dst_id,
@@ -12095,7 +12282,7 @@ function on_command(self, cmd_str)
     flags      = wire_flags,
     enqueue_time_ms = self:now(), -- first enqueue; cap reference for cascade-requeue
     requeue_count   = 0,
-    next_attempt_ms = 0,
+    next_attempt_ms = backoff_next,
   })
   self:emit("tx_enqueue", {
     origin = self.id, payload = text, ctr = ctr,

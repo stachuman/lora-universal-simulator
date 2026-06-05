@@ -124,7 +124,14 @@ class NodeConfig(BaseModel):
     model_config = LUS_MODEL_CONFIG
 
     name: str = Field(min_length=1, max_length=64)
-    script: str = Field(min_length=1)
+    # script is required for the default "lua" engine and unused for
+    # "meshroute" (the in-loop C++ FirmwareNode). Cross-field enforcement
+    # lives in lus (core/topology/JsonConfig.cpp), per schema docstring.
+    script: Optional[str] = Field(default=None, min_length=1)
+    # core/topology/JsonConfig.cpp:237 allowlist.
+    engine: Optional[Literal["lua", "meshroute"]] = None
+    # Optional explicit short_id assignment; otherwise allocated by lus.
+    node_id: Optional[int] = Field(default=None, ge=0, le=255)
     config: dict = Field(default_factory=dict)
     lat: Optional[float] = Field(default=None, ge=-90.0, le=90.0)
     lon: Optional[float] = Field(default=None, ge=-180.0, le=180.0)

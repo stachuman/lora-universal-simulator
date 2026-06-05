@@ -56,6 +56,13 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
         cfg.rt_aging_check_period_ms = config.value("rt_aging_check_period_ms", cfg.rt_aging_check_period_ms);
         cfg.data_sf                  = config.value("data_sf",                  cfg.data_sf);   // R3 data plane
         cfg.dv_hop_cap               = config.value("dv_hop_cap",               cfg.dv_hop_cap); // network-wide (J-join distributes it in Slice 3)
+        cfg.channel_dirty_max_advertisements = config.value("channel_dirty_max_advertisements", cfg.channel_dirty_max_advertisements); // K: BCN-digest retire count (Lua per-node; t68 shrinks it to 2)
+        cfg.channel_pull_jitter_ms           = config.value("channel_pull_jitter_ms",           cfg.channel_pull_jitter_ms);           // digest-pull backoff (t69 shrinks it to pin pull order)
+        cfg.channel_origin_max_per_window    = config.value("channel_origin_max_per_window",    cfg.channel_origin_max_per_window);    // per-origin anti-spam cap (t34 tightens it to 3)
+        cfg.channel_origin_window_ms         = config.value("channel_origin_window_ms",         cfg.channel_origin_window_ms);
+        cfg.cap_route_request_last           = config.value("cap_route_request_last",           cfg.cap_route_request_last);           // per-dst RREQ table cap (t61 shrinks to 2 to exercise table_cap_hit refuse)
+        cfg.cap_id_bind                      = config.value("cap_id_bind",                      cfg.cap_id_bind);                      // hash-locate id_bind cap (a gate shrinks it to exercise the refuse)
+        cfg.id_bind_ttl_ms                   = config.value("id_bind_ttl_ms",                   cfg.id_bind_ttl_ms);                   // hash-locate binding TTL (a gate shrinks the 48h default to exercise aging)
         // allowed_data_sfs: [7,9] -> allowed_sf_bitmap (bit = sf), matching the Lua config key. The DATA-SF
         // selector picks the fastest SF in this set the link SNR supports; absent/empty -> the single data_sf.
         if (config.contains("allowed_data_sfs") && config["allowed_data_sfs"].is_array()) {
@@ -119,6 +126,61 @@ std::string FirmwareNode::onCommand(std::string_view cmd_str) {
     // The sim TRANSPORT parses its command string into a TYPED meshroute::Command
     // (a device backend parses its binary frames into the SAME Command). lib/core
     // never sees a command string. SimController has already resolved name -> id.
+    // ROADMAP §3 channel gossip: send_channel <channel_id 0-255> <text>. The first arg is a numeric
+    // channel id (not a node name), so SimController's name->id resolution leaves it untouched.
+    if (cmd.rfind("send_channel ", 0) == 0) {
+        size_t s = 13; while (s < cmd.size() && cmd[s] == ' ') ++s;
+        unsigned ch = 0; size_t e = s; bool got = false;
+        while (e < cmd.size() && cmd[e] >= '0' && cmd[e] <= '9') { ch = ch * 10 + (cmd[e] - '0'); ++e; got = true; }
+        if (got && ch <= 255 && e < cmd.size() && cmd[e] == ' ') {
+            const std::string body = cmd.substr(e + 1);
+            meshroute::Command c{};
+            c.kind = meshroute::CmdKind::send_channel;
+            c.u.channel.channel_id = static_cast<uint8_t>(ch);
+            const size_t cap = 200;   // channel_msg_max_payload_bytes
+            c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
+            c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
+            const meshroute::CmdResult r = _node->on_command(c);
+            const char* code = (r.code == meshroute::CmdCode::queued) ? "queued" : "error";
+            return std::string("OK ") + code + " ctr=" + std::to_string(r.ctr) +
+                   " depth=" + std::to_string(r.queue_depth);
+        }
+        return "ERROR: usage: send_channel <channel_id 0-255> <text>";
+    }
+    // Hash-locate (H plane): send_hash <key_hash32 hex> <text>. Address by the target's stable
+    // key_hash32 instead of its short id — lib/core resolves it (id_bind cache or an H flood) before
+    // sending. The first arg is hex (not a node name) so SimController's name->id pass leaves it alone.
+    if (cmd.rfind("send_hash ", 0) == 0) {
+        size_t s = 10; while (s < cmd.size() && cmd[s] == ' ') ++s;
+        if (s + 1 < cmd.size() && cmd[s] == '0' && (cmd[s + 1] == 'x' || cmd[s + 1] == 'X')) s += 2;  // optional 0x
+        uint32_t h = 0; size_t e = s; int ndig = 0; bool got = false;
+        while (e < cmd.size()) {
+            const char ch = cmd[e];
+            int v;
+            if (ch >= '0' && ch <= '9')      v = ch - '0';
+            else if (ch >= 'a' && ch <= 'f') v = ch - 'a' + 10;
+            else if (ch >= 'A' && ch <= 'F') v = ch - 'A' + 10;
+            else break;
+            h = (h << 4) | static_cast<uint32_t>(v); ++e; ++ndig; got = true;
+        }
+        // Reject >8 hex digits: a key_hash32 is 32 bits, and silently truncating the high nibbles
+        // would mis-address the DM to a DIFFERENT (but valid) hash with a success-looking reply.
+        if (got && ndig <= 8 && h != 0 && e < cmd.size() && cmd[e] == ' ') {
+            const std::string body = cmd.substr(e + 1);
+            meshroute::Command c{};
+            c.kind = meshroute::CmdKind::send;
+            c.u.send.dst_hash = h;                 // the address-by-hash path (dst_id ignored when dst_hash != 0)
+            c.u.send.flags    = 0;
+            const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
+            c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
+            c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
+            const meshroute::CmdResult r = _node->on_command(c);
+            const char* code = (r.code == meshroute::CmdCode::queued) ? "queued" : "error";
+            return std::string("OK ") + code + " ctr=" + std::to_string(r.ctr) +
+                   " depth=" + std::to_string(r.queue_depth);
+        }
+        return "ERROR: usage: send_hash <key_hash32 hex> <text>";
+    }
     const bool is_e2e = (cmd.rfind("send_e2e ", 0) == 0);
     const size_t pfx  = is_e2e ? 9 : (cmd.rfind("send ", 0) == 0 ? 5 : 0);
     if (pfx) {

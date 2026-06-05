@@ -13,13 +13,13 @@
     }
   },
   "nodes": [
-    { "name": "alice", "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
-    { "name": "r1",    "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
-    { "name": "r2",    "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
-    { "name": "r3",    "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
-    { "name": "r4",    "node_id": 4, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
-    { "name": "r5",    "node_id": 5, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
-    { "name": "dave",  "node_id": 6, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } }
+    { "name": "alice", "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r1",    "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r2",    "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r3",    "node_id": 4, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r4",    "node_id": 5, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "r5",    "node_id": 6, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } },
+    { "name": "dave",  "node_id": 7, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": false, "peer_count": 6 } }
   ],
   "topology": { "links": [
     { "from": "alice", "to": "r1",   "snr": 16.0, "loss": 0.0, "bidir": true },

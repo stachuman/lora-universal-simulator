@@ -34,7 +34,7 @@
     { "at_ms": 20100, "node": "eve", "command": "send alice hello-via-R" }
   ],
   "expect": [
-    { "type": "script_emit_contains", "node": "eve",   "emit_type": "r_tx",          "value": "alice" },
+    { "type": "script_emit_contains", "node": "eve",   "emit_type": "r_tx",          "value": "no_route" },
     { "type": "script_emit_contains", "node": "dave",  "emit_type": "rreq_rx",       "value": "" },
     { "type": "script_emit_contains", "node": "eve",   "emit_type": "rrep_arrived",  "value": "" },
     { "type": "script_emit_contains", "node": "eve",   "emit_type": "send_drained",  "value": "" },

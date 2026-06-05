@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(lora_universal_simulator
         VERSION 0.1.0
-        LANGUAGES CXX)
+        LANGUAGES C CXX)        # C: monocypher.c (lib/core/identity seed -> key_hash32 derivation)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,8 +39,13 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         ${MESHROUTE_DIR}/lib/core/node_mac.cpp
         ${MESHROUTE_DIR}/lib/core/node_mac_rx.cpp
         ${MESHROUTE_DIR}/lib/core/node_route_discovery.cpp
+        ${MESHROUTE_DIR}/lib/core/node_query.cpp
+        ${MESHROUTE_DIR}/lib/core/node_channel.cpp
+        ${MESHROUTE_DIR}/lib/core/node_hashlocate.cpp
         ${MESHROUTE_DIR}/lib/core/node_budget.cpp
         ${MESHROUTE_DIR}/lib/core/node_cascade.cpp
+        ${MESHROUTE_DIR}/lib/core/identity.cpp
+        ${MESHROUTE_DIR}/lib/monocypher/src/monocypher.c
     )
     target_compile_features(meshroute_core PRIVATE cxx_std_20)
     target_compile_definitions(meshroute_core PRIVATE
@@ -53,6 +58,8 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         LORA_DUTY_CYCLE_PCT=10
     )
     target_include_directories(meshroute_core PUBLIC ${MESHROUTE_DIR}/lib/core)
+    # identity.cpp -> monocypher (seed -> key_hash32 derivation, shared with the device)
+    target_include_directories(meshroute_core PUBLIC ${MESHROUTE_DIR}/lib/monocypher/src)
     set(MESHROUTE_ENABLED ON)
 else()
     message(WARNING "MeshRoute not found at ${MESHROUTE_DIR} — building WITHOUT engine:meshroute "

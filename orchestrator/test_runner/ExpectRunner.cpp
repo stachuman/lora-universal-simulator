@@ -111,6 +111,11 @@ int ExpectRunner::evaluate(const SimConfig& cfg,
             int count = 0;
             for (const auto& e : events) {
                 if (e.value("type", "") != a.event_type) continue;
+                // Optional emit_type narrowing: lets event_count(_min) target a
+                // specific script_emit (e.g. channel_msg_received) instead of the
+                // whole `type` category. Empty emit_type preserves legacy behavior.
+                if (!a.emit_type.empty() &&
+                    e.value("emit_type", "") != a.emit_type) continue;
                 if (!nodeMatches(e, a.node, name_to_id)) continue;
                 ++count;
             }
@@ -130,6 +135,8 @@ int ExpectRunner::evaluate(const SimConfig& cfg,
             }
             std::string detail =
                 "event_type=" + a.event_type +
+                (a.emit_type.empty() ? std::string("")
+                                     : " emit_type=" + a.emit_type) +
                 " node=" + a.node +
                 " count=" + std::to_string(count);
             if (a.type == "event_count_min") {

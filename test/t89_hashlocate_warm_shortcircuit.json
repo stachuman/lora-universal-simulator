@@ -1,0 +1,189 @@
+{
+  "_name": "t89_hashlocate_warm_shortcircuit",
+  "_desc": "H hash-locate (Phase D send-by-hash) live gate. alice(1)-carol(2)-bob(3) CHAIN (alice has NO direct link to bob). alice send_hash bob: alice does not know bob, so it PARKS the DM + floods a SOFT H query; carol \u2014 which learned bob from his first-hand beacon \u2014 answers AUTHORITATIVE and SUPPRESSES the flood (it never reaches bob: zero h_rx at bob, zero h_forward anywhere); alice caches the answer + drains the parked DM, which routes alice->carol->bob. The SECOND send_hash resolves straight from alice cache: NO second flood (h_tx stays at 1) \u2014 the cache-on-pass efficiency payoff (t88-style: repeat by-hash sends do not re-redirect).",
+  "simulation": {
+    "duration_ms": 30000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 7,
+    "node_startup_jitter_ms": 0,
+    "radio": {
+      "sf": 7,
+      "bw": 250,
+      "cr": 5
+    }
+  },
+  "config": {},
+  "nodes": [
+    {
+      "name": "alice",
+      "node_id": 1,
+      "key_hash32": "0xA1A1A1A1",
+      "engine": "meshroute",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 7,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 8000,
+        "discovery_beacon_period_ms": 4000,
+        "quiet_threshold_ms": 0,
+        "state_snapshot_period_ms": 5000
+      }
+    },
+    {
+      "name": "carol",
+      "node_id": 2,
+      "key_hash32": "0xC2C2C2C2",
+      "engine": "meshroute",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 7,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 8000,
+        "discovery_beacon_period_ms": 4000,
+        "quiet_threshold_ms": 0,
+        "state_snapshot_period_ms": 5000
+      }
+    },
+    {
+      "name": "bob",
+      "node_id": 3,
+      "key_hash32": "0xB3B3B3B3",
+      "engine": "meshroute",
+      "config": {
+        "layer_id": 1,
+        "routing_sf": 7,
+        "allowed_data_sfs": [
+          7,
+          9,
+          10
+        ],
+        "beacon_period_ms": 8000,
+        "discovery_beacon_period_ms": 4000,
+        "quiet_threshold_ms": 0,
+        "state_snapshot_period_ms": 5000
+      }
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "alice",
+        "to": "carol",
+        "snr": 22.0,
+        "rssi": -68.0,
+        "bidir": true
+      },
+      {
+        "from": "carol",
+        "to": "bob",
+        "snr": 22.0,
+        "rssi": -68.0,
+        "bidir": true
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at_ms": 18000,
+      "node": "alice",
+      "command": "send_hash 0xB3B3B3B3 hello-bob"
+    },
+    {
+      "at_ms": 24000,
+      "node": "alice",
+      "command": "send_hash 0xB3B3B3B3 hello-again"
+    }
+  ],
+  "expect": [
+    {
+      "type": "cmd_reply_contains",
+      "node": "alice",
+      "command": "send_hash 0xB3B3B3B3 hello-bob",
+      "value": "queued"
+    },
+    {
+      "type": "cmd_reply_contains",
+      "node": "alice",
+      "command": "send_hash 0xB3B3B3B3 hello-again",
+      "value": "queued"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "alice",
+      "emit_type": "send_parked_for_hash",
+      "value": "\"key_hash32\":3014898611"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "alice",
+      "emit_type": "h_tx",
+      "value": "\"hard\":false"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "carol",
+      "emit_type": "h_resolved",
+      "value": "\"node\":3"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "carol",
+      "emit_type": "h_resolved",
+      "value": "\"authoritative\":true"
+    },
+    {
+      "type": "event_count",
+      "node": "bob",
+      "event_type": "script_emit",
+      "emit_type": "h_rx",
+      "count": 0
+    },
+    {
+      "type": "event_count",
+      "event_type": "script_emit",
+      "emit_type": "h_forward",
+      "count": 0
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "alice",
+      "emit_type": "hash_bind_rx",
+      "value": "\"node\":3"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "alice",
+      "emit_type": "send_hash_resolved",
+      "value": "\"node\":3"
+    },
+    {
+      "type": "event_count",
+      "node": "alice",
+      "event_type": "script_emit",
+      "emit_type": "h_tx",
+      "count": 1
+    },
+    {
+      "type": "event_count",
+      "node": "alice",
+      "event_type": "script_emit",
+      "emit_type": "send_parked_for_hash",
+      "count": 1
+    },
+    {
+      "type": "event_count",
+      "event_type": "script_emit",
+      "emit_type": "send_hash_giveup",
+      "count": 0
+    }
+  ]
+}

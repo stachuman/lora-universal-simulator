@@ -27,6 +27,7 @@
 #include "orchestrator/runtime/LuaHost.h"
 #ifdef MESHROUTE_ENABLED
 #include "orchestrator/runtime/FirmwareNode.h"
+#include "identity.h"                          // Slice A2: seed -> key_hash32 derivation (shared with device)
 #endif
 #include "orchestrator/runtime/ScriptedNode.h"
 #include "orchestrator/test_runner/ExpectRunner.h"
@@ -373,6 +374,24 @@ void SimController::initialize() {
         }
     }
 
+    // Slice A2: resolve key_hash32 for every node BEFORE constructing either engine, so the C++
+    // FirmwareNode and the Lua ScriptedNode receive the SAME value. With an identity `seed`, DERIVE
+    // key_hash32 = ed_pub[:4] via the device's lib/core/identity (sim+device share one derivation);
+    // otherwise keep the const _cfg's literal/fnv fallback. Stored here, never mutating const _cfg.
+    _resolved_key_hash32.assign(static_cast<size_t>(n), 0u);
+    for (int i = 0; i < n; ++i) {
+        _resolved_key_hash32[i] = _cfg.nodes[i].key_hash32;     // literal / fnv-of-name fallback
+        if (!_cfg.nodes[i].has_seed) continue;
+#ifdef MESHROUTE_ENABLED
+        meshroute::Identity id{};
+        meshroute::identity_from_seed(id, _cfg.nodes[i].seed.data());
+        _resolved_key_hash32[i] = id.key_hash32;
+#else
+        throw std::runtime_error("node '" + _cfg.nodes[i].name +
+            "': field \"seed\" requires the MeshRoute identity module (build with MeshRoute present)");
+#endif
+    }
+
     for (int i = 0; i < n; ++i) {
         const int sf = _cfg.nodes[i].sf;        // already merged with global defaults
         const int bw_khz = _cfg.nodes[i].bw;
@@ -390,7 +409,7 @@ void SimController::initialize() {
             // FirmwareNode: the MeshRoute C++ firmware (lib/core meshroute::Node)
             // run in-loop, implementing meshroute::Hal over the sim's services.
             _nodes.emplace_back(std::make_unique<FirmwareNode>(
-                i, _cfg.nodes[i].name, _cfg.nodes[i].key_hash32,
+                i, _cfg.nodes[i].name, _resolved_key_hash32[i],
                 *_radios[i], _events_out, _clock, _rng));
 #else
             throw std::runtime_error(
@@ -439,9 +458,13 @@ void SimController::initialize() {
 
     // Register + load scripts (must precede onInit so `self` is populated).
     for (int i = 0; i < n; ++i) {
+        // Protocol id defaults to a 1-BASED slot (i+1), reserving 0 as the "unprovisioned"
+        // sentinel (a fresh device boots node_id=0 until cfg/join; the C++ on_command refuses
+        // a send from id 0). An explicit config node_id (>=0) still wins. Runtime/registry/link
+        // indices stay the 0-based `i`; only the on-wire protocol id shifts.
         const int protocol_node_id = _cfg.nodes[i].node_id >= 0
             ? _cfg.nodes[i].node_id
-            : i;
+            : i + 1;
         _nodes[i]->setProtocolId(protocol_node_id);
         // Lua-only wiring: bind the self:* methods + load the script.
         // FirmwareNode (engine=="meshroute") runs C++ logic and skips both.
@@ -449,7 +472,7 @@ void SimController::initialize() {
         // ScriptedNode by the engine switch above.
         if (_cfg.nodes[i].engine == "lua") {
             _host.registerNode(i, static_cast<ScriptedNode*>(_nodes[i].get()),
-                               protocol_node_id, _cfg.nodes[i].key_hash32);
+                               protocol_node_id, _resolved_key_hash32[i]);
             std::string resolved =
                 resolveScriptPath(_cfg.nodes[i].script_path, _cfg.source_path);
             _host.loadScript(i, resolved);

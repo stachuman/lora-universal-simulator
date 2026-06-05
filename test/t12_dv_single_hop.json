@@ -33,12 +33,12 @@
   "expect": [
     { "type": "script_emit_contains", "node": "alice", "emit_type": "rt_full",   "value": "" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "rt_full",   "value": "" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_tx",    "value": "\"dst\":1" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rts_rx",    "value": "\"from\":0" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "cts_tx",    "value": "\"to\":0" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "cts_rx",    "value": "\"from\":1" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx",   "value": "\"dst\":1" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "data_rx",   "value": "\"from\":0" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_tx",    "value": "\"dst\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rts_rx",    "value": "\"from\":1" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "cts_tx",    "value": "\"to\":1" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "cts_rx",    "value": "\"from\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx",   "value": "\"dst\":2" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "data_rx",   "value": "\"from\":1" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "delivered", "value": "hello-bob" },
     { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "alice", "min": 0, "max": 0 },
     { "type": "event_count", "event_type": "drop_sf_mismatch", "node": "bob",   "min": 0, "max": 0 }

@@ -13,10 +13,10 @@
     }
   },
   "nodes": [
-    { "name": "alice",   "node_id": 0, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
-    { "name": "relay",   "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
-    { "name": "bob",     "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
-    { "name": "spammer", "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 900,    "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 2 } }
+    { "name": "alice",   "node_id": 1, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
+    { "name": "relay",   "node_id": 2, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
+    { "name": "bob",     "node_id": 3, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 100000, "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 3 } },
+    { "name": "spammer", "node_id": 4, "config": { "routing_sf": 7, "data_sf": 12, "beacon_period_ms": 900,    "quiet_threshold_ms": 0, "lbt_enabled": true, "peer_count": 2 } }
   ],
   "topology": { "links": [
     { "from": "alice",   "to": "relay", "snr": 16.0, "loss": 0.0, "bidir": true },

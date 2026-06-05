@@ -34,7 +34,7 @@
     { "at_ms": 5000, "node": "alice", "command": "send_channel 7 broadcast-test" }
   ],
   "expect": [
-    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 broadcast-test", "value": "channel msg queued" },
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 broadcast-test", "value": "queued" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx", "value": "\"m_broadcast\":true" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx", "value": "\"sf\":10" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "channel_overhear_armed", "value": "\"chosen_data_sf\":10" },

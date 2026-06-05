@@ -31,11 +31,11 @@
     { "at_ms": 25000, "node": "alice", "command": "send carol hello" }
   ],
   "expect": [
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_tx",    "value": "\"dst\":2" },
-    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx",   "value": "\"dst\":2" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "data_rx",   "value": "\"from\":0" },
-    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rts_tx",    "value": "\"dst\":2" },
-    { "type": "script_emit_contains", "node": "carol", "emit_type": "data_rx",   "value": "\"from\":1" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "rts_tx",    "value": "\"dst\":3" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "data_tx",   "value": "\"dst\":3" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "data_rx",   "value": "\"from\":1" },
+    { "type": "script_emit_contains", "node": "bob",   "emit_type": "rts_tx",    "value": "\"dst\":3" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "data_rx",   "value": "\"from\":2" },
     { "type": "script_emit_contains", "node": "carol", "emit_type": "delivered", "value": "hello" }
   ]
 }

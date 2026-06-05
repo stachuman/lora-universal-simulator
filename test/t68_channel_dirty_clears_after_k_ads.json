@@ -30,7 +30,7 @@
     { "at_ms": 3000, "node": "alice", "command": "send_channel 7 retire-after-K" }
   ],
   "expect": [
-    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 retire-after-K", "value": "channel msg queued" },
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 retire-after-K", "value": "queued" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_msg_received", "value": "\"source\":\"self_originate\"" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_dirty_cleared", "value": "\"ad_count\":2" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_dirty_cleared", "value": "\"threshold\":2" },

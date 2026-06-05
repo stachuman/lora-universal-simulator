@@ -1,0 +1,178 @@
+{
+  "_name": "t33b_anti_spam_airtime_backstop",
+  "_desc": "DM airtime anti-spam, full mechanism (Inc 2 backstop + Inc 3 ACK-warn + honest back-off). spammer floods neighbor SF10/BW125 (~0.55s/flight); neighbor duty 0.0286 (budget 8580) -> airtime cap ~3000ms, warn band ~[2400,3000) at originator_airtime_share=0.35. (Duty chosen so the cap stays ~3000 after the share was bumped 0.25->0.35 for C++ headroom; cap = 0.35*8580.) Inc 2: neighbor accumulates the spammers observed airtime (overheard RTS + received DATA); over cap -> silent RTS drop (rts_drop_originator_throttle); in warn band -> rts_originator_airtime_warn. Inc 3: the warn rides back in the ACK warn bit -> spammer records it (originator_warned_by_ack) and PARKS new DM originations (origination_backoff_ack_warn) -- the 4 late sends (25-31s) are deferred. Verifies warn, hard drop, delivered, warned-by-ack, and post-warn back-off.",
+  "simulation": {
+    "duration_ms": 60000,
+    "step_ms": 1,
+    "warmup_ms": 2000,
+    "seed": 42,
+    "node_startup_jitter_ms": 0,
+    "radio": {
+      "sf": 8,
+      "bw": 125,
+      "cr": 5
+    }
+  },
+  "nodes": [
+    {
+      "name": "spammer",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          10
+        ],
+        "beacon_period_ms": 5000,
+        "quiet_threshold_ms": 0
+      }
+    },
+    {
+      "name": "neighbor",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          10
+        ],
+        "beacon_period_ms": 5000,
+        "quiet_threshold_ms": 0,
+        "duty_cycle": 0.0286,
+        "duty_cycle_window_ms": 300000
+      }
+    },
+    {
+      "name": "victim",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          10
+        ],
+        "beacon_period_ms": 5000,
+        "quiet_threshold_ms": 0
+      }
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "spammer",
+        "to": "neighbor",
+        "snr": 12.0,
+        "rssi": -78.0,
+        "bidir": true
+      },
+      {
+        "from": "neighbor",
+        "to": "victim",
+        "snr": 12.0,
+        "rssi": -78.0,
+        "bidir": true
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at_ms": 5000,
+      "node": "spammer",
+      "command": "send victim s0"
+    },
+    {
+      "at_ms": 7000,
+      "node": "spammer",
+      "command": "send victim s1"
+    },
+    {
+      "at_ms": 9000,
+      "node": "spammer",
+      "command": "send victim s2"
+    },
+    {
+      "at_ms": 11000,
+      "node": "spammer",
+      "command": "send victim s3"
+    },
+    {
+      "at_ms": 13000,
+      "node": "spammer",
+      "command": "send victim s4"
+    },
+    {
+      "at_ms": 15000,
+      "node": "spammer",
+      "command": "send victim s5"
+    },
+    {
+      "at_ms": 17000,
+      "node": "spammer",
+      "command": "send victim s6"
+    },
+    {
+      "at_ms": 19000,
+      "node": "spammer",
+      "command": "send victim s7"
+    },
+    {
+      "at_ms": 21000,
+      "node": "spammer",
+      "command": "send victim s8"
+    },
+    {
+      "at_ms": 23000,
+      "node": "spammer",
+      "command": "send victim s9"
+    },
+    {
+      "at_ms": 25000,
+      "node": "spammer",
+      "command": "send victim late25000"
+    },
+    {
+      "at_ms": 27000,
+      "node": "spammer",
+      "command": "send victim late27000"
+    },
+    {
+      "at_ms": 29000,
+      "node": "spammer",
+      "command": "send victim late29000"
+    },
+    {
+      "at_ms": 31000,
+      "node": "spammer",
+      "command": "send victim late31000"
+    }
+  ],
+  "expect": [
+    {
+      "type": "script_emit_contains",
+      "node": "neighbor",
+      "emit_type": "rts_originator_airtime_warn",
+      "value": ""
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "neighbor",
+      "emit_type": "rts_drop_originator_throttle",
+      "value": ""
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "victim",
+      "emit_type": "delivered",
+      "value": ""
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "spammer",
+      "emit_type": "originator_warned_by_ack",
+      "value": ""
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "spammer",
+      "emit_type": "origination_backoff_ack_warn",
+      "value": ""
+    }
+  ]
+}

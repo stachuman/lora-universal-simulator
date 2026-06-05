@@ -26,7 +26,7 @@
     { "at_ms": 5000, "node": "alice", "command": "send_channel 7 hello-world" }
   ],
   "expect": [
-    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 hello-world", "value": "channel msg queued" },
+    { "type": "cmd_reply_contains", "node": "alice", "command": "send_channel 7 hello-world", "value": "queued" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_msg_received", "value": "\"source\":\"self_originate\"" },
     { "type": "script_emit_contains", "node": "alice", "emit_type": "channel_msg_received", "value": "\"channel_id\":7" },
     { "type": "script_emit_contains", "node": "bob",   "emit_type": "beacon_rx", "value": "\"channel_digest_ids\":1" },

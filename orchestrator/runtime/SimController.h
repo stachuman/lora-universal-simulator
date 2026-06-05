@@ -185,6 +185,11 @@ private:
     // off-band packets with drop_sf_mismatch.
     std::vector<std::vector<int>>        _node_sf_rx_set;
 
+    // Slice A2: per-node key_hash32 actually fed to the engines. Derived from the node's identity
+    // seed (lib/core/identity) when present, else the literal/fnv fallback in the const _cfg. Lives
+    // here (not in the const _cfg) so sim+device share one derivation without mutating the config.
+    std::vector<uint32_t>                _resolved_key_hash32;
+
     // Per-node "TX in flight until" slot. Set to InFlight.end_ms when an
     // InFlight is pushed for sender i; cleared to 0 when the InFlight is
     // compacted out at end_ms. Read by ScriptedNode::api_tx_in_flight via
