@@ -103,6 +103,11 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
         cfg.lbt_enabled         = config.value("lbt_enabled",         cfg.lbt_enabled);   // R4.5 firmware LBT
         cfg.lbt_backoff_ms      = config.value("lbt_backoff_ms",      cfg.lbt_backoff_ms);        // 0 = derive
         cfg.flood_lbt_max_defer_ms = config.value("flood_lbt_max_defer_ms", cfg.flood_lbt_max_defer_ms);  // 0 = derive
+        // NAV (virtual carrier sense). Inherit the firmware default (NodeConfig::nav_enabled = true) so the
+        // sim and the device agree; set "nav_enabled": false in a scenario for an off comparison or to keep
+        // a differential scenario lua-parity. C++-only feature; the Lua has no NAV.
+        cfg.nav_enabled         = config.value("nav_enabled",         cfg.nav_enabled);
+        cfg.nav_ignore_rts      = config.value("nav_ignore_rts",      cfg.nav_ignore_rts);   // tuning knob (firmware default false = answer)
     }
     _node = std::make_unique<meshroute::Node>(
         *this, static_cast<uint8_t>(_protocol_id), _key_hash32, _name.c_str());
@@ -126,6 +131,14 @@ std::string FirmwareNode::onCommand(std::string_view cmd_str) {
     // The sim TRANSPORT parses its command string into a TYPED meshroute::Command
     // (a device backend parses its binary frames into the SAME Command). lib/core
     // never sees a command string. SimController has already resolved name -> id.
+    // node_id auto-assignment (DAD): `join` kicks off the claim state machine (the node must be
+    // unprovisioned — node_id 0 — for this to pick an id).
+    if (cmd == "join") {
+        meshroute::Command c{}; c.kind = meshroute::CmdKind::join;
+        const meshroute::CmdResult r = _node->on_command(c);
+        const char* code = (r.code == meshroute::CmdCode::queued) ? "queued" : "error";
+        return std::string("OK ") + code;
+    }
     // ROADMAP §3 channel gossip: send_channel <channel_id 0-255> <text>. The first arg is a numeric
     // channel id (not a node name), so SimController's name->id resolution leaves it untouched.
     if (cmd.rfind("send_channel ", 0) == 0) {
