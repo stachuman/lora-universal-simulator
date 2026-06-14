@@ -48,13 +48,19 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
         cfg.beacon_silence_jitter_ms = config.value("beacon_silence_jitter_ms", cfg.beacon_silence_jitter_ms);  // R4.3
         cfg.seen_bitmap_enabled = config.value("seen_bitmap_enabled", cfg.seen_bitmap_enabled);
         cfg.is_gateway          = config.value("is_gateway",          cfg.is_gateway);
+        cfg.gateway_only        = config.value("gateway_only",        cfg.gateway_only);   // §7 pure-bridge switch
         cfg.is_mobile           = config.value("is_mobile",           cfg.is_mobile);
+        // leaf_id = the low 4 bits of the node's layer_id (frames.md: leaf_id IS the layer id, 0..15). The
+        // multi-layer scenarios configure each node's layer via `layer_id` (1/2/3 here), so DERIVE the firmware
+        // leaf from it — else every node defaults to leaf_id=0 and the byte-0 leaf gate (e.g. the channel-M
+        // cross-leaf leak gate) is inert. An explicit `leaf_id` still overrides (single-layer / direct tests).
         cfg.leaf_id             = config.value("leaf_id",             cfg.leaf_id);
+        if (config.contains("layer_id"))
+            cfg.leaf_id = static_cast<uint8_t>(config.value("layer_id", 0) & 0x0F);
         // R2 route-aging TTLs (config-overridable so a gate can shrink 45min/3h to seconds).
         cfg.rt_aging_ttl_neighbor_ms = config.value("rt_aging_ttl_neighbor_ms", cfg.rt_aging_ttl_neighbor_ms);
         cfg.rt_aging_ttl_remote_ms   = config.value("rt_aging_ttl_remote_ms",   cfg.rt_aging_ttl_remote_ms);
         cfg.rt_aging_check_period_ms = config.value("rt_aging_check_period_ms", cfg.rt_aging_check_period_ms);
-        cfg.data_sf                  = config.value("data_sf",                  cfg.data_sf);   // R3 data plane
         cfg.dv_hop_cap               = config.value("dv_hop_cap",               cfg.dv_hop_cap); // network-wide (J-join distributes it in Slice 3)
         cfg.channel_dirty_max_advertisements = config.value("channel_dirty_max_advertisements", cfg.channel_dirty_max_advertisements); // K: BCN-digest retire count (Lua per-node; t68 shrinks it to 2)
         cfg.channel_pull_jitter_ms           = config.value("channel_pull_jitter_ms",           cfg.channel_pull_jitter_ms);           // digest-pull backoff (t69 shrinks it to pin pull order)
@@ -64,7 +70,8 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
         cfg.cap_id_bind                      = config.value("cap_id_bind",                      cfg.cap_id_bind);                      // hash-locate id_bind cap (a gate shrinks it to exercise the refuse)
         cfg.id_bind_ttl_ms                   = config.value("id_bind_ttl_ms",                   cfg.id_bind_ttl_ms);                   // hash-locate binding TTL (a gate shrinks the 48h default to exercise aging)
         // allowed_data_sfs: [7,9] -> allowed_sf_bitmap (bit = sf), matching the Lua config key. The DATA-SF
-        // selector picks the fastest SF in this set the link SNR supports; absent/empty -> the single data_sf.
+        // selector picks the fastest SF in this set the link SNR supports; absent/empty -> NO data SF (the node
+        // refuses to originate data — the single-SF data_sf fallback was removed, sf_list is now mandatory).
         if (config.contains("allowed_data_sfs") && config["allowed_data_sfs"].is_array()) {
             uint16_t bm = 0;
             for (const auto& v : config["allowed_data_sfs"]) {

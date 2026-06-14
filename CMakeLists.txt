@@ -42,9 +42,11 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         ${MESHROUTE_DIR}/lib/core/node_query.cpp
         ${MESHROUTE_DIR}/lib/core/node_channel.cpp
         ${MESHROUTE_DIR}/lib/core/node_hashlocate.cpp
+        ${MESHROUTE_DIR}/lib/core/node_join.cpp
         ${MESHROUTE_DIR}/lib/core/node_budget.cpp
         ${MESHROUTE_DIR}/lib/core/node_cascade.cpp
         ${MESHROUTE_DIR}/lib/core/identity.cpp
+        ${MESHROUTE_DIR}/lib/core/inbox.cpp
         ${MESHROUTE_DIR}/lib/monocypher/src/monocypher.c
     )
     target_compile_features(meshroute_core PRIVATE cxx_std_20)

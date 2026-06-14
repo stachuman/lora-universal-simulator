@@ -232,9 +232,10 @@ def load_config(path):
     # Node ids are positional now — the orchestrator assigns them by node order, so
     # configs no longer carry an explicit `node_id`. Normalize once so every downstream
     # `n["node_id"]` keeps working: honour an explicit id (legacy configs) else use the
-    # 0-based slot index. (Mutates the in-memory dicts only; the config file is untouched.)
+    # 1-BASED slot index (i+1), matching SimController's protocol-id default — 0 is the
+    # reserved "unprovisioned" sentinel. (Mutates the in-memory dicts only; file untouched.)
     for i, n in enumerate(nodes):
-        n.setdefault("node_id", i)
+        n.setdefault("node_id", i + 1)
     id_to_name = {n["node_id"]: n["name"] for n in nodes}
     name_to_id = {n["name"]: n["node_id"] for n in nodes}
     slot_to_id = {i: n["node_id"] for i, n in enumerate(nodes)}

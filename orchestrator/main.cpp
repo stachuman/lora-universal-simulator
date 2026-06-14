@@ -48,6 +48,7 @@ void usage(const char* prog) {
         "Options:\n"
         "  -i, --interactive          Open REPL after preload (if any)\n"
         "  -l, --lua <script>         Load Lua script; if it defines main(), call it\n"
+        "  -e, --engine <lua|meshroute>  Force every node onto this engine (overrides per-node engine/script)\n"
         "  -h, --help                 Show this help and exit\n"
         "\n"
         "Modes:\n"
@@ -65,6 +66,7 @@ int main(int argc, char** argv) {
     std::string lua_script_path;
     std::string config_path;
     std::string events_path;
+    std::string engine_override;   // --engine <lua|meshroute>: force EVERY node to this engine (ignores per-node engine/script)
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -82,6 +84,18 @@ int main(int argc, char** argv) {
                 return 1;
             }
             lua_script_path = argv[++i];
+            continue;
+        }
+        if (a == "-e" || a == "--engine") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "lus: --engine requires <lua|meshroute>\n");
+                return 1;
+            }
+            engine_override = argv[++i];
+            if (engine_override != "lua" && engine_override != "meshroute") {
+                std::fprintf(stderr, "lus: --engine must be lua or meshroute (got '%s')\n", engine_override.c_str());
+                return 1;
+            }
             continue;
         }
         if (!a.empty() && a[0] == '-') {
@@ -115,6 +129,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "lus: failed to load config %s: %s\n",
                      config_path.c_str(), ex.what());
         return 1;
+    }
+
+    // --engine override: force every node onto the chosen engine (the per-node engine/script is ignored).
+    // Lets any engine-neutral scenario run on the C++ port (meshroute) or the Lua baseline without editing it.
+    if (!engine_override.empty()) {
+        for (auto& n : cfg.nodes) n.engine = engine_override;
+        std::fprintf(stderr, "lus: --engine %s forced for all %zu nodes\n",
+                     engine_override.c_str(), cfg.nodes.size());
     }
 
     std::ofstream events_file;

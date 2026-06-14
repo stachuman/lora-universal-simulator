@@ -550,13 +550,17 @@ static void validateConfig(const SimConfig& cfg) {
                     layer_id = nd.config["leaf_id"].get<int>();
                 }
             }
-            auto [it, inserted] = effective_node_ids.emplace(
-                std::make_pair(layer_id, effective_node_id), nd.name);
-            if (!inserted) {
-                errors.push_back(ctx + ".node_id/effective id ("
-                    + std::to_string(effective_node_id)
-                    + ") in layer " + std::to_string(layer_id)
-                    + " duplicates node \"" + it->second + "\"");
+            // node_id 0 is the UNPROVISIONED sentinel (a node that DAD-assigns its id at runtime) — many
+            // such nodes legitimately share id 0 at config time, so it is exempt from the duplicate check.
+            if (effective_node_id != 0) {
+                auto [it, inserted] = effective_node_ids.emplace(
+                    std::make_pair(layer_id, effective_node_id), nd.name);
+                if (!inserted) {
+                    errors.push_back(ctx + ".node_id/effective id ("
+                        + std::to_string(effective_node_id)
+                        + ") in layer " + std::to_string(layer_id)
+                        + " duplicates node \"" + it->second + "\"");
+                }
             }
             if (nd.start_at_ms > 0
                 && nd.start_at_ms >= cfg.simulation.duration_ms) {
