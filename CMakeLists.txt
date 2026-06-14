@@ -29,8 +29,23 @@ add_subdirectory(core)
 set(MESHROUTE_DIR "${CMAKE_SOURCE_DIR}/../MeshRoute" CACHE PATH
     "Path to the MeshRoute repo (for engine:meshroute firmware nodes)")
 if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
-    message(STATUS "MeshRoute found at ${MESHROUTE_DIR} — engine:meshroute ENABLED (meshroute_core)")
-    add_library(meshroute_core STATIC
+    message(STATUS "MeshRoute found at ${MESHROUTE_DIR} — engine:meshroute ENABLED (faithful two-lib: normal + gateway)")
+
+    # Slice 5 (faithful two-lib): the firmware core is built TWICE as ODR-distinct static libs so a
+    # FirmwareNode can run EITHER a single-layer node (meshroute_core_normal, namespace meshroute) OR a
+    # dual-layer gateway (meshroute_core_gw, namespace meshroute_gw, MR_N_LAYERS=2 + the gateway caps). The
+    # ODR isolation is the MESHROUTE_NS macro; the per-variant wrapper TU (NodeRuntimeWrapper.cpp) bridges
+    # the namespace-neutral sim interfaces (ISimHal/INodeRuntime) to each lib's Hal/Node.
+
+    # monocypher (C, namespace-free): ONE copy. If BOTH C++ core libs compiled it, lus (which links both)
+    # would see duplicate crypto_* symbols. identity.cpp in each variant resolves against this single lib.
+    add_library(meshroute_monocypher STATIC
+        ${MESHROUTE_DIR}/lib/monocypher/src/monocypher.c)
+    target_include_directories(meshroute_monocypher PUBLIC ${MESHROUTE_DIR}/lib/monocypher/src)
+
+    # The shared C++ firmware sources. The per-variant wrapper is added per-lib (so it compiles in that
+    # lib's namespace + picks the matching factory symbol via MR_GATEWAY_BUILD).
+    set(_meshroute_core_srcs
         ${MESHROUTE_DIR}/lib/core/airtime.cpp
         ${MESHROUTE_DIR}/lib/core/frame_codec.cpp
         ${MESHROUTE_DIR}/lib/core/node.cpp
@@ -47,21 +62,47 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         ${MESHROUTE_DIR}/lib/core/node_cascade.cpp
         ${MESHROUTE_DIR}/lib/core/identity.cpp
         ${MESHROUTE_DIR}/lib/core/inbox.cpp
-        ${MESHROUTE_DIR}/lib/monocypher/src/monocypher.c
     )
-    target_compile_features(meshroute_core PRIVATE cxx_std_20)
-    target_compile_definitions(meshroute_core PRIVATE
-        PROTOCOL_VERSION=1
-        LORA_FREQ_HZ=869462500
-        LORA_BW_HZ=125000
-        LORA_SF=8
-        LORA_CR=5
-        LORA_PREAMBLE_SYM=16
-        LORA_DUTY_CYCLE_PCT=10
+
+    # Build one core-lib variant. ARGN = extra PRIVATE compile definitions (the gateway -D set, or none).
+    function(add_meshroute_core_variant libname)
+        add_library(${libname} STATIC
+            ${_meshroute_core_srcs}
+            ${CMAKE_SOURCE_DIR}/orchestrator/runtime/NodeRuntimeWrapper.cpp
+        )
+        target_compile_features(${libname} PRIVATE cxx_std_20)
+        target_compile_definitions(${libname} PRIVATE
+            PROTOCOL_VERSION=1
+            LORA_FREQ_HZ=869462500
+            LORA_BW_HZ=125000
+            LORA_SF=8
+            LORA_CR=5
+            LORA_PREAMBLE_SYM=16
+            LORA_DUTY_CYCLE_PCT=10
+            ${ARGN}
+        )
+        # firmware headers (hal.h/node.h/command.h) + monocypher (identity.cpp); the wrapper also needs the
+        # neutral contract headers (CMAKE_SOURCE_DIR) + the vendored json it parses (third_party).
+        target_include_directories(${libname} PUBLIC
+            ${MESHROUTE_DIR}/lib/core
+            ${MESHROUTE_DIR}/lib/monocypher/src)
+        target_include_directories(${libname} PRIVATE
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/third_party)
+        target_link_libraries(${libname} PUBLIC meshroute_monocypher)
+    endfunction()
+
+    # normal: MR_N_LAYERS defaults to 1, MESHROUTE_NS defaults to `meshroute` (header guard) — byte-identical
+    # to the pre-split meshroute_core, so the s18 single-layer baseline holds.
+    add_meshroute_core_variant(meshroute_core_normal)
+    # gateway: a second LayerRuntime + the dedicated-gateway caps (mirrors platformio [env:gateway]).
+    add_meshroute_core_variant(meshroute_core_gw
+        MESHROUTE_NS=meshroute_gw
+        MR_N_LAYERS=2
+        MR_GATEWAY_BUILD=1
+        MR_CAP_CHANNEL_BUFFER=8
+        MR_CAP_DEFERRED_SENDS=16
     )
-    target_include_directories(meshroute_core PUBLIC ${MESHROUTE_DIR}/lib/core)
-    # identity.cpp -> monocypher (seed -> key_hash32 derivation, shared with the device)
-    target_include_directories(meshroute_core PUBLIC ${MESHROUTE_DIR}/lib/monocypher/src)
     set(MESHROUTE_ENABLED ON)
 else()
     message(WARNING "MeshRoute not found at ${MESHROUTE_DIR} — building WITHOUT engine:meshroute "

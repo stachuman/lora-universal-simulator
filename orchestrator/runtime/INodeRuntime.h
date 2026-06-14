@@ -14,7 +14,7 @@
 #include <string>
 #include <string_view>
 
-#include <nlohmann/json_fwd.hpp>
+#include "json/json.hpp"   // vendored amalgamated nlohmann (third_party/json/json.hpp); defines nlohmann::json
 
 namespace mrsim {
 

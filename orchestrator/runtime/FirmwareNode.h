@@ -1,31 +1,34 @@
 // orchestrator/runtime/FirmwareNode.h
 //
-// FirmwareNode runs the real MeshRoute C++ firmware (lib/core meshroute::Node)
-// in-loop inside the simulator (sim-integration track; ~/MeshRoute/docs/PORT_PLAN.md
-// §2.1). It is BOTH:
+// FirmwareNode runs the real MeshRoute C++ firmware in-loop inside the simulator
+// (sim-integration track; ~/MeshRoute/docs/PORT_PLAN.md §2.1). It is BOTH:
 //   - an INode (the surface SimController drives each step), and
-//   - a meshroute::Hal (the host contract the meshroute::Node calls into).
-// It owns a meshroute::Node and bridges the two: INode callbacks → Node methods;
-// Node's Hal calls → the simulator's TimerWheel / VirtualClock / _sim_rng /
-// EventLog / LbtModel / pending-tx queue.
+//   - a mrsim::ISimHal (the NAMESPACE-NEUTRAL host services the firmware calls into).
+// It owns a mrsim::INodeRuntime (a per-variant handle to a meshroute::Node OR a
+// meshroute_gw::Node — Slice 5 faithful two-lib) and bridges the two: INode callbacks
+// → INodeRuntime methods; the Node's Hal calls → the simulator's TimerWheel /
+// VirtualClock / _sim_rng / EventLog / LbtModel / pending-tx queue, via ISimHal.
 //
-// Compiled only when the build found MeshRoute (MESHROUTE_ENABLED); the Hal/Node
-// headers come from meshroute_core's include dir. The sim stays C++17 — the
-// meshroute headers are C++17-clean (D-S2a = B).
+// Slice 5: FirmwareNode is NAMESPACE-NEUTRAL — it never names meshroute::/meshroute_gw::
+// types. The two ODR-distinct firmware libs (meshroute_core_normal / meshroute_core_gw)
+// each compile a wrapper TU that adapts ISimHal<->NS::Hal and INodeRuntime<->NS::Node;
+// FirmwareNode binds the variant a scenario asks for (n_layers==2 => the gateway lib).
 //
-// Design (S1/S2): composition, no shared base. FirmwareNode owns its own
-// TimerWheel + airtime log (reuses the TimerWheel class, matches ScriptedNode's
-// drift semantics). ScriptedNode is untouched, so the Lua path is bit-identical.
+// Compiled only when the build found MeshRoute (MESHROUTE_ENABLED). The sim stays C++17;
+// the contract headers are C++17-clean (no NS:: firmware type leaks in).
+//
+// Design (S1/S2): composition, no shared base. FirmwareNode owns its own TimerWheel +
+// airtime log (reuses the TimerWheel class, matches ScriptedNode's drift semantics).
+// ScriptedNode is untouched, so the Lua path is bit-identical.
 
 #pragma once
 
 #include "core/clock/VirtualClock.h"
 #include "core/radio/SimRadio.h"
 #include "orchestrator/runtime/INode.h"
+#include "orchestrator/runtime/INodeRuntime.h"   // mrsim::INodeRuntime + the per-variant factories
+#include "orchestrator/runtime/ISimHal.h"        // mrsim::ISimHal (the neutral host surface)
 #include "orchestrator/runtime/TimerWheel.h"
-
-#include "hal.h"    // meshroute::Hal  (from meshroute_core include dir)
-#include "node.h"   // meshroute::Node
 
 #include <cstdint>
 #include <deque>
@@ -37,7 +40,7 @@
 #include <unordered_map>
 #include <vector>
 
-class FirmwareNode : public INode, public meshroute::Hal {
+class FirmwareNode : public INode, public mrsim::ISimHal {
 public:
     FirmwareNode(int id, std::string name, uint32_t key_hash32, SimRadio& radio,
                  std::ostream& events_out, VirtualClock& clock, std::mt19937& sim_rng);
@@ -69,21 +72,21 @@ public:
     uint64_t oldestTxEndMs() const override;
     uint64_t rxBlindUntilMs() const override { return _rx_blind_until_ms; }
 
-    // ---- meshroute::Hal (called by the owned meshroute::Node) ----------
-    [[nodiscard]] meshroute::TxResult tx(const uint8_t* bytes, size_t len,
-                                         const meshroute::TxParams& p) override;
-    void     set_rx_sf(int sf) override;
-    uint64_t channel_busy_until() override;
-    uint64_t airtime_used_ms(uint64_t window_ms) override;
-    uint64_t oldest_tx_end_ms() override;
-    uint64_t now() override;
-    [[nodiscard]] bool after(uint32_t delay_ms, uint32_t timer_id) override;
-    void     cancel(uint32_t timer_id) override;
-    void     set_protocol_id(int id) override;
-    int      rand_range(int lo, int hi) override;
-    void     emit(const char* type, const meshroute::EventField* fields, size_t n_fields) override;
-    void     log(const char* msg) override;
-    void     panic(const char* why) override;
+    // ---- mrsim::ISimHal (called by the per-variant HalAdapter wrapping the Node) ----
+    int      simTx(const uint8_t* bytes, size_t len, const mrsim::SimTxParams& p) override;  // -> SimTxResult
+    void     simSetRxSf(int sf) override;
+    uint64_t simChannelBusyUntil() override;
+    uint64_t simAirtimeUsedMs(uint64_t window_ms) override;
+    uint64_t simOldestTxEndMs() override;
+    uint32_t simRxWindowSlopMs(int sf) override;
+    uint64_t simNow() override;
+    bool     simAfter(uint32_t delay_ms, uint32_t timer_id) override;
+    void     simCancel(uint32_t timer_id) override;
+    void     simSetProtocolId(int id) override;
+    int      simRandRange(int lo, int hi) override;
+    void     simEmit(const char* type, const mrsim::SimEventField* fields, size_t n) override;
+    void     simLog(const char* msg) override;
+    void     simPanic(const char* why) override;
 
 private:
     void     armSfSwitchBlindWindow();
@@ -114,6 +117,9 @@ private:
     float             _sf_switch_delay_ms = 0.0f;
     struct TxAirtimeRec { uint64_t end_ms; uint32_t airtime_ms; };
     std::deque<TxAirtimeRec> _tx_airtime_log;
-    std::unique_ptr<meshroute::Node> _node;
+    // The firmware Node, behind a namespace-neutral handle. The factory (normal vs gw,
+    // chosen in onInit from n_layers) binds the right lib's wrapper. Declared LAST so it
+    // is destroyed FIRST — before _name (whose c_str() the Node borrows) and the timers.
+    std::unique_ptr<mrsim::INodeRuntime> _runtime;
     static constexpr size_t kMaxTimers = 64;   // matches MeshCore MAX_PENDING_TIMERS_PER_NODE
 };
