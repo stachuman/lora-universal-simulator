@@ -410,7 +410,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
                 if (ch_b)      { c.u.channel.team = true;  c.u.channel.global = true;  }   // BOTH
                 else if (ch_g) { c.u.channel.team = false; c.u.channel.global = true;  }   // GLOBAL
                 else           { c.u.channel.team = team_member; c.u.channel.global = false; }   // NATURAL (plain): TEAM for a team member, leaf for a static
-                const size_t cap = 200;   // channel_msg_max_payload_bytes
+                const size_t cap = MESHROUTE_NS::protocol::channel_msg_max_payload_bytes;   // derived from the protocol constant (was a 200 literal)
                 c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
                 c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
                 const MESHROUTE_NS::CmdResult r = _node.on_command(c);
@@ -452,7 +452,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
                 c.u.send.plane = static_cast<uint8_t>(MESHROUTE_NS::Plane::TEAM);
                 body.erase(body.size() - 3);
             }
-            const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
+            const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
             const MESHROUTE_NS::CmdResult r = _node.on_command(c);
@@ -484,7 +484,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
             c.u.send.dst_hash = h;
             c.u.send.flags    = 0;
             c.crypt           = MESHROUTE_NS::CryptIntent::on;   // §enc: force CRYPTED (seal) for this DM
-            const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
+            const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
             const MESHROUTE_NS::CmdResult r = _node.on_command(c);
@@ -538,14 +538,18 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
             uint32_t hash = 0; bool gh = false;                                     // dst key_hash32: 0x-hex or decimal
             if (p + 1 < cmd.size() && cmd[p] == '0' && (cmd[p + 1] == 'x' || cmd[p + 1] == 'X')) {
                 p += 2;
+                int ndig = 0;
                 for (; p < cmd.size(); ++p) {
                     const char ch = cmd[p]; uint32_t d;
                     if      (ch >= '0' && ch <= '9') d = static_cast<uint32_t>(ch - '0');
                     else if (ch >= 'a' && ch <= 'f') d = static_cast<uint32_t>(ch - 'a' + 10);
                     else if (ch >= 'A' && ch <= 'F') d = static_cast<uint32_t>(ch - 'A' + 10);
                     else break;
-                    hash = hash * 16u + d; gh = true;
+                    hash = hash * 16u + d; ++ndig; gh = true;
                 }
+                // Reject >8 hex digits: a key_hash32 is 32 bits, and silently truncating the high nibbles
+                // would mis-address the DM to a DIFFERENT (but valid) hash with a success-looking reply.
+                if (ndig > 8) gh = false;
             } else {
                 while (p < cmd.size() && cmd[p] >= '0' && cmd[p] <= '9') { hash = hash * 10u + static_cast<uint32_t>(cmd[p] - '0'); ++p; gh = true; }
             }
@@ -558,7 +562,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
                 c.u.layer.dst_hash  = hash;
                 c.u.layer.flags     = static_cast<uint8_t>(xl_ack ? MESHROUTE_NS::DATA_FLAG_E2E_ACK_REQ : 0);
                 c.crypt             = xl_x ? MESHROUTE_NS::CryptIntent::on : MESHROUTE_NS::CryptIntent::def;   // §S4: send_layerx seals
-                const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
+                const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
                 c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
                 c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
                 const MESHROUTE_NS::CmdResult r = _node.on_command(c);
@@ -581,7 +585,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
             c.kind = MESHROUTE_NS::CmdKind::send;
             c.u.send.dst_id = static_cast<uint8_t>(dst);
             c.u.send.flags  = static_cast<uint8_t>(is_e2e ? MESHROUTE_NS::DATA_FLAG_E2E_ACK_REQ : 0);  // the wire bit the RX acts on (was 0x08, a dead bit -> sim send_e2e ack never fired)
-            const size_t cap = 233;   // max_payload_bytes_hard_cap - 2
+            const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
             const MESHROUTE_NS::CmdResult r = _node.on_command(c);
