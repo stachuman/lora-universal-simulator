@@ -47,6 +47,7 @@ public:
     virtual ~ISimHal() = default;
     virtual int      simTx(const uint8_t* bytes, size_t len, const SimTxParams& p) = 0;  // -> SimTxResult
     virtual void     simSetRxSf(int sf) = 0;
+    virtual void     simSetRxBw(uint32_t /*bw_hz*/) {}   // §metal-fidelity (2026-07-07): track the ACTIVE-layer bw for the slop formula (no-op default -> Lua/idealized path unaffected)
     virtual uint64_t simChannelBusyUntil() = 0;
     virtual uint64_t simAirtimeUsedMs(uint64_t window_ms) = 0;
     virtual uint64_t simOldestTxEndMs() = 0;

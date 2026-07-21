@@ -1,0 +1,50 @@
+{
+  "_name": "t98_liveness_gossip",
+  "_desc": "Phase-4 distributed liveness GOSSIP gate — a node reroutes off a dead relay using ANOTHER node's gossip, WITHOUT its own timeout evidence (the mesh converges, not just the failing node). carol is MOBILE so it advertises NO routes -> alice can never route through carol -> carol has ZERO first-hand evidence about relay; any reroute it makes is provably GOSSIP-driven. Topology: alice + carol both reach dest via relay (their primary); carol also has an ALT to dest via dave. relay DEPARTS (forced_drops kill EVERY relay->alice and relay->carol frame from the 4th occurrence — after the first 3 beacons establish dest-via-relay on both). alice sends dest a stream of DMs: RTS-to-relay times out (relay silent to alice) -> alice marks relay SUSPECT from FIRST-HAND rts_timeout evidence -> alice GOSSIPS relay in its BCN suspect-TLV (alice-carol link is up). carol hears alice's gossip and marks relay suspect as a REMOTE observation (peer_suspect_mark remote_src=alice=1, source=bcn_suspect) -> the 12 dB penalty REROUTES carol's dest route from relay to dave (rt_penalty_rerank reason=bcn_suspect, from_next=relay to_next=dave) — with NO send of its own. A later carol DM then DELIVERS via the rerouted dave path. Pre-Phase-4 carol would keep relay as primary until its OWN flights timed out. Asserts: carol peer_suspect_mark remote_src:1 (gossip received) + carol rt_penalty_rerank reason:bcn_suspect (gossip-DRIVEN reroute, not first-hand) + dest delivered m1 (end-to-end via dave). Idle + lossless otherwise (sigma_db=0).",
+  "simulation": {
+    "duration_ms": 50000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 7,
+    "node_startup_jitter_ms": 300,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance", "alpha": 3.0, "sigma_db": 0.0,
+      "ref_distance_m": 1.0, "ref_loss_db": 40.0, "noise_floor_db": -120.0, "tx_power_dbm": 14.0
+    }
+  },
+  "config": {},
+  "nodes": [
+    { "name": "alice", "node_id": 1, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "relay", "node_id": 2, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "node_id": 3, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0, "is_mobile": true } },
+    { "name": "dave",  "node_id": 4, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "dest",  "node_id": 5, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "relay", "snr": 22.0, "rssi": -62.0, "bidir": true },
+      { "from": "relay", "to": "dest",  "snr": 22.0, "rssi": -62.0, "bidir": true },
+      { "from": "carol", "to": "relay", "snr": 16.0, "rssi": -72.0, "bidir": true },
+      { "from": "carol", "to": "dave",  "snr": 14.0, "rssi": -76.0, "bidir": true },
+      { "from": "dave",  "to": "dest",  "snr": 22.0, "rssi": -62.0, "bidir": true },
+      { "from": "alice", "to": "carol", "snr": 22.0, "rssi": -62.0, "bidir": true }
+    ]
+  },
+  "forced_drops": [
+    { "from": "relay", "to": "alice", "nth": 4, "count": 999 },
+    { "from": "relay", "to": "carol", "nth": 4, "count": 999 }
+  ],
+  "commands": [
+    { "at_ms": 12000, "node": "alice", "command": "send dest a1" },
+    { "at_ms": 16000, "node": "alice", "command": "send dest a2" },
+    { "at_ms": 20000, "node": "alice", "command": "send dest a3" },
+    { "at_ms": 24000, "node": "alice", "command": "send dest a4" },
+    { "at_ms": 42000, "node": "carol", "command": "send dest m1" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "peer_suspect_mark",  "value": "\"remote_src\":1" },
+    { "type": "script_emit_contains", "node": "carol", "emit_type": "rt_penalty_rerank",  "value": "\"reason\":\"bcn_suspect\"" },
+    { "type": "script_emit_contains", "node": "dest",  "emit_type": "delivered",          "value": "m1" }
+  ]
+}

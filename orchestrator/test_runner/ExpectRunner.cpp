@@ -208,6 +208,36 @@ int ExpectRunner::evaluate(const SimConfig& cfg,
             }
             report(a.type, detail, found);
         }
+        else if (a.type == "script_emit_not_contains") {
+            // The NEGATIVE of script_emit_contains: NO script_emit from `node`
+            // with `emit_type` may have a `data` dump containing `value`. For
+            // separation/containment gates (e.g. a static node must NEVER
+            // id_bind a mobile/team key_hash32 — match emit_type=id_bind_set +
+            // value=<the mobile's key>, scoped to the static node). `value` is
+            // REQUIRED (empty -> always passes; use event_count count:0 to
+            // forbid an emit_type outright).
+            bool leaked = false;
+            std::string leaked_dump;
+            for (const auto& e : events) {
+                if (e.value("type", "") != "script_emit") continue;
+                if (!nodeMatches(e, a.node, name_to_id)) continue;
+                if (!a.emit_type.empty() &&
+                    e.value("emit_type", "") != a.emit_type) continue;
+                if (!e.contains("data")) continue;
+                if (!a.value.empty() &&
+                    e["data"].dump().find(a.value) != std::string::npos) {
+                    leaked = true;
+                    leaked_dump = e["data"].dump();
+                    break;
+                }
+            }
+            std::string detail =
+                "node=" + a.node +
+                " emit_type=" + a.emit_type +
+                " forbidden_substr=\"" + a.value + "\"";
+            if (leaked) detail += " LEAKED_data=" + leaked_dump;
+            report(a.type, detail, !leaked);   // PASS iff the forbidden substring never appeared
+        }
         else {
             std::fprintf(stderr,
                          "FAIL expect[%s]: unknown assertion type\n",

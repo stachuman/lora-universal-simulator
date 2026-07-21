@@ -3,6 +3,7 @@
 
 #include "core/events/EventLog.h"
 #include "core/physics/LbtModel.h"
+#include "orchestrator/runtime/SnrReport.h"   // §snr-unification A: the pure report-SNR shaper (single choke point below)
 
 #include <string>
 #include <utility>
@@ -45,6 +46,15 @@ void FirmwareNode::onInit(const nlohmann::json& config) {
     // the same config key (Lua parity). Read it here because it lives on FirmwareNode, not in the Node.
     if (config.is_object())
         _lbt_enabled = config.value("lbt_enabled", _lbt_enabled);
+    // §metal-fidelity (2026-07-07): opt-in metal RX-window slop (default "idealized" -> simRxWindowSlopMs returns 0
+    // -> s18 byte-identical). _sim_bw_hz is injected by SimController alongside; used by the device slop formula.
+    if (config.is_object()) {
+        _rx_window_slop_metal = (config.value("_sim_rx_window_slop", std::string("metal")) == "metal");
+        _node_bw_hz = config.value("_sim_bw_hz", _node_bw_hz);
+        // §snr-unification A: the receiver-report SNR ceiling (SimController injects it from
+        // simulation.radio.snr_report_ceiling_db; default +12). Read once at init.
+        _snr_report_ceiling_db = config.value("_sim_snr_report_ceiling_db", _snr_report_ceiling_db);
+    }
     // Bind the firmware variant the scenario asks for: n_layers==2 => the GATEWAY lib (a second LayerRuntime;
     // the normal lib hard-REFUSES n_layers==2). Default 1 => the normal lib. setProtocolId() ran before
     // onInit, so _protocol_id is the firmware node_id the factory seeds the Node with.
@@ -79,8 +89,10 @@ void FirmwareNode::onRecv(std::string_view bytes, float snr, float rssi,
     // so the firmware must run with src_hint = -1 (unknown) exactly as it does on metal.
     (void)src_id;
     if (!_initialized || !_runtime) return;
+    // §snr-unification A: the firmware sees the SX126x-REPORTED SNR (saturated + q4-quantized),
+    // never the raw channel SNR. Physics already ran on the true value upstream in SimController.
     _runtime->onRecv(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
-                     snr, rssi, /*src_hint=*/-1, sim_ms);
+                     mrsim::shapeReportedSnr(snr, _snr_report_ceiling_db), rssi, /*src_hint=*/-1, sim_ms);
 }
 
 std::string FirmwareNode::onCommand(std::string_view cmd_str) {
@@ -100,7 +112,8 @@ void FirmwareNode::onRadioBusy(const RadioBusyInfo& info) {
 
 void FirmwareNode::onPreambleDetected(uint64_t time_ms, int from_id, float snr_db) {
     if (!_initialized || !_runtime) return;
-    _runtime->onPreambleDetected(time_ms, from_id, snr_db);
+    // §snr-unification A: preamble-detect SNR is a report too — same saturation + quantization.
+    _runtime->onPreambleDetected(time_ms, from_id, mrsim::shapeReportedSnr(snr_db, _snr_report_ceiling_db));
 }
 
 void FirmwareNode::tickTimers(uint64_t sim_ms) {
@@ -190,6 +203,12 @@ void FirmwareNode::simSetRxSf(int sf) {
     armSfSwitchBlindWindow();
 }
 
+void FirmwareNode::simSetRxBw(uint32_t bw_hz) {
+    // §metal-fidelity (2026-07-07): mirror device_radio.h:216 (_def_bw <- bw). simRxWindowSlopMs reads _node_bw_hz, so
+    // a GATEWAY's per-layer 62.5<->125 kHz switch now moves the slop to the ACTIVE layer (was frozen at the layer-0 seed).
+    if (bw_hz > 0) _node_bw_hz = static_cast<int>(bw_hz);
+}
+
 uint64_t FirmwareNode::simChannelBusyUntil() {
     // Gate-1: honour the lbt_enabled host knob so a disabled-LBT gate reports an
     // idle channel (the firmware LBT then never defers on the sim primitive).
@@ -204,7 +223,11 @@ uint64_t FirmwareNode::simOldestTxEndMs() { return oldestTxEndMs(); }
 
 uint32_t FirmwareNode::simRxWindowSlopMs(int sf) {
     // The idealized sim has no extra data-SF RX-window slop (no s18 regression); the device HAL returns the
-    // bench-measured slop. Matches the meshroute::Hal default (return 0).
+    // bench-measured slop. Matches the meshroute::Hal default (return 0). §metal-fidelity (2026-07-07): a scenario
+    // can opt into the DEVICE formula (mirror lib/hal/device_hal.h) so the CTS-wait metal turnaround surfaces —
+    // default idealized (0) keeps s18 byte-identical + every existing baseline unchanged.
+    if (_rx_window_slop_metal && _node_bw_hz > 0)
+        return static_cast<uint32_t>(((1u << sf) * 1000u) / static_cast<uint32_t>(_node_bw_hz) + 1u + 50u);
     (void)sf;
     return 0;
 }

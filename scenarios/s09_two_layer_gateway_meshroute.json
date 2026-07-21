@@ -1,0 +1,487 @@
+{
+  "_name": "s09_two_layer_gateway_meshroute",
+  "_desc": "Two-layer / two-gateway cross-layer DM on the C++ MeshRoute FirmwareNode. The gateways carry the dual schema (n_layers:2/layers[] for C++ + is_gateway/gateway_layers for Lua). Joiners are STATICALLY provisioned (node_id + allowed_data_sfs) because the C++ join workstream is deferred (codec-only) \u2014 join would otherwise hand them their id + data SFs. Asserts the two cross-layer DMs reach the joiners (l4_seed->l5_j1, l5_seed->l4_j1) + the local seed->gateway DMs + the gateway bridges. The Lua-specific join/envelope emit assertions are intentionally dropped.",
+  "simulation": {
+    "duration_ms": 240000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 909,
+    "node_startup_jitter_ms": 0,
+    "radio": {
+      "sf": 7,
+      "bw": 250,
+      "cr": 5
+    }
+  },
+  "nodes": [
+    {
+      "name": "l4_seed",
+      "node_id": 1,
+      "key_hash32": "0x44000001",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 4,
+        "routing_sf": 7,
+        "allowed_data_sfs": [
+          10
+        ],
+        "discovery_beacon_period_ms": 2000,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_offer_backoff_min_ms": 100,
+        "join_offer_backoff_max_ms": 300,
+        "state_snapshot_period_ms": 30000
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "gw_4",
+      "node_id": 10,
+      "key_hash32": "0x4400000a",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 4,
+        "is_gateway": true,
+        "gateway_layers": [
+          {
+            "layer_id": 5,
+            "routing_sf": 8,
+            "allowed_data_sfs": [
+              11
+            ],
+            "period_ms": 12000,
+            "duration_ms": 5000,
+            "offset_ms": 4000
+          }
+        ],
+        "routing_sf": 7,
+        "allowed_data_sfs": [
+          10
+        ],
+        "discovery_beacon_period_ms": 2000,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_offer_backoff_min_ms": 300,
+        "join_offer_backoff_max_ms": 600,
+        "state_snapshot_period_ms": 30000,
+        "n_layers": 2,
+        "layers": [
+          {
+            "layer_id": 4,
+            "node_id": 10,
+            "routing_sf": 7,
+            "allowed_data_sfs": [
+              10
+            ],
+            "beacon_period_ms": 12000,
+            "window_period_ms": 12000,
+            "window_ms": 0,
+            "window_offset_ms": 0
+          },
+          {
+            "layer_id": 5,
+            "node_id": 111,
+            "routing_sf": 8,
+            "allowed_data_sfs": [
+              11
+            ],
+            "beacon_period_ms": 12000,
+            "window_period_ms": 12000,
+            "window_ms": 0,
+            "window_offset_ms": 0
+          }
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l5_seed",
+      "node_id": 101,
+      "key_hash32": "0x55000065",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 5,
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          11
+        ],
+        "discovery_beacon_period_ms": 2000,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_offer_backoff_min_ms": 100,
+        "join_offer_backoff_max_ms": 300,
+        "state_snapshot_period_ms": 30000
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "gw_5",
+      "node_id": 110,
+      "key_hash32": "0x5500006e",
+      "script": "scenarios/dv_dual_sf.lua",
+      "config": {
+        "layer_id": 5,
+        "is_gateway": true,
+        "gateway_layers": [
+          {
+            "layer_id": 4,
+            "routing_sf": 7,
+            "allowed_data_sfs": [
+              10
+            ],
+            "period_ms": 12000,
+            "duration_ms": 5000,
+            "offset_ms": 4000
+          }
+        ],
+        "routing_sf": 8,
+        "allowed_data_sfs": [
+          11
+        ],
+        "discovery_beacon_period_ms": 2000,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_offer_backoff_min_ms": 300,
+        "join_offer_backoff_max_ms": 600,
+        "state_snapshot_period_ms": 30000,
+        "n_layers": 2,
+        "layers": [
+          {
+            "layer_id": 5,
+            "node_id": 110,
+            "routing_sf": 8,
+            "allowed_data_sfs": [
+              11
+            ],
+            "beacon_period_ms": 12000,
+            "window_period_ms": 12000,
+            "window_ms": 0,
+            "window_offset_ms": 0
+          },
+          {
+            "layer_id": 4,
+            "node_id": 112,
+            "routing_sf": 7,
+            "allowed_data_sfs": [
+              10
+            ],
+            "beacon_period_ms": 12000,
+            "window_period_ms": 12000,
+            "window_ms": 0,
+            "window_offset_ms": 0
+          }
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l4_j1",
+      "node_id": 113,
+      "key_hash32": "0x44000011",
+      "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 30000,
+      "config": {
+        "join_required": true,
+        "layer_id": 4,
+        "routing_sf": 7,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1500,
+        "join_discover_jitter_ms": 500,
+        "join_claim_guard_ms": 2500,
+        "state_snapshot_period_ms": 30000,
+        "allowed_data_sfs": [
+          10
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l4_j2",
+      "node_id": 114,
+      "key_hash32": "0x44000012",
+      "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 48000,
+      "config": {
+        "join_required": true,
+        "layer_id": 4,
+        "routing_sf": 7,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1500,
+        "join_discover_jitter_ms": 500,
+        "join_claim_guard_ms": 2500,
+        "state_snapshot_period_ms": 30000,
+        "allowed_data_sfs": [
+          10
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l4_j3",
+      "node_id": 115,
+      "key_hash32": "0x44000013",
+      "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 66000,
+      "config": {
+        "join_required": true,
+        "layer_id": 4,
+        "routing_sf": 7,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1500,
+        "join_discover_jitter_ms": 500,
+        "join_claim_guard_ms": 2500,
+        "state_snapshot_period_ms": 30000,
+        "allowed_data_sfs": [
+          10
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l5_j1",
+      "node_id": 116,
+      "key_hash32": "0x55000071",
+      "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 36000,
+      "config": {
+        "join_required": true,
+        "layer_id": 5,
+        "routing_sf": 8,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1500,
+        "join_discover_jitter_ms": 500,
+        "join_claim_guard_ms": 2500,
+        "state_snapshot_period_ms": 30000,
+        "allowed_data_sfs": [
+          11
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l5_j2",
+      "node_id": 117,
+      "key_hash32": "0x55000072",
+      "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 54000,
+      "config": {
+        "join_required": true,
+        "layer_id": 5,
+        "routing_sf": 8,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1500,
+        "join_discover_jitter_ms": 500,
+        "join_claim_guard_ms": 2500,
+        "state_snapshot_period_ms": 30000,
+        "allowed_data_sfs": [
+          11
+        ]
+      },
+      "engine": "meshroute"
+    },
+    {
+      "name": "l5_j3",
+      "node_id": 118,
+      "key_hash32": "0x55000073",
+      "script": "scenarios/dv_dual_sf.lua",
+      "start_at_ms": 72000,
+      "config": {
+        "join_required": true,
+        "layer_id": 5,
+        "routing_sf": 8,
+        "beacon_period_ms": 12000,
+        "quiet_threshold_ms": 0,
+        "join_listen_ms": 1500,
+        "join_discover_jitter_ms": 500,
+        "join_claim_guard_ms": 2500,
+        "state_snapshot_period_ms": 30000,
+        "allowed_data_sfs": [
+          11
+        ]
+      },
+      "engine": "meshroute"
+    }
+  ],
+  "topology": {
+    "links": [
+      {
+        "from": "l4_seed",
+        "to": "gw_4",
+        "snr": 24.0,
+        "rssi": -66.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_j1",
+        "to": "l4_seed",
+        "snr": 22.0,
+        "rssi": -68.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_j2",
+        "to": "l4_seed",
+        "snr": 21.0,
+        "rssi": -69.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_j3",
+        "to": "gw_4",
+        "snr": 21.0,
+        "rssi": -69.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_j1",
+        "to": "gw_4",
+        "snr": 18.0,
+        "rssi": -72.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_j1",
+        "to": "gw_5",
+        "snr": 18.0,
+        "rssi": -72.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_j2",
+        "to": "gw_5",
+        "snr": 18.0,
+        "rssi": -72.0,
+        "bidir": true
+      },
+      {
+        "from": "l4_seed",
+        "to": "gw_5",
+        "snr": 19.0,
+        "rssi": -71.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_seed",
+        "to": "gw_5",
+        "snr": 24.0,
+        "rssi": -66.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_j1",
+        "to": "l5_seed",
+        "snr": 22.0,
+        "rssi": -68.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_j2",
+        "to": "l5_seed",
+        "snr": 21.0,
+        "rssi": -69.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_j3",
+        "to": "gw_5",
+        "snr": 21.0,
+        "rssi": -69.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_j1",
+        "to": "gw_5",
+        "snr": 18.0,
+        "rssi": -72.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_j1",
+        "to": "gw_4",
+        "snr": 18.0,
+        "rssi": -72.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_j2",
+        "to": "gw_4",
+        "snr": 18.0,
+        "rssi": -72.0,
+        "bidir": true
+      },
+      {
+        "from": "l5_seed",
+        "to": "gw_4",
+        "snr": 19.0,
+        "rssi": -71.0,
+        "bidir": true
+      },
+      {
+        "from": "gw_4",
+        "to": "gw_5",
+        "snr": 20.0,
+        "rssi": -70.0,
+        "bidir": true
+      }
+    ]
+  },
+  "commands": [
+    {
+      "at_ms": 70000,
+      "node": "l4_seed",
+      "command": "send gw_4 l4-local-seed-to-gw"
+    },
+    {
+      "at_ms": 78000,
+      "node": "l5_seed",
+      "command": "send gw_5 l5-local-seed-to-gw"
+    },
+    {
+      "at_ms": 128000,
+      "node": "l4_seed",
+      "command": "send_layer 5 1426063473 cross-l4-to-l5-joiner"
+    },
+    {
+      "at_ms": 196000,
+      "node": "l5_seed",
+      "command": "send_layer 4 1140850705 cross-l5-to-l4-joiner"
+    }
+  ],
+  "expect": [
+    {
+      "type": "script_emit_contains",
+      "node": "l5_j1",
+      "emit_type": "push",
+      "value": "cross-l4-to-l5-joiner"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "l4_j1",
+      "emit_type": "push",
+      "value": "cross-l5-to-l4-joiner"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "gw_5",
+      "emit_type": "push",
+      "value": "l5-local-seed-to-gw"
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "gw_4",
+      "emit_type": "xl_bridge",
+      "value": ""
+    },
+    {
+      "type": "script_emit_contains",
+      "node": "gw_5",
+      "emit_type": "xl_bridge",
+      "value": ""
+    }
+  ]
+}

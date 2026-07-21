@@ -14,7 +14,7 @@
       "cr": 5,
       "max_packet_bytes": 255,
       "snr_coherence_ms": 0,
-      "duty_cycle": 0.01
+      "duty_cycle": 1
     }
   },
   "commands": [

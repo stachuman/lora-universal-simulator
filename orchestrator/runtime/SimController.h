@@ -36,6 +36,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "orchestrator/runtime/LinkBudget.h"   // §1.5: txPowerDeltaDb() (shared with the unit test)
+
 struct StepResult {
     bool     ended      = false;
     int      new_events = 0;
@@ -125,6 +127,7 @@ private:
         int      sf;
         int      bw_hz;
         int      cr;
+        int      power_dbm = -127;   // §1.5: explicit per-frame TX power (-127 = radio default); link-budget delta applied at delivery/collision
         uint16_t pre_sym;
         float    t_sym_ms;
         float    t_preamble_ms;

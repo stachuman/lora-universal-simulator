@@ -106,6 +106,9 @@ static std::string resolveScriptPath(const std::string& script_path,
     throw std::runtime_error(msg);
 }
 
+// §1.5 tx-power link-budget delta: txPowerDeltaDb() is defined in SimController.h (shared with the
+// sim-native unit test); used at the delivery + collision link-budget sites below.
+
 // Build the CapturedSignal struct used by evaluateCollision().
 template <typename InFlightT>
 CapturedSignal toCaptured(const InFlightT& f, float snr_db_at_rcv) {
@@ -353,7 +356,8 @@ void SimController::initialize() {
     }
 
     // ---- Radios + nodes -----------------------------------------------------
-    // bw in JSON is kHz (matches meshcore_real_sim convention); SimRadio takes Hz.
+    // §1.1 (2026-07-20 review): bw is now stored INTERNALLY IN Hz (JsonConfig converts the kHz-double
+    // JSON field ×1000 at parse). SimRadio takes Hz, so pass _cfg.nodes[i].bw straight through.
     _radios.clear();
     _nodes.clear();
     _radios.reserve(static_cast<size_t>(n));
@@ -394,10 +398,10 @@ void SimController::initialize() {
 
     for (int i = 0; i < n; ++i) {
         const int sf = _cfg.nodes[i].sf;        // already merged with global defaults
-        const int bw_khz = _cfg.nodes[i].bw;
+        const int bw_hz = _cfg.nodes[i].bw;   // already Hz (JsonConfig kHz-double -> Hz)
         const int cr = _cfg.nodes[i].cr;
         _radios.emplace_back(std::make_unique<SimRadio>(
-            _clock, sf, bw_khz * 1000, cr,
+            _clock, sf, bw_hz, cr,
             _cfg.simulation.radio.rx_to_tx_delay_ms,
             _cfg.simulation.radio.tx_to_rx_delay_ms));
         // TODO(Y2): plumb cfg.nodes[i].tx_fail_prob through SimRadio::setTxFailProb
@@ -561,10 +565,15 @@ void SimController::initialize() {
             cfg.update(_cfg.nodes[i].config);
         }
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
-        cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw * 1000;  // bw is kHz in JSON
+        cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw;         // bw stored in Hz (JsonConfig kHz-double -> Hz)
         cfg["_sim_cr"]        = _cfg.nodes[i].cr;
-        cfg["_sim_duty_cycle"]           = _cfg.simulation.radio.duty_cycle;
+        // §2.2 (realism ruling 2.2): simulation.radio.duty_cycle is a PERCENT (1 = 1%); the injected
+        // _sim_duty_cycle keeps the firmware/Lua NodeConfig FRACTION semantic (0.01 = 1%), so divide /100
+        // at this boundary — firmware behavior is unchanged (only the authoring unit moved to percent).
+        cfg["_sim_duty_cycle"]           = _cfg.simulation.radio.duty_cycle / 100.0;
         cfg["_sim_duty_cycle_window_ms"] = _cfg.simulation.radio.duty_cycle_window_ms;
+        cfg["_sim_rx_window_slop"]       = _cfg.simulation.rx_window_slop;   // §metal-fidelity (2026-07-07): opt-in metal RX-window slop
+        cfg["_sim_snr_report_ceiling_db"] = _cfg.simulation.radio.snr_report_ceiling_db;   // §snr-unification A: FirmwareNode saturates the SNR the firmware sees to this ceiling (report-only)
         _nodes[i]->onInit(cfg);
         _nodes[i]->markInitialized();
         std::string role = "script";
@@ -697,10 +706,15 @@ void SimController::processStartupAtStep() {
             cfg.update(_cfg.nodes[i].config);
         }
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
-        cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw * 1000;  // bw is kHz in JSON
+        cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw;         // bw stored in Hz (JsonConfig kHz-double -> Hz)
         cfg["_sim_cr"]        = _cfg.nodes[i].cr;
-        cfg["_sim_duty_cycle"]           = _cfg.simulation.radio.duty_cycle;
+        // §2.2 (realism ruling 2.2): simulation.radio.duty_cycle is a PERCENT (1 = 1%); the injected
+        // _sim_duty_cycle keeps the firmware/Lua NodeConfig FRACTION semantic (0.01 = 1%), so divide /100
+        // at this boundary — firmware behavior is unchanged (only the authoring unit moved to percent).
+        cfg["_sim_duty_cycle"]           = _cfg.simulation.radio.duty_cycle / 100.0;
         cfg["_sim_duty_cycle_window_ms"] = _cfg.simulation.radio.duty_cycle_window_ms;
+        cfg["_sim_rx_window_slop"]       = _cfg.simulation.rx_window_slop;   // §metal-fidelity (2026-07-07): opt-in metal RX-window slop
+        cfg["_sim_snr_report_ceiling_db"] = _cfg.simulation.radio.snr_report_ceiling_db;   // §snr-unification A: FirmwareNode saturates the SNR the firmware sees to this ceiling (report-only)
         _nodes[i]->onInit(cfg);
         _nodes[i]->markInitialized();
 
@@ -872,6 +886,16 @@ void SimController::deliverReceptionsForStep() {
                         tx.info.empty() ? nullptr : tx.info.c_str());
                 }
                 continue;
+            }
+
+            // §1.5: shift the received signal by the frame's explicit-TX-power delta BEFORE fading /
+            // threshold / collision-consult / rx-event, so every downstream verdict sees the adjusted
+            // budget. Inert when the frame carries the -127 sentinel (the whole corpus today).
+            {
+                const float pdelta = txPowerDeltaDb(tx.power_dbm,
+                                                    _cfg.simulation.path_loss.tx_power_dbm);
+                lp.snr  += pdelta;
+                lp.rssi += pdelta;
             }
 
             // Per-link fading. advanceFading() is a no-op when
@@ -1373,13 +1397,17 @@ void SimController::registerTransmissionsForStep() {
             // a fresh TX of this airtime could fit — i.e., when enough
             // of the oldest entries have aged out of the window.
             {
-                float dc = _cfg.simulation.radio.duty_cycle;
+                // §2.2 (realism ruling): the GLOBAL simulation.radio.duty_cycle is a PERCENT (1 = 1%);
+                // this enforcement math works in the FRACTION domain (budget = dc * window), so divide
+                // /100 here. The per-node override below is a raw JSON passthrough kept as a FRACTION
+                // (Lua-parity — the Lua script reads the same key as a fraction); it is NOT re-scaled.
+                float dc = _cfg.simulation.radio.duty_cycle / 100.0f;   // PERCENT -> fraction
                 unsigned long dc_window = _cfg.simulation.radio.duty_cycle_window_ms;
                 const auto& nc = _cfg.nodes[i].config;
                 if (nc.is_object()) {
                     auto it = nc.find("duty_cycle");
                     if (it != nc.end() && it->is_number())
-                        dc = it->get<float>();
+                        dc = it->get<float>();   // per-node override: FRACTION (Lua-parity passthrough)
                     auto wit = nc.find("duty_cycle_window_ms");
                     if (wit != nc.end() && wit->is_number_unsigned())
                         dc_window = wit->get<unsigned long>();
@@ -1429,14 +1457,20 @@ void SimController::registerTransmissionsForStep() {
             // InFlight directly.
             InFlight f;
             f.sender_id     = i;
-            f.start_ms      = now;
-            f.end_ms        = now + airtime;
+            // §metal-fidelity (2026-07-07): a firmware-node TX (synthesised here, bypassing startSendRaw) must still
+            // honor the radio's RX->TX turnaround — the sender can't TX until _earliest_tx_ms after its last RX ends.
+            // This is the metal latency the firmware's airtime math can't see (the CTS-wait bug). Idealized scenarios
+            // keep the ~1ms default turnaround (near-inert); a metal scenario's ~50ms surfaces the late-CTS bug.
+            const unsigned long earliest_tx = static_cast<unsigned long>(_radios[i]->getEarliestTxMs());
+            f.start_ms      = (now > earliest_tx) ? now : earliest_tx;
+            f.end_ms        = f.start_ms + airtime;
             f.bytes         = std::move(p.bytes);
             f.label         = p.label;
             f.info          = p.info;
             f.sf            = sf;
             f.bw_hz         = bw_hz;
             f.cr            = cr;
+            f.power_dbm     = p.power_dbm;   // §1.5: carry the frame's explicit TX power (delta applied at delivery/collision)
             f.pre_sym       = static_cast<uint16_t>(_radios[i]->getPreambleSymbols());
             f.t_sym_ms      = static_cast<float>(_radios[i]->getSymbolMs());
             f.t_preamble_ms = static_cast<float>(_radios[i]->getPreambleMs());
@@ -1461,6 +1495,9 @@ void SimController::registerTransmissionsForStep() {
                     LinkParams lp_f, lp_e;
                     if (!_links->getLink(f.sender_id, r, lp_f)) continue;
                     if (!_links->getLink(e.sender_id, r, lp_e)) continue;
+                    // §1.5: each flight's collision SNR carries its own explicit-TX-power delta (inert @ -127).
+                    lp_f.snr += txPowerDeltaDb(f.power_dbm, _cfg.simulation.path_loss.tx_power_dbm);
+                    lp_e.snr += txPowerDeltaDb(e.power_dbm, _cfg.simulation.path_loss.tx_power_dbm);
                     CapturedSignal sig_f = toCaptured(f, lp_f.snr);
                     CapturedSignal sig_e = toCaptured(e, lp_e.snr);
 

@@ -28,7 +28,7 @@ static const char* kPresent = R"({
   "simulation": {
     "duration_ms": 1000,
     "step_ms": 1,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+    "radio": { "sf": 7, "bw": 250, "cr": 5, "duty_cycle": 0.01 }
   },
   "nodes": [
     { "name": "alice", "script": "examples/x.lua" },
@@ -42,7 +42,7 @@ static const char* kAbsent = R"({
   "simulation": {
     "duration_ms": 1000,
     "step_ms": 1,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+    "radio": { "sf": 7, "bw": 250, "cr": 5, "duty_cycle": 0.01 }
   },
   "nodes": [
     { "name": "alice", "script": "examples/x.lua" },
@@ -56,7 +56,7 @@ static const char* kClamp = R"({
   "simulation": {
     "duration_ms": 1000,
     "step_ms": 1,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+    "radio": { "sf": 7, "bw": 250, "cr": 5, "duty_cycle": 0.01 }
   },
   "nodes": [
     { "name": "alice", "script": "examples/x.lua", "sf_rx_set": [3, 13, 7] }
@@ -69,7 +69,7 @@ static const char* kBadType = R"({
   "simulation": {
     "duration_ms": 1000,
     "step_ms": 1,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+    "radio": { "sf": 7, "bw": 250, "cr": 5, "duty_cycle": 0.01 }
   },
   "nodes": [
     { "name": "alice", "script": "examples/x.lua", "sf_rx_set": "not-an-array" }
@@ -82,7 +82,7 @@ static const char* kBadEntry = R"({
   "simulation": {
     "duration_ms": 1000,
     "step_ms": 1,
-    "radio": { "sf": 7, "bw": 250, "cr": 5 }
+    "radio": { "sf": 7, "bw": 250, "cr": 5, "duty_cycle": 0.01 }
   },
   "nodes": [
     { "name": "alice", "script": "examples/x.lua", "sf_rx_set": [7, "8"] }

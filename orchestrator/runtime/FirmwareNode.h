@@ -75,6 +75,7 @@ public:
     // ---- mrsim::ISimHal (called by the per-variant HalAdapter wrapping the Node) ----
     int      simTx(const uint8_t* bytes, size_t len, const mrsim::SimTxParams& p) override;  // -> SimTxResult
     void     simSetRxSf(int sf) override;
+    void     simSetRxBw(uint32_t bw_hz) override;   // §metal-fidelity: mirror device _def_bw -> _node_bw_hz follows the active layer's bw
     uint64_t simChannelBusyUntil() override;
     uint64_t simAirtimeUsedMs(uint64_t window_ms) override;
     uint64_t simOldestTxEndMs() override;
@@ -115,6 +116,9 @@ private:
     float             _clock_drift_ppm = 0.0f;
     uint64_t          _rx_blind_until_ms = 0;
     float             _sf_switch_delay_ms = 0.0f;
+    bool              _rx_window_slop_metal = true;
+    int               _node_bw_hz = 62500;             //   the node's BW (from _sim_bw_hz), for the slop formula ((1<<sf)*1000)/bw + 1 + 50
+    float             _snr_report_ceiling_db = 12.0f;  // §snr-unification A: report-only SNR saturation ceiling (config _sim_snr_report_ceiling_db; huge = disable)
     struct TxAirtimeRec { uint64_t end_ms; uint32_t airtime_ms; };
     std::deque<TxAirtimeRec> _tx_airtime_log;
     // The firmware Node, behind a namespace-neutral handle. The factory (normal vs gw,

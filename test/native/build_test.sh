@@ -60,6 +60,17 @@ test_with_arg test_path_loss_config "$SCRIPT_DIR/sample_path_loss.json" \
 run test_sf_rx_set_parsing "$SCRIPT_DIR/test_sf_rx_set_parsing.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"
 
+# Wave 1 (2026-07-20 realism review): bw double-parse, required-key refusal, SF5/6 airtime, tx-power delta.
+run test_wave1_config "$SCRIPT_DIR/test_wave1_config.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp"
+
+run test_snr_report_shaping "$SCRIPT_DIR/test_snr_report_shaping.cpp"
+
+# Wave 2a (2026-07-21 realism ruling): metal turnaround/slop defaults + duty percent unit.
+run test_wave2_config "$SCRIPT_DIR/test_wave2_config.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp"
+
 run test_timerwheel "$SCRIPT_DIR/test_timerwheel.cpp" \
     "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp"
 

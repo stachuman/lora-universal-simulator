@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     assert(cfg.simulation.step_ms == 1);
     assert(cfg.simulation.warmup_ms == 0);
     assert(cfg.simulation.radio.sf == 11);
-    assert(cfg.simulation.radio.bw == 250);
+    assert(cfg.simulation.radio.bw == 250000);   // §1.1: bw stored in Hz (JSON "bw":250 kHz -> 250000 Hz)
     assert(cfg.simulation.radio.cr == 5);
 
     // nodes
@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
 
     // global radio defaults should have merged into nodes
     assert(cfg.nodes[0].sf == 11);
-    assert(cfg.nodes[0].bw == 250);
+    assert(cfg.nodes[0].bw == 250000);   // §1.1: Hz (merged from global)
     assert(cfg.nodes[0].cr == 5);
 
     // topology
@@ -57,6 +57,7 @@ int main(int argc, char** argv) {
     assert(lk.to   == "bob");
     assert(lk.snr  == 8.0f);
     assert(lk.rssi == -80.0f);
+    assert(lk.snr_std_dev == 0.0f);   // §1.3: now a required link field (fixture provides 0)
     assert(lk.bidir == true);
 
     // commands / expect should be empty (present-but-empty arrays)

@@ -1,0 +1,72 @@
+{
+  "_name": "t94_e2e_dm_crypto",
+  "_desc": "Phase-1 E2E DM crypto, live over the simulated radio (the #39 sim-seam gate), updated for the USER-DRIVEN key acquisition of the 2026-06-16 provisioning spec (§5 no-auto-query / §6 reqpubkey / §2 send_failed{reason} / §7 peer_key_cached push). Two seeded engine=meshroute FirmwareNodes with e2e_dm=true: SimController derives each node's X25519 secret + Ed25519 pubkey from its `seed` and installs them via set_crypto_identity. Flow demonstrates all three Phase-1 properties + the no-auto behaviour: (1) FAIL-LOUD-NO-PUBKEY — alice's first send to bob has no AUTHORITATIVE recipient pubkey, so it refuses (e2e_no_pubkey, NEVER cleartext) and — §5 — does NOT auto-flood; it WARNS the app (push send_failed{reason:no_pubkey}) and drops. The user then explicitly REQUESTS the key on-air: `reqpubkey 474f8542` fires the HARD WANT_PUBKEY; bob (the owner) answers TYPE-5 with its ed_pub; alice caches it (peer_key_cached node=2 + the §7 push). (2) CIPHERTEXT-WITHOUT-KEY (§1a sealed-sender) — alice retries: now it SEALS and the CRYPTED DATA hits the air; bob receives it but holds NO cached key for the sender (a sealed frame carries NO cleartext sender hint), so TRIAL DECRYPTION finds no candidate key that opens the tag -> e2e_open_no_key -> SILENT DROP (NO delivered/push \"secret-two\") — exactly what a passive listener or an un-provisioned receiver sees: an opaque sealed frame. (3) ENCRYPTED DELIVERY — bob requests alice's key (`reqpubkey f2e6f8d4` -> alice answers -> peer_key_cached node=1); alice's final send then seals AND bob opens it -> delivered \"secret-three\". Idle + lossless (sigma_db=0) so the handshake is deterministic.",
+  "simulation": {
+    "duration_ms": 40000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 11,
+    "node_startup_jitter_ms": 500,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance", "alpha": 3.0, "sigma_db": 0.0,
+      "ref_distance_m": 1.0, "ref_loss_db": 40.0, "noise_floor_db": -120.0, "tx_power_dbm": 14.0
+    }
+  },
+  "config": {},
+  "nodes": [
+    {
+      "name": "alice", "node_id": 1,
+      "seed": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "engine": "meshroute",
+      "config": {
+        "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7],
+        "e2e_dm": true,
+        "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0
+      },
+      "lat": 41.3900, "lon": 2.1600
+    },
+    {
+      "name": "bob", "node_id": 2,
+      "seed": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+      "engine": "meshroute",
+      "config": {
+        "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7],
+        "e2e_dm": true,
+        "beacon_period_ms": 4000, "discovery_beacon_period_ms": 2000, "quiet_threshold_ms": 0
+      },
+      "lat": 41.4035, "lon": 2.1600
+    }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob", "snr": 22.0, "rssi": -68.0, "bidir": true }
+    ]
+  },
+  "commands": [
+    { "at_ms":  8000, "node": "alice", "command": "send bob secret-one" },
+    { "at_ms": 10000, "node": "alice", "command": "reqpubkey 474f8542" },
+    { "at_ms": 16000, "node": "alice", "command": "send bob secret-two" },
+    { "at_ms": 18000, "node": "bob",   "command": "reqpubkey f2e6f8d4" },
+    { "at_ms": 24000, "node": "alice", "command": "send bob secret-three" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "e2e_no_pubkey",                      "value": "\"dst\":2" },
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "push", "value": "\"kind\":\"send_failed\"" },
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "push", "value": "\"reason\":\"no_pubkey\"" },
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "h_tx",                               "value": "\"hard\":true" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "hash_bind_pubkey_response_enqueued", "value": "\"to\":1" },
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "peer_key_cached",                    "value": "\"node\":2" },
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "push", "value": "\"kind\":\"peer_key_cached\"" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "e2e_open_no_key",                    "value": "\"ctr\":" },
+    { "type": "script_emit_not_contains", "node": "bob",   "emit_type": "delivered",                          "value": "secret-two" },
+    { "type": "script_emit_not_contains", "node": "bob",   "emit_type": "push",                               "value": "secret-two" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "h_tx",                               "value": "\"hard\":true" },
+    { "type": "script_emit_contains",     "node": "alice", "emit_type": "hash_bind_pubkey_response_enqueued", "value": "\"to\":2" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "peer_key_cached",                    "value": "\"node\":1" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "delivered",                          "value": "secret-three" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "push", "value": "\"kind\":\"msg_recv\"" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "push", "value": "\"enc\":true" },
+    { "type": "script_emit_contains",     "node": "bob",   "emit_type": "push", "value": "secret-three" }
+  ]
+}

@@ -7,7 +7,7 @@
     "warmup_ms": 30000,
     "seed": 42,
     "node_startup_jitter_ms": 500,
-    "radio": { "sf": 10, "bw": 250, "cr": 5, "max_packet_bytes": 255, "snr_coherence_ms": 0 , "duty_cycle": 0.01},
+    "radio": { "sf": 10, "bw": 250, "cr": 5, "max_packet_bytes": 255, "snr_coherence_ms": 0 , "duty_cycle": 1},
     "path_loss": {
       "model": "log_distance",
       "alpha": 3.0,

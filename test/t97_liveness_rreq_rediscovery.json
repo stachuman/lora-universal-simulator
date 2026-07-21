@@ -1,0 +1,43 @@
+{
+  "_name": "t97_liveness_rreq_rediscovery",
+  "_desc": "Phase-3 routing-liveness gate — the NO-ALT active rediscovery (the user's real bug: a dest reachable ONLY via a DEPARTED relay, with NO passive alt). LINE topology alice-bob-carol: bob is alice's SOLE next-hop to carol (relayed in bob's first beacons). bob then DEPARTS — forced_drops kill EVERY bob->alice frame from the 4th occurrence on (after the first 3 beacons establish carol-via-bob), so bob stops CTS/ACKing alice's RTS. alice's DMs to carol fail at bob; the failed flights are liveness evidence -> bob crosses suspect (2 timeouts) then SILENT (3). With the SOLE candidate (bob) now silent and NO alt, Phase 3 fires an RREQ (r_tx, reason=no_route) to actively rediscover a path instead of silently re-RTSing the dead bob until the 3 h aging TTL (the pre-Phase-3 stall — the exact failure mode behind the user's persistent stale-via-191 route). No alt path EXISTS here, so delivery cannot recover — the gate proves the ACTIVE-REDISCOVERY REACTION (suspect-mark + RREQ), not recovery. (RREQ-driven recovery is covered deterministically by the native §P3 unit test; a multi-node recovery sim is blocked by the F-frame-labelled-as-BCN telemetry gap + DV passive route propagation — see the phase report.) Idle + lossless otherwise (sigma_db=0). NB: an empty forced_drops `label` matches ALL frame labels (SimController.cpp), modelling bob's full departure.",
+  "simulation": {
+    "duration_ms": 50000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 7,
+    "node_startup_jitter_ms": 300,
+    "radio": { "sf": 7, "bw": 250, "cr": 5 },
+    "path_loss": {
+      "model": "log_distance", "alpha": 3.0, "sigma_db": 0.0,
+      "ref_distance_m": 1.0, "ref_loss_db": 40.0, "noise_floor_db": -120.0, "tx_power_dbm": 14.0
+    }
+  },
+  "config": {},
+  "nodes": [
+    { "name": "alice", "node_id": 1, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "bob",   "node_id": 2, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } },
+    { "name": "carol", "node_id": 3, "engine": "meshroute", "config": { "layer_id": 1, "routing_sf": 7, "allowed_data_sfs": [7], "beacon_period_ms": 3000, "discovery_beacon_period_ms": 1500, "quiet_threshold_ms": 0 } }
+  ],
+  "topology": {
+    "links": [
+      { "from": "alice", "to": "bob",   "snr": 22.0, "rssi": -62.0, "bidir": true },
+      { "from": "bob",   "to": "carol", "snr": 22.0, "rssi": -62.0, "bidir": true }
+    ]
+  },
+  "forced_drops": [
+    { "from": "bob", "to": "alice", "nth": 4, "count": 999 }
+  ],
+  "commands": [
+    { "at_ms": 12000, "node": "alice", "command": "send carol m1" },
+    { "at_ms": 16000, "node": "alice", "command": "send carol m2" },
+    { "at_ms": 20000, "node": "alice", "command": "send carol m3" },
+    { "at_ms": 26000, "node": "alice", "command": "send carol m4" },
+    { "at_ms": 34000, "node": "alice", "command": "send carol m5" }
+  ],
+  "expect": [
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "peer_suspect_mark", "value": "\"node\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "peer_suspect_mark", "value": "\"level\":2" },
+    { "type": "script_emit_contains", "node": "alice", "emit_type": "r_tx",              "value": "\"reason\":\"no_route\"" }
+  ]
+}

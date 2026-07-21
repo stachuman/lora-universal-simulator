@@ -7,7 +7,7 @@
     "warmup_ms": 2000,
     "seed": 42,
     "node_startup_jitter_ms": 0,
-    "radio": { "sf": 8, "bw": 250, "cr": 5, "duty_cycle": 0.01, "duty_cycle_window_ms": 3600000 }
+    "radio": { "sf": 8, "bw": 250, "cr": 5, "duty_cycle": 1, "duty_cycle_window_ms": 3600000 }
   },
   "nodes": [
     { "name": "alice",    "script": "scenarios/dv_dual_sf.lua",

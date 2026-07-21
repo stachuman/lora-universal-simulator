@@ -11,7 +11,7 @@
       "sf": 8,
       "bw": 250,
       "cr": 5,
-      "duty_cycle": 0.02,
+      "duty_cycle": 2,
       "duty_cycle_window_ms": 10000
     }
   },

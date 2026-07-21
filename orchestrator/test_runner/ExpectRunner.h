@@ -4,7 +4,7 @@
 // has finished. Consumes the in-memory event buffer captured by EventLog
 // (Loop.cpp wires it up) and reports failures to stderr.
 //
-// Six assertion types are supported (matched on Assertion::type):
+// Seven assertion types are supported (matched on Assertion::type):
 //
 //   cmd_reply_contains      most-recent cmd_reply for (node, command-prefix)
 //                            has its `reply` field contain `value` (substring)
@@ -19,6 +19,9 @@
 //   script_emit_contains    at least one script_emit event from `node`
 //                            with emit_type==`emit_type` whose serialized
 //                            `data` field contains `value` (substring)
+//   script_emit_not_contains NO script_emit from `node` with emit_type==
+//                            `emit_type` may have `data` containing `value`
+//                            (separation gate; value REQUIRED)
 //
 // Node-name vs node-id: tx/rx/cmd_reply events emit `"node"` as a string
 // name; script_log/script_emit emit it as an integer id. Whenever an
