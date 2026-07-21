@@ -56,8 +56,8 @@ public:
 
     SimRadio(VirtualClock& clock,
              int sf = 8, int bw_hz = 62500, int cr = 1,
-             float rx_to_tx_delay_ms = 1.0f,
-             float tx_to_rx_delay_ms = 5.0f);
+             float rx_to_tx_delay_ms = 27.0f,   // metal-measured SX1262 turnaround (realism ruling 2.1); matches JsonConfig default
+             float tx_to_rx_delay_ms = 27.0f);
 
     // ---- LoRa parameters ------------------------------------------------
     void setRadioParams(int sf, int bw_hz, int cr);
@@ -67,6 +67,7 @@ public:
     int    getCR() const { return _cr; }
     double getSymbolMs() const { return (double)(1 << _sf) / (_bw_hz / 1000.0); }
     int    getPreambleSymbols() const { return _preamble_len; }
+    uint32_t getEarliestTxMs() const { return _earliest_tx_ms; }   // §metal-fidelity: earliest this radio may TX (RX->TX turnaround honored)
     double getPreambleMs() const { return (getPreambleSymbols() + 4.25) * getSymbolMs(); }
     // Per-tx preamble override. The Semtech datasheet specifies a 6-symbol
     // minimum (the preamble must contain enough symbols for the receiver to

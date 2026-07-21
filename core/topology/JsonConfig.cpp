@@ -23,6 +23,7 @@
 
 #include "core/topology/JsonConfig.h"
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -62,6 +63,13 @@ static uint32_t fnv1a32(const std::string& s) {
         h *= 16777619u;
     }
     return h == 0 ? 1u : h;
+}
+
+// §1.1 (2026-07-20 realism review): the JSON `bw` field is authored in kHz as a DOUBLE; store it
+// internally in Hz (×1000, rounded). "62.5" -> 62500 Hz exactly — the old get<int>() truncated it
+// to 62 kHz (62000 Hz), diverging from the firmware's own airtime math which runs true 62500.
+static int parseBwHz(const json& value) {
+    return static_cast<int>(std::lround(value.get<double>() * 1000.0));
 }
 
 static uint32_t parseKeyHash32(const json& value, const std::string& ctx) {
@@ -152,10 +160,12 @@ static SimConfig parseJson(const json& j) {
         if (sim.contains("seed"))        cfg.simulation.seed        = sim["seed"].get<uint64_t>();
         if (sim.contains("node_startup_jitter_ms"))
             cfg.simulation.node_startup_jitter_ms = sim["node_startup_jitter_ms"].get<int>();
+        if (sim.contains("rx_window_slop"))
+            cfg.simulation.rx_window_slop = sim["rx_window_slop"].get<std::string>();
         if (sim.contains("radio")) {
             auto& r = sim["radio"];
             if (r.contains("sf")) cfg.simulation.radio.sf = r["sf"].get<int>();
-            if (r.contains("bw")) cfg.simulation.radio.bw = r["bw"].get<int>();
+            if (r.contains("bw")) cfg.simulation.radio.bw = parseBwHz(r["bw"]);   // kHz-double -> Hz
             if (r.contains("cr")) cfg.simulation.radio.cr = r["cr"].get<int>();
             if (r.contains("capture_locked_db"))   cfg.simulation.radio.capture_locked_db   = r["capture_locked_db"].get<float>();
             if (r.contains("capture_unlocked_db")) cfg.simulation.radio.capture_unlocked_db = r["capture_unlocked_db"].get<float>();
@@ -164,7 +174,10 @@ static SimConfig parseJson(const json& j) {
             if (r.contains("cad_reliable_snr"))    cfg.simulation.radio.cad_reliable_snr    = r["cad_reliable_snr"].get<float>();
             if (r.contains("cad_marginal_snr"))    cfg.simulation.radio.cad_marginal_snr    = r["cad_marginal_snr"].get<float>();
             if (r.contains("snr_coherence_ms"))    cfg.simulation.radio.snr_coherence_ms    = r["snr_coherence_ms"].get<float>();
-            if (r.contains("duty_cycle"))          cfg.simulation.radio.duty_cycle          = r["duty_cycle"].get<float>();
+            if (r.contains("snr_report_ceiling_db")) cfg.simulation.radio.snr_report_ceiling_db = r["snr_report_ceiling_db"].get<float>();  // §snr-unification A: receiver-report saturation ceiling (default +12; huge = disable)
+            // §2.2 (2026-07-21 realism ruling): duty_cycle is authored as a PERCENT (1 = 1%),
+            // stored verbatim; consumers divide by 100 (SimController enforcement + injection).
+            if (r.contains("duty_cycle"))          cfg.simulation.radio.duty_cycle          = r["duty_cycle"].get<float>();  // PERCENT (1 = 1%)
             if (r.contains("duty_cycle_window_ms")) cfg.simulation.radio.duty_cycle_window_ms = r["duty_cycle_window_ms"].get<unsigned long>();
             if (r.contains("hardware")) {
                 auto& hw = r["hardware"];
@@ -280,11 +293,11 @@ static SimConfig parseJson(const json& j) {
             if (nd.contains("radio")) {
                 auto& r = nd["radio"];
                 if (r.contains("sf")) def.sf = r["sf"].get<int>();
-                if (r.contains("bw")) def.bw = r["bw"].get<int>();
+                if (r.contains("bw")) def.bw = parseBwHz(r["bw"]);   // kHz-double -> Hz
                 if (r.contains("cr")) def.cr = r["cr"].get<int>();
             }
             if (nd.contains("sf")) def.sf = nd["sf"].get<int>();
-            if (nd.contains("bw")) def.bw = nd["bw"].get<int>();
+            if (nd.contains("bw")) def.bw = parseBwHz(nd["bw"]);     // kHz-double -> Hz
             if (nd.contains("cr")) def.cr = nd["cr"].get<int>();
 
             // Optional sf_rx_set: per-node list of SFs the receiver can
@@ -478,6 +491,17 @@ static SimConfig parseJson(const json& j) {
 static void validateConfig(const SimConfig& cfg) {
     std::vector<std::string> errors;
 
+    // §1.3 (2026-07-20 realism review): global radio sf/bw/cr/duty_cycle are REQUIRED. An omitted key
+    // used to become a silent physics default (sf 8 / bw 62.5-MHz-as-kHz / cr 1 = outside [5..8]).
+    // Sentinel (<0) = unset -> a named error, run refuses to start. (Per-link snr/snr_std_dev are
+    // enforced in the link loop below.)
+    if (cfg.simulation.radio.sf < 0)
+        errors.push_back("simulation.radio.sf is required (spreading factor, 5..12)");
+    if (cfg.simulation.radio.bw < 0)
+        errors.push_back("simulation.radio.bw is required (kHz, authored as a double e.g. 62.5 or 125)");
+    if (cfg.simulation.radio.cr < 0)
+        errors.push_back("simulation.radio.cr is required (coding-rate multiplier 5..8; 5 = CR4/5)");
+
     // Simulation parameters
     if (cfg.simulation.step_ms <= 0)
         errors.push_back("simulation.step_ms must be > 0 (got "
@@ -512,9 +536,12 @@ static void validateConfig(const SimConfig& cfg) {
     if (cfg.simulation.radio.snr_coherence_ms < 0.0f)
         errors.push_back("simulation.radio.snr_coherence_ms must be >= 0 (got "
                          + std::to_string(cfg.simulation.radio.snr_coherence_ms) + ")");
-    if (cfg.simulation.radio.duty_cycle <= 0.0f
-        || cfg.simulation.radio.duty_cycle > 1.0f)
-        errors.push_back("simulation.radio.duty_cycle must be in (0, 1] (got "
+    // §2.2 (2026-07-21 realism ruling): duty_cycle is a PERCENT (1 = 1%). Range (0, 100].
+    if (cfg.simulation.radio.duty_cycle < 0.0f)
+        errors.push_back("simulation.radio.duty_cycle is required (PERCENT in (0, 100], e.g. 1 = 1%)");
+    else if (cfg.simulation.radio.duty_cycle == 0.0f
+             || cfg.simulation.radio.duty_cycle > 100.0f)
+        errors.push_back("simulation.radio.duty_cycle must be in (0, 100] PERCENT (got "
                          + std::to_string(cfg.simulation.radio.duty_cycle) + ")");
     if (cfg.simulation.radio.duty_cycle_window_ms == 0)
         errors.push_back("simulation.radio.duty_cycle_window_ms must be > 0");
@@ -624,6 +651,13 @@ static void validateConfig(const SimConfig& cfg) {
             errors.push_back("link from \"" + lk.from + "\" references unknown node");
         if (node_names.find(lk.to) == node_names.end())
             errors.push_back("link to \"" + lk.to + "\" references unknown node");
+        // §1.3: per-link snr + snr_std_dev are REQUIRED (NaN sentinel = unset). An omitted snr used to
+        // become a silent healthy 8 dB link; an omitted snr_std_dev silently disabled fading.
+        if (std::isnan(lk.snr))
+            errors.push_back("link " + lk.from + " -> " + lk.to + ": snr is required (dB)");
+        if (std::isnan(lk.snr_std_dev))
+            errors.push_back("link " + lk.from + " -> " + lk.to
+                             + ": snr_std_dev is required (dB; 0 = no fading)");
         if (lk.loss < 0.0f || lk.loss > 1.0f)
             errors.push_back("link " + lk.from + " -> " + lk.to
                              + ": loss must be [0.0, 1.0] (got "

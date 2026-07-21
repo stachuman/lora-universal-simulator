@@ -47,9 +47,18 @@ struct SimConfig {
 
     struct RadioConfig {
         // Global LoRa defaults. Per-node overrides merge in below.
-        int sf = 8;
-        int bw = 62500;
-        int cr = 1;
+        //
+        // ★ ONE bw CONVENTION (2026-07-20 realism review §1.1): bw is stored INTERNALLY IN Hz.
+        //   The JSON `bw` field is authored in kHz as a DOUBLE and multiplied ×1000 at parse time
+        //   (JsonConfig.cpp), so `"bw": 62.5` yields exactly 62500 Hz (the old `get<int>()` truncated
+        //   it to 62 kHz → 62000 Hz). SimController no longer multiplies — bw is Hz end-to-end.
+        //
+        // sf / bw / cr / duty_cycle are REQUIRED (sentinel -1 = unset → validateConfig fails loud).
+        // The old silent defaults (sf 8 / bw 62500-as-kHz i.e. 62.5 MHz / cr 1 which is outside the
+        // [5..8] validator range) are gone: absence is now a named error, not a surprise physics run.
+        int sf = -1;
+        int bw = -1;   // Hz (see convention above); -1 = REQUIRED-and-unset
+        int cr = -1;
 
         // Capture / CAD physics tuning.
         float capture_locked_db   = 3.0f;
@@ -69,11 +78,15 @@ struct SimConfig {
 
         // SX1262-style hardware turnaround delays. After an RX completes,
         // the radio cannot TX for rx_to_tx_delay_ms (PA ramp + PLL); after
-        // a TX, cannot RX for tx_to_rx_delay_ms (LNA + PLL relock). Defaults
-        // are conservative-realistic for SX1262 (~150 µs and ~1–2 ms) — at
-        // the simulator's 1 ms granularity we round up.
-        float rx_to_tx_delay_ms = 1.0f;
-        float tx_to_rx_delay_ms = 5.0f;
+        // a TX, cannot RX for tx_to_rx_delay_ms (LNA + PLL relock).
+        // ★ DEFAULTS = the metal-measured SX1262 turnaround 27/27 ms (2026-07-21
+        //   realism ruling 2.1: "simulations need to be as realistic as possible").
+        //   These are the one hardware datapoint we have (s09_two_layer_gateway_metal
+        //   sets exactly these); the old 1/5 ms idealized values simulated a radio
+        //   5–27× faster at turnaround, where the CTS-wait metal bug hid. A scenario
+        //   may still override per radio.hardware for a deliberately-idealized run.
+        float rx_to_tx_delay_ms = 27.0f;
+        float tx_to_rx_delay_ms = 27.0f;
         // Time to retune the receiver to a new SF (PLL relock + sync). Real
         // SX1262 takes ~200 µs; we round up to 1 ms. Modelled as an "RX
         // blind window" after self:set_rx_sf(): incoming frames whose
@@ -103,18 +116,38 @@ struct SimConfig {
         // (analytic tests).
         float decode_margin_steepness_db = 1.5f;
 
-        // Regulatory duty cycle. Default 1% / 1h matches ETSI EN 300 220
-        // (European 868 MHz ISM sub-band g1). 0 < duty_cycle <= 1, sliding
-        // window > 0. The runtime tracks per-node TX airtime in a sliding
-        // window of `duty_cycle_window_ms`; if a fresh TX would push the
-        // window's airtime sum past `duty_cycle * window_ms`, it is
-        // deferred via on_radio_busy(reason="duty_cycle_exceeded"). Lua
-        // scripts may also self-regulate using the same window via
-        // self:airtime_used_ms() — both layers compose. Per-node override
-        // via nodes[].config.duty_cycle / duty_cycle_window_ms (also
-        // injected as _sim_duty_cycle / _sim_duty_cycle_window_ms for
-        // scripts that want the inherited default).
-        float         duty_cycle           = 0.01f;
+        // Receiver-REPORT SNR ceiling (dB). A real SX126x never *reports* SNR
+        // above ~+10..+13 dB regardless of how strong the channel actually is
+        // (the SnrPkt register saturates). The sim's PathLossModel computes the
+        // TRUE channel SNR (rx_dbm - noise_floor), which for co-located links
+        // reaches tens of dB — a value no real firmware would ever observe.
+        // FirmwareNode saturates the SNR the firmware SEES to this ceiling
+        // (then quantizes to the chip's 0.25 dB q4 grid). REPORT-ONLY: the
+        // delivery/collision/demod physics in SimController stay on the true
+        // channel SNR; this only shapes what the Node is told. Default +12.0.
+        // A very large value (e.g. 1e9) effectively DISABLES the saturation —
+        // the A/B-debug escape hatch to recover the old inflated-SNR behaviour.
+        float snr_report_ceiling_db = 12.0f;
+
+        // Regulatory duty cycle. ★ UNIT = PERCENT (2026-07-21 realism ruling 2.2:
+        // "percent everywhere, 1 = 1%"): this field stores the value AS AUTHORED in
+        // the scenario JSON — a PERCENT (1 => 1%, 0.1 => 0.1%), matching the device
+        // console's `duty=` (which is already percent). The old scenario convention
+        // was a FRACTION (0.01 = 1%) while the device took percent — a 100× trap;
+        // that is now unified. Consumers divide by 100 to get the fraction at the
+        // point of use (SimController: the enforcement budget `duty*window/100` and
+        // the `_sim_duty_cycle` injection into the firmware NodeConfig, whose field
+        // keeps its FRACTION semantic — see SimController). Default 1 (=1%) / 1 h
+        // matches ETSI EN 300 220 (European 868 MHz ISM sub-band g1). 0 < duty <= 100.
+        // The runtime tracks per-node TX airtime in a sliding window of
+        // `duty_cycle_window_ms`; if a fresh TX would push the window's airtime sum
+        // past `(duty/100) * window_ms`, it is deferred (reason="duty_cycle_exceeded").
+        // Lua scripts self-regulate off the injected fraction. ⚠ Per-node override
+        // nodes[].config.duty_cycle stays a raw JSON passthrough read by BOTH the Lua
+        // script (as a fraction) and the C++ enforcement net (as a fraction) — it is
+        // NOT re-scaled here (Lua-parity), so a per-node override is authored as a
+        // fraction; the MeshRoute corpus uses none. The GLOBAL knob is percent.
+        float         duty_cycle           = -1.0f;   // REQUIRED (sentinel <0 = unset); PERCENT in (0,100]
         unsigned long duty_cycle_window_ms = 3600000UL;
     };
 
@@ -205,6 +238,7 @@ struct SimConfig {
         // gated until on_init fires — pre-init packets are silently
         // dropped script-side.
         int           node_startup_jitter_ms = 0;
+        std::string   rx_window_slop = "metal";   // §metal-fidelity: DEFAULT "metal" (device turnaround/RX-window slop formula in FirmwareNode — 2026-07-21 realism ruling 2.1); "idealized" (RX-window slop 0) is now the explicit opt-in for a deliberately-idealized run
 
         RadioConfig  radio;
         PathLossSpec path_loss;
@@ -309,9 +343,12 @@ struct SimConfig {
     struct LinkDef {
         std::string from;
         std::string to;
-        float snr         = 8.0f;
+        // snr + snr_std_dev are REQUIRED per explicit link (2026-07-20 review §1.3): an omitted snr
+        // used to silently become a healthy 8 dB link, and the VARIANCE half silently became 0 (no
+        // fading) — both the silent-optimism class. NaN sentinel = unset → validateConfig fails loud.
+        float snr         = std::numeric_limits<float>::quiet_NaN();
         float rssi        = -80.0f;
-        float snr_std_dev = 0.0f;
+        float snr_std_dev = std::numeric_limits<float>::quiet_NaN();
         float loss        = 0.0f;
         bool  bidir       = true;
     };

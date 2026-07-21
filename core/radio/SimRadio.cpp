@@ -139,10 +139,18 @@ uint32_t SimRadio::getEstAirtimeFor(int len_bytes) {
     // which gives the same multiplier 5..8. Don't double-shift — _cr is
     // already in multiplier form. JsonConfig validates the [5..8] range.
     double t_sym = getSymbolMs();
-    double t_pre = (_preamble_len + 4.25) * t_sym;
+
+    // SX126x datasheet §6.1.4 (ported 2026-07-20 from the firmware's own airtime.cpp): SF5/SF6 use a
+    // 6.25-symbol sync offset (not 4.25) and drop the +8 header-symbol constant from the payload
+    // numerator (+36, not +44). SF7-12 are UNCHANGED — the flat AN1200.13 4.25/+44 previously applied
+    // here freed the channel 1-2 ms early vs the firmware budget math at low SF. Numerically matches
+    // airtime_ms(): airtime_ms(6, 125000, 5, 16, 50) == 61.
+    const bool   low_sf   = (_sf == 5 || _sf == 6);
+    const double sync_sym = low_sf ? 6.25 : 4.25;
+    double t_pre = (_preamble_len + sync_sym) * t_sym;
 
     int de = (t_sym >= 16.0) ? 1 : 0;
-    double num = 8.0 * len_bytes - 4.0 * _sf + 44;
+    double num = 8.0 * len_bytes - 4.0 * _sf + (low_sf ? 36 : 44);
     double den = 4.0 * (_sf - 2 * de);
     int pay_sym = 8 + (int)std::max(std::ceil(num / den) * _cr, 0.0);
 

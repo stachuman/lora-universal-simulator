@@ -58,10 +58,13 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         ${MESHROUTE_DIR}/lib/core/node_channel.cpp
         ${MESHROUTE_DIR}/lib/core/node_hashlocate.cpp
         ${MESHROUTE_DIR}/lib/core/node_join.cpp
+        ${MESHROUTE_DIR}/lib/core/node_mobile.cpp   # §mobile 2b: the mobile-side registration FSM
         ${MESHROUTE_DIR}/lib/core/node_budget.cpp
         ${MESHROUTE_DIR}/lib/core/node_cascade.cpp
         ${MESHROUTE_DIR}/lib/core/identity.cpp
         ${MESHROUTE_DIR}/lib/core/inbox.cpp
+        ${MESHROUTE_DIR}/lib/core/dm_crypto.cpp   # Crypto phase 1: dm_kdf/dm_nonce/dm_open (node_hashlocate e2e_open_inner); uses the already-linked monocypher
+        ${MESHROUTE_DIR}/lib/core/leaf_config.cpp # R6: leaf_config_hash / pack_c_config / parse_c_config (node_beacon, node_query)
     )
 
     # Build one core-lib variant. ARGN = extra PRIVATE compile definitions (the gateway -D set, or none).
