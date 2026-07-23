@@ -56,8 +56,8 @@ public:
 
     SimRadio(VirtualClock& clock,
              int sf = 8, int bw_hz = 62500, int cr = 1,
-             float rx_to_tx_delay_ms = 27.0f,   // metal-measured SX1262 turnaround (realism ruling 2.1); matches JsonConfig default
-             float tx_to_rx_delay_ms = 27.0f);
+             float rx_to_tx_delay_ms = 8.0f,   // real-mobile-log RX_DONE->TX_START turnaround (2026-07-23); matches JsonConfig default
+             float tx_to_rx_delay_ms = 8.0f);
 
     // ---- LoRa parameters ------------------------------------------------
     void setRadioParams(int sf, int bw_hz, int cr);

@@ -79,14 +79,16 @@ struct SimConfig {
         // SX1262-style hardware turnaround delays. After an RX completes,
         // the radio cannot TX for rx_to_tx_delay_ms (PA ramp + PLL); after
         // a TX, cannot RX for tx_to_rx_delay_ms (LNA + PLL relock).
-        // ★ DEFAULTS = the metal-measured SX1262 turnaround 27/27 ms (2026-07-21
-        //   realism ruling 2.1: "simulations need to be as realistic as possible").
-        //   These are the one hardware datapoint we have (s09_two_layer_gateway_metal
-        //   sets exactly these); the old 1/5 ms idealized values simulated a radio
-        //   5–27× faster at turnaround, where the CTS-wait metal bug hid. A scenario
-        //   may still override per radio.hardware for a deliberately-idealized run.
-        float rx_to_tx_delay_ms = 27.0f;
-        float tx_to_rx_delay_ms = 27.0f;
+        // ★ DEFAULTS = 8/8 ms, MEASURED from a real mobile-node log (2026-07-23):
+        //   RX_DONE->TX_START = 8 ms consistently (RTS->CTS same-SF, DATA->ACK and
+        //   CTS->DATA cross-SF alike — so it is SF-change-independent). Supersedes
+        //   the 27/27 ms of 2026-07-21 realism ruling 2.1, which over-charged the
+        //   turnaround ~3-4x by conflating it with the round-trip CTS/ACK-WAIT
+        //   (~200 ms at mobile SF/BW — a different quantity, covered by rx_window_slop).
+        //   NB s09_two_layer_gateway_metal still pins 27/27 explicitly — revisit.
+        //   A scenario may override per radio.hardware for a deliberately-idealized run.
+        float rx_to_tx_delay_ms = 8.0f;
+        float tx_to_rx_delay_ms = 8.0f;
         // Time to retune the receiver to a new SF (PLL relock + sync). Real
         // SX1262 takes ~200 µs; we round up to 1 ms. Modelled as an "RX
         // blind window" after self:set_rx_sf(): incoming frames whose

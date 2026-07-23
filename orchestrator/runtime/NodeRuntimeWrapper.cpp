@@ -163,7 +163,7 @@ bool NodeRuntime::onInit(const nlohmann::json& config) {
             // (A) mapped scalars/keys read in this function
             "routing_sf","beacon_period_ms","team_beacon_period_ms","beacon_max_idle_ms","quiet_threshold_ms",
             "beacon_silence_jitter_ms","seen_bitmap_enabled","is_gateway","gateway_only","is_mobile","team_id",
-            "mobile_autoregister","e2e_dm","leaf_id","layer_id","rt_aging_ttl_neighbor_ms","rt_aging_ttl_remote_ms",
+            "mobile_autoregister","team_dad_pin_id","e2e_dm","leaf_id","layer_id","rt_aging_ttl_neighbor_ms","rt_aging_ttl_remote_ms",
             "rt_aging_check_period_ms","dv_hop_cap","channel_dirty_max_advertisements","channel_pull_jitter_ms",
             "channel_active_fraction","channel_min_interval_ms","dm_min_interval_ms","channel_origin_window_ms",
             "cap_route_request_last","cap_id_bind","id_bind_ttl_ms","allowed_data_sfs","duty_cycle",
@@ -204,6 +204,7 @@ bool NodeRuntime::onInit(const nlohmann::json& config) {
         cfg.is_mobile           = config.value("is_mobile",           cfg.is_mobile);
         cfg.team_id             = config.value("team_id",             cfg.team_id);             // §mobile 6.1: team overlay (0 = no team). A team member (is_mobile + team_id) team-DADs a _team_local_id + runs the team plane. Absent -> 0 -> static/lone unchanged (s18 byte-identical).
         cfg.mobile_autoregister = config.value("mobile_autoregister", cfg.mobile_autoregister); // §mobile: also seek a static home; a pure off-grid team leaves it default and just team-DADs.
+        cfg.team_dad_pin_id     = static_cast<uint8_t>(config.value("team_dad_pin_id", static_cast<unsigned>(cfg.team_dad_pin_id)));  // §W2c WHITE-BOX TEST HOOK (0=OFF): pin the FIRST team-DAD id so a hidden-terminal collision is deterministic (only s30 sets it; a re-pick ignores the pin -> convergence intact).
         cfg.e2e_dm              = config.value("e2e_dm",              cfg.e2e_dm);              // §enc: default-crypt app DMs (CryptIntent::def follows this); send_hashx forces crypt regardless. Absent -> default -> unchanged.
         // leaf_id = the low 4 bits of the node's layer_id (frames.md: leaf_id IS the layer id, 0..15). The
         // multi-layer scenarios configure each node's layer via `layer_id` (1/2/3 here), so DERIVE the firmware

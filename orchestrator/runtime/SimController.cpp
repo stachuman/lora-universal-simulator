@@ -191,9 +191,24 @@ SimController::SimController(const SimConfig& cfg, std::ostream& events_out)
     : _cfg(cfg),
       _events_out(events_out),
       _clock(cfg.simulation.epoch_start),
-      _rng(static_cast<std::mt19937::result_type>(cfg.simulation.seed)) {}
+      // Dedicated path-loss stream (see header). _node_rng / _link_rng are
+      // sized/populated in initialize() once the node count is known.
+      _pathloss_rng(mrsim::makeStream(cfg.simulation.seed, mrsim::RngDomain::PathLoss, 0)) {}
 
 SimController::~SimController() = default;
+
+// Lazily materialize (and deterministically seed) the physics stream for a
+// directed link. Reference stability across inserts is guaranteed by
+// unordered_map (node-based container), so a returned reference stays valid.
+std::mt19937& SimController::linkRng(uint64_t link_idx) {
+    auto it = _link_rng.find(link_idx);
+    if (it == _link_rng.end()) {
+        it = _link_rng.emplace(
+            link_idx,
+            mrsim::makeStream(_cfg.simulation.seed, mrsim::RngDomain::Link, link_idx)).first;
+    }
+    return it->second;
+}
 
 int SimController::eventCount() const {
     return static_cast<int>(EventLog::events().size());
@@ -234,6 +249,21 @@ void SimController::initialize() {
     // Forced-drop match tally (R3.x). Zeroed; empty when no forced_drops.
     _drop_match_count.assign(_cfg.drop_directives.size(), 0);
 
+    // ---- Per-node RNG streams (Wave-4 Slice C) ------------------------------
+    // Build BEFORE any node/path-loss construction: nodes capture a reference
+    // to their stream (must outlive them), and the per-node path-loss offset
+    // draws below read from these. reserve() guarantees no reallocation so the
+    // references stay valid for the controller's lifetime. Keyed by the stable
+    // runtime index i (node_id is NOT unique — fresh nodes boot id 0).
+    _node_rng.clear();
+    _node_rng.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        _node_rng.emplace_back(
+            mrsim::makeStream(_cfg.simulation.seed, mrsim::RngDomain::Node,
+                              static_cast<uint64_t>(i)));
+    }
+    _link_rng.clear();
+
     // ---- Mutable per-node positions for mobility ----------------------------
     _node_lat.assign(static_cast<size_t>(n), 0.0);
     _node_lon.assign(static_cast<size_t>(n), 0.0);
@@ -272,7 +302,10 @@ void SimController::initialize() {
         plc.node_tx_offset_sigma_db = _cfg.simulation.path_loss.node_tx_offset_sigma_db;
         plc.node_rx_offset_sigma_db = _cfg.simulation.path_loss.node_rx_offset_sigma_db;
         plc.asymmetry_coherence_ms  = _cfg.simulation.path_loss.asymmetry_coherence_ms;
-        _path_loss = std::make_unique<PathLossModel>(plc, _rng);
+        // Path-loss draws (per-node offsets, per-pair shadows, coherence
+        // resamples) run off a dedicated stream — fixed-count / fixed-cadence,
+        // so isolated from node runtime draw counts and the per-link physics.
+        _path_loss = std::make_unique<PathLossModel>(plc, _pathloss_rng);
         _path_loss->initializeNodes(n);
 
         // Apply per-node JSON overrides AFTER initializeNodes() (which
@@ -414,7 +447,7 @@ void SimController::initialize() {
             // run in-loop, implementing meshroute::Hal over the sim's services.
             _nodes.emplace_back(std::make_unique<FirmwareNode>(
                 i, _cfg.nodes[i].name, _resolved_key_hash32[i],
-                *_radios[i], _events_out, _clock, _rng));
+                *_radios[i], _events_out, _clock, _node_rng[(size_t)i]));
 #else
             throw std::runtime_error(
                 "node '" + _cfg.nodes[i].name + "': engine \"meshroute\" requires "
@@ -423,7 +456,7 @@ void SimController::initialize() {
         } else {
             _nodes.emplace_back(std::make_unique<ScriptedNode>(
                 i, _cfg.nodes[i].name,
-                _host, *_radios[i], _events_out, _clock, _rng));
+                _host, *_radios[i], _events_out, _clock, _node_rng[(size_t)i]));
         }
         // Hand the node a stable pointer to its sf_rx_set slot so scripts
         // can retune at runtime via self:set_rx_sf(...). _node_sf_rx_set
@@ -441,13 +474,17 @@ void SimController::initialize() {
     // drift is still 0 at that moment, the very first timer of every
     // node is misscheduled.
     {
-        std::normal_distribution<double> drift_dist(
-            0.0, _cfg.simulation.clock_drift_ppm_sigma);
         for (int i = 0; i < n; ++i) {
+            // Fresh distribution per node: std::normal_distribution caches the
+            // second Box-Muller value, so a single shared instance would leak a
+            // draw from node i's stream into node i+1's — a local instance keeps
+            // the per-node streams truly independent.
+            std::normal_distribution<double> drift_dist(
+                0.0, _cfg.simulation.clock_drift_ppm_sigma);
             float ppm = _cfg.nodes[i].clock_drift_ppm;
             if (std::isnan(ppm)) {
                 ppm = (_cfg.simulation.clock_drift_ppm_sigma > 0.0)
-                          ? static_cast<float>(drift_dist(_rng))
+                          ? static_cast<float>(drift_dist(_node_rng[(size_t)i]))
                           : 0.0f;
             }
             _nodes[i]->setClockDriftPpm(ppm);
@@ -519,15 +556,15 @@ void SimController::initialize() {
     }
 
     // Per-node startup offsets. Default 0 (synchronous init at t=0); if
-    // simulation.node_startup_jitter_ms > 0, draw each from [0, jitter]
-    // using _rng. The jitter==0 path makes ZERO _rng draws so existing
-    // scenarios stay bit-identical.
+    // simulation.node_startup_jitter_ms > 0, draw each from [0, jitter] using
+    // the node's own stream. The jitter==0 path makes ZERO draws so nodes with
+    // no jitter don't advance their stream.
     _node_init_at_ms.assign(static_cast<size_t>(n), 0);
     if (_cfg.simulation.node_startup_jitter_ms > 0) {
         std::uniform_int_distribution<int> jdist(
             0, _cfg.simulation.node_startup_jitter_ms);
         for (int i = 0; i < n; ++i) {
-            _node_init_at_ms[i] = static_cast<uint64_t>(jdist(_rng));
+            _node_init_at_ms[i] = static_cast<uint64_t>(jdist(_node_rng[(size_t)i]));
         }
     }
 
@@ -907,6 +944,12 @@ void SimController::deliverReceptionsForStep() {
             const size_t link_idx =
                 static_cast<size_t>(tx.sender_id) * static_cast<size_t>(n)
                 + static_cast<size_t>(rcv);
+            // All physics rolls for this directed link draw from its own
+            // stream (Slice C) — fading, PER sigmoid, preamble-miss and
+            // per-link loss below — so link B's traffic can never perturb
+            // link A's fading/loss sequence, and node draw counts can't
+            // perturb the physics at all.
+            std::mt19937& lrng = linkRng(static_cast<uint64_t>(link_idx));
             _fading_last_update_ms[link_idx] = now;
             const uint64_t coh_ms = static_cast<uint64_t>(
                 _cfg.simulation.radio.snr_coherence_ms);
@@ -915,7 +958,7 @@ void SimController::deliverReceptionsForStep() {
                               lp.snr_std_dev,
                               coh_ms,
                               /*step_ms=*/now,
-                              _rng);
+                              lrng);
             const float snr_at_rcv = lp.snr + fade_offset;
 
             // SF-dependent SNR threshold for the packet's SF. We
@@ -1020,7 +1063,7 @@ void SimController::deliverReceptionsForStep() {
                 const float margin = snr_at_rcv - thr;
                 const float per = 1.0f / (1.0f + std::exp(margin / steep));
                 std::uniform_real_distribution<float> u(0.0f, 1.0f);
-                if (u(_rng) < per) {
+                if (u(lrng) < per) {
                     EventLog::dropWeak(
                         static_cast<unsigned long>(now),
                         _nodes[tx.sender_id]->name().c_str(),
@@ -1041,7 +1084,7 @@ void SimController::deliverReceptionsForStep() {
             const float miss_prob = _cfg.simulation.radio.rx_preamble_miss_prob;
             if (miss_prob > 0.0f) {
                 std::uniform_real_distribution<float> u(0.0f, 1.0f);
-                if (u(_rng) < miss_prob) {
+                if (u(lrng) < miss_prob) {
                     EventLog::dropPreambleMiss(
                         static_cast<unsigned long>(now),
                         _nodes[tx.sender_id]->name().c_str(),
@@ -1058,7 +1101,7 @@ void SimController::deliverReceptionsForStep() {
             // Per-link Bernoulli loss.
             if (lp.loss > 0.0f) {
                 std::uniform_real_distribution<float> u(0.0f, 1.0f);
-                if (u(_rng) < lp.loss) {
+                if (u(lrng) < lp.loss) {
                     EventLog::dropLoss(
                         static_cast<unsigned long>(now),
                         _nodes[tx.sender_id]->name().c_str(),
@@ -1129,8 +1172,8 @@ void SimController::deliverReceptionsForStep() {
             // sigma_db / Bernoulli loss: a surviving reception matching a
             // forced_drops directive is dropped here, firing exactly one
             // protocol retry reproducibly. The loop never runs when
-            // drop_directives is empty (no _rng draws, existing scenarios
-            // byte-identical). Each directive's counter advances once per
+            // drop_directives is empty (deterministic, makes no RNG draws).
+            // Each directive's counter advances once per
             // physical FRAME (see dd_counted above); the Nth..Nth+count-1
             // frames are dropped to every receiver matching `to`.
             {

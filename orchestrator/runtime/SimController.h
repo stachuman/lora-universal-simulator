@@ -28,6 +28,8 @@
 #include "orchestrator/runtime/LuaHost.h"
 #include "orchestrator/runtime/ScriptedNode.h"
 
+#include "orchestrator/runtime/RngStreams.h"
+
 #include <cstdint>
 #include <memory>
 #include <ostream>
@@ -145,7 +147,38 @@ private:
 
     LuaHost                          _host;
     VirtualClock                     _clock;
-    std::mt19937                     _rng;
+
+    // ---- Per-stream RNG (Wave-4 Slice C — kill the shared-mt19937 coupling) --
+    // Every stochastic consumer draws from an INDEPENDENT stream derived from
+    // the scenario seed (see RngStreams.h), so one consumer's draw count can
+    // never perturb another's sequence. The scenario `seed` remains the single
+    // knob that reseeds all of them.
+    //
+    // _node_rng[i]  — per-node behaviour + timing profile: the node's firmware
+    //   simRandRange (FirmwareNode/ScriptedNode hold a reference), plus its
+    //   clock-drift and startup-jitter draws. Keyed by the RUNTIME index i
+    //   (0..n-1), which is guaranteed unique & stable; the protocol node_id is
+    //   NOT usable as the key (fresh/unprovisioned nodes all boot node_id=0 and
+    //   would collide). Sized once in initialize() BEFORE nodes are built and
+    //   never resized, so the references handed to nodes stay valid.
+    std::vector<std::mt19937> _node_rng;
+    // _pathloss_rng — the path-loss offset/shadow draws (per-node hardware bias
+    //   + per-pair shadow + coherence resamples). One dedicated stream: these
+    //   are fixed-count init draws + fixed-cadence resamples, NEVER driven by
+    //   node runtime behaviour, so a single stream already gives the isolation
+    //   guarantee (no coupling to node draw counts or to the per-link physics).
+    //   Passed by reference into PathLossModel.
+    std::mt19937 _pathloss_rng;
+    // _link_rng — per-directed-link physics rolls (fading, PER sigmoid,
+    //   preamble-miss, Bernoulli loss). Keyed by link_idx = sender*n + rcv
+    //   (matches _fading indexing). LAZY: a stream is created on first use,
+    //   deterministically seeded from (seed, Link, link_idx) regardless of
+    //   WHEN first touched, so reproducibility holds while a dense n*n grid
+    //   (e.g. s18's 138 nodes → 19k links) never eagerly allocates ~19k
+    //   generators for links that carry no traffic.
+    std::unordered_map<uint64_t, std::mt19937> _link_rng;
+    std::mt19937& linkRng(uint64_t link_idx);
+
     std::unique_ptr<MatrixLinkModel> _links;
     std::unique_ptr<LbtModel>        _lbt;
     std::unique_ptr<PathLossModel>   _path_loss;
@@ -211,8 +244,9 @@ private:
     std::vector<uint64_t>                _node_last_tx_end_ms;
 
     // Per-node sim-time at which on_init fires. Drawn uniformly from
-    // [0, simulation.node_startup_jitter_ms] using _rng (so reproducible
-    // per seed). Nodes with offset 0 init synchronously at SimController
+    // [0, simulation.node_startup_jitter_ms] using the node's own stream
+    // (_node_rng[i], so reproducible per seed AND isolated from other nodes'
+    // draw counts). Nodes with offset 0 init synchronously at SimController
     // init time as before; the rest are fired during step() once
     // _now_ms >= their offset. When jitter is 0 (the default), no rand
     // draws are made and all offsets stay 0 — bit-identical to legacy.

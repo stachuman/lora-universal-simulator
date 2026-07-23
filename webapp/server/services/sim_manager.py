@@ -321,6 +321,7 @@ class SimManager:
                 # stdout is unused (DEVNULL). stderr carries a one-line summary.
                 proc = await asyncio.create_subprocess_exec(
                     str(self.orchestrator_path),
+                    "-e", "meshroute",   # webapp ALWAYS runs the meshroute engine (2026-07-22)
                     str(config_path),
                     str(events_path),
                     stdout=asyncio.subprocess.DEVNULL,

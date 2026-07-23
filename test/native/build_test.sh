@@ -67,6 +67,9 @@ run test_wave1_config "$SCRIPT_DIR/test_wave1_config.cpp" \
 
 run test_snr_report_shaping "$SCRIPT_DIR/test_snr_report_shaping.cpp"
 
+# Wave 4 (2026-07-21 realism review) Slice C: per-node/per-link RNG streams.
+run test_rng_streams "$SCRIPT_DIR/test_rng_streams.cpp"
+
 # Wave 2a (2026-07-21 realism ruling): metal turnaround/slop defaults + duty percent unit.
 run test_wave2_config "$SCRIPT_DIR/test_wave2_config.cpp" \
     "$REPO_ROOT/core/topology/JsonConfig.cpp"

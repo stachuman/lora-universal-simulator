@@ -1123,6 +1123,24 @@ function drawDensity() {
     ctx.globalAlpha = 1;
 }
 
+// §viz-fix (turnaround): the on-air reception window [start_ms, end_ms] of a
+// received frame is CONCURRENT with its transmission (propagation is instant).
+// A receiver-side event's time_ms is the DELIVERY time — and for a frame heard
+// right after the node itself transmitted (e.g. the CTS after our RTS), lus
+// delays delivery by the ~27 ms TX->RX turnaround it correctly models for real
+// hardware, so `time_ms - airtime` overshoots TX-start by that turnaround.
+// Anchor the bar to the matching TX (by pkt); fall back to time_ms - airtime
+// when the TX isn't loaded/visible.
+function rxAirWindow(ev) {
+    const tx = ev.pkt && S.txByPkt ? S.txByPkt[ev.pkt] : null;
+    if (tx) {
+        const air = tx.airtime_ms || ev.airtime_ms || 50;
+        return [tx.time_ms, tx.time_ms + air];
+    }
+    const air = ev.airtime_ms || 50;
+    return [ev.time_ms - air, ev.time_ms];
+}
+
 function drawEvents() {
     const events = S.cachedEvents;
     const span = S.viewTo - S.viewFrom;
@@ -1210,13 +1228,12 @@ function drawEvents() {
             const y = nodeToY(ev.to, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
-            const airtime = ev.airtime_ms || 50;
-            // rx event time_ms is the END of reception (delivery to on_recv).
-            // Signal propagation is essentially instantaneous, so the receiver
-            // was busy from when the sender started TX = time_ms - airtime_ms.
-            // Draw the bar to span [TX-start, RX-delivery] on the receiver lane.
-            const xStart = msToX(t - airtime);
-            const xEnd = msToX(t);
+            // §viz-fix: draw the bar over the on-air window (concurrent with the
+            // TX), anchored to the matching TX — NOT t - airtime, which is offset
+            // right by the real TX->RX turnaround baked into the rx delivery time.
+            const [w0, w1] = rxAirWindow(ev);
+            const xStart = msToX(w0);
+            const xEnd = msToX(w1);
             const boxX = xStart;
             const boxW = Math.max(2, xEnd - xStart);
             const boxH = S.laneH / 2 - 2;
@@ -1288,8 +1305,9 @@ function drawEvents() {
             // before the collision verdict was known at end-of-airtime.
             const airtime = ev.airtime_ms || 0;
             if (airtime > 0) {
-                const xStart = msToX(t - airtime);
-                const xEnd = x;
+                const [w0, w1] = rxAirWindow(ev);   // §viz-fix: on-air window anchored to TX
+                const xStart = msToX(w0);
+                const xEnd = msToX(w1);
                 const boxX = xStart;
                 const boxW = Math.max(2, xEnd - xStart);
                 const boxH = S.laneH / 2 - 2;
@@ -1365,10 +1383,10 @@ function drawEvents() {
             const y = nodeToY(ev.to, ev);
             if (y === null || y + S.laneH < 0 || y > canvas.height) continue;
             const isTraced = S.tracePkts && S.tracePkts.has(ev.pkt);
-            const airtime = ev.airtime_ms || 50;
-            // Same timing semantics as rx: time_ms is end-of-reception.
-            const xStart = msToX(t - airtime);
-            const xEnd = msToX(t);
+            // §viz-fix: same as rx — anchor the on-air bar to the matching TX.
+            const [w0, w1] = rxAirWindow(ev);
+            const xStart = msToX(w0);
+            const xEnd = msToX(w1);
             const boxX = xStart;
             const boxW = Math.max(2, xEnd - xStart);
             const boxH = S.laneH / 2 - 2;
@@ -1404,7 +1422,8 @@ function drawEvents() {
             // Anchor at TX-start (= time_ms - airtime_ms) — the moment
             // the receiver first saw the in-air signal.
             const airtime = ev.airtime_ms || 0;
-            const xMark = msToX(t - airtime);
+            const [w0, w1] = rxAirWindow(ev);   // §viz-fix: on-air window anchored to TX
+            const xMark = msToX(w0);
             const isMismatch = (etype === 'drop_sf_mismatch');
 
             if (isMismatch && airtime > 0) {
@@ -1413,7 +1432,7 @@ function drawEvents() {
                 // Render as an airtime-spanning box so the user sees
                 // "this whole period was wasted on a wrong-SF packet"
                 // — same pattern as drop_halfduplex but in pink.
-                const xEnd = msToX(t);
+                const xEnd = msToX(w1);
                 const boxX = xMark;
                 const boxW = Math.max(2, xEnd - xMark);
                 const boxH = S.laneH / 2 - 2;
@@ -1958,11 +1977,14 @@ function findEventsAt(mx, my) {
 
         let dist;
         if (ev.type === 'tx' || ev.type === 'rx' || ev.type === 'drop_halfduplex') {
-            // TX/RX bar spans [time_ms, time_ms + airtime_ms]
-            const end = ev.time_ms + (ev.airtime_ms || 50);
-            if (ms >= ev.time_ms - tolerance && ms <= end + tolerance) {
-                // Distance = 0 if inside bar, otherwise distance to nearest edge
-                dist = (ms >= ev.time_ms && ms <= end) ? 0 : Math.min(Math.abs(ms - ev.time_ms), Math.abs(ms - end));
+            // §viz-fix: hit region = the drawn bar. TX = [time_ms, time_ms+airtime];
+            // rx/drop = the on-air window anchored to the matching TX (concurrent
+            // with the TX), matching how drawEvents now renders the receiver bar.
+            let start, end;
+            if (ev.type === 'tx') { start = ev.time_ms; end = ev.time_ms + (ev.airtime_ms || 50); }
+            else { [start, end] = rxAirWindow(ev); }
+            if (ms >= start - tolerance && ms <= end + tolerance) {
+                dist = (ms >= start && ms <= end) ? 0 : Math.min(Math.abs(ms - start), Math.abs(ms - end));
             } else {
                 continue;
             }

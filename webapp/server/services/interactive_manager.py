@@ -142,6 +142,7 @@ class InteractiveSessionManager:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.orchestrator_path,
+                "-e", "meshroute",   # webapp ALWAYS runs the meshroute engine (2026-07-22)
                 "-i",
                 str(config_path),
                 stdin=asyncio.subprocess.PIPE,

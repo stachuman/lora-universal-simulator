@@ -1,9 +1,11 @@
-"""Config validator for lus scenario JSON.
+"""Config validator for lus scenario JSON — DELIBERATELY A NO-OP (2026-07-22).
 
-Returns ``(parsed_config, [])`` on success, ``(None, [errors])`` on failure.
-Unknown lus fields are allowed through so the webapp stays forward-compatible
-with the orchestrator. MeshCore-only fields still get explicit messages so
-users porting from MeshCore configs get clear guidance.
+The webapp does NO config validation: lus validates fail-loud at load
+(JsonConfig::validateConfig + NodeRuntimeWrapper::onInit), so a second schema
+here only drifted from it and produced false rejections (e.g. the stale
+duty_cycle 0..1 fraction bound vs lus's percent unit). ``validate()`` always
+returns ``(None, [])``. Kept as a seam so callers + tests stay unchanged; the
+original checks live in git history if per-webapp validation is ever wanted.
 """
 
 from __future__ import annotations
@@ -21,41 +23,7 @@ _MESHCORE_NODE = {"firmware", "role"}
 
 
 def validate(cfg: dict) -> tuple[Optional[LusConfig], list[str]]:
-    errors: list[str] = []
-
-    # Pre-flight: catch MeshCore fields with friendly messages.
-    for k in _MESHCORE_TOP_LEVEL:
-        if k in cfg:
-            errors.append(
-                f"top-level field {k!r} is MeshCore-specific and not accepted by lus"
-            )
-
-    sim = cfg.get("simulation") or {}
-    if isinstance(sim, dict):
-        for k in _MESHCORE_SIMULATION:
-            if k in sim:
-                errors.append(
-                    f"simulation.{k!r} is MeshCore-specific and not accepted by lus"
-                )
-
-    nodes = cfg.get("nodes") or []
-    if isinstance(nodes, list):
-        for i, node in enumerate(nodes):
-            if not isinstance(node, dict):
-                continue
-            for k in _MESHCORE_NODE:
-                if k in node:
-                    errors.append(
-                        f"nodes[{i}].{k!r} is MeshCore-specific; use 'script' + 'config' instead"
-                    )
-
-    if errors:
-        return None, errors
-
-    # Pydantic structural validation.
-    try:
-        parsed = LusConfig.model_validate(cfg)
-    except ValidationError as exc:
-        return None, [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
-
-    return parsed, []
+    # DELIBERATE PASS-THROUGH — the webapp validates nothing; lus validates
+    # fail-loud at load. All callers use only the (now always-empty) error list;
+    # `parsed` is unused. See the module docstring. (cfg is intentionally ignored.)
+    return None, []
