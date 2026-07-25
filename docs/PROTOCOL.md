@@ -212,7 +212,8 @@ Loser triggers `forced_rejoin`: yields the contested id (adds it to
 `join_start_claim`, and emits `addr_conflict_forced_rejoin`. Winner
 stays adopted unchanged. Telemetry: `addr_conflict_defense` (the DENY
 emit) and `addr_conflict_tie_break` (winner-or-loser determination).
-Verified by `test/t60_addr_conflict_forced_rejoin.json`.
+Was verified by `test/t60_addr_conflict_forced_rejoin.json`, RETIRED 2026-07-25
+with the legacy `test/` corpus (git history) — no live scenario covers it now.
 
 **Mobile identity beacons:** mobile nodes emit BCN with `is_mobile=1`,
 `key_hash32`, and `n_entries=0`. They omit route entries, destination-seen
@@ -2469,8 +2470,9 @@ sends `J_DISCOVER`, adopts DATA SF policy from `J_OFFER`, sends `J_CLAIM`, and
 only after `join_adopted` participates as a normal node. While unjoined it does
 not emit normal DV beacons.
 
-Current focused test: `test/t48_join_autonomous_fourth_node.json` has three
-pinned nodes and a fourth `node_id:null` joiner. The expected path is
+The focused test was `test/t48_join_autonomous_fourth_node.json` (three pinned
+nodes and a fourth `node_id:null` joiner), RETIRED 2026-07-25 with the legacy
+`test/` corpus (git history). The expected path is
 `J_DISCOVER -> J_OFFER -> J_CLAIM -> join_adopted`.
 
 ### 11a.1 Node-local discovery

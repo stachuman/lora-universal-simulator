@@ -162,6 +162,20 @@ static SimConfig parseJson(const json& j) {
             cfg.simulation.node_startup_jitter_ms = sim["node_startup_jitter_ms"].get<int>();
         if (sim.contains("rx_window_slop"))
             cfg.simulation.rx_window_slop = sim["rx_window_slop"].get<std::string>();
+        // ★ 2026-07-25 ruling: the deprecated-Lua opt-in. Belongs HERE (a
+        // simulation-level knob, like rx_window_slop) — deliberately NOT under
+        // nodes[].config, whose meshroute key whitelist fails loud on anything
+        // it does not know (NodeRuntimeWrapper.cpp "unknown key"), so a
+        // misplaced copy is rejected rather than silently ignored. Type-checked
+        // the way the "engine" field below is.
+        if (sim.contains("allow_deprecated_lua")) {
+            if (!sim["allow_deprecated_lua"].is_boolean()) {
+                throw std::runtime_error(
+                    "config error at simulation: field \"allow_deprecated_lua\" "
+                    "must be a boolean");
+            }
+            cfg.simulation.allow_deprecated_lua = sim["allow_deprecated_lua"].get<bool>();
+        }
         if (sim.contains("radio")) {
             auto& r = sim["radio"];
             if (r.contains("sf")) cfg.simulation.radio.sf = r["sf"].get<int>();
@@ -287,10 +301,16 @@ static SimConfig parseJson(const json& j) {
                         "config error at " + ctx + ": field \"engine\" must be a string");
                 }
                 def.engine = nd["engine"].get<std::string>();
+                // "lua" still PARSES (it is the frozen parity reference, kept on
+                // purpose) but is DEPRECATED + UNSUPPORTED: the run is refused at
+                // SimController::initialize() unless simulation.allow_deprecated_lua
+                // is set. The refusal deliberately does NOT live here — main.cpp's
+                // --engine override rewrites n.engine AFTER load, so a check at
+                // parse time would miss the CLI path entirely.
                 if (def.engine != "lua" && def.engine != "meshroute") {
                     throw std::runtime_error(
                         "config error at " + ctx + ": unknown engine \"" + def.engine
-                        + "\" (expected \"lua\" or \"meshroute\")");
+                        + "\" (expected \"meshroute\", or the deprecated \"lua\")");
                 }
             }
 

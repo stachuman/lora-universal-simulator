@@ -337,8 +337,12 @@ fields silently — but the validator catches them at the HTTP layer.
 
 - `docs/superpowers/specs/2026-05-05-lora-universal-simulator-design.md`
   — the canonical Y1 design with rationale for each field
-- `scenarios/dv_dual_sf.lua` and `scenarios/s01_dv_dual_sf.json`
+- `scenarios/dv_dual_sf.lua` and `scenarios/deprecated/s01_dv_dual_sf.json`
   — a non-trivial protocol scenario exercising path-loss, multi-hop
-  routing, dual-SF data delivery, and assertions
+  routing, dual-SF data delivery, and assertions. ⚠ s01 was RETIRED
+  2026-07-25 (owner ruling, deliberately NOT migrated): it no longer passes
+  config validation, so read it as a schema *example* only. For a
+  currently-valid reference config use `scenarios/s18_singlelayer_dense.json`
+  or MeshRoute's `simulation/` corpus.
 - `examples/flooder.lua`, `examples/sf_picker.lua`
   — minimal per-feature demos

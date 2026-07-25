@@ -31,7 +31,8 @@ FirmwareNode::FirmwareNode(int id, std::string name, uint32_t key_hash32,
       _events_out(events_out),
       _clock(clock),
       _sim_rng(sim_rng) {
-    (void)_radio;        // TX goes via _pending_txs (drained by SimController), not SimRadio directly
+    // _radio: TX BYTES go via _pending_txs (drained by SimController), never through SimRadio directly — but
+    // simSetRxBw retunes the radio's bandwidth on it (the device's _def_bw mirror), so it is a live member.
     (void)_events_out;   // EventLog owns its output stream
 }
 
@@ -204,9 +205,34 @@ void FirmwareNode::simSetRxSf(int sf) {
 }
 
 void FirmwareNode::simSetRxBw(uint32_t bw_hz) {
-    // §metal-fidelity (2026-07-07): mirror device_radio.h:216 (_def_bw <- bw). simRxWindowSlopMs reads _node_bw_hz, so
-    // a GATEWAY's per-layer 62.5<->125 kHz switch now moves the slop to the ACTIVE layer (was frozen at the layer-0 seed).
-    if (bw_hz > 0) _node_bw_hz = static_cast<int>(bw_hz);
+    // ONE runtime BW retune moves THREE things, exactly as the device does. Kept in step with the Lua twin
+    // ScriptedNode::api_set_rx_bw — the two entry points of the same mechanism must agree or a native test
+    // driven through the Lua hook would pin behaviour the firmware path doesn't have.
+    //  (1) §metal-fidelity (2026-07-07): _node_bw_hz, read by simRxWindowSlopMs, so a GATEWAY's per-layer
+    //      62.5<->125 kHz switch moves the slop to the ACTIVE layer (was frozen at the layer-0 seed).
+    //  (2) §bw-gating (2026-07-25): the node's LIVE RX BANDWIDTH, which the delivery path gates on
+    //      (drop_bw_mismatch) — so the window switch actually retunes what the gateway can HEAR.
+    //  (3) §bw-tx / F-BW-TX (2026-07-25): the radio's DEFAULT TX BANDWIDTH. DeviceHal::set_rx_bw assigns
+    //      `_def_bw` alongside the modem retune and DeviceHal::tx resolves an unset (-1) TxParams::bw_hz
+    //      against it (lib/hal/device_hal.cpp:68-72 + :21) — and NO firmware site ever sets TxParams::bw_hz,
+    //      so without this mirror the sim's two sentinel-resolution sites (registerTransmissionsForStep,
+    //      warmup + physics) fell back to getBwHz() = the FROZEN config bw: a dual-BW gateway could hear
+    //      both layers but transmit to only one. Retuning the SimRadio is the whole fix — both sites already
+    //      resolve against getBwHz(), and getEstAirtimeFor()/getSymbolMs() then debit the airtime at the
+    //      ON-AIR bandwidth, which is the coupling the device comment ("the airtime debit == the on-air BW")
+    //      ties together explicitly.
+    // ★ (2) and (3) are DELIBERATELY separate slots, not one value: _rx_bw_hz is the live RECEIVE bandwidth,
+    // while SimRadio::_bw_hz is a TX-side notion (setRadioParams stamps it from every outgoing frame's own
+    // params). The delivery gate must keep reading its own slot and must NEVER be re-pointed at getBwHz().
+    // 0 = "inherit" per the Hal contract (DeviceHal::set_rx_bw returns early on 0): nothing is written, so
+    // neither the live RX bandwidth nor the TX default can be zeroed — no fallback, no invented default.
+    if (bw_hz > 0) {
+        _node_bw_hz = static_cast<int>(bw_hz);
+        if (_rx_bw_hz) *_rx_bw_hz = static_cast<int>(bw_hz);
+        // Bandwidth only; sf/cr are read back and re-stamped unchanged (SimRadio has no narrower setter, and
+        // adding one would fork a second way to mutate the same field).
+        _radio.setRadioParams(_radio.getSF(), static_cast<int>(bw_hz), _radio.getCR());
+    }
 }
 
 uint64_t FirmwareNode::simChannelBusyUntil() {

@@ -44,18 +44,21 @@ python3 tools/visualize.py events.ndjson
 ## Test
 
 ```bash
-bash test/run_tests.sh test/t01_flooder.json   # JSON regression test
-bash test/native/build_test.sh                 # C++ unit tests
+bash test/native/build_test.sh                 # C++ unit tests (also runs test/t01_flooder.json)
 ```
+
+The legacy JSON regression corpus (`test/t*.json`, `scenarios/s*.json`) and its
+runner `test/run_tests.sh` were **retired 2026-07-25**: the configs stopped
+passing `JsonConfig` validation at the 2026-07-21 required-keys change and
+nothing gated on them. Delivery/behaviour gating lives in the MeshRoute repo —
+`simulation/BASELINE.md` — driven with `lus -e meshroute simulation/<s>.json`.
 
 ## Performance benchmark
 
-200-node x 1 h smoke test (no script work, just runtime overhead):
-
-```bash
-python3 tools/gen_grid.py > test/t99_perf_smoke.json
-time ./build/orchestrator/lus test/t99_perf_smoke.json /dev/null
-```
+200-node x 1 h smoke test (no script work, just runtime overhead) — retired
+2026-07-25 with the legacy corpus (its generator `tools/gen_grid.py` and the
+generated `test/t99_perf_smoke.json` are gone; the generator emitted links
+without the now-required `snr_std_dev`).
 
 Last measured: real 0m5.9s (user 5.9s / sys 0.0s) on AMD EPYC 7402P
 24-Core (Linux 6.8, Release build, vanilla Lua 5.4). Comfortably

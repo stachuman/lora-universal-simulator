@@ -1,7 +1,8 @@
 -- examples/snr_probe.lua
 -- Queries sim:link_snr(self.name, peer) for every peer in sim:nodes() at
 -- on_init time and emits one `link_snr` event per peer carrying the SNR.
--- Use with t09_link_snr.json or interactively to inspect the link matrix.
+-- Use interactively to inspect the link matrix. (Its old driver scenario
+-- test/t09_link_snr.json was retired 2026-07-25 with the legacy corpus.)
 
 function on_init(self, config)
   for _, n in ipairs(sim:nodes()) do

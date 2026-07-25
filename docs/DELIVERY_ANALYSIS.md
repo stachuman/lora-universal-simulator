@@ -20,7 +20,10 @@ when a root cause, lever, or measurement changes — don't re-derive from scratc
   analysis — that window is network *stabilization* (boot discovery beaconing,
   `discovery_beacon_period_ms`, bounded by `discovery_until_ms`). It is expected,
   not overhead to optimize.
-- Canonical tool: `tools/dm_delivery_breakdown.py --failures` (DM + channel; the
+- Canonical tool: `dm_delivery_breakdown.py --failures` — it lives in the **MeshRoute**
+  repo (`MeshRoute/tools/`, gated by `simulation/BASELINE.md`); this repo deliberately
+  keeps NO copy. `python3 tools/meshroute_canonical.py` prints where it resolved to
+  (honours `$MESHROUTE_ROOT`). (DM + channel; the
   cross-layer "reached-gateway-lost" bucket is sub-classified into
   no-route-to-target / first-hop-stalled / lost-downstream / resolve-bound, with a
   HOME/VISIT target-location tally). Requires explicit `node_id` in config (runs on

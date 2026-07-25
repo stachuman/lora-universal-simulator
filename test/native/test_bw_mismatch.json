@@ -1,0 +1,43 @@
+{
+  "_name": "test_bw_mismatch",
+  "_desc": "BW-mismatch delivery gate (§6.1.1). One 125 kHz sender; receivers on matched / mismatched / retuned BW at strong and weak SNR. Analytically deterministic: no fading (snr_std_dev 0), no PER sigmoid (steepness 0), no preamble miss, no startup jitter, no warmup (the warmup path bypasses physics), no receiver TX. ★ Runs on the DEPRECATED Lua engine BY NECESSITY (build_test.sh cannot link FirmwareNode) — hence the explicit per-node \"engine\":\"lua\" plus the allow_deprecated_lua opt-in below: this is the sanctioned internal use that opt-in exists for.",
+  "simulation": {
+    "duration_ms": 4000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 4242,
+    "node_startup_jitter_ms": 0,
+    "allow_deprecated_lua": true,
+    "radio": {
+      "sf": 7,
+      "bw": 125,
+      "cr": 5,
+      "duty_cycle": 100,
+      "rx_preamble_miss_prob": 0.0,
+      "decode_margin_steepness_db": 0.0,
+      "snr_coherence_ms": 0
+    }
+  },
+  "nodes": [
+    { "name": "tx125",       "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} },
+    { "name": "rx125",       "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} },
+    { "name": "rx250",       "engine": "lua", "script": "bw_probe.lua", "bw": 250, "config": {} },
+    { "name": "rx250to125",  "engine": "lua", "script": "bw_probe.lua", "bw": 250, "config": { "rx_bw_hz": 125000 } },
+    { "name": "rx125to250",  "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": { "rx_bw_hz": 250000 } },
+    { "name": "far250",      "engine": "lua", "script": "bw_probe.lua", "bw": 250, "config": {} },
+    { "name": "far125",      "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} }
+  ],
+  "topology": {
+    "links": [
+      { "from": "tx125", "to": "rx125",      "snr": 8.0,   "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "tx125", "to": "rx250",      "snr": 8.0,   "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "tx125", "to": "rx250to125", "snr": 8.0,   "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "tx125", "to": "rx125to250", "snr": 8.0,   "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "tx125", "to": "far250",     "snr": -20.0, "rssi": -128.0, "snr_std_dev": 0 },
+      { "from": "tx125", "to": "far125",     "snr": -20.0, "rssi": -128.0, "snr_std_dev": 0 }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000, "node": "tx125", "command": "ping" }
+  ]
+}

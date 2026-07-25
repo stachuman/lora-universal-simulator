@@ -12,11 +12,11 @@ scenarios/*_events.ndjson
 docs/superpoweras/
 
 webapp/data/
-webapp/__pycache__/
-webapp/server/__pycache__/
-webapp/server/routers/__pycache__/
-webapp/server/services/__pycache__/
-webapp/server/models/__pycache__/
-webapp/tests/__pycache__/
+# Python bytecode, in ANY directory. Previously enumerated per webapp/ subdirectory,
+# which is why tools/__pycache__/ escaped and 9 .pyc ended up TRACKED — three of them
+# sourceless after the 2026-07-25 retirement/de-fork slices deleted their .py. Listing
+# directories one by one does not scale; this mirrors the MeshRoute repo's own rule.
+__pycache__/
+*.pyc
 .pytest_cache/
 .claude/

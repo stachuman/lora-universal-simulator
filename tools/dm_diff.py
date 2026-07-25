@@ -4,8 +4,12 @@
 
 The R3 gate (decision Q2) is per-message ARRIVED parity: the set of delivered
 (dst, payload) must MATCH lua-vs-meshroute, on a scenario where the deferred MAC
-features (LBT/NACK/cascade) don't fire (idle + lossless). It also shells out to
-the canonical tools/dm_delivery_breakdown.py for the human-readable funnel.
+features (LBT/NACK/cascade) don't fire (idle + lossless). The emit funnel it
+prints is counted HERE by `funnel()` below — this tool does NOT shell out to, or
+share code with, MeshRoute's canonical `tools/dm_delivery_breakdown.py` (an
+earlier version of this line said it did). Reach for the canonical tool when you
+want the real per-DM / cross-layer breakdown; this is a cross-engine
+differential.
 
 Usage:
     tools/dm_diff.py scenarios/r3_data_diff.json [--build build]
@@ -26,8 +30,16 @@ def make_variant(base, engine):
         node.pop("script", None)
         if engine == "lua":
             node["script"] = "scenarios/dv_dual_sf.lua"
+            # ★ 2026-07-25 deprecation ruling: the engine must be named EXPLICITLY.
+            # "meshroute" is now the DEFAULT, so omitting the key (as this did) would
+            # silently make the "lua REFERENCE" variant a second meshroute run and turn
+            # the whole differential vacuous. The generated variant also carries the
+            # deprecated-Lua opt-in, since a Lua run is otherwise refused outright.
+            node["engine"] = "lua"
         else:
             node["engine"] = "meshroute"
+    if engine == "lua":
+        s.setdefault("simulation", {})["allow_deprecated_lua"] = True
     return s
 
 

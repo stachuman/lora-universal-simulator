@@ -8,6 +8,11 @@ seed this regenerates the s15 config with that seed, runs lus, and parses
 rate and the per-mechanism failure counts (the bucket the 'F' route-Find
 flood targets is "SL: origin no route (requery failed)").
 
+The analysis tool is MeshRoute's canonical `tools/dm_delivery_breakdown.py`,
+located via `meshroute_canonical` — this repo deliberately keeps no copy of it
+(one source of truth). Its `--run` / `--mode` / `--failures` surface, and the
+output this parses, are unchanged.
+
 Usage:
   python3 tools/s15_route_convergence_sweep.py 1522 7 13 101 777 2026 4242 9001
 """
@@ -19,9 +24,10 @@ import sys
 import tempfile
 from collections import Counter
 
+from meshroute_canonical import canonical_tool_path
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_CONFIG = os.path.join(REPO, "scenarios", "s15_three_layer.json")
-DM_TOOL = os.path.join(REPO, "tools", "dm_delivery_breakdown.py")
 
 DELIV_RE = re.compile(r"delivered\s+(\d+)/(\d+)\s*=\s*([\d.]+)%;\s*(\d+)\s+failed")
 CAT_RE = re.compile(r"^\s*(\d+)\s*\(\s*[\d.]+%\s*of fails\)\s+(.*\S)\s*$")
@@ -36,8 +42,11 @@ def run_seed(seed, config=BASE_CONFIG):
     with open(tmp_cfg, "w") as f:
         json.dump(cfg, f)
     events = os.path.join(tempfile.gettempdir(), f"{stem}_seed_{seed}.ndjson")
+    # Resolved at use, so a missing MeshRoute checkout fails loudly here with a
+    # message naming what was looked for, instead of silently parsing nothing.
+    dm_tool = str(canonical_tool_path())
     out = subprocess.run(
-        [sys.executable, DM_TOOL, tmp_cfg, events, "--run",
+        [sys.executable, dm_tool, tmp_cfg, events, "--run",
          "--mode", "dm", "--failures"],
         cwd=REPO, capture_output=True, text=True).stdout
 

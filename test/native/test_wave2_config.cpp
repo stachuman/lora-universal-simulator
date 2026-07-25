@@ -3,7 +3,9 @@
 //
 // Wave 2a (2026-07-21 realism ruling) coverage:
 //   2.1  turnaround / rx_window_slop DEFAULTS flipped to the metal values:
-//        radio.hardware.rx_to_tx_delay_ms / tx_to_rx_delay_ms default 27/27 ms,
+//        radio.hardware.rx_to_tx_delay_ms / tx_to_rx_delay_ms default 8/8 ms
+//        (bench-measured ~5-8 ms; 2026-07-23 correction, ratified 2026-07-25 — this
+//        comment and the printf below read 27/27 and contradicted the assertions),
 //        simulation.rx_window_slop default "metal". Config-absent == config-present.
 //   2.2  duty_cycle unit = PERCENT everywhere (1 = 1%): JsonConfig stores the authored
 //        percent verbatim; range (0, 100]; consumers divide /100. Migration sanity:
@@ -39,7 +41,7 @@ int main() {
         assert(r.tx_to_rx_delay_ms == 8.0f);
         SimConfig::SimulationConfig s;
         assert(s.rx_window_slop == "metal");
-        std::printf("  [2.1] metal turnaround/slop defaults (27/27, \"metal\"): OK\n");
+        std::printf("  [2.1] metal turnaround/slop defaults (8/8, \"metal\"): OK\n");
     }
 
     // ---- 2.2 duty percent parse: value stored VERBATIM as percent -------------------

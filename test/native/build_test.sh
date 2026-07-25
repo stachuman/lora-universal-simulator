@@ -31,6 +31,11 @@ test_with_arg() {
 run test_clock    "$SCRIPT_DIR/test_clock.cpp"
 run test_link     "$SCRIPT_DIR/test_link.cpp"     "$REPO_ROOT/core/link/LinkModel.cpp"
 run test_eventlog "$SCRIPT_DIR/test_eventlog.cpp" "$REPO_ROOT/core/events/EventLog.cpp"
+# Wire-format pin for all 10 drop_* emitters (5 of them fire in NO scenario, so
+# stream byte-identity proves nothing about them) + the shared-builder overflow
+# contract. Guards the dropCommon()/DropLine refactor.
+run test_eventlog_drops "$SCRIPT_DIR/test_eventlog_drops.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp"
 run test_simradio "$SCRIPT_DIR/test_simradio.cpp" "$REPO_ROOT/core/radio/SimRadio.cpp"
 run test_physics  "$SCRIPT_DIR/test_physics.cpp"  \
     "$REPO_ROOT/core/physics/CollisionModel.cpp" \
@@ -85,6 +90,68 @@ run test_path_loss_asymmetry "$SCRIPT_DIR/test_path_loss_asymmetry.cpp" \
 
 LUA_CFLAGS="$(pkg-config --cflags lua5.4)"
 LUA_LIBS="$(pkg-config --libs lua5.4)"
+
+# Wave 4 (2026-07-20 realism review §6.1.1): BW-mismatch delivery gating.
+test_with_arg test_bw_mismatch "$SCRIPT_DIR/test_bw_mismatch.json" \
+    "$SCRIPT_DIR/test_bw_mismatch.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
+
+# F-BW-TX (test_bw_tx_follows_retune) was DELETED 2026-07-25 by owner ruling: the
+# dual-BW gateway probe carries that proof instead, and the test drove its retune
+# through the now-deprecated Lua engine.
+
+# ★ The deprecated-Lua contract (2026-07-25 ruling): default engine "meshroute",
+# a "lua" node REFUSED at initialize(), the config/CLI opt-in that sanctions it.
+test_with_arg test_lua_deprecated "$SCRIPT_DIR/test_lua_deprecated.json" \
+    "$SCRIPT_DIR/test_lua_deprecated.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
+
+# ★ The send-by-name resolution contract: `send <name>` resolves on the SENDER'S
+# layer, and REFUSES when sender and addressee share none (or the sender is itself a
+# multi-layer gateway). The corpus has ZERO commands on any refusal path, so suite
+# byte-identity pins none of this -- see the test's header for the window-phase bug it
+# guards (MeshRoute simulation/BASELINE.md note 2026-07-25d).
+run test_send_by_name_layer "$SCRIPT_DIR/test_send_by_name_layer.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
 
 run test_sim_controller "$SCRIPT_DIR/test_sim_controller.cpp" \
     "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \

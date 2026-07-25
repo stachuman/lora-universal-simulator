@@ -1,5 +1,16 @@
 // orchestrator/runtime/ScriptedNode.h
 //
+// ★★ DEPRECATED + UNSUPPORTED (2026-07-25 ruling) — the Lua engine.
+// ScriptedNode is the Lua half of the simulator. The Lua engine is DEPRECATED
+// and UNSUPPORTED: it is far behind the MeshRoute firmware and no longer tracks
+// it. It is RETAINED, deliberately, as the FROZEN PARITY REFERENCE the C++ port
+// was validated against (scenarios/dv_dual_sf.lua) — deleting it would destroy
+// that historical record. Do not add features here, and do not "fix" it to match
+// current firmware behaviour.
+// Nodes now default to engine "meshroute"; a node resolving to engine "lua" is
+// REFUSED at SimController::initialize() unless the run opts in via
+// simulation.allow_deprecated_lua / `lus --allow-deprecated-lua`.
+//
 // Per-node container that owns the timer wheel and pending-tx queue, and
 // dispatches the script lifecycle callbacks (on_init / on_recv / on_command /
 // on_radio_busy) by going through LuaHost.
@@ -12,9 +23,11 @@
 // natural ownership: LuaHost owns the Lua state and ScriptedNodes are created
 // before scripts run and destroyed after).
 //
-// SimRadio is held by reference but currently used only for parameter lookups
-// the scripts may need; actual TX dispatch is deferred — scripts queue a
-// PendingTx via api_tx() and the main loop drains it via drainPendingTxs().
+// SimRadio is held by reference for parameter lookups the scripts may need and
+// for the api_set_rx_bw retune (which moves the radio's default TX bandwidth,
+// mirroring the device's _def_bw); actual TX dispatch is deferred — scripts
+// queue a PendingTx via api_tx() and the main loop drains it via
+// drainPendingTxs().
 
 #pragma once
 
@@ -78,6 +91,7 @@ public:
     void     api_set_protocol_id(int protocol_id);
     void     api_set_rx_sf(int sf);                      // single-SF retune
     void     api_set_rx_sf_set(sol::table sf_set);       // multi-SF retune (opt-in)
+    void     api_set_rx_bw(int bw_hz);                   // RX-bandwidth retune (Hz)
     uint64_t api_channel_busy_until() const;             // LBT busy_until or 0
     uint64_t api_tx_in_flight() const;                   // own pending TX end_ms or 0
     // Sum of TX airtime in the last `window_ms` ms. Used by scripts that
@@ -116,6 +130,10 @@ public:
     // lifetime of the controller (the outer vector is sized once via
     // assign(n, {}) and never reallocates).
     void attachSfRxSet(std::vector<int>* slot) override { _sf_rx_set = slot; }
+
+    // Live RX-bandwidth slot in SimController::_node_rx_bw_hz — the BW twin
+    // of attachSfRxSet, same stable-pointer discipline.
+    void attachRxBwSlot(int* slot) override { _rx_bw_hz = slot; }
 
     // Per-node slot updated by SimController: set to the TX end_ms when an
     // InFlight is pushed for this sender, cleared to 0 when the InFlight is
@@ -169,6 +187,7 @@ private:
     // on_init returns. Default false so jitter-staged nodes start dark.
     bool              _initialized = false;
     std::vector<int>* _sf_rx_set = nullptr;  // borrowed; set via attachSfRxSet
+    int*              _rx_bw_hz  = nullptr;  // borrowed; set via attachRxBwSlot
     uint64_t*         _tx_in_flight_until = nullptr;  // borrowed; SimController owns
     class LbtModel*   _lbt = nullptr;                  // borrowed; SimController owns
     float             _clock_drift_ppm = 0.0f;         // set by SimController at init

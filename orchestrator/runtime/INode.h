@@ -87,6 +87,11 @@ public:
 
     // ---- one-time wiring set by SimController::initialize() -------------
     virtual void attachSfRxSet(std::vector<int>* slot) = 0;
+    // Live per-node RX BANDWIDTH slot (Hz), the BW twin of attachSfRxSet.
+    // Seeded by SimController from nodes[i].bw and moved by a runtime retune
+    // (Hal::set_rx_bw -> ISimHal::simSetRxBw / self:set_rx_bw), so the
+    // delivery path can reject frames whose BW the modem isn't tuned to.
+    virtual void attachRxBwSlot(int* slot) = 0;
     virtual void attachTxInFlightSlot(uint64_t* slot) = 0;
     virtual void attachLbtModel(LbtModel* lbt) = 0;
     virtual void setClockDriftPpm(float ppm) = 0;

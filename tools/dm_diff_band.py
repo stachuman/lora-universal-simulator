@@ -27,7 +27,13 @@ Two regimes (P1 = both):
     the delivery-% band applies; the funnel is reported. Calibrate the band from a
     multi-seed run before locking (P2). NOT wired (a diagnostic tool).
 
-Per-pair delivery-% reuses the canonical tools/dm_delivery_breakdown.summarise.
+Per-pair delivery-% is computed HERE, by `per_pair()` below, straight from each
+run's delivery events. It does NOT share code with MeshRoute's canonical
+`tools/dm_delivery_breakdown.py` — an earlier version of this line claimed it
+"reuses the canonical ...summarise", and there is no import and no call — and it
+is deliberately lighter: no gateway/cross-layer reconstruction, no fail-loud
+denominator. Use the canonical tool for a delivery verdict; this is a
+cross-engine differential.
 
 Usage:
     tools/dm_diff_band.py scenarios/r4_data_diff_forced.json \\
@@ -56,8 +62,16 @@ def make_variant(base, engine):
         node.pop("script", None)
         if engine == "lua":
             node["script"] = "scenarios/dv_dual_sf.lua"
+            # ★ 2026-07-25 deprecation ruling: the engine must be named EXPLICITLY.
+            # "meshroute" is now the DEFAULT, so omitting the key (as this did) would
+            # silently make the "lua REFERENCE" variant a second meshroute run and turn
+            # the whole differential vacuous. The generated variant also carries the
+            # deprecated-Lua opt-in, since a Lua run is otherwise refused outright.
+            node["engine"] = "lua"
         else:
             node["engine"] = "meshroute"
+    if engine == "lua":
+        s.setdefault("simulation", {})["allow_deprecated_lua"] = True
     return s
 
 

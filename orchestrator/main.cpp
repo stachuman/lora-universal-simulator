@@ -48,7 +48,11 @@ void usage(const char* prog) {
         "Options:\n"
         "  -i, --interactive          Open REPL after preload (if any)\n"
         "  -l, --lua <script>         Load Lua script; if it defines main(), call it\n"
-        "  -e, --engine <lua|meshroute>  Force every node onto this engine (overrides per-node engine/script)\n"
+        "  -e, --engine <meshroute|lua>  Force every node onto this engine (overrides per-node engine/script).\n"
+        "                             Default engine is 'meshroute'; 'lua' is DEPRECATED + UNSUPPORTED\n"
+        "                             (frozen parity reference only) and REFUSED without the opt-in below\n"
+        "      --allow-deprecated-lua Opt in to running the DEPRECATED Lua engine (frozen parity reference).\n"
+        "                             Sets simulation.allow_deprecated_lua; a sanctioned run still warns\n"
         "  -h, --help                 Show this help and exit\n"
         "\n"
         "Modes:\n"
@@ -66,7 +70,8 @@ int main(int argc, char** argv) {
     std::string lua_script_path;
     std::string config_path;
     std::string events_path;
-    std::string engine_override;   // --engine <lua|meshroute>: force EVERY node to this engine (ignores per-node engine/script)
+    std::string engine_override;   // --engine <meshroute|lua>: force EVERY node to this engine (ignores per-node engine/script)
+    bool        allow_deprecated_lua = false;   // --allow-deprecated-lua: sanction the DEPRECATED Lua engine (see JsonConfig.h)
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -93,9 +98,18 @@ int main(int argc, char** argv) {
             }
             engine_override = argv[++i];
             if (engine_override != "lua" && engine_override != "meshroute") {
-                std::fprintf(stderr, "lus: --engine must be lua or meshroute (got '%s')\n", engine_override.c_str());
+                std::fprintf(stderr,
+                    "lus: --engine must be meshroute, or the DEPRECATED lua (got '%s')\n",
+                    engine_override.c_str());
                 return 1;
             }
+            continue;
+        }
+        // ★ 2026-07-25 ruling: the deprecated-Lua opt-in. Sets the config field of
+        // the same name; the refusal itself lives in SimController::initialize() so
+        // it also covers config-declared Lua and direct-construction from a test.
+        if (a == "--allow-deprecated-lua") {
+            allow_deprecated_lua = true;
             continue;
         }
         if (!a.empty() && a[0] == '-') {
@@ -131,8 +145,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // --allow-deprecated-lua: hoist the CLI flag into the config so ONE field carries
+    // the opt-in for every entry path (CLI, scenario JSON, direct SimController
+    // construction). The flag can only ever ENABLE — it never clears a scenario's own
+    // "allow_deprecated_lua": true.
+    if (allow_deprecated_lua) cfg.simulation.allow_deprecated_lua = true;
+
     // --engine override: force every node onto the chosen engine (the per-node engine/script is ignored).
-    // Lets any engine-neutral scenario run on the C++ port (meshroute) or the Lua baseline without editing it.
+    // Lets any engine-neutral scenario run on the C++ port (meshroute) or the DEPRECATED Lua reference
+    // without editing it. `--engine lua` is refused at initialize() unless --allow-deprecated-lua is given.
     if (!engine_override.empty()) {
         for (auto& n : cfg.nodes) n.engine = engine_override;
         std::fprintf(stderr, "lus: --engine %s forced for all %zu nodes\n",

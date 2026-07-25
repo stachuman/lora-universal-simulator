@@ -1,4 +1,16 @@
 -- scenarios/dv_dual_sf.lua
+--
+-- ★★ DEPRECATED + UNSUPPORTED (2026-07-25 ruling) — DO NOT EXTEND, DO NOT DELETE.
+-- This script IS the Lua engine's protocol implementation, and the Lua engine is
+-- deprecated and unsupported: it is far behind the MeshRoute firmware and no
+-- longer tracks it. It is RETAINED, deliberately, as the FROZEN PARITY REFERENCE
+-- the C++ port (lib/core, run in the sim as engine "meshroute") was validated
+-- against — the historical record of that validation. Freeze it: do not port new
+-- firmware behaviour into it, and do not "fix" divergences from current firmware.
+-- Nodes now default to engine "meshroute"; a node resolving to engine "lua" is
+-- REFUSED unless the run opts in with `lus --allow-deprecated-lua` or
+-- "allow_deprecated_lua": true in the scenario's "simulation" block.
+--
 -- Distance-vector routing on routing_sf with per-hop dual-SF data delivery
 -- on data_sf via RTS/CTS/DATA. See docs/superpowers/specs/2026-05-06-s01-dv-dual-sf-scenario-design.md.
 --

@@ -1,8 +1,11 @@
 # Deprecated tests
 
-These tests are kept in the tree for archeology but **excluded from
-the default `bash test/run_tests.sh` sweep** (the runner only scans
-top-level `test/t*.json` and `scenarios/s*.json`). They were authored
+These tests are kept in the tree for archeology. They were excluded from
+the default `bash test/run_tests.sh` sweep (the runner only scanned
+top-level `test/t*.json` and `scenarios/s*.json`) — and as of **2026-07-25
+that runner and the whole legacy corpus are RETIRED** (owner ruling: the
+configs stopped passing `JsonConfig` validation at the 2026-07-21 Wave-1
+required-keys change; git history preserves them). These files were authored
 against an earlier, less-realistic version of the protocol; their
 timing assumptions or wire-format expectations no longer hold once
 the model acquired BCN trigger rate-limiting, F1 blind windows,
@@ -28,21 +31,24 @@ None of these failures are regressions. See
 | `t43_seen_bitmap_no_candidate_refresh` | Bitmap refreshes candidates only via sender | candidate fresh-via-sender check evolved |
 | `t44_rts_multi_next_visual` | Ordered multi-next-hop RTS slot behaviour | slot timing evolved |
 
-## Stress scenario
+## Deprecated scenarios (`scenarios/deprecated/`)
 
 | Scenario | Why it's here |
 |---|---|
 | `scenarios/deprecated/s11_three_layer_gateway_stress.json` | `sim_end` reaches cleanly but assertions for early cross-layer flights fail; transient delivery loss during the simultaneous-join + gateway-discovery window is expected under realistic protocol timing |
+| `scenarios/deprecated/s01_dv_dual_sf.json` | The original 4-node dual-SF Lua acceptance scenario (dynamic SF retune + path-loss + `sim:link_snr`). Moved here 2026-07-25 by owner ruling ("drop the s01 file, do not migrate") with the legacy-corpus retirement: it stopped passing `JsonConfig` validation at the 2026-07-21 Wave-1 required-keys change, and the Lua engine it targets is itself deprecated. **Deliberately NOT migrated** — kept only as the frozen reference. ⚠ `webapp/tests/test_sim_manager.py`, `test_simulations_router.py` and `test_smoke_e2e.py` still resolve `scenarios/s01_dv_dual_sf.json`; refixturing or removing them is the owner's call. |
 
 ## Running them anyway
 
+`test/run_tests.sh` no longer exists (retired 2026-07-25). Drive one directly:
+
 ```bash
 # Single test:
-bash test/run_tests.sh test/deprecated/t26_k3_cascade.json
-
-# All deprecated:
-bash test/run_tests.sh test/deprecated/*.json scenarios/deprecated/*.json
+./build/orchestrator/lus test/deprecated/t26_k3_cascade.json /tmp/t26.ndjson
 ```
+
+Expect a `Config validation failed` refusal until the file is migrated to the
+current required keys (`simulation.radio.duty_cycle`, per-link `snr_std_dev`).
 
 ## Recovering a test
 

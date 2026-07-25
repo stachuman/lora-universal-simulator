@@ -2,6 +2,7 @@
 
 #include "json/json.hpp"
 
+#include <cstdarg>
 #include <cstring>
 #include <cstdio>
 #include <ostream>
@@ -276,93 +277,163 @@ void collision(unsigned long time_ms, const char* from, const char* to,
     emitLine(buf);
 }
 
+// ---- the shared drop_* line builder (review §F5 / §3-C) -------------------
+//
+// All ten drop_* events are one line shape:
+//
+//   {"type":<T>,"time_ms":,"from":,"to":  <bespoke middle>
+//        ,"pkt": [,"airtime_ms"] [,"sf"] [,"bw_hz"]  [,"label"] [,"info"]}
+//
+// Before this builder each emitter hand-rolled the identical `char pkt[9] +
+// packetHashHex + char buf[2048] + one giant snprintf + emitLine` prologue and
+// epilogue (and three of them hand-rolled the same label/info `extra` ritual
+// on top), so the invariant head/tail existed in ten copies while only the
+// middle actually differed. dropCommon() owns everything invariant; an emitter
+// now writes only what is genuinely its own.
+//
+// Three events omit one shared tail member — drop_weak / drop_loss carry no
+// airtime_ms, drop_sf_mismatch carries packet_sf instead of "sf",
+// drop_bw_mismatch carries packet_bw_hz instead of "bw_hz" — so addPhy() takes
+// kOmit for those. The sentinel is unambiguous: a real airtime is >= 0, a real
+// sf is 5..12, a real bw_hz is > 0.
+//
+// Byte-identity with the previous ten snprintf calls is the gate: appending
+// incrementally into the same 2048-byte buffer with the same format specifiers
+// produces the same bytes as one printf. The longest drop_* line the corpus
+// produces is far inside the bound (longest NDJSON line of ANY type across the
+// whole scenario suite: 1516 bytes; the longest `label` ever emitted is 4
+// chars, "DATA", and `info`/`reason` are short printf outputs).
+//
+// ⚠ OVERFLOW SEMANTICS — a DELIBERATE strict improvement over the ten copies,
+// reachable only by a >2 kB line that no emitter in the corpus can produce.
+// addf() is ALL-OR-NOTHING (a field that would not fit whole is skipped, never
+// written half — the same rule the old append_optional_text_field used for
+// label/info) and emit() ALWAYS has reserved room for the closing "}\n". The
+// old code could not promise that: three emitters capped their label/info in a
+// separate 1400-byte `extra` buffer while the other seven had no cap at all,
+// and the final snprintf into buf[2048] could truncate away the closing brace
+// AND the newline — producing an unterminated line that silently MERGES with
+// the next event and corrupts the NDJSON stream. A drop_* line is now always
+// well-formed JSON; only late optional fields can go missing.
+namespace {
+
+constexpr int kOmit = -1;   // "this event has no such field"
+
+class DropLine {
+public:
+    DropLine(const char* type, unsigned long time_ms,
+             const char* from, const char* to)
+          // Field text may occupy [_buf, _limit); the 3 bytes at _limit are
+          // reserved for '}', '\n' and the terminating NUL, so emit() can
+          // never be truncated away.
+        : _cur(_buf), _limit(_buf + sizeof(_buf) - 3) {
+        _buf[0] = '\0';
+        addf("{\"type\":\"%s\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\"",
+             type, time_ms, from, to);
+    }
+
+    // The emitter's own field(s), printf-style — e.g. addf(",\"loss\":%.3f", p).
+    // All-or-nothing: once a field does not fit, it and every later field are
+    // dropped, so the buffer always ends on a field boundary and '}' closes a
+    // valid object.
+    void addf(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+        if (_overflow) return;
+        const size_t room = static_cast<size_t>(_limit - _cur) + 1;  // +1 = vsnprintf's NUL
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = vsnprintf(_cur, room, fmt, ap);
+        va_end(ap);
+        if (n < 0 || static_cast<size_t>(n) >= room) {
+            *_cur = '\0';          // discard the partial write
+            _overflow = true;
+            return;
+        }
+        _cur += n;
+    }
+
+    // The shared PHY tail, always in this order: pkt, airtime_ms, sf, bw_hz.
+    // Pass kOmit for a member this event does not carry.
+    void addPhy(const uint8_t* data, int len,
+                long airtime_ms, int sf, int bw_hz) {
+        char pkt[9];
+        packetHashHex(pkt, data, len);
+        addf(",\"pkt\":\"%s\"", pkt);
+        if (airtime_ms != kOmit) addf(",\"airtime_ms\":%u", (unsigned)airtime_ms);
+        if (sf          != kOmit) addf(",\"sf\":%d",         sf);
+        if (bw_hz       != kOmit) addf(",\"bw_hz\":%d",      bw_hz);
+    }
+
+    // Optional JSON-escaped text field; absent/empty values emit nothing.
+    void addText(const char* key, const char* value) {
+        if (!value || !*value) return;
+        char esc[1024];
+        json_escape(esc, sizeof(esc), value);
+        addf(",\"%s\":\"%s\"", key, esc);
+    }
+
+    // Always fits: the constructor reserved 3 bytes for exactly this.
+    void emit() {
+        *_cur++ = '}';
+        *_cur++ = '\n';
+        *_cur   = '\0';
+        emitLine(_buf);
+    }
+
+private:
+    char  _buf[2048];
+    char* _cur;
+    char* _limit;          // one past the last byte usable by field text
+    bool  _overflow = false;
+};
+
+}  // namespace
+
 void dropRxBlind(unsigned long time_ms, const char* from, const char* to,
                  uint64_t blind_until_ms,
                  const uint8_t* data, int len, uint32_t airtime_ms,
                  int sf, int bw_hz) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_rx_blind\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"blind_until_ms\":%llu,\"pkt\":\"%s\",\"airtime_ms\":%u,"
-        "\"sf\":%d,\"bw_hz\":%d}\n",
-        time_ms, from, to, (unsigned long long)blind_until_ms,
-        pkt, (unsigned)airtime_ms, sf, bw_hz);
-    emitLine(buf);
+    DropLine l("drop_rx_blind", time_ms, from, to);
+    l.addf(",\"blind_until_ms\":%llu", (unsigned long long)blind_until_ms);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.emit();
 }
 
 void dropPreambleMiss(unsigned long time_ms, const char* from, const char* to,
                       float miss_prob,
                       const uint8_t* data, int len, uint32_t airtime_ms,
                       int sf, int bw_hz) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_preamble_miss\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"miss_prob\":%.3f,\"pkt\":\"%s\",\"airtime_ms\":%u,"
-        "\"sf\":%d,\"bw_hz\":%d}\n",
-        time_ms, from, to, miss_prob,
-        pkt, (unsigned)airtime_ms, sf, bw_hz);
-    emitLine(buf);
+    DropLine l("drop_preamble_miss", time_ms, from, to);
+    l.addf(",\"miss_prob\":%.3f", miss_prob);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.emit();
 }
 
 void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int sf, int bw_hz) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_halfduplex\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"pkt\":\"%s\",\"airtime_ms\":%u,"
-        "\"sf\":%d,\"bw_hz\":%d}\n",
-        time_ms, from, to, pkt, (unsigned)airtime_ms,
-        sf, bw_hz);
-    emitLine(buf);
+    DropLine l("drop_halfduplex", time_ms, from, to);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.emit();
 }
 
 void dropWeak(unsigned long time_ms, const char* from, const char* to,
               float snr, float threshold,
               const uint8_t* data, int len,
               int sf, int bw_hz) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_weak\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"snr\":%.1f,\"threshold\":%.1f,\"pkt\":\"%s\","
-        "\"sf\":%d,\"bw_hz\":%d}\n",
-        time_ms, from, to, snr, threshold, pkt,
-        sf, bw_hz);
-    emitLine(buf);
+    DropLine l("drop_weak", time_ms, from, to);
+    l.addf(",\"snr\":%.1f,\"threshold\":%.1f", snr, threshold);
+    l.addPhy(data, len, /*airtime_ms=*/kOmit, sf, bw_hz);
+    l.emit();
 }
 
 void dropLoss(unsigned long time_ms, const char* from, const char* to,
               float loss_prob,
               const uint8_t* data, int len,
               int sf, int bw_hz) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_loss\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"loss\":%.3f,\"pkt\":\"%s\","
-        "\"sf\":%d,\"bw_hz\":%d}\n",
-        time_ms, from, to, loss_prob, pkt,
-        sf, bw_hz);
-    emitLine(buf);
-}
-
-static void append_optional_text_field(char*& ep, char* end,
-                                       const char* key, const char* value) {
-    if (!value || !*value || ep >= end) return;
-    char esc[1024];
-    json_escape(esc, sizeof(esc), value);
-    size_t room = static_cast<size_t>(end - ep);
-    int n = snprintf(ep, room, ",\"%s\":\"%s\"", key, esc);
-    if (n > 0 && static_cast<size_t>(n) < room) ep += n;
+    DropLine l("drop_loss", time_ms, from, to);
+    l.addf(",\"loss\":%.3f", loss_prob);
+    l.addPhy(data, len, /*airtime_ms=*/kOmit, sf, bw_hz);
+    l.emit();
 }
 
 void dropReceiverInactive(unsigned long time_ms, const char* from, const char* to,
@@ -370,44 +441,25 @@ void dropReceiverInactive(unsigned long time_ms, const char* from, const char* t
                           const uint8_t* data, int len, uint32_t airtime_ms,
                           int sf, int bw_hz,
                           const char* label, const char* info) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char extra[1400];
-    char* ep = extra;
-    char* end = extra + sizeof(extra);
-    append_optional_text_field(ep, end, "label", label);
-    append_optional_text_field(ep, end, "info", info);
-    *ep = '\0';
     char esc_reason[256];
     json_escape(esc_reason, sizeof(esc_reason), reason ? reason : "");
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_receiver_inactive\",\"time_ms\":%lu,"
-        "\"from\":\"%s\",\"to\":\"%s\",\"reason\":\"%s\","
-        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"sf\":%d,\"bw_hz\":%d%s}\n",
-        time_ms, from, to, esc_reason, pkt, (unsigned)airtime_ms, sf, bw_hz, extra);
-    emitLine(buf);
+    DropLine l("drop_receiver_inactive", time_ms, from, to);
+    l.addf(",\"reason\":\"%s\"", esc_reason);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.addText("label", label);
+    l.addText("info", info);
+    l.emit();
 }
 
 void dropNoLink(unsigned long time_ms, const char* from, const char* to,
                 const uint8_t* data, int len, uint32_t airtime_ms,
                 int sf, int bw_hz,
                 const char* label, const char* info) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char extra[1400];
-    char* ep = extra;
-    char* end = extra + sizeof(extra);
-    append_optional_text_field(ep, end, "label", label);
-    append_optional_text_field(ep, end, "info", info);
-    *ep = '\0';
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_no_link\",\"time_ms\":%lu,"
-        "\"from\":\"%s\",\"to\":\"%s\","
-        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"sf\":%d,\"bw_hz\":%d%s}\n",
-        time_ms, from, to, pkt, (unsigned)airtime_ms, sf, bw_hz, extra);
-    emitLine(buf);
+    DropLine l("drop_no_link", time_ms, from, to);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.addText("label", label);
+    l.addText("info", info);
+    l.emit();
 }
 
 // Deterministic forced drop (R3.x lossy gate). A distinct event — NOT an
@@ -416,20 +468,10 @@ void dropNoLink(unsigned long time_ms, const char* from, const char* to,
 void dropForced(unsigned long time_ms, const char* from, const char* to,
                 const uint8_t* data, int len, uint32_t airtime_ms,
                 int sf, int bw_hz, const char* label) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char extra[1400];
-    char* ep = extra;
-    char* end = extra + sizeof(extra);
-    append_optional_text_field(ep, end, "label", label);
-    *ep = '\0';
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_forced\",\"time_ms\":%lu,"
-        "\"from\":\"%s\",\"to\":\"%s\","
-        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"sf\":%d,\"bw_hz\":%d%s}\n",
-        time_ms, from, to, pkt, (unsigned)airtime_ms, sf, bw_hz, extra);
-    emitLine(buf);
+    DropLine l("drop_forced", time_ms, from, to);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.addText("label", label);
+    l.emit();
 }
 
 void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
@@ -437,18 +479,23 @@ void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     float snr, float rssi,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int bw_hz) {
-    char pkt[9];
-    packetHashHex(pkt, data, len);
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"drop_sf_mismatch\",\"time_ms\":%lu,\"from\":\"%s\",\"to\":\"%s\","
-        "\"packet_sf\":%d,\"rx_sf\":%d,"
-        "\"snr_db\":%.2f,\"rssi_dbm\":%.2f,"
-        "\"pkt\":\"%s\",\"airtime_ms\":%u,\"bw_hz\":%d}\n",
-        time_ms, from, to, packet_sf, rx_sf,
-        snr, rssi,
-        pkt, (unsigned)airtime_ms, bw_hz);
-    emitLine(buf);
+    DropLine l("drop_sf_mismatch", time_ms, from, to);
+    l.addf(",\"packet_sf\":%d,\"rx_sf\":%d,\"snr_db\":%.2f,\"rssi_dbm\":%.2f",
+           packet_sf, rx_sf, snr, rssi);
+    l.addPhy(data, len, (long)airtime_ms, /*sf=*/kOmit, bw_hz);
+    l.emit();
+}
+
+void dropBwMismatch(unsigned long time_ms, const char* from, const char* to,
+                    int packet_bw_hz, int rx_bw_hz,
+                    float snr, float rssi,
+                    const uint8_t* data, int len, uint32_t airtime_ms,
+                    int sf) {
+    DropLine l("drop_bw_mismatch", time_ms, from, to);
+    l.addf(",\"packet_bw_hz\":%d,\"rx_bw_hz\":%d,\"snr_db\":%.2f,\"rssi_dbm\":%.2f",
+           packet_bw_hz, rx_bw_hz, snr, rssi);
+    l.addPhy(data, len, (long)airtime_ms, sf, /*bw_hz=*/kOmit);
+    l.emit();
 }
 
 void nodeStats(unsigned long time_ms, const char* node,

@@ -115,6 +115,14 @@ private:
     void processStartupAtStep();
 
     void processCommandsAtStep();
+
+    // Pre-flight (initialize()): every scenario `send <name>` / `send_e2e <name>` must
+    // resolve to an id the addressee wears on the SENDER's layer. THROWS on a scenario
+    // that names a node it shares no layer with, or that sends by name from a
+    // multi-layer gateway — both are authoring errors whose verb is send_layer. Run
+    // before the first event is emitted so a refused run produces zero bytes.
+    void validateSendByNameCommands() const;
+
     void deliverReceptionsForStep();
     void tickTimersForStep();
     void registerTransmissionsForStep();
@@ -220,6 +228,21 @@ private:
     // deliverReceptionsForStep before the SNR-threshold gate to drop
     // off-band packets with drop_sf_mismatch.
     std::vector<std::vector<int>>        _node_sf_rx_set;
+
+    // Per-node LIVE receive bandwidth in Hz — the BW twin of _node_sf_rx_set.
+    // Seeded from nodes[i].bw (REQUIRED and validated > 0 by JsonConfig, so a
+    // seed is never 0/unset) and moved at runtime by a retune through the
+    // borrowed slot handed out via INode::attachRxBwSlot:
+    //   firmware  Hal::set_rx_bw -> ISimHal::simSetRxBw  (a dual-BW gateway's
+    //             per-layer window switch, a mobile adopting a host's PHY)
+    //   Lua       self:set_rx_bw(hz)
+    // Consulted by deliverReceptionsForStep immediately after the SF gate: a
+    // real LoRa modem demodulates only the bandwidth it is tuned to, so a
+    // BW-mismatched frame is dropped with drop_bw_mismatch. Sized once via
+    // assign() so &_node_rx_bw_hz[i] stays valid for this controller's life.
+    // NOT derived from _radios[i]->getBwHz(): that tracks the node's last
+    // TRANSMISSION (setRadioParams is called with each TX frame's params).
+    std::vector<int>                     _node_rx_bw_hz;
 
     // Slice A2: per-node key_hash32 actually fed to the engines. Derived from the node's identity
     // seed (lib/core/identity) when present, else the literal/fnv fallback in the const _cfg. Lives

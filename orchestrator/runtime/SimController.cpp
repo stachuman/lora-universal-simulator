@@ -185,6 +185,171 @@ static bool infoNamesNextHop(const std::string& info, const std::string& node_na
     return info.find("next=" + node_name) != std::string::npos;
 }
 
+// ---- send-by-name resolution (`send <name>` / `send_e2e <name>`) --------------
+// A scenario writes a readable node NAME; meshroute firmware takes a numeric dst.
+// Which number is correct is a PLANE question, not a timing question — see
+// resolveAddresseeOnSenderLayer() below for the window-phase trap this replaces.
+
+// The layer a node's top-level config places it on. Mirrors the derivation in
+// JsonConfig::validateConfig()'s duplicate-effective-id check (`leaf_id` is the
+// legacy spelling of `layer_id`) — keep the two in step. Absent => 0, which is what
+// every single-layer scenario means: no node in one writes layer_id at all, so they
+// all share layer 0 and resolution stays exactly as it was.
+static int layerIdForNode(const SimConfig::NodeDef& node) {
+    if (node.config.is_object()) {
+        auto lit = node.config.find("layer_id");
+        if (lit != node.config.end() && lit->is_number_integer()) return lit->get<int>();
+        auto fit = node.config.find("leaf_id");
+        if (fit != node.config.end() && fit->is_number_integer()) return fit->get<int>();
+    }
+    return 0;
+}
+
+// config.layers[] iff the node is MULTI-LAYER (a dual-layer gateway). Each entry
+// carries its own layer_id AND its own node_id, i.e. such a node wears a DIFFERENT
+// protocol id on each of its layers.
+static const nlohmann::json* layersForNode(const SimConfig::NodeDef& node) {
+    if (!node.config.is_object()) return nullptr;
+    auto it = node.config.find("layers");
+    if (it == node.config.end() || !it->is_array() || it->empty()) return nullptr;
+    return &(*it);
+}
+
+// "layer 4" for a single-layer node; "layers {4:10, 5:111}" for a gateway. Used only
+// to build the refusal message, so it names layers AND the per-layer ids the author
+// can pick from.
+static std::string describeLayersOf(const SimConfig::NodeDef& node) {
+    const nlohmann::json* layers = layersForNode(node);
+    if (!layers) return "layer " + std::to_string(layerIdForNode(node));
+    std::string out = "layers {";
+    bool first = true;
+    for (const auto& e : *layers) {
+        if (!e.is_object()) continue;
+        auto lit = e.find("layer_id");
+        auto nit = e.find("node_id");
+        if (lit == e.end() || !lit->is_number_integer()) continue;
+        if (!first) out += ", ";
+        first = false;
+        out += std::to_string(lit->get<int>()) + ":";
+        out += (nit != e.end() && nit->is_number_integer())
+                   ? std::to_string(nit->get<int>()) : std::string("?");
+    }
+    return out + "}";
+}
+
+enum class AddresseeIdSource {
+    LiveProtocolId,     // single-layer addressee: it wears exactly one id -> its LIVE id
+    PerLayerNodeId,     // multi-layer addressee: the id it wears on the sender's layer
+    RefuseNoShared,     // sender and addressee are on no common layer
+    RefuseAmbiguousSender,  // the SENDER is multi-layer: "its" layer is window-dependent
+};
+
+struct AddresseeId {
+    AddresseeIdSource src = AddresseeIdSource::LiveProtocolId;
+    int               node_id = 0;   // meaningful only for PerLayerNodeId
+};
+
+// Resolve a same-layer `send <name>` addressee to the id it wears ON THE SENDER'S
+// LAYER — the fix for the window-phase bug recorded in MeshRoute
+// simulation/BASELINE.md note 2026-07-25d.
+//
+// ★ THE TRAP THIS REPLACES. The obvious resolution is the addressee's LIVE
+// INode::protocolId(). For a single-layer node that is right and stays right (it
+// wears one id, and the live value also tracks a DAD/join/mobile lease that config
+// cannot know). For a dual-layer GATEWAY it is a coin flip: the gateway
+// time-multiplexes its two leaves, and MeshRoute's Node::activate_layer() re-stamps
+// the HAL short id to the ENTERING leaf's node_id on every window swap
+// (lib/core/node.cpp:493 -> NodeRuntimeWrapper::set_protocol_id ->
+// FirmwareNode::simSetProtocolId). So protocolId() ALTERNATES with the window phase,
+// and a layer-4 `send gw_4` issued during the gateway's layer-5 window was addressed
+// to a layer-5-only id — unroutable from layer 4, so the DM died in
+// send_deferred_giveup. Whether a scenario passed depended on WHEN its command fired.
+//
+// A same-layer DM is addressed within one layer's id namespace, so the resolution is
+// a static plane property: match the sender's layer against the addressee's layers[].
+static AddresseeId resolveAddresseeOnSenderLayer(const SimConfig::NodeDef& sender,
+                                                 const SimConfig::NodeDef& addressee) {
+    // ★ A MULTI-LAYER SENDER is refused, not guessed. Its own "current" layer is
+    // whichever leaf its window scheduler has active at command time — i.e. exactly
+    // the timing accident this function exists to remove, now on the sender side (the
+    // firmware enqueues the DM on _active). Resolving against its home leaf would be
+    // well-defined but still silently wrong in the other window. A gateway that must
+    // DM a leaf has to name the layer, which only the scenario knows.
+    if (layersForNode(sender) != nullptr) {
+        return {AddresseeIdSource::RefuseAmbiguousSender, 0};
+    }
+
+    const int sender_layer = layerIdForNode(sender);
+
+    if (const nlohmann::json* layers = layersForNode(addressee)) {
+        for (const auto& e : *layers) {
+            if (!e.is_object()) continue;
+            auto lit = e.find("layer_id");
+            auto nit = e.find("node_id");
+            if (lit == e.end() || !lit->is_number_integer()) continue;
+            if (lit->get<int>() != sender_layer) continue;
+            if (nit == e.end() || !nit->is_number_integer()) break;   // entry exists but unusable
+            return {AddresseeIdSource::PerLayerNodeId, nit->get<int>()};
+        }
+        return {AddresseeIdSource::RefuseNoShared, 0};
+    }
+
+    // Single-layer addressee: the live id is unambiguous, but the two must actually
+    // share a layer — a cross-layer DM's verb is send_layer, not send.
+    if (layerIdForNode(addressee) != sender_layer) {
+        return {AddresseeIdSource::RefuseNoShared, 0};
+    }
+    return {AddresseeIdSource::LiveProtocolId, 0};
+}
+
+// C2 refusal text, built once so the pre-flight and the fire site cannot drift.
+static std::string sendByNameRefusal(const SimConfig::NodeDef& sender,
+                                     const SimConfig::NodeDef& addressee,
+                                     const std::string&        command,
+                                     AddresseeIdSource         why) {
+    std::string msg = "REFUSED: cannot resolve the same-layer send `" + command
+                    + "` issued by node '" + sender.name + "' ("
+                    + describeLayersOf(sender) + ") to node '" + addressee.name + "' ("
+                    + describeLayersOf(addressee) + "): ";
+    if (why == AddresseeIdSource::RefuseAmbiguousSender) {
+        msg += "the SENDER is a multi-layer gateway, so which layer it sends on depends "
+               "on which window its scheduler has active at command time. Name the "
+               "layer explicitly with `send_layer <layer> <key_hash32> <text>`, or "
+               "issue the send from a single-layer node.";
+    } else {
+        msg += "they share NO layer, so `" + addressee.name
+             + "` has no id in the sender's layer-" + std::to_string(layerIdForNode(sender))
+             + " namespace. A cross-layer DM's verb is `send_layer <layer> <key_hash32> "
+               "<text>`; a same-layer `send <name>` only addresses nodes on the sender's "
+               "own layer.";
+    }
+    return msg + " (Refusing rather than falling back to the addressee's momentary "
+                 "protocolId(): that fallback is the window-phase bug recorded in "
+                 "MeshRoute simulation/BASELINE.md note 2026-07-25d.)";
+}
+
+// The two SAME-LAYER unicast verbs are the only ones that take a node NAME. Every
+// other send verb (`send_layer`/`send_layerx`, `send_hash`/`send_hashx`,
+// `send_channel`) is addressed by layer+key_hash32 or by channel and is left verbatim.
+struct SendByName {
+    size_t verb_len = 0;                        // 0 => not a send-by-name command
+    size_t name_end = std::string::npos;        // index of the space ending the name
+    std::string name;
+    bool named() const { return verb_len != 0 && name_end != std::string::npos; }
+};
+
+static SendByName parseSendByName(const std::string& command) {
+    SendByName p;
+    if      (command.rfind("send_e2e ", 0) == 0) p.verb_len = 9;
+    else if (command.rfind("send ", 0) == 0)     p.verb_len = 5;
+    if (p.verb_len == 0) return p;
+    size_t s = p.verb_len;
+    while (s < command.size() && command[s] == ' ') ++s;
+    p.name_end = command.find(' ', s);
+    if (p.name_end != std::string::npos) p.name = command.substr(s, p.name_end - s);
+    return p;
+}
+
 }  // namespace
 
 SimController::SimController(const SimConfig& cfg, std::ostream& events_out)
@@ -231,6 +396,67 @@ int SimController::protocolNodeId(size_t runtime_id) const {
 void SimController::initialize() {
     if (_initialized) return;
 
+    // ---- ★ DEPRECATED LUA ENGINE — fail-loud refusal (2026-07-25 ruling) ----
+    // The Lua engine is deprecated and unsupported: it is far behind the
+    // firmware, and it is kept only as the frozen parity reference the C++ port
+    // was validated against. Running it by accident produces a plausible-looking
+    // NDJSON stream that answers a question nobody asked — which is exactly what
+    // used to happen, because "lua" was the DEFAULT engine and most of the
+    // corpus carries no engine key.
+    //
+    // ★ This is the choke point BECAUSE it sees the engine AFTER every override:
+    //   - config          -> JsonConfig sets NodeDef::engine;
+    //   - CLI --engine    -> main.cpp rewrites n.engine after loadFromFile();
+    //   - a native test   -> constructs SimController(cfg, out) directly and
+    //                        never touches the lus CLI at all.
+    // A JsonConfig::validateConfig check would miss the last two. Placed at the
+    // very top of initialize(), before the first EventLog write, so a refused
+    // run emits NOTHING rather than a truncated stream. (Same fail-loud-in-
+    // initialize discipline as the `bw <= 0` throw further down.)
+    //
+    // ★ The predicate is `engine != "meshroute"`, NOT `engine == "lua"`: the node
+    // dispatch below builds a ScriptedNode for ANY non-"meshroute" value (its
+    // `else` branch), so anything unrecognised is silently a Lua node. Config and
+    // CLI both reject unknown engine strings, so on every reachable path this is
+    // exactly equivalent to `== "lua"` — but it means a hand-built SimConfig can
+    // never sneak a Lua node past this gate under a misspelt name.
+    {
+        size_t      lua_nodes = 0;
+        std::string first_lua_name;
+        std::string first_lua_engine;
+        for (const auto& nd : _cfg.nodes) {
+            if (nd.engine == "meshroute") continue;
+            if (lua_nodes == 0) { first_lua_name = nd.name; first_lua_engine = nd.engine; }
+            ++lua_nodes;
+        }
+        if (lua_nodes > 0 && !_cfg.simulation.allow_deprecated_lua) {
+            throw std::runtime_error(
+                "REFUSED: the Lua engine is DEPRECATED and UNSUPPORTED — it is far "
+                "behind the MeshRoute firmware and is retained only as the frozen "
+                "parity reference the C++ port was validated against. Node '"
+                + first_lua_name + "' resolves to engine \"" + first_lua_engine + "\" ("
+                + std::to_string(lua_nodes) + " of "
+                + std::to_string(_cfg.nodes.size())
+                + " node(s) do). Run the firmware engine instead (drop `--engine lua`, "
+                  "or tag the node \"engine\":\"meshroute\" — \"meshroute\" is now the "
+                  "DEFAULT, so an untagged node needs no flag at all). To run the "
+                  "frozen Lua reference deliberately, opt in: pass "
+                  "`--allow-deprecated-lua` on the lus command line, or set "
+                  "\"allow_deprecated_lua\": true in the scenario's \"simulation\" block.");
+        }
+        if (lua_nodes > 0) {
+            // Sanctioned, but a sanctioned run must still be impossible to
+            // mistake for a supported one. One line, once per run.
+            std::fprintf(stderr,
+                "lus: warning — DEPRECATED LUA ENGINE in use on %zu of %zu node(s) "
+                "(first: '%s', engine \"%s\") via allow_deprecated_lua. The Lua engine "
+                "is UNSUPPORTED and far behind the firmware; it is kept only as the "
+                "frozen parity reference. Results are NOT firmware behaviour.\n",
+                lua_nodes, _cfg.nodes.size(), first_lua_name.c_str(),
+                first_lua_engine.c_str());
+        }
+    }
+
     EventLog::setOutputStream(&_events_out);
     // Capture every emitted event into the in-memory buffer so the
     // ExpectRunner can read them at the end of the run.
@@ -245,6 +471,13 @@ void SimController::initialize() {
     for (int i = 0; i < n; ++i) {
         _name_to_id.emplace(_cfg.nodes[i].name, i);
     }
+
+    // ---- Pre-flight: every `send <name>` must resolve on the sender's layer ---
+    // Runs here (needs _name_to_id, still before the first EventLog WRITE — the calls
+    // above only wire the stream/buffer up) so an unresolvable scenario refuses with
+    // ZERO bytes instead of dying mid-run with a truncated stream. Same fail-loud-in-
+    // initialize discipline as the Lua refusal above and the `bw <= 0` throw below.
+    validateSendByNameCommands();
 
     // Forced-drop match tally (R3.x). Zeroed; empty when no forced_drops.
     _drop_match_count.assign(_cfg.drop_directives.size(), 0);
@@ -399,6 +632,7 @@ void SimController::initialize() {
     // Resolve per-node sf_rx_set: empty config -> [node.sf] (single-SF,
     // matches real Semtech LoRa hardware). See SimController.h note.
     _node_sf_rx_set.assign(static_cast<size_t>(n), {});
+    _node_rx_bw_hz.assign(static_cast<size_t>(n), 0);
     _node_tx_in_flight_until.assign(static_cast<size_t>(n), 0ULL);
     _node_last_tx_start_ms.assign(static_cast<size_t>(n), 0ULL);
     _node_last_tx_end_ms.assign(static_cast<size_t>(n), 0ULL);
@@ -409,6 +643,18 @@ void SimController::initialize() {
         } else {
             _node_sf_rx_set[i] = _cfg.nodes[i].sf_rx_set;
         }
+        // §bw-gating: seed the LIVE RX bandwidth from the node's configured bw
+        // (Hz; kHz-double x1000 at parse). FAIL LOUD rather than invent a
+        // fallback — validateConfig already rejects bw <= 0 (JsonConfig.cpp
+        // "bw must be > 0"), so reaching here with 0 means the config path was
+        // bypassed and every delivery verdict downstream would be garbage.
+        if (_cfg.nodes[i].bw <= 0) {
+            throw std::runtime_error(
+                "node '" + _cfg.nodes[i].name + "': bw must be > 0 Hz (got "
+                + std::to_string(_cfg.nodes[i].bw)
+                + ") — the RX-bandwidth gate has no default to fall back on");
+        }
+        _node_rx_bw_hz[i] = _cfg.nodes[i].bw;
     }
 
     // Slice A2: resolve key_hash32 for every node BEFORE constructing either engine, so the C++
@@ -464,6 +710,10 @@ void SimController::initialize() {
         // reallocates, so &_node_sf_rx_set[i] stays valid for the lifetime
         // of this controller.
         _nodes[i]->attachSfRxSet(&_node_sf_rx_set[i]);
+        // §bw-gating: same stable-pointer contract for the live RX-BW slot —
+        // _node_rx_bw_hz was sized by the assign() above and never reallocates,
+        // so &_node_rx_bw_hz[i] outlives every retune.
+        _nodes[i]->attachRxBwSlot(&_node_rx_bw_hz[i]);
         _nodes[i]->attachTxInFlightSlot(&_node_tx_in_flight_until[i]);
         // _lbt is constructed below; defer the LBT attach until then.
     }
@@ -802,6 +1052,32 @@ void SimController::processStartupAtStep() {
     }
 }
 
+void SimController::validateSendByNameCommands() const {
+    // Mirrors processCommandsAtStep()'s guards exactly (lua_fn deferred, unknown node
+    // name skipped, meshroute-only rewrite) so the pre-flight can never accept a
+    // command the fire site would refuse, or vice versa. Both call the one
+    // resolveAddresseeOnSenderLayer().
+    for (const auto& cmd : _cfg.commands) {
+        if (!cmd.lua_fn.empty()) continue;
+        const auto sit = _name_to_id.find(cmd.node);
+        if (sit == _name_to_id.end()) continue;
+        const SimConfig::NodeDef& sender = _cfg.nodes[sit->second];
+        if (sender.engine != "meshroute") continue;
+        const SendByName p = parseSendByName(cmd.command);
+        if (!p.named()) continue;
+        const auto ait = _name_to_id.find(p.name);
+        if (ait == _name_to_id.end()) continue;   // a numeric/unknown dst passes through
+        const SimConfig::NodeDef& addressee = _cfg.nodes[ait->second];
+        const AddresseeId r = resolveAddresseeOnSenderLayer(sender, addressee);
+        if (r.src == AddresseeIdSource::RefuseNoShared
+            || r.src == AddresseeIdSource::RefuseAmbiguousSender) {
+            throw std::runtime_error(
+                sendByNameRefusal(sender, addressee, cmd.command, r.src)
+                + " [scenario command at_ms=" + std::to_string(cmd.at_ms) + "]");
+        }
+    }
+}
+
 void SimController::processCommandsAtStep() {
     const uint64_t now = _now_ms;
     for (size_t k = 0; k < _cfg.commands.size(); ++k) {
@@ -847,20 +1123,35 @@ void SimController::processCommandsAtStep() {
         std::string command = cmd.command;
         if (_cfg.nodes[target].engine == "meshroute") {
             // Resolve "send <name>" / "send_e2e <name>" -> "<verb> <id>", rebuilding with the SAME verb.
-            // PROTOCOL id, not the array index (they differ when a scenario sets node_id != slot).
-            size_t plen = 0;
-            if      (command.rfind("send_e2e ", 0) == 0) plen = 9;
-            else if (command.rfind("send ", 0) == 0)     plen = 5;
-            if (plen) {
-                size_t s = plen;
-                while (s < command.size() && command[s] == ' ') ++s;
-                const size_t e = command.find(' ', s);
-                if (e != std::string::npos) {
-                    const std::string name = command.substr(s, e - s);
-                    const auto nit = _name_to_id.find(name);
-                    if (nit != _name_to_id.end())
-                        command = command.substr(0, plen) + std::to_string(_nodes[nit->second]->protocolId())
-                                  + command.substr(e);
+            // ★ The id is the one the addressee wears ON THIS SENDER'S LAYER, which for a
+            // dual-layer gateway is NOT its momentary protocolId() — see
+            // resolveAddresseeOnSenderLayer() for the window-phase trap. Single-layer
+            // addressees keep the LIVE protocol id (not the array index, and not the
+            // configured node_id: they differ whenever a scenario sets node_id != slot, or
+            // the node takes a DAD/join/mobile lease at runtime).
+            const SendByName p = parseSendByName(command);
+            if (p.named()) {
+                const auto nit = _name_to_id.find(p.name);
+                if (nit != _name_to_id.end()) {
+                    const SimConfig::NodeDef& sender    = _cfg.nodes[target];
+                    const SimConfig::NodeDef& addressee = _cfg.nodes[nit->second];
+                    const AddresseeId r = resolveAddresseeOnSenderLayer(sender, addressee);
+                    int dst = 0;
+                    switch (r.src) {
+                        case AddresseeIdSource::PerLayerNodeId: dst = r.node_id; break;
+                        case AddresseeIdSource::LiveProtocolId:
+                            dst = _nodes[nit->second]->protocolId();
+                            break;
+                        default:
+                            // Unreachable: validateSendByNameCommands() refuses these at
+                            // initialize(), before a single event is emitted. Kept as a
+                            // hard stop so a future caller cannot re-introduce the silent
+                            // protocolId() fallback (C2).
+                            throw std::runtime_error(
+                                sendByNameRefusal(sender, addressee, cmd.command, r.src));
+                    }
+                    command = command.substr(0, p.verb_len) + std::to_string(dst)
+                              + command.substr(p.name_end);
                 }
             }
         }
@@ -1065,7 +1356,46 @@ void SimController::deliverReceptionsForStep() {
                 continue;
             }
 
-            // SF matches and we haven't collided. drop_weak captures
+            // BW-mismatch gate (§bw-gating, 2026-07-25 realism review §6.1.1).
+            // The SF gate's twin on the other PHY axis: a LoRa modem
+            // demodulates only the BANDWIDTH its registers are set to, so a
+            // receiver listening on 125 kHz cannot decode a 250 kHz frame at
+            // any SNR (nor the reverse) — confirmed across the SX126x/SX127x
+            // families. Before this gate the sim decoded such a frame
+            // perfectly, which made a dual-BW gateway's layers RF-CONNECTED in
+            // sim while they are RF-ISOLATED on metal.
+            // _node_rx_bw_hz[rcv] is the receiver's LIVE bandwidth (seeded from
+            // nodes[i].bw, moved by Hal::set_rx_bw / self:set_rx_bw) — NOT
+            // _radios[rcv]->getBwHz(), which tracks the last TRANSMISSION.
+            // Placed AFTER the SF gate so an SF-mismatched frame keeps
+            // reporting as drop_sf_mismatch (no event reclassification), and
+            // BEFORE drop_weak because "not tuned to this signal" outranks
+            // "signal too weak".
+            // NOTE: this is a DECODE-path gate only. A BW-mismatched frame
+            // still deposits in-band energy, so it deliberately keeps feeding
+            // the collision verdict and the energy-LBT / preamble-detect
+            // provider — bandwidth grants NO orthogonality (unlike the
+            // cross-SF chirp-rate property in CollisionModel.cpp).
+            // No fallback on a bad rx bw: a non-positive value can't compare
+            // equal to a real tx.bw_hz, so the frame is REFUSED, never passed
+            // (and initialize() already throws on a bw <= 0 seed).
+            const int rx_bw_hz = _node_rx_bw_hz[rcv];
+            if (tx.bw_hz != rx_bw_hz) {
+                if (!would_decode) continue;  // off-net, silent
+                EventLog::dropBwMismatch(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    tx.bw_hz, rx_bw_hz,
+                    snr_at_rcv, lp.rssi,
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                    tx.sf);
+                continue;
+            }
+
+            // SF + BW match and we haven't collided. drop_weak captures
             // "right SF, signal below threshold."
             if (!would_decode) {
                 EventLog::dropWeak(

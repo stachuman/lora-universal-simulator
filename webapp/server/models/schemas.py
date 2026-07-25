@@ -124,11 +124,16 @@ class NodeConfig(BaseModel):
     model_config = LUS_MODEL_CONFIG
 
     name: str = Field(min_length=1, max_length=64)
-    # script is required for the default "lua" engine and unused for
-    # "meshroute" (the in-loop C++ FirmwareNode). Cross-field enforcement
-    # lives in lus (core/topology/JsonConfig.cpp), per schema docstring.
+    # script is required for the "lua" engine and unused for "meshroute" (the
+    # in-loop C++ FirmwareNode), which is the DEFAULT when `engine` is omitted.
+    # Cross-field enforcement lives in lus (core/topology/JsonConfig.cpp), per
+    # schema docstring.
     script: Optional[str] = Field(default=None, min_length=1)
-    # core/topology/JsonConfig.cpp:237 allowlist.
+    # core/topology/JsonConfig.cpp allowlist. ★ "lua" is DEPRECATED + UNSUPPORTED
+    # (2026-07-25 ruling) — kept only as the frozen parity reference, and lus
+    # REFUSES it unless the scenario sets simulation.allow_deprecated_lua (or lus
+    # is given --allow-deprecated-lua). Still accepted here: the webapp's job is
+    # to model the file format, and lus owns the policy.
     engine: Optional[Literal["lua", "meshroute"]] = None
     # Optional explicit short_id assignment; otherwise allocated by lus.
     node_id: Optional[int] = Field(default=None, ge=0, le=255)

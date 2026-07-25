@@ -30,9 +30,17 @@ def make_variant(base, engine):
         node.pop("engine", None)
         node.pop("script", None)
         if engine == "lua":
-            node["script"] = "scenarios/dv_dual_sf.lua"   # script => Lua engine
+            node["script"] = "scenarios/dv_dual_sf.lua"
+            # ★ 2026-07-25 deprecation ruling: the engine must be named EXPLICITLY.
+            # "meshroute" is now the DEFAULT, so omitting the key (as this did) would
+            # silently make the "lua REFERENCE" variant a second meshroute run and turn
+            # the whole differential vacuous. The generated variant also carries the
+            # deprecated-Lua opt-in, since a Lua run is otherwise refused outright.
+            node["engine"] = "lua"
         else:
             node["engine"] = "meshroute"
+    if engine == "lua":
+        s.setdefault("simulation", {})["allow_deprecated_lua"] = True
     return s
 
 

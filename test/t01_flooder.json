@@ -1,18 +1,19 @@
 {
   "_name": "t01_flooder",
-  "_desc": "3-node chain alice → relay → bob. alice sends 'hello'. relay forwards. bob receives + emits 'recv'.",
+  "_desc": "3-node chain alice → relay → bob. alice sends 'hello'. relay forwards. bob receives + emits 'recv'. ★ A pure-Lua fixture (examples/flooder.lua is not firmware protocol at all), so it tags \"engine\":\"lua\" EXPLICITLY and carries the allow_deprecated_lua opt-in — the 2026-07-25 ruling made \"meshroute\" the default and refuses an unsanctioned Lua node. test/native/test_sim_controller.cpp drives this file through SimController directly and cannot link FirmwareNode.",
   "simulation": {
     "duration_ms": 30000,
     "step_ms": 1,
     "warmup_ms": 0,
     "seed": 42,
     "node_startup_jitter_ms": 500,
+    "allow_deprecated_lua": true,
     "radio": { "sf": 11, "bw": 250, "cr": 5, "duty_cycle": 1 }
   },
   "nodes": [
-    { "name": "alice", "script": "examples/flooder.lua", "config": { "role": "originator" } },
-    { "name": "relay", "script": "examples/flooder.lua", "config": { "role": "forwarder" } },
-    { "name": "bob",   "script": "examples/flooder.lua", "config": { "role": "forwarder" } }
+    { "name": "alice", "engine": "lua", "script": "examples/flooder.lua", "config": { "role": "originator" } },
+    { "name": "relay", "engine": "lua", "script": "examples/flooder.lua", "config": { "role": "forwarder" } },
+    { "name": "bob",   "engine": "lua", "script": "examples/flooder.lua", "config": { "role": "forwarder" } }
   ],
   "topology": {
     "links": [

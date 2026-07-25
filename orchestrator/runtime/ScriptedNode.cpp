@@ -1,4 +1,10 @@
 // orchestrator/runtime/ScriptedNode.cpp
+//
+// ★★ DEPRECATED + UNSUPPORTED (2026-07-25 ruling) — the Lua engine. Far behind
+// the MeshRoute firmware; RETAINED as the frozen parity reference the C++ port
+// was validated against, and runnable only via the explicit opt-in
+// (simulation.allow_deprecated_lua / `lus --allow-deprecated-lua`). Full
+// rationale in the ScriptedNode.h header.
 #include "orchestrator/runtime/ScriptedNode.h"
 
 #include "core/events/EventLog.h"
@@ -325,6 +331,35 @@ void ScriptedNode::api_set_rx_sf_set(sol::table sf_set) {
         *_sf_rx_set = std::move(result);
         armSfSwitchBlindWindow();
     }
+}
+
+// Dynamic RX-BANDWIDTH retune (Hz) — the BW twin of api_set_rx_sf, and the
+// ENGINE-AGNOSTIC twin of the firmware seam Hal::set_rx_bw ->
+// ISimHal::simSetRxBw. It must stay behaviourally identical to
+// FirmwareNode::simSetRxBw (which carries the full rationale), because that is
+// what lets a native test drive a retune through Lua and still pin what the
+// firmware path does — build_test.sh cannot link FirmwareNode. So one retune
+// moves BOTH halves of the node's bandwidth:
+//   - its slot in SimController::_node_rx_bw_hz — the live RECEIVE bandwidth
+//     the delivery path reads for the BW-mismatch gate;
+//   - its SimRadio's bandwidth — the DEFAULT TX bandwidth that
+//     registerTransmissionsForStep resolves an unset (-1) PendingTx::bw_hz
+//     against, so the airtime is debited at the on-air BW (the device ties the
+//     two together in DeviceHal::set_rx_bw / ::tx via _def_bw).
+// A script that wants a per-frame bandwidth still passes `bw` to self:tx();
+// that overrides the default for that frame only, exactly as before.
+// 0-means-inherit is honoured per the Hal contract: a non-positive value is
+// IGNORED (neither half is written), so a script can't deafen or mute a node —
+// same shape as api_set_rx_sf_set refusing an empty set.
+// No blind window: unlike an SF change, LoRa BW is a modem-register write on
+// the same PLL setting; the sim has no measured BW-switch settling time, and
+// inventing one would be an unagreed default.
+void ScriptedNode::api_set_rx_bw(int bw_hz) {
+    if (!_rx_bw_hz) return;   // not attached yet (shouldn't happen post-init)
+    if (bw_hz <= 0) return;   // 0 = "inherit" per the Hal contract — leave both values
+    *_rx_bw_hz = bw_hz;
+    // Bandwidth only; sf/cr read back and re-stamped unchanged.
+    _radio.setRadioParams(_radio.getSF(), bw_hz, _radio.getCR());
 }
 
 uint64_t ScriptedNode::api_channel_busy_until() const {

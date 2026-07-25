@@ -1,4 +1,13 @@
 // orchestrator/runtime/LuaHost.cpp
+//
+// ★★ DEPRECATED + UNSUPPORTED (2026-07-25 ruling) — the Lua engine. This host
+// owns the sandboxed Lua state and the `self:*` bindings that ScriptedNode
+// scripts call. The Lua engine is far behind the MeshRoute firmware and is
+// RETAINED only as the frozen parity reference the C++ port was validated
+// against (scenarios/dv_dual_sf.lua); it runs only via the explicit opt-in
+// (simulation.allow_deprecated_lua / `lus --allow-deprecated-lua`). Do not add
+// new bindings for firmware features — they belong in FirmwareNode /
+// NodeRuntimeWrapper. Full rationale in the ScriptedNode.h header.
 #include "orchestrator/runtime/LuaHost.h"
 
 #include "core/events/EventLog.h"
@@ -87,6 +96,8 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node, int protocol_node_id
             [node](sol::object /*self*/, int sf) { node->api_set_rx_sf(sf); });
         self.set_function("set_rx_sf_set",
             [node](sol::object /*self*/, sol::table t) { node->api_set_rx_sf_set(t); });
+        self.set_function("set_rx_bw",
+            [node](sol::object /*self*/, int bw_hz) { node->api_set_rx_bw(bw_hz); });
         self.set_function("channel_busy_until",
             [node](sol::object /*self*/) { return node->api_channel_busy_until(); });
         self.set_function("tx_in_flight",

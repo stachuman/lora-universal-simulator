@@ -256,6 +256,17 @@ struct SimConfig {
         int           node_startup_jitter_ms = 0;
         std::string   rx_window_slop = "metal";   // §metal-fidelity: DEFAULT "metal" (device turnaround/RX-window slop formula in FirmwareNode — 2026-07-21 realism ruling 2.1); "idealized" (RX-window slop 0) is now the explicit opt-in for a deliberately-idealized run
 
+        // ★ 2026-07-25 ruling — the DEPRECATED-LUA OPT-IN. The Lua engine is
+        // deprecated and unsupported (see NodeDef::engine); a node whose
+        // RESOLVED engine is "lua" makes SimController::initialize() refuse the
+        // run outright. Set true to sanction a Lua run anyway (the frozen parity
+        // reference, a Lua-vs-meshroute differential, or a native test that
+        // cannot link FirmwareNode). The CLI twin is `lus --allow-deprecated-lua`,
+        // which sets exactly this field after config load. A sanctioned run still
+        // prints a one-time deprecation warning to stderr, so it can never be
+        // mistaken for a supported one. Default false = refuse.
+        bool          allow_deprecated_lua = false;
+
         RadioConfig  radio;
         PathLossSpec path_loss;
     };
@@ -285,10 +296,21 @@ struct SimConfig {
         std::string    script_path;
         nlohmann::json config = nlohmann::json::object();
 
-        // Node engine: "lua" (default) -> ScriptedNode runs script_path;
-        // "meshroute" -> FirmwareNode (the C++ port run in-loop in the sim).
+        // Node engine: "meshroute" (DEFAULT) -> FirmwareNode (the C++ firmware
+        // run in-loop in the sim); "lua" -> ScriptedNode runs script_path.
         // See ~/MeshRoute/docs/PORT_PLAN.md §2.1 (sim-integration track).
-        std::string    engine = "lua";
+        //
+        // ★ 2026-07-25 ruling: the LUA ENGINE IS DEPRECATED AND UNSUPPORTED — it
+        // is far behind the firmware. It is RETAINED as the frozen parity
+        // reference the C++ port was validated against, and a "lua" node is
+        // REFUSED at SimController::initialize() unless the run opts in via
+        // simulation.allow_deprecated_lua / --allow-deprecated-lua. The default
+        // flipped lua -> meshroute in the same ruling: 389 of the 722 nodes in
+        // the MeshRoute corpus carry no engine key at all (the whole mandatory
+        // s21-s30 suite among them), so a "lua" default made every one of them
+        // one forgotten `-e meshroute` away from silently running the frozen
+        // reference and reporting the result as if it were the firmware's.
+        std::string    engine = "meshroute";
 
         // Per-node radio overrides. -1 means "fall back to simulation.radio".
         int sf = -1;

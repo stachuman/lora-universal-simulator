@@ -141,6 +141,25 @@ void dropSfMismatch(unsigned long time_ms, const char* from, const char* to,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int bw_hz);
 
+// BW mismatch — receiver isn't tuned to the packet's BANDWIDTH. A LoRa
+// modem demodulates only the bandwidth its registers are set to, so a
+// node listening on 125 kHz cannot decode a 250 kHz frame (nor the
+// reverse) even at unlimited SNR. The mirror of drop_sf_mismatch on the
+// other PHY axis: `packet_bw_hz` is the frame's bandwidth, `rx_bw_hz`
+// the receiver's live one (seeded from nodes[i].bw, moved by
+// Hal::set_rx_bw -> ISimHal::simSetRxBw, e.g. a dual-BW gateway's
+// per-layer window switch). No separate `bw_hz` field is emitted
+// (packet_bw_hz already carries it); `sf` IS emitted because the frame's
+// SF matched — the drop is purely about bandwidth.
+// `snr_db` / `rssi_dbm` are the link's quality at this receiver, emitted
+// for the same reason as on drop_sf_mismatch: the event is gated on
+// "would-have-decoded-at-the-correct-BW", so the values are meaningful.
+void dropBwMismatch(unsigned long time_ms, const char* from, const char* to,
+                    int packet_bw_hz, int rx_bw_hz,
+                    float snr, float rssi,
+                    const uint8_t* data, int len, uint32_t airtime_ms,
+                    int sf);
+
 // TX failure events
 void txFail(unsigned long time_ms, const char* node, uint32_t count);
 

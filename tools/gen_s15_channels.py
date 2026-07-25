@@ -59,7 +59,9 @@ def main() -> None:
         injected.append({"at_ms": at, "node": node, "command": f"send_channel {ch} {body}"})
 
     # Default this scenario to the C++ port (the channel FLOOD under test). The Lua `script` is kept so
-    # `lus --engine lua <scenario>` still runs the pull-plane baseline for a differential.
+    # `lus --engine lua --allow-deprecated-lua <scenario>` still runs the pull-plane baseline for a
+    # differential — the Lua engine is DEPRECATED + UNSUPPORTED (2026-07-25 ruling) and is REFUSED
+    # without that opt-in; it survives only as the frozen parity reference.
     for n in d["nodes"]:
         n["engine"] = "meshroute"
 

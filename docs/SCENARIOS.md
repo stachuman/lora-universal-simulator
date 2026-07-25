@@ -1155,7 +1155,8 @@ t=5240 GUARD fires:
                                         rt_merge for delta=143
 ```
 
-**Status.** Implemented; `test/t48_join_autonomous_fourth_node.json`.
+**Status.** Implemented; scenario `test/t48_join_autonomous_fourth_node.json`
+RETIRED 2026-07-25 with the legacy `test/` corpus (git history).
 
 ## 5.2 Join — no neighbours → exhaustion
 
@@ -1196,7 +1197,8 @@ t≈3000+BACKOFF:
        (joiner remains unjoined; no further automatic action)
 ```
 
-**Status.** Implemented; `test/t49_join_no_offer_retry.json`.
+**Status.** Implemented; scenario `test/t49_join_no_offer_retry.json`
+RETIRED 2026-07-25 with the legacy `test/` corpus (git history).
 
 **Notes.**
 - `join_discover_max_attempts=0` means "unlimited" — magic-value
@@ -1286,9 +1288,9 @@ t=5000+BACKOFF (delta's retry):
          ... eventually delta adopts a different id ...
 ```
 
-**Status.** Implemented; loser side covered by
-`test/t50_join_simultaneous_claim_race.json` (winner side could be
-covered by a t51 with two real joiners).
+**Status.** Implemented; loser side was covered by
+`test/t50_join_simultaneous_claim_race.json`, RETIRED 2026-07-25 with the
+legacy `test/` corpus (git history) — winner side was never covered.
 
 **Edge case.** If two joiners share `key_hash32` (birthday collision)
 AND draw the same random `nonce`, both see "I lose" and back off. Both
@@ -1636,8 +1638,9 @@ t=2000000 merge:
 
 ## 6.1 Gateway — two-layer scheduled smoke
 
-**Status.** Implemented and passing in
-`scenarios/s09_two_layer_gateway_debug.json`.
+**Status.** Implemented. Its acceptance scenario
+`scenarios/s09_two_layer_gateway_debug.json` was RETIRED 2026-07-25 (git
+history); the live equivalent is MeshRoute's `simulation/s09_two_layer_gateway.json`.
 
 **Purpose.** This is the current gateway v1 acceptance scenario. It proves
 that a single-radio gateway can retune between two layers, advertise its
@@ -1706,8 +1709,10 @@ leases are implemented.
 
 ## 6.2 Gateway — full layer separation workbench
 
-**Status.** Implemented in
-`scenarios/s10_two_layer_gateway_separation.json`. It reuses ordinary short
+**Status.** Implemented. Its workbench
+`scenarios/s10_two_layer_gateway_separation.json` was RETIRED 2026-07-25 (git
+history); the live equivalent is MeshRoute's `simulation/s10_two_layer_separation.json`.
+It reuses ordinary short
 IDs across layers (`l4_seed` and `l5_seed` both use node ID 1) to prove that
 route and identity state are isolated by layer.
 
@@ -2207,8 +2212,11 @@ PAYLOAD_TYPE_M.
 
 ## 8.1 s14 — Realistic debug scenario
 
-**Status.** Implemented in `scenarios/s14_realistic_debug.json`;
-generator `tools/gen_s14_realistic_debug.py`. Wall-clock ~30-60 s
+**Status.** RETIRED 2026-07-25 (git history) — both the scenario
+`scenarios/s14_realistic_debug.json` and its generator
+`tools/gen_s14_realistic_debug.py` are gone: the scenario no longer passed
+config validation, and the generator emitted links without the required
+`snr_std_dev`. Section kept for the design record. Wall-clock was ~30-60 s
 for the full 40-min simulated run.
 
 **Purpose.** A small, debuggable, realistic scenario for isolating
@@ -2333,16 +2341,16 @@ Cross-reference of mechanisms each scenario depends on:
 - **Wire format:** `docs/PROTOCOL.md` §3 (frame layouts), §13 (event
   catalogue).
 - **Design and known gaps:** `docs/ROADMAP.md`.
-- **Tests:**
-  - Data plane: `test/t42_seen_bitmap_wire.json`,
-    `test/t45_mobile_path_loss_overrides_static_links.json` (regression
-    frontier — t46+ is the gold standard). Earlier data-plane tests
-    (t11/t15/t26/t31/t33/t39–t44, plus `s11`) live under
-    `test/deprecated/` and `scenarios/deprecated/`; their assertions
-    pre-date the realism pass and are not regressions — see
-    `test/deprecated/README.md`.
-  - Node id / join wire: `test/t46_node_id_split.json`,
-    `test/t47_j_frame_wire.json`.
-  - Join autonomous: `test/t48_join_autonomous_fourth_node.json`.
-  - Join no-offer: `test/t49_join_no_offer_retry.json`.
-  - Join simultaneous claim: `test/t50_join_simultaneous_claim_race.json`.
+- **Tests:** ★ the legacy `test/t*.json` + `scenarios/s*.json` regression
+  corpus and its runner `test/run_tests.sh` were **RETIRED 2026-07-25**
+  (owner ruling): the configs had been failing `JsonConfig` validation since
+  the 2026-07-21 Wave-1 required-keys change (`simulation.radio.duty_cycle`,
+  per-link `snr_std_dev`) and nothing gated on them. Git history preserves
+  them. The named data-plane / node-id / join wire scenarios
+  (t42/t45/t46/t47/t48/t49/t50) went with it, as did the earlier
+  pre-realism set (t11/t15/t26/t31/t33/t39–t44, plus `s11`) still parked
+  under `test/deprecated/` and `scenarios/deprecated/` — see
+  `test/deprecated/README.md`.
+  - **Live coverage today:** `bash test/native/build_test.sh` (the C++ unit
+    suite, which also runs `test/t01_flooder.json`) plus MeshRoute's
+    `simulation/` corpus gated by `simulation/BASELINE.md`.

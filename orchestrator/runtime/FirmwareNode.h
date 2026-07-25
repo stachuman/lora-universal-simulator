@@ -60,6 +60,7 @@ public:
     void setProtocolId(int protocol_id) override { _protocol_id = protocol_id; }
     const std::string& name() const override { return _name; }
     void attachSfRxSet(std::vector<int>* slot) override { _sf_rx_set = slot; }
+    void attachRxBwSlot(int* slot) override { _rx_bw_hz = slot; }   // live RX BW (Hz); written by simSetRxBw
     void attachTxInFlightSlot(uint64_t* slot) override { _tx_in_flight_until = slot; }
     void attachLbtModel(LbtModel* lbt) override { _lbt = lbt; }
     void setClockDriftPpm(float ppm) override { _clock_drift_ppm = ppm; }
@@ -75,7 +76,7 @@ public:
     // ---- mrsim::ISimHal (called by the per-variant HalAdapter wrapping the Node) ----
     int      simTx(const uint8_t* bytes, size_t len, const mrsim::SimTxParams& p) override;  // -> SimTxResult
     void     simSetRxSf(int sf) override;
-    void     simSetRxBw(uint32_t bw_hz) override;   // §metal-fidelity: mirror device _def_bw -> _node_bw_hz follows the active layer's bw
+    void     simSetRxBw(uint32_t bw_hz) override;   // the device _def_bw mirror: moves the slop bw, the live RX bw, AND the radio's default TX bw
     uint64_t simChannelBusyUntil() override;
     uint64_t simAirtimeUsedMs(uint64_t window_ms) override;
     uint64_t simOldestTxEndMs() override;
@@ -98,7 +99,7 @@ private:
     int               _protocol_id;
     std::string       _name;
     uint32_t          _key_hash32;
-    SimRadio&         _radio;          // held for parity with ScriptedNode; unused in S2 path
+    SimRadio&         _radio;          // == SimController::_radios[_id]; retuned by simSetRxBw (the device _def_bw mirror)
     std::ostream&     _events_out;     // EventLog owns its own stream
     VirtualClock&     _clock;
     std::mt19937&     _sim_rng;
@@ -110,6 +111,7 @@ private:
     std::vector<PendingTx> _pending_txs;
     bool              _initialized = false;
     std::vector<int>* _sf_rx_set = nullptr;
+    int*              _rx_bw_hz  = nullptr;   // borrowed; SimController::_node_rx_bw_hz slot (live RX BW)
     uint64_t*         _tx_in_flight_until = nullptr;
     LbtModel*         _lbt = nullptr;
     bool              _lbt_enabled = true;   // R3.x host knob (config "lbt_enabled")

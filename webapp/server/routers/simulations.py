@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from server.config import validate_safe_id
 from server.services.config_validator import validate as validate_lus_config
-from server.services.dm_breakdown import DmBreakdownCache
+from server.services.dm_breakdown import CanonicalToolMissing, DmBreakdownCache
 from server.services.event_index import EventIndex, EventIndexCache
 from server.services.sim_manager import SimManager
 
@@ -246,10 +246,14 @@ async def sim_events(
 
 @router.get("/{sim_id}/dm_breakdown")
 async def sim_dm_breakdown(sim_id: str, request: Request):
-    """Per-DM + per-channel delivery breakdown (see tools/dm_delivery_breakdown.py).
+    """Per-DM + per-channel delivery breakdown.
 
-    Returns {"summary": [...], "messages": [...], "channels": [...]} for a
-    completed sim. 409 while still running, 404 if unknown / no events."""
+    Computed by MeshRoute's canonical `tools/dm_delivery_breakdown.py` (this repo
+    keeps no copy — see server/services/dm_breakdown.py).
+
+    Returns {"summary": [...], "messages": [...], "channels": [...],
+    "cross_layer": {...}, "warnings": [...]} for a completed sim. 409 while still
+    running, 404 if unknown / no events."""
     sim = _get_sim_or_404(sim_id, request)
     sim_manager: SimManager = request.app.state.sim_manager
     cache: DmBreakdownCache = request.app.state.dm_breakdown_cache
@@ -268,7 +272,14 @@ async def sim_dm_breakdown(sim_id: str, request: Request):
     if config_path is None:
         raise HTTPException(status_code=404, detail="Config not found for this simulation")
 
-    payload = cache.get(sim_id, str(config_path), str(events_path))
+    try:
+        payload = cache.get(sim_id, str(config_path), str(events_path))
+    except CanonicalToolMissing as e:
+        # The analysis is NOT in this repo (one source of truth). Surface the
+        # resolver's message — which names every path tried and $MESHROUTE_ROOT —
+        # instead of a bare 500 or, worse, an empty/zeroed breakdown.
+        raise HTTPException(status_code=503,
+            detail=f"delivery analysis unavailable: {e}")
     return _cached_json_response(request, sim_id, payload)
 
 
