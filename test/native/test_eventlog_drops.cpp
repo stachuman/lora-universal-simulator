@@ -1,13 +1,15 @@
 // test/native/test_eventlog_drops.cpp
 //
-// Wire-format pin for ALL TEN drop_* emitters.
+// Wire-format pin for ALL ELEVEN drop_* emitters.
 //
 // Why this exists: the scenario suite only ever fires FIVE of them
 // (drop_sf_mismatch / drop_weak / drop_preamble_miss / drop_rx_blind /
 // drop_halfduplex). drop_loss, drop_no_link, drop_receiver_inactive,
 // drop_forced and drop_bw_mismatch never appear in any baseline stream, so
 // scenario byte-identity proves NOTHING about them — including across the
-// dropCommon()/DropLine refactor that rewrote all ten bodies. This test is
+// dropCommon()/DropLine refactor that rewrote all ten bodies (and, since
+// 2026-07-25, drop_tx_settling — the TX->RX-turnaround twin of
+// drop_halfduplex, which no scenario fired before that slice either). This test is
 // the missing half of that proof: each emitter's exact NDJSON line, field
 // order included, asserted verbatim.
 //
@@ -98,6 +100,22 @@ int main() {
     }),
     "{\"type\":\"drop_halfduplex\",\"time_ms\":1002,\"from\":\"alice\",\"to\":\"bob\","
     "\"pkt\":\"e3a027a5\",\"airtime_ms\":122,\"sf\":9,\"bw_hz\":62500}");
+
+    // ---- 3b. drop_tx_settling: drop_halfduplex's TX->RX-turnaround twin ----
+    // §tx-turnaround (2026-07-25). Deliberately a SEPARATE event from
+    // drop_halfduplex — "was still transmitting" and "was still coming back
+    // from transmitting" are different hardware mechanisms, and a stream that
+    // merged them could attribute neither. Shaped like drop_rx_blind (the other
+    // settling-window drop): one uint64 absolute "receptive again at" field
+    // ahead of the shared PHY tail.
+    expect(emitted([&] {
+        EventLog::dropTxSettling(1017, "alice", "bob",
+                                 /*deaf_until_ms=*/1234567890124ull,
+                                 p, n, 131, 10, 250000);
+    }),
+    "{\"type\":\"drop_tx_settling\",\"time_ms\":1017,\"from\":\"alice\",\"to\":\"bob\","
+    "\"deaf_until_ms\":1234567890124,\"pkt\":\"e3a027a5\",\"airtime_ms\":131,"
+    "\"sf\":10,\"bw_hz\":250000}");
 
     // ---- 4. drop_weak: CARRIES NO airtime_ms ------------------------------
     {
@@ -265,7 +283,7 @@ int main() {
     }
 
     EventLog::setOutputStream(nullptr);
-    std::printf("test_eventlog_drops: OK (all 10 drop_* wire formats pinned, "
+    std::printf("test_eventlog_drops: OK (all 11 drop_* wire formats pinned, "
                 "overflow all-or-nothing + always terminated)\n");
     return 0;
 }

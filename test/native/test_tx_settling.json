@@ -1,0 +1,36 @@
+{
+  "_name": "test_tx_settling",
+  "_desc": "TX->RX turnaround deafness (Wave-4 §6.1.2). After its own TX ends a real radio needs simulation.radio.hardware.tx_to_rx_delay_ms (LNA re-enable + PLL relock) before it can receive again; a frame whose preamble arrives inside that window is missed (drop_tx_settling). ★ TOPOLOGY IS DELIBERATELY ONE-WAY: s_in/s_out -> deaf only, with NO reverse link, so the two senders never hear deaf's transmission and therefore never arm their own RX->TX turnaround — their frames start at exactly the commanded millisecond, which is what makes the window boundary testable to the millisecond. Analytically deterministic: no fading (snr_std_dev 0), no PER sigmoid (steepness 0), no preamble miss, no startup jitter, no warmup (the warmup path bypasses physics), duty 100%. ★ The two SENDER command times are computed IN THE TEST from SimRadio::getEstAirtimeFor (deaf's own airtime) and appended to simulation.commands there — see test_tx_settling.cpp; only deaf's own two sends are scheduled here. deaf transmits TWICE, a second apart, with ONE sender following each: a single deaf TX cannot host both senders because the frames are ~39 ms long, so an inside-the-window frame and an outside-the-window frame would collide with EACH OTHER rather than testing the deaf window. ★ Runs on the DEPRECATED Lua engine BY NECESSITY (build_test.sh cannot link FirmwareNode) — hence the explicit per-node \"engine\":\"lua\" plus allow_deprecated_lua, the sanctioned internal use of that opt-in (same precedent as test_bw_mismatch).",
+  "simulation": {
+    "duration_ms": 6000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 4242,
+    "node_startup_jitter_ms": 0,
+    "allow_deprecated_lua": true,
+    "radio": {
+      "sf": 7,
+      "bw": 125,
+      "cr": 5,
+      "duty_cycle": 100,
+      "rx_preamble_miss_prob": 0.0,
+      "decode_margin_steepness_db": 0.0,
+      "snr_coherence_ms": 0
+    }
+  },
+  "nodes": [
+    { "name": "deaf",  "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} },
+    { "name": "s_in",  "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} },
+    { "name": "s_out", "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} }
+  ],
+  "topology": {
+    "links": [
+      { "from": "s_in",  "to": "deaf", "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0, "bidir": false },
+      { "from": "s_out", "to": "deaf", "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0, "bidir": false }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000, "node": "deaf", "command": "ping" },
+    { "at_ms": 3000, "node": "deaf", "command": "ping" }
+  ]
+}

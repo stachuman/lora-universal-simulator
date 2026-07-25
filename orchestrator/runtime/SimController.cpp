@@ -683,9 +683,21 @@ void SimController::initialize() {
             _clock, sf, bw_hz, cr,
             _cfg.simulation.radio.rx_to_tx_delay_ms,
             _cfg.simulation.radio.tx_to_rx_delay_ms));
-        // TODO(Y2): plumb cfg.nodes[i].tx_fail_prob through SimRadio::setTxFailProb
-        // once the loop honours startSendRaw failure paths instead of always
-        // staging InFlight entries unconditionally.
+        // §tx-fail (2026-07-25) — DONE (was: "TODO(Y2): plumb cfg.nodes[i].
+        // tx_fail_prob through SimRadio::setTxFailProb once the loop honours
+        // startSendRaw failure paths"). The key is now plumbed WITHOUT that
+        // precondition: the TX loop calls SimRadio::rollTxFail() directly at
+        // the point startSendRaw would have rolled it (see §tx-fail there).
+        // Until this landed a scenario could set tx_fail_prob, have it parsed
+        // and range-validated by JsonConfig, and have it silently discarded.
+        _radios[i]->setTxFailProb(_cfg.nodes[i].tx_fail_prob);
+        // Per-node, independent-of-everything-else roll stream (Slice C): its
+        // own RngDomain, so enabling tx_fail_prob perturbs neither _node_rng[i]
+        // (the node's firmware draws) nor any link stream. Seeding makes no
+        // draw, so this line is inert while every node is at prob 0.
+        _radios[i]->seed(mrsim::deriveSeed(_cfg.simulation.seed,
+                                           mrsim::RngDomain::TxFail,
+                                           static_cast<uint64_t>(i)));
 
         if (_cfg.nodes[i].engine == "meshroute") {
 #ifdef MESHROUTE_ENABLED
@@ -1491,33 +1503,90 @@ void SimController::deliverReceptionsForStep() {
                 continue;
             }
 
-            // Strict half-duplex enforcement: a node can't receive while
-            // it's transmitting. If rcv has any of its own in-flight TX
-            // overlapping [tx.start_ms, tx.end_ms] (any time during the
-            // incoming packet's airtime), the radio was busy TX'ing and
-            // missed the packet — emit drop_halfduplex instead of rx.
-            bool rcv_was_tx = false;
+            // Strict half-duplex enforcement + the TX->RX settling tail.
+            // One receiver-side "was this radio able to hear?" question with
+            // TWO answers, deliberately kept as separate events:
+            //   drop_halfduplex   — rcv's own TX was CONCURRENT with
+            //     [tx.start_ms, tx.end_ms]: one PA path, the modem was
+            //     transmitting and never heard the frame.
+            //   drop_tx_settling  — §tx-turnaround (2026-07-25) DONE: rcv's own
+            //     TX had ENDED, but the radio was still in its TX->RX
+            //     turnaround (LNA re-enable + PLL relock) when this frame's
+            //     PREAMBLE arrived. Real hardware needs tx_to_rx_delay_ms
+            //     (8 ms bench-measured) to come back; the sim used to be
+            //     instantly receptive and so heard frames metal would miss.
+            //     Before this, _earliest_rx_ms was set ONLY inside the
+            //     bypassed startSendRaw and read ONLY by the (equally
+            //     bypassed) isSendComplete, so nothing on the delivery path
+            //     ever consulted it — see §startSendRaw-bypass in the TX loop.
+            // Modelled by EXTENDING rcv's own-TX interval to
+            // [own.start_ms, own.end_ms + settle) for the overlap test. Both
+            // arms below must apply the same extension — a divergence between
+            // the live-_in_flight scan and the compacted-out fallback would be
+            // a latent, traffic-pattern-dependent bug.
+            // The concurrent case is tested FIRST and unchanged, so the drop_
+            // halfduplex classification is bit-for-bit what it always was; only
+            // frames that used to be DELIVERED can become drop_tx_settling.
+            //
+            // Read from config, never a literal. Truncating float->int matches
+            // the RX->TX side's existing convention (SimRadio's (uint32_t)
+            // casts of the same pair of knobs); the >0 test is only there
+            // because casting a negative float to an unsigned type is UB —
+            // a negative turnaround is not a configuration this honours.
+            const float settle_f = _cfg.simulation.radio.tx_to_rx_delay_ms;
+            const uint64_t settle_ms =
+                (settle_f > 0.0f) ? static_cast<uint64_t>(settle_f) : 0;
+            bool     rcv_was_tx    = false;   // concurrent -> drop_halfduplex
+            uint64_t deaf_until_ms = 0;       // settling   -> drop_tx_settling
             for (const auto& other : _in_flight) {
                 if (other.sender_id != rcv) continue;
-                if (other.start_ms < tx.end_ms && other.end_ms > tx.start_ms) {
+                if (other.start_ms >= tx.end_ms) continue;
+                if (other.end_ms > tx.start_ms) {
                     rcv_was_tx = true;
                     break;
                 }
+                if (other.end_ms + settle_ms > tx.start_ms &&
+                    other.end_ms + settle_ms > deaf_until_ms) {
+                    deaf_until_ms = other.end_ms + settle_ms;
+                }
             }
-            // Also catch a receiver TX that overlapped this frame's airtime but
-            // already ended (compacted out of _in_flight before this frame is
-            // delivered at its end_ms). The frame's preamble still arrived while
-            // the receiver was transmitting, so the radio never locked on it.
-            if (!rcv_was_tx
-                && _node_last_tx_start_ms[(size_t)rcv] < tx.end_ms
-                && _node_last_tx_end_ms[(size_t)rcv]   > tx.start_ms) {
-                rcv_was_tx = true;
+            // Also catch a receiver TX that overlapped this frame's airtime (or
+            // whose settling tail did) but already ended — compacted out of
+            // _in_flight before this frame is delivered at its end_ms. The
+            // frame's preamble still arrived while the receiver was
+            // transmitting or coming back, so the radio never locked on it.
+            // end_ms == 0 means "this node has never transmitted" (a real TX
+            // always ends > 0): without that guard the settling tail would
+            // make every node spuriously deaf for the first settle_ms of the run.
+            if (!rcv_was_tx) {
+                const uint64_t own_start = _node_last_tx_start_ms[(size_t)rcv];
+                const uint64_t own_end   = _node_last_tx_end_ms[(size_t)rcv];
+                if (own_end != 0 && own_start < tx.end_ms) {
+                    if (own_end > tx.start_ms) {
+                        rcv_was_tx = true;
+                    } else if (own_end + settle_ms > tx.start_ms &&
+                               own_end + settle_ms > deaf_until_ms) {
+                        deaf_until_ms = own_end + settle_ms;
+                    }
+                }
             }
             if (rcv_was_tx) {
                 EventLog::dropHalfDuplex(
                     static_cast<unsigned long>(now),
                     _nodes[tx.sender_id]->name().c_str(),
                     _nodes[rcv]->name().c_str(),
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                    tx.sf, tx.bw_hz);
+                continue;
+            }
+            if (deaf_until_ms != 0) {
+                EventLog::dropTxSettling(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    deaf_until_ms,
                     reinterpret_cast<const uint8_t*>(tx.bytes.data()),
                     static_cast<int>(tx.bytes.size()),
                     static_cast<uint32_t>(tx.end_ms - tx.start_ms),
@@ -1853,9 +1922,55 @@ void SimController::registerTransmissionsForStep() {
                 }
             }
 
-            // TODO(Y2): plumb through SimRadio::startSendRaw so half-
-            // duplex/LBT bookkeeping fires; for v1 we synthesise the
-            // InFlight directly.
+            // §tx-fail (2026-07-25) — DONE. Modem-level transmit failure
+            // (SPI / RadioLib error path), the LAST gate before the frame goes
+            // on air — exactly where startSendRaw rolls it, and after LBT and
+            // the duty ledger, matching the device order (Node decides, then
+            // DeviceHal::pump_tx arms the radio).
+            // ★ METAL SEMANTICS, verified at lib/hal/device_hal.cpp:36-46: a
+            // failed arm DROPS the frame and the protocol is NOT told ("A
+            // failed arm drops the frame (rare radio_error; not retried
+            // here)"); the duty ledger is debited only on success. So: emit
+            // the event, push no InFlight, debit no airtime, send no
+            // onRadioBusy — MAC timeouts are the recovery path, on metal and
+            // here alike. NOT a silent vanish: tx_fail names the node.
+            // rollTxFail() makes ZERO RNG draws while tx_fail_prob == 0, so
+            // this block is byte-inert for every scenario that omits the key.
+            if (_radios[i]->rollTxFail()) {
+                EventLog::txFail(static_cast<unsigned long>(now),
+                                 _nodes[i]->name().c_str(),
+                                 _radios[i]->getTxFailCount());
+                continue;
+            }
+
+            // ★★ §startSendRaw-bypass (2026-07-25) — STILL MISSING, DEFERRED
+            // BY RULING. The original note here read: "TODO(Y2): plumb through
+            // SimRadio::startSendRaw so half-duplex/LBT bookkeeping fires; for
+            // v1 we synthesise the InFlight directly." That bypass is STILL IN
+            // PLACE — everything below synthesises the InFlight by hand.
+            // What this slice DID close is the two OBSERVABLE consequences of
+            // the bypass, not the bypass itself:
+            //   [DONE] tx_fail_prob is honoured    -> the roll just above
+            //   [DONE] TX->RX deafness is modelled -> the settling arm of the
+            //          half-duplex gate in deliverReceptionsForStep
+            //   [DONE, 2026-07-07] RX->TX turnaround -> getEarliestTxMs below
+            // What is STILL hand-mirrored (i.e. duplicated, i.e. free to
+            // drift) or simply absent because startSendRaw never runs:
+            //   * SimRadio's own TX state — _state/_tx_done_at/_packets_sent
+            //     never move, so isSendComplete()/onSendFinished() are inert;
+            //   * _earliest_rx_ms is never set, so SimRadio::notifyChannelBusy's
+            //     "can't detect a preamble before the radio is back" clamp
+            //     (SimRadio.cpp:63) is a no-op — CAD-mode LBT still hears
+            //     preambles that arrived during the node's own TX + settling
+            //     (inert under the default "energy" model, which asks the live
+            //     in-flight set instead);
+            //   * the deaf window is computed from _in_flight /
+            //     _node_last_tx_* in the delivery gate rather than read from
+            //     the radio, so the two must be kept consistent by hand.
+            // WHY still deferred: unifying the two TX paths is a substantially
+            // larger refactor (the whole staging/collision/LBT-notify block
+            // below would have to move behind the radio), and C1 forbids
+            // folding a refactor into a fix. Recorded decision, not oversight.
             InFlight f;
             f.sender_id     = i;
             // §metal-fidelity (2026-07-07): a firmware-node TX (synthesised here, bypassing startSendRaw) must still
@@ -1960,20 +2075,41 @@ void SimController::registerTransmissionsForStep() {
             // the preamble at the link's SNR. Marginal/weak links may
             // miss; reliable links almost always notify.
             //
-            // Same loop also calls SimRadio::notifyRxStart on each
-            // observer so that any future code path checking
-            // radio.isReceiving() sees the correct state. lus's loop
-            // does not currently consult that flag (the in_flight
-            // ground-truth check above is more robust), but keeping the
-            // SimRadio state hygienic prevents downstream surprises and
-            // matches meshcore_real_sim's wiring.
+            // Same loop also calls SimRadio::notifyRxStart on each observer,
+            // which arms that radio's RX-active window AND — via
+            // _earliest_tx_ms = rx_end + rx_to_tx_delay_ms — the observer's
+            // RX->TX turnaround. ⚠ NOT merely state hygiene: f.start_ms above
+            // reads getEarliestTxMs(), so this is the value that decides when
+            // every RESPONDER may reply. (The `isReceiving()` flag itself is
+            // still unconsulted by the delivery path, which uses the _in_flight
+            // ground truth; the previous comment here claimed the whole call
+            // was unconsulted, which drifted once §metal-fidelity 2026-07-07
+            // started reading getEarliestTxMs.)
+            //
+            // ★ §rx-window-arming (2026-07-25) — FIXED HERE. notifyRxStart
+            // computes `clock_now + duration`, so passing `airtime` armed the
+            // window from the TX *DECISION* time. Whenever this frame's start
+            // was itself deferred by the SENDER's own RX->TX turnaround
+            // (f.start_ms > now — every reply leg of an RTS/CTS/DATA/ACK
+            // handshake), that put every observer's rx_end — and therefore its
+            // earliest_tx — a full rx_to_tx_delay_ms EARLY, exactly cancelling
+            // the turnaround for the reply: the reply then began at precisely
+            // this frame's end_ms, with zero turnaround. Harmless while nothing
+            // modelled the TX->RX direction; LETHAL once it is (the originator
+            // is deaf for tx_to_rx_delay_ms after its own TX ends, so a reply
+            // starting at end_ms + 0 lands inside the deaf window and EVERY
+            // ACK/CTS dies). Pass the frame's REAL remaining duration so
+            // rx_end == f.end_ms. Inert for any frame that was not deferred:
+            // f.start_ms == now => end_ms - now == airtime.
             const auto& just_pushed = _in_flight.back();
+            const uint32_t rx_busy_ms =
+                static_cast<uint32_t>(just_pushed.end_ms - now);
             for (int observer = 0; observer < n; ++observer) {
                 if (observer == i) continue;
                 LinkParams lp;
                 if (!_links->getLink(i, observer, lp)) continue;
                 if (lp.snr <= -100.0f) continue;
-                _radios[observer]->notifyRxStart(static_cast<uint32_t>(airtime));
+                _radios[observer]->notifyRxStart(rx_busy_ms);
 
                 // "Did the observer's radio detect this transmission?"
                 //   CAD mode    — probabilistic CAD-miss roll vs SNR (draws

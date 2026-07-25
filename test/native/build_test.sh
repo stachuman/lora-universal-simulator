@@ -31,9 +31,10 @@ test_with_arg() {
 run test_clock    "$SCRIPT_DIR/test_clock.cpp"
 run test_link     "$SCRIPT_DIR/test_link.cpp"     "$REPO_ROOT/core/link/LinkModel.cpp"
 run test_eventlog "$SCRIPT_DIR/test_eventlog.cpp" "$REPO_ROOT/core/events/EventLog.cpp"
-# Wire-format pin for all 10 drop_* emitters (5 of them fire in NO scenario, so
+# Wire-format pin for all 11 drop_* emitters (5 of them fire in NO scenario, so
 # stream byte-identity proves nothing about them) + the shared-builder overflow
-# contract. Guards the dropCommon()/DropLine refactor.
+# contract. Guards the dropCommon()/DropLine refactor. The 11th is
+# drop_tx_settling (Wave-4 6.1.2, TX->RX turnaround deafness).
 run test_eventlog_drops "$SCRIPT_DIR/test_eventlog_drops.cpp" \
     "$REPO_ROOT/core/events/EventLog.cpp"
 run test_simradio "$SCRIPT_DIR/test_simradio.cpp" "$REPO_ROOT/core/radio/SimRadio.cpp"
@@ -138,6 +139,49 @@ test_with_arg test_lua_deprecated "$SCRIPT_DIR/test_lua_deprecated.json" \
 # byte-identity pins none of this -- see the test's header for the window-phase bug it
 # guards (MeshRoute simulation/BASELINE.md note 2026-07-25d).
 run test_send_by_name_layer "$SCRIPT_DIR/test_send_by_name_layer.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
+
+# Wave 4 (2026-07-20 realism review 6.1.2) -- TX->RX turnaround.
+# nodes[].tx_fail_prob reaching the radio at all: the corpus sets it NOWHERE, so
+# suite byte-identity is evidence the prob-0 guard WORKS and can never show it is
+# needed. Unit half proves prob 0 is draw-free; controller half proves the key is
+# plumbed and a failed arm drops the frame visibly (tx_fail).
+test_with_arg test_tx_fail_prob "$SCRIPT_DIR/test_tx_fail_prob.json" \
+    "$SCRIPT_DIR/test_tx_fail_prob.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
+
+# A node is DEAF for tx_to_rx_delay_ms after its own TX ends (LNA + PLL relock).
+# Drives the knob at 0 / 8 / 100 ms over one fixture: a frame inside the window
+# drops (drop_tx_settling), one after it is received, and the boundary + the
+# verdict track the config -- none of which stream byte-identity can pin.
+test_with_arg test_tx_settling "$SCRIPT_DIR/test_tx_settling.json" \
+    "$SCRIPT_DIR/test_tx_settling.cpp" \
     "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
     "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
     "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \

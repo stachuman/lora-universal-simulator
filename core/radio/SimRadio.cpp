@@ -199,19 +199,30 @@ float SimRadio::packetScore(float snr, int packet_len) {
     return score < 0.0f ? 0.0f : (score > 1.0f ? 1.0f : score);
 }
 
+// TX failure (models SPI/hardware errors per the RadioLib error path).
+// Extracted from startSendRaw so the LIVE TX path — which bypasses that
+// function entirely (§startSendRaw-bypass, see the header) — rolls through the
+// SAME code instead of forking a second implementation (U1).
+// ★ The prob-0 early-out is the byte-identity guard: no draw, no state change,
+// so a corpus that never sets tx_fail_prob is provably unmoved.
+bool SimRadio::rollTxFail() {
+    if (_tx_fail_prob <= 0.0f) return false;
+    // xorshift32 PRNG — avoids <random> header (min/max macro clash). The
+    // state is per-radio and seed()ed per node, so one node's TX count can
+    // never perturb another's sequence (Slice C).
+    _rng_state ^= _rng_state << 13;
+    _rng_state ^= _rng_state >> 17;
+    _rng_state ^= _rng_state << 5;
+    const float roll = (_rng_state & 0xFFFFFFu) / (float)0x1000000u;
+    if (roll >= _tx_fail_prob) return false;
+    _tx_fail_count_stat++;
+    return true;
+}
+
 bool SimRadio::startSendRaw(const uint8_t* bytes, int len) {
-    // TX failure (models SPI/hardware errors per RadioLib error path)
-    if (_tx_fail_prob > 0.0f) {
-        // xorshift32 PRNG — avoids <random> header (min/max macro clash)
-        _rng_state ^= _rng_state << 13;
-        _rng_state ^= _rng_state >> 17;
-        _rng_state ^= _rng_state << 5;
-        float roll = (_rng_state & 0xFFFFFFu) / (float)0x1000000u;
-        if (roll < _tx_fail_prob) {
-            _state = RadioState::IDLE;  // RadioLib calls idle() on failure
-            _tx_fail_count_stat++;
-            return false;
-        }
+    if (rollTxFail()) {
+        _state = RadioState::IDLE;  // RadioLib calls idle() on failure
+        return false;
     }
 
     uint32_t now = _clock.getMillis();

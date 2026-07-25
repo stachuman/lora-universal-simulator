@@ -1,0 +1,36 @@
+{
+  "_name": "test_tx_fail_prob",
+  "_desc": "Per-node modem TX-failure injection (Wave-4 §6.1.2). nodes[].tx_fail_prob parsed + range-validated by JsonConfig but never reached the radio: the roll lived only inside SimRadio::startSendRaw, which the live TX path bypasses. Two identical senders differing ONLY in tx_fail_prob (1.0 vs absent) prove the key now reaches the radio and that a failed arm removes the frame from the air while emitting tx_fail. Metal semantics (lib/hal/device_hal.cpp pump_tx): a failed arm DROPS the frame and does NOT notify the protocol, and does NOT debit the duty ledger. Analytically deterministic: no fading, no PER sigmoid, no preamble miss, no startup jitter, no warmup, duty 100%. ★ Runs on the DEPRECATED Lua engine BY NECESSITY (build_test.sh cannot link FirmwareNode) — hence the explicit per-node \"engine\":\"lua\" plus allow_deprecated_lua, the sanctioned internal use of that opt-in (same precedent as test_bw_mismatch).",
+  "simulation": {
+    "duration_ms": 4000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 4242,
+    "node_startup_jitter_ms": 0,
+    "allow_deprecated_lua": true,
+    "radio": {
+      "sf": 7,
+      "bw": 125,
+      "cr": 5,
+      "duty_cycle": 100,
+      "rx_preamble_miss_prob": 0.0,
+      "decode_margin_steepness_db": 0.0,
+      "snr_coherence_ms": 0
+    }
+  },
+  "nodes": [
+    { "name": "always_fails", "engine": "lua", "script": "bw_probe.lua", "bw": 125, "tx_fail_prob": 1.0, "config": {} },
+    { "name": "never_fails",  "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} },
+    { "name": "listener",     "engine": "lua", "script": "bw_probe.lua", "bw": 125, "config": {} }
+  ],
+  "topology": {
+    "links": [
+      { "from": "always_fails", "to": "listener", "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0, "bidir": false },
+      { "from": "never_fails",  "to": "listener", "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0, "bidir": false }
+    ]
+  },
+  "commands": [
+    { "at_ms": 1000, "node": "always_fails", "command": "ping" },
+    { "at_ms": 2000, "node": "never_fails",  "command": "ping" }
+  ]
+}

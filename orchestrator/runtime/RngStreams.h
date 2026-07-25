@@ -40,6 +40,11 @@ enum class RngDomain : uint64_t {
     Node     = 0x4E4F4445ull,  // "NODE" — per-node behaviour + timing profile
     Link     = 0x4C494E4Bull,  // "LINK" — per-directed-link physics rolls
     PathLoss = 0x50415448ull,  // "PATH" — path-loss offset/shadow draws
+    TxFail   = 0x5458464Cull,  // "TXFL" — per-node modem TX-failure rolls
+                               //   (nodes[].tx_fail_prob). Its OWN domain
+                               //   rather than Node, so switching a node's
+                               //   tx_fail_prob on cannot shift that same
+                               //   node's firmware/timing draws.
 };
 
 // Fold (seed, domain, index) into a 64-bit stream seed.

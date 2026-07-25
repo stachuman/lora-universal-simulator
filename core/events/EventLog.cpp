@@ -416,6 +416,16 @@ void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
     l.emit();
 }
 
+void dropTxSettling(unsigned long time_ms, const char* from, const char* to,
+                    uint64_t deaf_until_ms,
+                    const uint8_t* data, int len, uint32_t airtime_ms,
+                    int sf, int bw_hz) {
+    DropLine l("drop_tx_settling", time_ms, from, to);
+    l.addf(",\"deaf_until_ms\":%llu", (unsigned long long)deaf_until_ms);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.emit();
+}
+
 void dropWeak(unsigned long time_ms, const char* from, const char* to,
               float snr, float threshold,
               const uint8_t* data, int len,

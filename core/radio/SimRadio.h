@@ -104,6 +104,17 @@ public:
     int  recvRaw(uint8_t* bytes, int sz);
 
     // ---- TX path --------------------------------------------------------
+    // ★ §startSendRaw-bypass (2026-07-25): startSendRaw() is NOT on the live
+    // TX path. SimController synthesises its InFlight directly (its own
+    // TODO(Y2) records why), so NOTHING below this comment runs for a real
+    // scenario TX — the controller hand-mirrors the pieces it needs instead:
+    //   * the RX->TX turnaround   -> read via getEarliestTxMs()
+    //   * the tx_fail_prob roll   -> called via rollTxFail()          [DONE]
+    //   * the TX->RX deaf window  -> recomputed in the delivery gate  [DONE]
+    // and _earliest_rx_ms / _tx_done_at / _state / _packets_sent stay at
+    // their construction values, so isSendComplete(), onSendFinished() and
+    // getPacketsSent() are inert in an `lus` run. Keep the mirrored pieces in
+    // step with this class until the two paths are unified.
     bool startSendRaw(const uint8_t* bytes, int len);
     bool isSendComplete();
     void onSendFinished();
@@ -119,9 +130,21 @@ public:
     void resetStats() { _packets_recv = _packets_sent = _packets_recv_errors = 0; }
 
     // ---- TX failure injection (models SPI/HW errors) --------------------
+    // §tx-fail (2026-07-25) DONE: nodes[].tx_fail_prob now REACHES the radio.
+    // SimController::initialize() calls setTxFailProb() from the parsed config
+    // and seed()s each radio from its own (scenario_seed, TxFail, node_index)
+    // stream, and the live TX path calls rollTxFail() below. Before this the
+    // config key parsed, validated, and was then silently discarded (the roll
+    // only ever ran inside the bypassed startSendRaw).
     void setTxFailProb(float p) { _tx_fail_prob = p; }
     void seed(uint64_t s) { _rng_state = static_cast<uint32_t>(s) | 1u; } // ensure non-zero
     uint32_t getTxFailCount() const { return _tx_fail_count_stat; }
+    // One transmit-attempt roll against _tx_fail_prob: true = the modem
+    // refused this frame (RadioLib error path). ★ DRAW-FREE at prob 0 — the
+    // guard is load-bearing: an unconditional draw would advance this radio's
+    // stream on every TX and move every scenario that never sets the key.
+    // The SINGLE roll implementation; startSendRaw() calls it too.
+    bool rollTxFail();
 
     // ---- Rx boosted gain mode (no-op in simulator) ----------------------
     void setRxBoostedGainMode(bool enable) { _rx_boosted_gain = enable; }

@@ -92,7 +92,21 @@ void dropPreambleMiss(unsigned long time_ms, const char* from, const char* to,
                       const uint8_t* data, int len, uint32_t airtime_ms,
                       int sf, int bw_hz);
 
+// Receiver's own TX was CONCURRENT with this frame's airtime — one PA path,
+// so the modem was transmitting and never heard it.
 void dropHalfDuplex(unsigned long time_ms, const char* from, const char* to,
+                    const uint8_t* data, int len, uint32_t airtime_ms,
+                    int sf, int bw_hz);
+// §tx-turnaround (2026-07-25): receiver's own TX had ALREADY ENDED, but the
+// radio was still in its TX->RX turnaround (LNA re-enable + PLL relock,
+// simulation.radio.tx_to_rx_delay_ms — 8 ms bench-measured) when this frame's
+// preamble arrived, so it never locked on. A DIFFERENT mechanism from
+// drop_halfduplex (concurrent TX) and kept a distinct event so a trace can
+// separate "was transmitting" from "was still coming back"; deaf_until_ms is
+// the absolute time the radio becomes receptive, exactly as drop_rx_blind
+// carries blind_until_ms for the SF-retune window.
+void dropTxSettling(unsigned long time_ms, const char* from, const char* to,
+                    uint64_t deaf_until_ms,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int sf, int bw_hz);
 void dropWeak(unsigned long time_ms, const char* from, const char* to,
