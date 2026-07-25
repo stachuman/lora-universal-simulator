@@ -6,7 +6,9 @@ LbtModel::LbtModel(int n_nodes, LbtConfig cfg, uint64_t rng_seed)
       _busy_until(n_nodes > 0 ? (size_t)n_nodes : 0u, 0ULL) {}
 
 LbtModel::LbtModel(int n_nodes, float cad_miss_prob, uint64_t rng_seed)
-    : LbtModel(n_nodes, LbtConfig{cad_miss_prob, 0.0f, -15.0f}, rng_seed) {}
+    : LbtModel(n_nodes,
+               LbtConfig{cad_miss_prob, 0.0f, -15.0f, LbtMode::Cad, 0.0f},
+               rng_seed) {}
 
 float LbtModel::effectiveMissProb(float rx_snr_db) const {
     // Upstream Orchestrator.cpp 518-526.
@@ -43,12 +45,22 @@ bool LbtModel::isChannelBusy(int observer_node, uint64_t now_ms) const {
     if (observer_node < 0 || (size_t)observer_node >= _busy_until.size()) {
         return false;
     }
+    if (_cfg.mode == LbtMode::Energy) {
+        // Ask-time energy detect: re-evaluated live on every call (no cached
+        // busy-until survives across defer/retry attempts).
+        if (!_energy_provider) return false;
+        return _energy_provider(observer_node, _cfg.energy_threshold_snr_db) > now_ms;
+    }
     return _busy_until[(size_t)observer_node] > now_ms;
 }
 
 uint64_t LbtModel::busyUntil(int observer_node) const {
     if (observer_node < 0 || (size_t)observer_node >= _busy_until.size()) {
         return 0;
+    }
+    if (_cfg.mode == LbtMode::Energy) {
+        if (!_energy_provider) return 0;
+        return _energy_provider(observer_node, _cfg.energy_threshold_snr_db);
     }
     return _busy_until[(size_t)observer_node];
 }

@@ -76,6 +76,20 @@ struct SimConfig {
         float cad_marginal_snr    = -15.0f;
         float snr_coherence_ms    = 0.0f;
 
+        // Listen-Before-Talk model selector (2026-07-24 realism review §1A-1):
+        //   "energy" (DEFAULT) — the device's noise-floor energy detect:
+        //       busy is decided at TX-attempt time by comparing each in-flight
+        //       frame's SNR-at-observer to `lbt_energy_threshold_snr_db`;
+        //       deterministic, zero RNG, re-sampled on every deferred retry.
+        //   "cad"              — the historical probabilistic CAD-miss model
+        //       (SNR-interpolated miss prob, pre-rolled per frame at TX-start),
+        //       kept for A/B. Any other value = a named validateConfig error.
+        // The threshold mirrors the device's noise-floor + margin rule; it
+        // reads the MATRIX SNR (same source the CAD model uses — fading-in-
+        // verdicts is a deliberately separate future slice).
+        std::string lbt_model                 = "energy";
+        float       lbt_energy_threshold_snr_db = 0.0f;
+
         // SX1262-style hardware turnaround delays. After an RX completes,
         // the radio cannot TX for rx_to_tx_delay_ms (PA ramp + PLL); after
         // a TX, cannot RX for tx_to_rx_delay_ms (LNA + PLL relock).

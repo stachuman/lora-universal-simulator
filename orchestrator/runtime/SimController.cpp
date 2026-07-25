@@ -647,12 +647,40 @@ void SimController::initialize() {
     // pending TX (isChannelBusy) and updated after each successful TX
     // (notifyChannelBusy per reachable observer, gated by shouldNotifyBusy
     // for the SNR-modulated CAD-miss roll). See R.1.6.
+    LbtConfig lbt_cfg;
+    lbt_cfg.cad_miss_prob    = _cfg.simulation.radio.cad_miss_prob;
+    lbt_cfg.cad_reliable_snr = _cfg.simulation.radio.cad_reliable_snr;
+    lbt_cfg.cad_marginal_snr = _cfg.simulation.radio.cad_marginal_snr;
+    // §1A-1: scenario-level default is "energy" (validated to energy|cad in JsonConfig).
+    lbt_cfg.mode = (_cfg.simulation.radio.lbt_model == "cad") ? LbtMode::Cad : LbtMode::Energy;
+    lbt_cfg.energy_threshold_snr_db = _cfg.simulation.radio.lbt_energy_threshold_snr_db;
     _lbt = std::make_unique<LbtModel>(
-        n,
-        LbtConfig{_cfg.simulation.radio.cad_miss_prob,
-                  _cfg.simulation.radio.cad_reliable_snr,
-                  _cfg.simulation.radio.cad_marginal_snr},
-        _cfg.simulation.seed ^ 0xCAFEBABEull);
+        n, lbt_cfg, _cfg.simulation.seed ^ 0xCAFEBABEull);
+
+    // Energy mode: the busy verdict is computed at ASK TIME from the live
+    // in-flight frame set + the SNR matrix (which LbtModel doesn't own).
+    // This functor walks _in_flight and returns the latest end_ms among
+    // frames whose SNR-at-observer >= threshold, at the current sim-time
+    // (_now_ms), or 0 if idle. Pure matrix lookup — ZERO RNG draws, and it
+    // reads the MATRIX SNR (same source the CAD pre-roll uses; fading-in-
+    // verdicts is a separate future slice). Fresh on every call, so the
+    // firmware's defer/retry re-asks always get a current verdict.
+    if (lbt_cfg.mode == LbtMode::Energy) {
+        _lbt->setEnergyBusyProvider(
+            [this](int observer, float threshold_db) -> uint64_t {
+                uint64_t busy_until = 0;
+                for (const auto& f : _in_flight) {
+                    if (f.sender_id == observer) continue;   // self-TX handled separately
+                    if (f.end_ms <= _now_ms) continue;       // already ended this step
+                    LinkParams lp;
+                    if (!_links->getLink(f.sender_id, observer, lp)) continue;
+                    if (lp.snr <= -100.0f) continue;         // no link
+                    if (lp.snr < threshold_db) continue;     // below the energy floor
+                    if (f.end_ms > busy_until) busy_until = f.end_ms;
+                }
+                return busy_until;
+            });
+    }
 
     // Hand each ScriptedNode a borrowed pointer to the LBT model so
     // self:channel_busy_until() can answer without going through SimController.
@@ -1616,15 +1644,36 @@ void SimController::registerTransmissionsForStep() {
                 if (!_links->getLink(i, observer, lp)) continue;
                 if (lp.snr <= -100.0f) continue;
                 _radios[observer]->notifyRxStart(static_cast<uint32_t>(airtime));
-                if (!_lbt->shouldNotifyBusy(lp.snr)) continue;
-                _lbt->notifyChannelBusy(observer, i,
-                                        just_pushed.end_ms, lp.snr);
+
+                // "Did the observer's radio detect this transmission?"
+                //   CAD mode    — probabilistic CAD-miss roll vs SNR (draws
+                //                  the LBT RNG); on a hit, record the busy
+                //                  window (busy is pre-rolled here at TX-start).
+                //   ENERGY mode — deterministic noise-floor energy detect:
+                //                  detected iff SNR-at-observer >= threshold.
+                //                  NO busy window is recorded — busy is computed
+                //                  at ask-time from the live in-flight set (see
+                //                  the energy provider). ZERO RNG draws.
+                // Either way, `detected` gates the PreambleDetected callback
+                // below (the energy threshold is the RNG-free analogue of the
+                // CAD-miss roll that historically gated it).
+                bool detected;
+                if (_lbt->mode() == LbtMode::Energy) {
+                    detected = (lp.snr >= _lbt->config().energy_threshold_snr_db);
+                } else {
+                    detected = _lbt->shouldNotifyBusy(lp.snr);
+                    if (detected) {
+                        _lbt->notifyChannelBusy(observer, i,
+                                                just_pushed.end_ms, lp.snr);
+                    }
+                }
+                if (!detected) continue;
                 // SX1262-PreambleDetected equivalent: fire only if the
                 // observer's modem is currently tuned to a SF that includes
                 // the TX's SF. LoRa SFs are quasi-orthogonal at the same BW;
-                // a radio set to SF7 won't see an SF10 preamble. The CAD
-                // gate above (shouldNotifyBusy) already modelled the
-                // probabilistic miss against SNR. Fires regardless of
+                // a radio set to SF7 won't see an SF10 preamble. The detect
+                // gate above already modelled the miss (CAD roll / energy
+                // threshold). Fires regardless of
                 // sync-word match — matches real hardware (PreambleDetected
                 // IRQ is pre-SyncWordValid), and that's the right level for
                 // a "channel about to be polluted by anyone at our SF"

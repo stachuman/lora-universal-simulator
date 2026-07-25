@@ -35,8 +35,8 @@ int main() {
     // ---- 2.1 metal defaults (config-absent) -----------------------------------------
     {
         SimConfig::RadioConfig r;   // struct defaults
-        assert(r.rx_to_tx_delay_ms == 27.0f);
-        assert(r.tx_to_rx_delay_ms == 27.0f);
+        assert(r.rx_to_tx_delay_ms == 8.0f);   // 2026-07-23 bench correction: 27 ms was a stale overestimate
+        assert(r.tx_to_rx_delay_ms == 8.0f);
         SimConfig::SimulationConfig s;
         assert(s.rx_window_slop == "metal");
         std::printf("  [2.1] metal turnaround/slop defaults (27/27, \"metal\"): OK\n");

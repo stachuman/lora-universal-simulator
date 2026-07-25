@@ -175,6 +175,11 @@ static SimConfig parseJson(const json& j) {
             if (r.contains("cad_marginal_snr"))    cfg.simulation.radio.cad_marginal_snr    = r["cad_marginal_snr"].get<float>();
             if (r.contains("snr_coherence_ms"))    cfg.simulation.radio.snr_coherence_ms    = r["snr_coherence_ms"].get<float>();
             if (r.contains("snr_report_ceiling_db")) cfg.simulation.radio.snr_report_ceiling_db = r["snr_report_ceiling_db"].get<float>();  // §snr-unification A: receiver-report saturation ceiling (default +12; huge = disable)
+            // §1A-1 (2026-07-24 realism review): LBT model — "energy" (default, device noise-floor
+            // energy detect) | "cad" (legacy probabilistic model, kept for A/B). Unknown = fail-loud
+            // validateConfig error. lbt_energy_threshold_snr_db is the energy-detect busy threshold (dB).
+            if (r.contains("lbt_model"))           cfg.simulation.radio.lbt_model           = r["lbt_model"].get<std::string>();
+            if (r.contains("lbt_energy_threshold_snr_db")) cfg.simulation.radio.lbt_energy_threshold_snr_db = r["lbt_energy_threshold_snr_db"].get<float>();
             // §2.2 (2026-07-21 realism ruling): duty_cycle is authored as a PERCENT (1 = 1%),
             // stored verbatim; consumers divide by 100 (SimController enforcement + injection).
             if (r.contains("duty_cycle"))          cfg.simulation.radio.duty_cycle          = r["duty_cycle"].get<float>();  // PERCENT (1 = 1%)
@@ -536,6 +541,9 @@ static void validateConfig(const SimConfig& cfg) {
     if (cfg.simulation.radio.snr_coherence_ms < 0.0f)
         errors.push_back("simulation.radio.snr_coherence_ms must be >= 0 (got "
                          + std::to_string(cfg.simulation.radio.snr_coherence_ms) + ")");
+    if (cfg.simulation.radio.lbt_model != "energy" && cfg.simulation.radio.lbt_model != "cad")
+        errors.push_back("simulation.radio.lbt_model must be \"energy\" or \"cad\" (got \""
+                         + cfg.simulation.radio.lbt_model + "\")");
     // §2.2 (2026-07-21 realism ruling): duty_cycle is a PERCENT (1 = 1%). Range (0, 100].
     if (cfg.simulation.radio.duty_cycle < 0.0f)
         errors.push_back("simulation.radio.duty_cycle is required (PERCENT in (0, 100], e.g. 1 = 1%)");
