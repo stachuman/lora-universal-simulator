@@ -60,6 +60,32 @@ struct SimConfig {
         int bw = -1;   // Hz (see convention above); -1 = REQUIRED-and-unset
         int cr = -1;
 
+        // ★ THE SCENARIO'S GLOBAL RF CARRIER, in INTEGER kHz (§carrier, 2026-07-26 owner ruling:
+        //   "a realistic simulator able to test our multi layer / multi freq simulations").
+        //   Every node inherits this unless it sets its own `freq_khz`; a node's per-LAYER
+        //   config.layers[i].freq_mhz then overrides it again at runtime via the firmware's own
+        //   Hal::set_rx_freq retune (see SimController::_node_rx_freq_khz).
+        //
+        // WHY kHz-INTEGER AND NOT A kHz/MHz DOUBLE LIKE `bw`: the carrier is compared for EXACT
+        // EQUALITY by the reachability gate (hard split, no adjacent-channel overlap — we have no
+        // bench data on adjacent-channel rejection). Float equality there is a latent bug, so the
+        // carrier is integer end-to-end. The ONE MHz→kHz rounding that does exist lives in the
+        // firmware (`meshroute::protocol::mhz_to_khz`) and is applied at the single seam where the
+        // firmware hands a `double` MHz over (NodeRuntimeWrapper's HalAdapter::set_rx_freq); this
+        // TU deliberately owns NO second conversion — it would be free to drift.
+        //
+        // WHY NOT REQUIRED, unlike sf/bw/cr (§1.3): an absent sf/bw/cr silently produced a WRONG
+        // PHYSICS ANSWER (62.5 MHz bandwidth, cr outside [5..8]). An absent carrier cannot: the gate
+        // is pure equality, so one uniform default reproduces exactly the single-carrier world that
+        // existed before this feature — the whole shipped corpus is byte-identical under it. 868000
+        // also agrees with path_loss.frequency_mhz's own 868.0 default, so the two globals do not
+        // start out disagreeing.
+        // ⚠ path_loss.frequency_mhz is a SEPARATE, authoring-only field (the webapp's SRTM+ITM
+        //   generator; the runtime path-loss model ignores it) and is deliberately NOT reused here:
+        //   this value is the modem's tuned carrier, that one is a propagation parameter. Unifying
+        //   them is a defensible follow-up, but it would be a second semantic change in one slice.
+        int freq_khz = 868000;
+
         // Capture / CAD physics tuning.
         float capture_locked_db   = 3.0f;
         float capture_unlocked_db = 6.0f;
@@ -316,6 +342,13 @@ struct SimConfig {
         int sf = -1;
         int bw = -1;
         int cr = -1;
+        // §carrier: this node's BOOT RF carrier in INTEGER kHz; -1 = inherit simulation.radio.freq_khz
+        // (the merge at the bottom of load(), same shape as sf/bw/cr). It seeds
+        // SimController::_node_rx_freq_khz — the node's LIVE tuned carrier, which a firmware
+        // Hal::set_rx_freq (per-layer window switch / mobile PHY adopt) then moves at runtime.
+        // A gateway that wants two carriers does NOT set this twice: it sets
+        // config.layers[i].freq_mhz, and the per-layer retune wins by construction.
+        int freq_khz = -1;
 
         // Per-node receive-SF set. Empty means "default to [node.sf]" at
         // SimController init time (single-SF reception, matching real

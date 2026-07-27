@@ -92,6 +92,7 @@ public:
     void     api_set_rx_sf(int sf);                      // single-SF retune
     void     api_set_rx_sf_set(sol::table sf_set);       // multi-SF retune (opt-in)
     void     api_set_rx_bw(int bw_hz);                   // RX-bandwidth retune (Hz)
+    void     api_set_rx_freq_khz(int khz);               // §carrier: RF-carrier retune (INTEGER kHz — see the impl)
     uint64_t api_channel_busy_until() const;             // LBT busy_until or 0
     uint64_t api_tx_in_flight() const;                   // own pending TX end_ms or 0
     // Sum of TX airtime in the last `window_ms` ms. Used by scripts that
@@ -134,6 +135,10 @@ public:
     // Live RX-bandwidth slot in SimController::_node_rx_bw_hz — the BW twin
     // of attachSfRxSet, same stable-pointer discipline.
     void attachRxBwSlot(int* slot) override { _rx_bw_hz = slot; }
+
+    // §carrier: live RX-carrier slot in SimController::_node_rx_freq_khz — the
+    // frequency twin of the two above, same stable-pointer discipline.
+    void attachRxFreqSlot(uint32_t* slot) override { _rx_freq_khz = slot; }
 
     // Per-node slot updated by SimController: set to the TX end_ms when an
     // InFlight is pushed for this sender, cleared to 0 when the InFlight is
@@ -188,6 +193,7 @@ private:
     bool              _initialized = false;
     std::vector<int>* _sf_rx_set = nullptr;  // borrowed; set via attachSfRxSet
     int*              _rx_bw_hz  = nullptr;  // borrowed; set via attachRxBwSlot
+    uint32_t*         _rx_freq_khz = nullptr; // borrowed; set via attachRxFreqSlot (§carrier, kHz)
     uint64_t*         _tx_in_flight_until = nullptr;  // borrowed; SimController owns
     class LbtModel*   _lbt = nullptr;                  // borrowed; SimController owns
     float             _clock_drift_ppm = 0.0f;         // set by SimController at init

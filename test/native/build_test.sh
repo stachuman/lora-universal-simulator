@@ -4,7 +4,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 CXX="${CXX:-g++}"
-CXXFLAGS="-std=c++17 -Wall -Wextra -O0 -g"
+# -Werror=switch (owner ruling 2026-07-27): this harness does NOT go through CMake, so the top-level
+# add_compile_options(-Werror=switch) in ../../CMakeLists.txt does not reach it — it needs its own copy or the
+# native suite would stay the one place an unhandled enumerator still only warns. Measured clean 2026-07-27:
+# all 27 binaries build with ZERO warnings of any class.
+CXXFLAGS="-std=c++17 -Wall -Wextra -Werror=switch -O0 -g"
 INCLUDES="-I $REPO_ROOT -I $REPO_ROOT/third_party"
 
 run() {
@@ -113,6 +117,30 @@ test_with_arg test_bw_mismatch "$SCRIPT_DIR/test_bw_mismatch.json" \
 # F-BW-TX (test_bw_tx_follows_retune) was DELETED 2026-07-25 by owner ruling: the
 # dual-BW gateway probe carries that proof instead, and the test drove its retune
 # through the now-deprecated Lua engine.
+
+# §carrier (owner ruling 2026-07-26): FREQUENCY-SELECTIVE PHY. The BW gate's twin on the
+# third PHY axis -- and the ONLY automated proof the feature works, because the corpus is
+# carrier-dark BY CONSTRUCTION (no scenario sets a second carrier, so every comparison in
+# the gate is a tautology and suite byte-identity proves only "no regression"). Covers the
+# schema default + inherit + fail-loud refusals, the hard split incl. an ADJACENT channel,
+# a retune flipping the verdict both ways, and all four consumers of the one shared
+# predicate: decode, preamble-detect, energy-LBT busy and collision.
+test_with_arg test_freq_mismatch "$SCRIPT_DIR/test_freq_mismatch.json" \
+    "$SCRIPT_DIR/test_freq_mismatch.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/SimController.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/LuaHost.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/ScriptedNode.cpp" \
+    "$REPO_ROOT/orchestrator/runtime/TimerWheel.cpp" \
+    "$REPO_ROOT/orchestrator/test_runner/ExpectRunner.cpp" \
+    "$REPO_ROOT/core/radio/SimRadio.cpp" \
+    "$REPO_ROOT/core/link/LinkModel.cpp" \
+    "$REPO_ROOT/core/link/LinkFadingState.cpp" \
+    "$REPO_ROOT/core/link/PathLossModel.cpp" \
+    "$REPO_ROOT/core/physics/CollisionModel.cpp" \
+    "$REPO_ROOT/core/physics/LbtModel.cpp" \
+    "$REPO_ROOT/core/events/EventLog.cpp" \
+    "$REPO_ROOT/core/topology/JsonConfig.cpp" \
+    $LUA_CFLAGS $LUA_LIBS
 
 # ★ The deprecated-Lua contract (2026-07-25 ruling): default engine "meshroute",
 # a "lua" node REFUSED at initialize(), the config/CLI opt-in that sanctions it.

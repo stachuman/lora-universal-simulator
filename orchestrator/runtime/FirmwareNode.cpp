@@ -235,6 +235,50 @@ void FirmwareNode::simSetRxBw(uint32_t bw_hz) {
     }
 }
 
+// §carrier (2026-07-26): the node's LIVE RF carrier, in INTEGER kHz. Fed by the per-variant HalAdapter,
+// which is where the firmware's `double` MHz was canonicalized through the firmware's OWN
+// protocol::mhz_to_khz — this side never converts, so the two can't drift (U2).
+//
+// ONE slot, not three like simSetRxBw: a radio has ONE synthesizer, so the tuned carrier is
+// simultaneously what the node can hear AND what its next TX flies on. The delivery gate reads the slot
+// for RX; registerTransmissionsForStep stamps InFlight::freq_khz from the SAME slot for TX. That mirrors
+// the device exactly: DeviceRadio::set_rx_freq latches the frequency in standby and
+// `start_transmit never sets frequency`, so the latched carrier carries into the next transmission.
+//
+// 0 = "inherit" per the Hal contract (DeviceHal::set_rx_freq returns early on mhz <= 0, and the core
+// only calls it when layers[i].freq_mhz > 0). Nothing is written, so a node can never be silently
+// detuned to 0 — which would make it totally deaf, since 0 can equal no real frame carrier.
+//
+// ★ NO BLIND WINDOW IS ARMED. A frequency hop IS a PLL relock, but the sim has no bench-measured
+// carrier-switch settling time, and inventing one is exactly the fabricated-physics trap this slice was
+// told to avoid (same reasoning as ScriptedNode::api_set_rx_bw / simSetRxBw, which arm none either).
+// In practice it is moot: EVERY firmware call site (node.cpp activate_layer, adopt_mobile_phy,
+// node_mobile.cpp scan) calls set_rx_sf IMMEDIATELY BEFORE set_rx_freq, and set_rx_sf arms the existing
+// sf_switch_delay_ms window at the same instant. If a bench measurement ever lands, arm it here.
+void FirmwareNode::simSetRxFreqKhz(uint32_t khz) {
+    if (khz == 0) return;                                  // inherit — leave the boot/previous carrier
+    if (_rx_freq_khz) *_rx_freq_khz = khz;
+}
+
+// §cr-retune (2026-07-26): the CR half of the per-layer PHY retune, previously MISSING end-to-end
+// (Hal::set_rx_cr's no-op default was inherited, so `_radios[i]->getCR()` never moved).
+//
+// CR is not a decode gate — LoRa's explicit header carries the coding rate, so a receiver demodulates
+// any CR — so there is no per-node "live RX cr" slot and no drop_cr_mismatch. Its ONLY observable is
+// AIRTIME: getEstAirtimeFor() consumes SimRadio::_cr, and the sim resolves every frame's cr from
+// getCR() because the firmware never sets TxParams::cr (verified: node_mac.cpp/node_beacon.cpp set only
+// sf/label/tag). So the retune must move the radio, and that is the whole fix — the device ties the two
+// the same way (DeviceHal::set_rx_cr assigns _def_cr, and tx() resolves the -1 cr sentinel against it,
+// so "the airtime debit == the on-air CR").
+// cr is preserved-in-range by the firmware (validate_gateway_layers rejects anything outside 5..8 with
+// GwValErr::bad_cr) and 0 = inherit, mirrored here as the early return — no clamp, no invented default.
+void FirmwareNode::simSetRxCr(uint8_t cr) {
+    if (cr == 0) return;                                   // inherit the global — leave the radio alone
+    // CR only; sf/bw read back and re-stamped unchanged (SimRadio has no narrower setter, and adding one
+    // would fork a second way to mutate the same field — the simSetRxBw argument, unchanged).
+    _radio.setRadioParams(_radio.getSF(), _radio.getBwHz(), static_cast<int>(cr));
+}
+
 uint64_t FirmwareNode::simChannelBusyUntil() {
     // Gate-1: honour the lbt_enabled host knob so a disabled-LBT gate reports an
     // idle channel (the firmware LBT then never defers on the sim primitive).

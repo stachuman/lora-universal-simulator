@@ -61,6 +61,7 @@ public:
     const std::string& name() const override { return _name; }
     void attachSfRxSet(std::vector<int>* slot) override { _sf_rx_set = slot; }
     void attachRxBwSlot(int* slot) override { _rx_bw_hz = slot; }   // live RX BW (Hz); written by simSetRxBw
+    void attachRxFreqSlot(uint32_t* slot) override { _rx_freq_khz = slot; }   // §carrier: live RX carrier (kHz); written by simSetRxFreqKhz
     void attachTxInFlightSlot(uint64_t* slot) override { _tx_in_flight_until = slot; }
     void attachLbtModel(LbtModel* lbt) override { _lbt = lbt; }
     void setClockDriftPpm(float ppm) override { _clock_drift_ppm = ppm; }
@@ -77,6 +78,8 @@ public:
     int      simTx(const uint8_t* bytes, size_t len, const mrsim::SimTxParams& p) override;  // -> SimTxResult
     void     simSetRxSf(int sf) override;
     void     simSetRxBw(uint32_t bw_hz) override;   // the device _def_bw mirror: moves the slop bw, the live RX bw, AND the radio's default TX bw
+    void     simSetRxFreqKhz(uint32_t khz) override;  // §carrier: move the node's LIVE tuned carrier (one PLL -> one value; TX follows it too)
+    void     simSetRxCr(uint8_t cr) override;         // §cr-retune: move the radio's CR so airtime is debited at the ACTIVE layer's cr
     uint64_t simChannelBusyUntil() override;
     uint64_t simAirtimeUsedMs(uint64_t window_ms) override;
     uint64_t simOldestTxEndMs() override;
@@ -112,6 +115,7 @@ private:
     bool              _initialized = false;
     std::vector<int>* _sf_rx_set = nullptr;
     int*              _rx_bw_hz  = nullptr;   // borrowed; SimController::_node_rx_bw_hz slot (live RX BW)
+    uint32_t*         _rx_freq_khz = nullptr; // borrowed; SimController::_node_rx_freq_khz slot (§carrier: live RX/TX carrier, kHz)
     uint64_t*         _tx_in_flight_until = nullptr;
     LbtModel*         _lbt = nullptr;
     bool              _lbt_enabled = true;   // R3.x host knob (config "lbt_enabled")

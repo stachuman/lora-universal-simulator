@@ -174,6 +174,33 @@ void dropBwMismatch(unsigned long time_ms, const char* from, const char* to,
                     const uint8_t* data, int len, uint32_t airtime_ms,
                     int sf);
 
+// FREQUENCY (carrier) mismatch — the receiver's modem is tuned to a different
+// RF channel, so the frame was never in its passband at all. §carrier, the
+// 2026-07-26 frequency-selective-PHY ruling.
+// ★ ITS OWN REASON ON PURPOSE — deliberately NOT folded into drop_no_link.
+// "no RF link" and "wrong channel" are different physical facts with different
+// fixes, and mislabelling one condition as another is the exact defect class
+// this project keeps paying for (the `> gateway err ok` enum hole; six
+// unhandled PushKinds; the oracle collapsing 11 push kinds into send_failed).
+// HARD SPLIT: exact integer-kHz equality, or unreachable. No partial
+// adjacent-channel overlap is modelled — there is no bench data on our radios'
+// adjacent-channel rejection, and inventing the parameters would be fabricated
+// physics (the same trap as guessing a motion sigma for fading).
+// `packet_freq_khz` is the frame's carrier, `rx_freq_khz` the receiver's live
+// one (seeded from nodes[i].freq_khz, moved by Hal::set_rx_freq ->
+// ISimHal::simSetRxFreqKhz on a gateway's per-layer window switch or a mobile
+// adopting a host's PHY).
+// BOTH `sf` and `bw_hz` are emitted — unlike the SF/BW twins this drop asserts
+// nothing about either, so both stay diagnostically useful.
+// `snr_db` / `rssi_dbm` are the link's PRE-FADING quality: the gate sits ahead
+// of the fading draw on purpose (an out-of-band frame must consume no RNG), so
+// there is no faded value to report. See SimController's §carrier gate.
+void dropFreqMismatch(unsigned long time_ms, const char* from, const char* to,
+                      int packet_freq_khz, int rx_freq_khz,
+                      float snr, float rssi,
+                      const uint8_t* data, int len, uint32_t airtime_ms,
+                      int sf, int bw_hz);
+
 // TX failure events
 void txFail(unsigned long time_ms, const char* node, uint32_t count);
 

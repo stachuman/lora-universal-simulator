@@ -22,6 +22,8 @@ if(MESHROUTE_ENABLED)
     # meshroute::/meshroute_gw:: type). It links BOTH ODR-distinct firmware libs; the per-variant wrapper
     # (compiled into each) exports the matching factory. meshroute_monocypher comes in transitively.
     target_sources(lus PRIVATE runtime/FirmwareNode.cpp)
-    target_link_libraries(lus PRIVATE meshroute_core_normal meshroute_core_gw)
+    # meshroute_console (Wave-4 #6): ONE copy of lib/console, in the default namespace, reached
+    # from BOTH wrapper variants through the primitive-typed mrsim::pushKindName bridge.
+    target_link_libraries(lus PRIVATE meshroute_core_normal meshroute_core_gw meshroute_console)
     target_compile_definitions(lus PRIVATE MESHROUTE_ENABLED=1)
 endif()

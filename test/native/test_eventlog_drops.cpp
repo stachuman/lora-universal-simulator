@@ -1,6 +1,6 @@
 // test/native/test_eventlog_drops.cpp
 //
-// Wire-format pin for ALL ELEVEN drop_* emitters.
+// Wire-format pin for ALL TWELVE drop_* emitters.
 //
 // Why this exists: the scenario suite only ever fires FIVE of them
 // (drop_sf_mismatch / drop_weak / drop_preamble_miss / drop_rx_blind /
@@ -9,15 +9,19 @@
 // scenario byte-identity proves NOTHING about them — including across the
 // dropCommon()/DropLine refactor that rewrote all ten bodies (and, since
 // 2026-07-25, drop_tx_settling — the TX->RX-turnaround twin of
-// drop_halfduplex, which no scenario fired before that slice either). This test is
+// drop_halfduplex, which no scenario fired before that slice either; and since
+// 2026-07-26, drop_freq_mismatch — the carrier twin, which no scenario can fire
+// because none sets a second carrier). This test is
 // the missing half of that proof: each emitter's exact NDJSON line, field
 // order included, asserted verbatim.
 //
-// It also pins the three shape carve-outs that make the shared builder
+// It also pins the four shape carve-outs that make the shared builder
 // non-trivial and would otherwise rot silently:
 //   - drop_weak / drop_loss carry NO "airtime_ms"
 //   - drop_sf_mismatch carries "packet_sf" and NO "sf"
 //   - drop_bw_mismatch carries "packet_bw_hz" and NO "bw_hz"
+//   - drop_freq_mismatch carries "packet_freq_khz" AND BOTH "sf" and "bw_hz"
+//     (it asserts nothing about either axis, so neither is omitted)
 // plus the optional label/info tail (present, absent, and JSON-escaped).
 
 #include "core/events/EventLog.h"
@@ -237,6 +241,30 @@ int main() {
     "{\"type\":\"drop_bw_mismatch\",\"time_ms\":1014,\"from\":\"alice\",\"to\":\"bob\","
     "\"packet_bw_hz\":250000,\"rx_bw_hz\":62500,\"snr_db\":-3.50,\"rssi_dbm\":-110.25,"
     "\"pkt\":\"e3a027a5\",\"airtime_ms\":40,\"sf\":8}");
+
+    // ---- 10b. drop_freq_mismatch: packet_freq_khz/rx_freq_khz, sf AND bw_hz --
+    // §carrier (2026-07-26). Its OWN reason on purpose — a carrier mismatch is NOT
+    // drop_no_link. Unlike its SF/BW twins this drop asserts nothing about either
+    // axis, so BOTH sf and bw_hz are emitted (no kOmit carve-out); that is the
+    // shape carve-out worth pinning here. No scenario fires it, so this is the
+    // only wire-format proof it has.
+    expect(emitted([&] {
+        EventLog::dropFreqMismatch(1016, "alice", "bob",
+                                   /*packet_freq_khz=*/868000, /*rx_freq_khz=*/869500,
+                                   8.0f, -80.0f, p, n, 128, /*sf=*/7, /*bw_hz=*/125000);
+    }),
+    "{\"type\":\"drop_freq_mismatch\",\"time_ms\":1016,\"from\":\"alice\",\"to\":\"bob\","
+    "\"packet_freq_khz\":868000,\"rx_freq_khz\":869500,\"snr_db\":8.00,\"rssi_dbm\":-80.00,"
+    "\"pkt\":\"e3a027a5\",\"airtime_ms\":128,\"sf\":7,\"bw_hz\":125000}");
+    // An ADJACENT carrier (100 kHz away) reports identically — the gate is a HARD
+    // split, so "nearly right" is not a distinguishable outcome anywhere.
+    expect(emitted([&] {
+        EventLog::dropFreqMismatch(1017, "alice", "bob", 868000, 868100,
+                                   -3.5f, -110.25f, p, n, 41, 8, 62500);
+    }),
+    "{\"type\":\"drop_freq_mismatch\",\"time_ms\":1017,\"from\":\"alice\",\"to\":\"bob\","
+    "\"packet_freq_khz\":868000,\"rx_freq_khz\":868100,\"snr_db\":-3.50,\"rssi_dbm\":-110.25,"
+    "\"pkt\":\"e3a027a5\",\"airtime_ms\":41,\"sf\":8,\"bw_hz\":62500}");
 
     // ---- 11. overflow semantics: all-or-nothing, ALWAYS terminated --------
     // Unreachable from the corpus (the longest `label` ever emitted is "DATA"

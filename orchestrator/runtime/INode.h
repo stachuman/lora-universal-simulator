@@ -92,6 +92,14 @@ public:
     // (Hal::set_rx_bw -> ISimHal::simSetRxBw / self:set_rx_bw), so the
     // delivery path can reject frames whose BW the modem isn't tuned to.
     virtual void attachRxBwSlot(int* slot) = 0;
+    // §carrier: live per-node RX CARRIER slot (INTEGER kHz) — the frequency twin of the two above.
+    // Seeded by SimController from nodes[i].freq_khz and moved by a runtime retune
+    // (Hal::set_rx_freq -> ISimHal::simSetRxFreqKhz / self:set_rx_freq_khz), so the delivery path can
+    // refuse a frame on a carrier the modem is not tuned to (drop_freq_mismatch).
+    // SINGLE-VALUED, not a set like sf_rx_set: a real node has one PLL, so a dual-layer gateway is
+    // genuinely deaf to layer 1 while tuned to layer 0. That is correct physics, and managing it is
+    // precisely why the gateway window scheduler exists — do NOT model simultaneous multi-carrier RX.
+    virtual void attachRxFreqSlot(uint32_t* slot) = 0;
     virtual void attachTxInFlightSlot(uint64_t* slot) = 0;
     virtual void attachLbtModel(LbtModel* lbt) = 0;
     virtual void setClockDriftPpm(float ppm) = 0;

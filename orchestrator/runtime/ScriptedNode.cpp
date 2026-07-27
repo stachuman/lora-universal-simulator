@@ -362,6 +362,30 @@ void ScriptedNode::api_set_rx_bw(int bw_hz) {
     _radio.setRadioParams(_radio.getSF(), bw_hz, _radio.getCR());
 }
 
+// §carrier: dynamic RF-CARRIER retune — the ENGINE-AGNOSTIC twin of the firmware seam
+// Hal::set_rx_freq -> ISimHal::simSetRxFreqKhz. It must stay behaviourally identical to
+// FirmwareNode::simSetRxFreqKhz (which carries the full rationale), because that is what lets a native
+// test drive a carrier retune and still pin what the firmware path does — build_test.sh cannot link
+// FirmwareNode (it needs the whole MeshRoute firmware). Same sanctioned arrangement as api_set_rx_bw.
+//
+// ★ TAKES INTEGER kHz, NOT MHz, and that is deliberate: the ONE MHz->kHz rounding path in this project
+// is the firmware's `protocol::mhz_to_khz`, applied at the HalAdapter seam. A Lua-side MHz argument
+// would need a SECOND conversion here, free to drift from the firmware's rounding — the exact U2
+// violation the design avoids. A script that wants 869.5 MHz passes 869500.
+//
+// ONE slot (not the three simSetRxBw moves): the carrier is a single-synthesizer property, so the same
+// value is what the node hears on AND what its next TX flies on (the delivery gate reads the slot for
+// RX; registerTransmissionsForStep stamps InFlight::freq_khz from it for TX).
+// Non-positive = "inherit" per the Hal contract: IGNORED, so a script cannot detune a node to 0 and
+// deafen it — same shape as api_set_rx_bw's guard and api_set_rx_sf_set refusing an empty set.
+// No blind window, for the reason spelled out on FirmwareNode::simSetRxFreqKhz (no measured
+// carrier-switch settling time exists; inventing one would be an unagreed default).
+void ScriptedNode::api_set_rx_freq_khz(int khz) {
+    if (!_rx_freq_khz) return;   // not attached yet (shouldn't happen post-init)
+    if (khz <= 0) return;        // 0 = "inherit" per the Hal contract — leave the current carrier
+    *_rx_freq_khz = static_cast<uint32_t>(khz);
+}
+
 uint64_t ScriptedNode::api_channel_busy_until() const {
     if (!_lbt) return 0;
     return _lbt->busyUntil(_id);

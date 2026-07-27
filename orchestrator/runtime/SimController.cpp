@@ -633,6 +633,7 @@ void SimController::initialize() {
     // matches real Semtech LoRa hardware). See SimController.h note.
     _node_sf_rx_set.assign(static_cast<size_t>(n), {});
     _node_rx_bw_hz.assign(static_cast<size_t>(n), 0);
+    _node_rx_freq_khz.assign(static_cast<size_t>(n), 0u);   // §carrier
     _node_tx_in_flight_until.assign(static_cast<size_t>(n), 0ULL);
     _node_last_tx_start_ms.assign(static_cast<size_t>(n), 0ULL);
     _node_last_tx_end_ms.assign(static_cast<size_t>(n), 0ULL);
@@ -655,6 +656,18 @@ void SimController::initialize() {
                 + ") — the RX-bandwidth gate has no default to fall back on");
         }
         _node_rx_bw_hz[i] = _cfg.nodes[i].bw;
+        // §carrier: seed the LIVE tuned carrier from the node's boot freq_khz (already merged with
+        // simulation.radio.freq_khz by JsonConfig — that inherit is what keeps the whole shipped corpus
+        // byte-identical, since no scenario sets a second carrier). FAIL LOUD on a non-positive value
+        // exactly as the bw seed does: the reachability gate is pure equality, so a 0 could never match
+        // a real frame carrier and the node would be silently, permanently deaf to everything.
+        if (_cfg.nodes[i].freq_khz <= 0) {
+            throw std::runtime_error(
+                "node '" + _cfg.nodes[i].name + "': freq_khz must be > 0 kHz (got "
+                + std::to_string(_cfg.nodes[i].freq_khz)
+                + ") — the RF-carrier gate has no default to fall back on");
+        }
+        _node_rx_freq_khz[i] = static_cast<uint32_t>(_cfg.nodes[i].freq_khz);
     }
 
     // Slice A2: resolve key_hash32 for every node BEFORE constructing either engine, so the C++
@@ -726,6 +739,8 @@ void SimController::initialize() {
         // _node_rx_bw_hz was sized by the assign() above and never reallocates,
         // so &_node_rx_bw_hz[i] outlives every retune.
         _nodes[i]->attachRxBwSlot(&_node_rx_bw_hz[i]);
+        // §carrier: same stable-pointer contract for the live RX-carrier slot.
+        _nodes[i]->attachRxFreqSlot(&_node_rx_freq_khz[i]);
         _nodes[i]->attachTxInFlightSlot(&_node_tx_in_flight_until[i]);
         // _lbt is constructed below; defer the LBT attach until then.
     }
@@ -866,6 +881,12 @@ void SimController::initialize() {
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
         cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw;         // bw stored in Hz (JsonConfig kHz-double -> Hz)
         cfg["_sim_cr"]        = _cfg.nodes[i].cr;
+        // §layer-freq (2026-07-27): the node's GLOBAL boot carrier, INTEGER kHz, post-inherit (JsonConfig has
+        // already merged simulation.radio.freq_khz into any node that left freq_khz = -1). Exactly the same
+        // shape as _sim_bw_hz above, and the same value SimController seeds _node_rx_freq_khz[i] with — so
+        // NodeConfig::radio_freq_mhz, the firmware's inherit fallback, agrees with the sim's live tuned
+        // carrier by construction. Without it the firmware's per-layer freq RESET is unmodellable here.
+        cfg["_sim_freq_khz"]  = _cfg.nodes[i].freq_khz;
         // §2.2 (realism ruling 2.2): simulation.radio.duty_cycle is a PERCENT (1 = 1%); the injected
         // _sim_duty_cycle keeps the firmware/Lua NodeConfig FRACTION semantic (0.01 = 1%), so divide /100
         // at this boundary — firmware behavior is unchanged (only the authoring unit moved to percent).
@@ -934,6 +955,12 @@ void SimController::initialize() {
                 for (const auto& f : _in_flight) {
                     if (f.sender_id == observer) continue;   // self-TX handled separately
                     if (f.end_ms <= _now_ms) continue;       // already ended this step
+                    // ★ §carrier: a frame on another channel deposits NO in-band energy at this
+                    // observer's receiver, so it cannot raise its energy detector. Same ONE predicate as
+                    // the decode gate — otherwise a multi-carrier deployment would still LBT-block itself
+                    // across channels, which is precisely what channelization exists to prevent and
+                    // would make the multi-freq simulation useless for its stated purpose.
+                    if (!tunedToCarrier(observer, f.freq_khz)) continue;
                     LinkParams lp;
                     if (!_links->getLink(f.sender_id, observer, lp)) continue;
                     if (lp.snr <= -100.0f) continue;         // no link
@@ -1035,6 +1062,12 @@ void SimController::processStartupAtStep() {
         cfg["_sim_warmup_ms"] = _cfg.simulation.warmup_ms;
         cfg["_sim_bw_hz"]     = _cfg.nodes[i].bw;         // bw stored in Hz (JsonConfig kHz-double -> Hz)
         cfg["_sim_cr"]        = _cfg.nodes[i].cr;
+        // §layer-freq (2026-07-27): the node's GLOBAL boot carrier, INTEGER kHz, post-inherit (JsonConfig has
+        // already merged simulation.radio.freq_khz into any node that left freq_khz = -1). Exactly the same
+        // shape as _sim_bw_hz above, and the same value SimController seeds _node_rx_freq_khz[i] with — so
+        // NodeConfig::radio_freq_mhz, the firmware's inherit fallback, agrees with the sim's live tuned
+        // carrier by construction. Without it the firmware's per-layer freq RESET is unmodellable here.
+        cfg["_sim_freq_khz"]  = _cfg.nodes[i].freq_khz;
         // §2.2 (realism ruling 2.2): simulation.radio.duty_cycle is a PERCENT (1 = 1%); the injected
         // _sim_duty_cycle keeps the firmware/Lua NodeConfig FRACTION semantic (0.01 = 1%), so divide /100
         // at this boundary — firmware behavior is unchanged (only the authoring unit moved to percent).
@@ -1266,6 +1299,40 @@ void SimController::deliverReceptionsForStep() {
                 lp.rssi += pdelta;
             }
 
+            // ★ §carrier — THE RF-CARRIER GATE (2026-07-26). A frame on another channel was never in
+            // this receiver's passband, so it cannot be decoded at any SNR. HARD SPLIT: exact kHz match
+            // or unreachable; no adjacent-channel overlap is modelled (no bench data — see
+            // tunedToCarrier()). Before this gate the sim decoded a foreign-carrier frame perfectly,
+            // which made a multi-freq deployment RF-CONNECTED in sim while RF-ISOLATED on metal — the
+            // same class of fiction the SF and BW gates each removed on their own axis.
+            //
+            // ★ PLACED BEFORE THE FADING DRAW ON PURPOSE, unlike its SF/BW twins which sit after it.
+            // advanceFading() consumes this directed link's RNG stream; letting an out-of-band frame
+            // draw would make enabling multi-freq perturb the fading sequence of every OTHER frame on
+            // the link. A frame we are about to declare "not on my channel" must consume no randomness
+            // and no collision state.
+            //
+            // The off-net silence carve-out is preserved in spirit but uses the PRE-FADING link budget
+            // (lp.snr, power-delta already applied) as its draw-free proxy for `would_decode`: a receiver
+            // too far to have heard the frame even on the right channel stays SILENT rather than emitting
+            // one drop per frame forever — exactly how the SF/BW gates treat an off-net receiver. With
+            // fading disabled (every analytic scenario) the proxy IS would_decode, exactly.
+            if (!tunedToCarrier(rcv, tx.freq_khz)) {
+                if (lp.snr < SimRadio::getSnrThreshold(tx.sf)) continue;   // off-net, silent
+                EventLog::dropFreqMismatch(
+                    static_cast<unsigned long>(now),
+                    _nodes[tx.sender_id]->name().c_str(),
+                    _nodes[rcv]->name().c_str(),
+                    static_cast<int>(tx.freq_khz),
+                    static_cast<int>(_node_rx_freq_khz[static_cast<size_t>(rcv)]),
+                    lp.snr, lp.rssi,
+                    reinterpret_cast<const uint8_t*>(tx.bytes.data()),
+                    static_cast<int>(tx.bytes.size()),
+                    static_cast<uint32_t>(tx.end_ms - tx.start_ms),
+                    tx.sf, tx.bw_hz);
+                continue;
+            }
+
             // Per-link fading. advanceFading() is a no-op when
             // lp.snr_std_dev <= 0 (returns 0.0f), so configs without
             // fading remain bit-exactly deterministic. Indexing is
@@ -1388,6 +1455,12 @@ void SimController::deliverReceptionsForStep() {
             // the collision verdict and the energy-LBT / preamble-detect
             // provider — bandwidth grants NO orthogonality (unlike the
             // cross-SF chirp-rate property in CollisionModel.cpp).
+            // ⚠ V1 2026-07-26 (§w4-#7): "preamble-detect provider" above means the
+            // SNR/energy computation that decides `detected` in the observer loop —
+            // that is still fed. The PreambleDetected CALLBACK is no longer: the
+            // observer loop now carries this same bw predicate beside its SF gate,
+            // because the detector is a correlator matched to one chirp rate. Energy,
+            // busy and collision unchanged; only the IRQ is suppressed.
             // No fallback on a bad rx bw: a non-positive value can't compare
             // equal to a real tx.bw_hz, so the frame is REFUSED, never passed
             // (and initialize() already throws on a bw <= 0 seed).
@@ -1701,6 +1774,12 @@ void SimController::registerTransmissionsForStep() {
     // bypassed. The intent is to let scripts establish steady state
     // (route caches, advert exchanges, etc.) before the stress-test
     // physics phase starts.
+    // §carrier (2026-07-26) — INTENTIONALLY NOT GATED HERE, and the same is already true of the SF and
+    // BW gates: warmup bypasses the whole physics path by contract (a warmup frame builds no InFlight, so
+    // there is no stamped carrier to compare). A multi-freq scenario must therefore run warmup_ms = 0, or
+    // accept that during warmup every node hears every other regardless of tuning. Stated here rather
+    // than silently inherited, because it is the one place a carrier-isolation assertion could pass for
+    // the wrong reason. (Every §carrier-relevant corpus/native scenario runs warmup_ms = 0.)
     if (in_warmup) {
         for (int i = 0; i < n; ++i) {
             if (!_node_alive[i]) continue;
@@ -1987,6 +2066,12 @@ void SimController::registerTransmissionsForStep() {
             f.bw_hz         = bw_hz;
             f.cr            = cr;
             f.power_dbm     = p.power_dbm;   // §1.5: carry the frame's explicit TX power (delta applied at delivery/collision)
+            // §carrier: the frame flies on the sender's CURRENTLY TUNED carrier. Read from
+            // _node_rx_freq_khz (the live slot a Hal::set_rx_freq retune moves), NOT from any per-frame
+            // parameter — the firmware's TxParams carries no frequency field, and the device behaves
+            // identically (DeviceRadio::set_rx_freq latches the frequency in standby and start_transmit
+            // never sets one, so the latched carrier carries into the next transmission).
+            f.freq_khz      = _node_rx_freq_khz[static_cast<size_t>(i)];
             f.pre_sym       = static_cast<uint16_t>(_radios[i]->getPreambleSymbols());
             f.t_sym_ms      = static_cast<float>(_radios[i]->getSymbolMs());
             f.t_preamble_ms = static_cast<float>(_radios[i]->getPreambleMs());
@@ -2006,6 +2091,16 @@ void SimController::registerTransmissionsForStep() {
                 // Time overlap?
                 if (e.end_ms <= f.start_ms || e.start_ms >= f.end_ms)
                     continue;
+                // ★ §carrier: two frames on DIFFERENT CHANNELS cannot interfere, at any receiver — this
+                // is a property of the frame PAIR, so it is gated here rather than per-receiver.
+                // ⚠ THE DELIBERATE ASYMMETRY vs the BW gate, which states explicitly that a BW-mismatched
+                // frame "still deposits in-band energy, so it deliberately keeps feeding the collision
+                // verdict — bandwidth grants NO orthogonality". A separate CARRIER genuinely does grant
+                // it: that is what channelization IS. Without this, two layers on two carriers would
+                // still destroy each other's frames and the multi-freq simulation would be worthless.
+                // Note this uses the frame's stamped carrier, not tunedToCarrier(): the receiver's own
+                // tuning is irrelevant to whether these two signals overlap in spectrum.
+                if (e.freq_khz != f.freq_khz) continue;
                 for (int r = 0; r < n; ++r) {
                     if (r == f.sender_id || r == e.sender_id) continue;
                     LinkParams lp_f, lp_e;
@@ -2109,6 +2204,19 @@ void SimController::registerTransmissionsForStep() {
                 LinkParams lp;
                 if (!_links->getLink(i, observer, lp)) continue;
                 if (lp.snr <= -100.0f) continue;
+                // ★ §carrier — THE SECOND REACHABILITY PREDICATE. This loop decides three things at
+                // once, and a node tuned to another channel must be exempt from ALL THREE:
+                //   (a) notifyRxStart      — the observer's RX->TX turnaround charge (load-bearing: it
+                //                            sets _earliest_tx_ms, which decides when it may reply);
+                //   (b) the CAD/energy detect + _lbt->notifyChannelBusy below — "the channel is busy";
+                //   (c) onPreambleDetected — the signal that drives beacon throttling.
+                // Gating here, ABOVE all three, rather than only at the SF gate further down, is what
+                // keeps the two predicates consistent: a node that cannot DECODE a frame (the
+                // deliverReceptionsForStep gate) must equally not DETECT its preamble, not be LBT-blocked
+                // by it and not have its turnaround charged by it. The alternative is physically
+                // impossible and would corrupt exactly the LBT + throttling decisions this loop feeds.
+                // Same ONE predicate, same hard integer-kHz split.
+                if (!tunedToCarrier(observer, just_pushed.freq_khz)) continue;
                 _radios[observer]->notifyRxStart(rx_busy_ms);
 
                 // "Did the observer's radio detect this transmission?"
@@ -2144,12 +2252,40 @@ void SimController::registerTransmissionsForStep() {
                 // IRQ is pre-SyncWordValid), and that's the right level for
                 // a "channel about to be polluted by anyone at our SF"
                 // signal that drives beacon-throttling decisions.
+                //
+                // §carrier (2026-07-26): the CARRIER half of this predicate is DONE — handled at the top
+                // of the loop (above notifyRxStart), so it also exempts the turnaround charge and the LBT
+                // busy-notify, which a gate placed here could not reach.
+                //
+                // ★ §w4-#7 (2026-07-26) — THE BANDWIDTH HALF IS NOW DONE, HERE, and its placement is the
+                // whole point. Same predicate as the DECODE path (deliverReceptionsForStep §bw-gating:
+                // `tx.bw_hz != rx_bw_hz` against the receiver's LIVE _node_rx_bw_hz) so the two cannot
+                // drift — a frame the modem cannot demodulate must not raise its PreambleDetected IRQ
+                // either. Physically: the preamble detector is a correlator matched to the configured
+                // chirp rate BW/2^SF, so a different BW fails to correlate for exactly the reason a
+                // different SF does. That is what this gate's own comment always said ("quasi-orthogonal
+                // AT THE SAME BW") while the code compared SF alone.
+                //
+                // ⚠ DELIBERATELY NOT beside the carrier gate at the top of the loop, and the asymmetry is
+                // REAL, not an oversight (26u: "bandwidth grants NO orthogonality; a separate channel
+                // genuinely does"). A BW-mismatched frame still deposits in-band energy, so it must keep
+                // (a) charging the observer's RX->TX turnaround via notifyRxStart, (b) marking the channel
+                // BUSY for LBT — CAD-mode notifyChannelBusy above and the energy provider's ask-time scan
+                // — and (c) feeding the frame-vs-frame collision verdict at registerTransmissionsForStep.
+                // A carrier mismatch is exempt from all three; a BW mismatch is exempt from NONE of them.
+                // Hoisting this gate up would silently grant 125/250 kHz layers the channel isolation only
+                // a separate carrier earns. The gate therefore sits exactly where the SF gate sits, and
+                // suppresses exactly one thing: the PreambleDetected callback.
                 const auto& rx_set = _node_sf_rx_set[observer];
                 bool sf_match = false;
                 for (int sf : rx_set) {
                     if (sf == just_pushed.sf) { sf_match = true; break; }
                 }
-                if (sf_match) {
+                // No fallback on a bad rx bw (C2), mirroring the decode gate verbatim: a non-positive value
+                // cannot compare equal to a real bw_hz, so the preamble is REFUSED, never waved through
+                // (initialize() already throws on a bw <= 0 seed).
+                const bool bw_match = (just_pushed.bw_hz == _node_rx_bw_hz[observer]);
+                if (sf_match && bw_match) {
                     const int protocol_sender_id = _nodes[i]->protocolId();
                     _nodes[observer]->onPreambleDetected(
                         just_pushed.start_ms, protocol_sender_id, lp.snr);

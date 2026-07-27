@@ -13,6 +13,16 @@ endif()
 
 # Strict warnings
 add_compile_options(-Wall -Wextra -Wpedantic)
+# ★ -Werror=switch (owner ruling 2026-07-27) — the sim half of the firmware's platformio.ini [common] flag.
+# -Wswitch only WARNS, so an unhandled enumerator ships and enforcement degrades to "a human reads the
+# census"; that is the class that produced the oracle folding 10 of PushKind's 14 enumerators into
+# "send_failed" (Wave-4 #6), a defect the byte-identity gate was structurally blind to. Applied at the TOP
+# level so it reaches every target created below, including meshroute_core_normal / meshroute_core_gw
+# (MeshRoute lib/core) and meshroute_console (lib/console) — firmware code the sim compiles is held to the
+# same bar in both builds. Measured clean 2026-07-27: a full clean build of lus + all 27 native test binaries
+# emits ZERO -Wswitch, so this turns nothing red today. NB `switch`, not `switch-enum`: a `default:` label
+# still silences it, matching the firmware's intent exactly.
+add_compile_options(-Werror=switch)
 
 find_package(Lua 5.4 REQUIRED)
 find_package(Threads REQUIRED)
@@ -106,6 +116,45 @@ if(EXISTS "${MESHROUTE_DIR}/lib/core/protocol_constants.h")
         MR_CAP_CHANNEL_BUFFER=8
         MR_CAP_DEFERRED_SENDS=16
     )
+
+    # --- MeshRoute lib/console (Wave-4 #6, 2026-07-26) ------------------------------------
+    # ★ FIRST TIME THE SIM COMPILES ANYTHING FROM lib/console. It exists so the scenario
+    # oracle's push `kind` field is rendered by the FIRMWARE's own exhaustive mapper
+    # (console_json.cpp pushkind_name) instead of a 3-arm ternary that defaulted 10 of
+    # PushKind's 14 enumerators to "send_failed". One table, two audiences (U1).
+    #
+    # ★ Built ONCE and NOT per-variant, unlike lib/core: lib/console opens the LITERAL
+    # namespace `meshroute::console`, so a second compilation under MESHROUTE_NS=meshroute_gw
+    # would not even parse (no `PushKind` findable from inside namespace `meshroute`).
+    # Dual-namespacing it is a FIRMWARE edit and is deliberately not folded in here.
+    # orchestrator/runtime/ConsoleNames.cpp is the resulting namespace bridge — read its
+    # header block for the soundness argument and for the HARD LIMIT on what may cross it
+    # (enum mappers only; this lib carries the NORMAL variant's MR_N_LAYERS=1 struct layout).
+    #
+    # ⚠ COVERAGE: this compiles the whole TU (lib/console now shares the sim's
+    # -Wall -Wextra -Wpedantic), but only pushkind_name is EXECUTED by the corpus. The rest of
+    # lib/console remains covered solely by the firmware native suite.
+    add_library(meshroute_console STATIC
+        ${MESHROUTE_DIR}/lib/console/console_json.cpp
+        ${CMAKE_SOURCE_DIR}/orchestrator/runtime/ConsoleNames.cpp
+    )
+    target_compile_features(meshroute_console PRIVATE cxx_std_20)
+    target_compile_definitions(meshroute_console PRIVATE
+        PROTOCOL_VERSION=1
+        LORA_FREQ_HZ=869462500
+        LORA_BW_HZ=125000
+        LORA_SF=8
+        LORA_CR=5
+        LORA_PREAMBLE_SYM=16
+        LORA_DUTY_CYCLE_PCT=10
+    )
+    target_include_directories(meshroute_console PUBLIC
+        ${MESHROUTE_DIR}/lib/console)
+    target_include_directories(meshroute_console PRIVATE
+        ${MESHROUTE_DIR}/lib/core
+        ${MESHROUTE_DIR}/lib/monocypher/src
+        ${CMAKE_SOURCE_DIR})
+
     set(MESHROUTE_ENABLED ON)
 else()
     message(WARNING "MeshRoute not found at ${MESHROUTE_DIR} — building WITHOUT engine:meshroute "

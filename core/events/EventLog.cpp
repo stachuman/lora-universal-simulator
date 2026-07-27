@@ -508,6 +508,21 @@ void dropBwMismatch(unsigned long time_ms, const char* from, const char* to,
     l.emit();
 }
 
+// §carrier: the frequency twin of the SF/BW mismatch pair — its OWN reason, never drop_no_link.
+// Both sf and bw_hz ARE emitted (this drop asserts nothing about either), so unlike its two twins
+// there is no kOmit carve-out here.
+void dropFreqMismatch(unsigned long time_ms, const char* from, const char* to,
+                      int packet_freq_khz, int rx_freq_khz,
+                      float snr, float rssi,
+                      const uint8_t* data, int len, uint32_t airtime_ms,
+                      int sf, int bw_hz) {
+    DropLine l("drop_freq_mismatch", time_ms, from, to);
+    l.addf(",\"packet_freq_khz\":%d,\"rx_freq_khz\":%d,\"snr_db\":%.2f,\"rssi_dbm\":%.2f",
+           packet_freq_khz, rx_freq_khz, snr, rssi);
+    l.addPhy(data, len, (long)airtime_ms, sf, bw_hz);
+    l.emit();
+}
+
 void nodeStats(unsigned long time_ms, const char* node,
                const char* stats_type, const char* json_data) {
     char buf[4096];
@@ -615,3 +630,4 @@ void logScriptEmit(int node_id, uint64_t sim_ms,
 }
 
 } // namespace EventLog
+

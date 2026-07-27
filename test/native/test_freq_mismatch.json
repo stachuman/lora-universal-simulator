@@ -1,0 +1,75 @@
+{
+  "_name": "test_freq_mismatch",
+  "_desc": "FREQUENCY-SELECTIVE PHY gate (§carrier, 2026-07-26 owner ruling). Three isolated groups over one fixture. GROUP A: one 868 MHz sender; receivers on the INHERITED carrier / a far carrier / an ADJACENT 868.1 MHz carrier (hard split, no adjacent-channel leniency) / retuned both ways / off-net at both carriers. GROUP B: LBT orthogonality — a same-carrier neighbour IS deferred, a cross-carrier one is NOT. GROUP C: hidden-terminal collision — same-carrier frames destroy each other, cross-carrier frames do not. Analytically deterministic: no fading (snr_std_dev 0), no PER sigmoid (steepness 0), no preamble miss, no startup jitter, no warmup (warmup bypasses ALL physics gates by contract, carrier included). ★ simulation.radio.freq_khz is DELIBERATELY ABSENT so the run also proves the 868000 default AND the per-node inherit. ★ Runs on the DEPRECATED Lua engine BY NECESSITY (build_test.sh cannot link FirmwareNode) — hence the explicit per-node \"engine\":\"lua\" plus allow_deprecated_lua: the sanctioned internal use that opt-in exists for.",
+  "simulation": {
+    "duration_ms": 12000,
+    "step_ms": 1,
+    "warmup_ms": 0,
+    "seed": 4242,
+    "node_startup_jitter_ms": 0,
+    "allow_deprecated_lua": true,
+    "radio": {
+      "sf": 7,
+      "bw": 125,
+      "cr": 5,
+      "duty_cycle": 100,
+      "rx_preamble_miss_prob": 0.0,
+      "decode_margin_steepness_db": 0.0,
+      "snr_coherence_ms": 0
+    }
+  },
+  "nodes": [
+    { "name": "tx868",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "rx868",       "engine": "lua", "script": "freq_probe.lua", "config": {} },
+    { "name": "rx869",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 869500, "config": {} },
+    { "name": "rx868p1",     "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868100, "config": {} },
+    { "name": "rx869to868",  "engine": "lua", "script": "freq_probe.lua", "freq_khz": 869500, "config": { "rx_freq_khz": 868000 } },
+    { "name": "rx868to869",  "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": { "rx_freq_khz": 869500 } },
+    { "name": "far869",      "engine": "lua", "script": "freq_probe.lua", "freq_khz": 869500, "config": {} },
+    { "name": "far868",      "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+
+    { "name": "busyA",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "busyB",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "freeA",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "freeB",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 869500, "config": {} },
+
+    { "name": "hidA",        "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "hidB",        "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "hidRx",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "xhidA",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} },
+    { "name": "xhidB",       "engine": "lua", "script": "freq_probe.lua", "freq_khz": 869500, "config": {} },
+    { "name": "xhidRx",      "engine": "lua", "script": "freq_probe.lua", "freq_khz": 868000, "config": {} }
+  ],
+  "topology": {
+    "links": [
+      { "from": "tx868", "to": "rx868",      "snr": 8.0,   "rssi": -80.0,  "snr_std_dev": 0 },
+      { "from": "tx868", "to": "rx869",      "snr": 8.0,   "rssi": -80.0,  "snr_std_dev": 0 },
+      { "from": "tx868", "to": "rx868p1",    "snr": 8.0,   "rssi": -80.0,  "snr_std_dev": 0 },
+      { "from": "tx868", "to": "rx869to868", "snr": 8.0,   "rssi": -80.0,  "snr_std_dev": 0 },
+      { "from": "tx868", "to": "rx868to869", "snr": 8.0,   "rssi": -80.0,  "snr_std_dev": 0 },
+      { "from": "tx868", "to": "far869",     "snr": -20.0, "rssi": -128.0, "snr_std_dev": 0 },
+      { "from": "tx868", "to": "far868",     "snr": -20.0, "rssi": -128.0, "snr_std_dev": 0 },
+
+      { "from": "busyA", "to": "busyB",  "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "freeA", "to": "freeB",  "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0 },
+
+      { "from": "hidA",  "to": "hidRx",  "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "hidB",  "to": "hidRx",  "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "xhidA", "to": "xhidRx", "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0 },
+      { "from": "xhidB", "to": "xhidRx", "snr": 8.0, "rssi": -80.0, "snr_std_dev": 0 }
+    ]
+  },
+  "commands": [
+    { "at_ms": 2000, "node": "tx868", "command": "ping" },
+
+    { "at_ms": 4000, "node": "busyA", "command": "ping" },
+    { "at_ms": 4000, "node": "busyB", "command": "ping" },
+    { "at_ms": 6000, "node": "freeA", "command": "ping" },
+    { "at_ms": 6000, "node": "freeB", "command": "ping" },
+
+    { "at_ms": 8000,  "node": "hidA",  "command": "ping" },
+    { "at_ms": 8000,  "node": "hidB",  "command": "ping" },
+    { "at_ms": 10000, "node": "xhidA", "command": "ping" },
+    { "at_ms": 10000, "node": "xhidB", "command": "ping" }
+  ]
+}

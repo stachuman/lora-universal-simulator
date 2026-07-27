@@ -127,6 +127,26 @@ private:
     void tickTimersForStep();
     void registerTransmissionsForStep();
 
+    // ★ §carrier — THE ONE CARRIER-REACHABILITY RULE. "Is node `idx`'s modem tuned to the channel this
+    // frame is on?" HARD SPLIT: exact integer-kHz equality, or unreachable. No partial adjacent-channel
+    // overlap is modelled — we have no bench data on our radios' adjacent-channel rejection, and
+    // inventing the parameters would be fabricated physics (2026-07-26 ruling).
+    //
+    // ⚠ IT EXISTS AS ONE FUNCTION BECAUSE THERE ARE FOUR CALLERS AND THEY MUST NEVER DISAGREE:
+    //   1. deliverReceptionsForStep  — the decode gate (emits drop_freq_mismatch)
+    //   2. registerTransmissionsForStep's observer loop — RX->TX turnaround charge, LBT busy-notify and
+    //      the PreambleDetected callback. A node that CANNOT DECODE a frame must equally not DETECT its
+    //      preamble; the alternative is physically impossible and would corrupt LBT + beacon throttling.
+    //   3. the energy-LBT ask-time busy provider — an out-of-band frame deposits no in-band energy.
+    //   4. the frame-vs-frame collision evaluation — two carriers cannot interfere. (This is the
+    //      DELIBERATE ASYMMETRY vs the BW gate, which keeps feeding collisions on purpose because
+    //      bandwidth grants NO orthogonality; a separate CHANNEL genuinely does.)
+    // Comparing integer kHz — never a double MHz — because exact float equality is a latent bug; the
+    // canonicalization is the firmware's own protocol::mhz_to_khz, applied once at the HalAdapter seam.
+    bool tunedToCarrier(int idx, uint32_t frame_freq_khz) const {
+        return _node_rx_freq_khz[static_cast<size_t>(idx)] == frame_freq_khz;
+    }
+
     struct InFlight {
         int      sender_id;
         uint64_t start_ms;
@@ -138,6 +158,12 @@ private:
         int      bw_hz;
         int      cr;
         int      power_dbm = -127;   // §1.5: explicit per-frame TX power (-127 = radio default); link-budget delta applied at delivery/collision
+        // §carrier: the RF carrier this frame flew on, INTEGER kHz. Stamped from the SENDER's live tuned
+        // carrier (_node_rx_freq_khz[sender]) — a radio has one synthesizer, so it transmits on whatever
+        // it is tuned to (the device makes the same guarantee: DeviceRadio::set_rx_freq latches the
+        // frequency and start_transmit never sets one). There is no per-frame override to resolve: the
+        // firmware's TxParams carries no frequency field at all, unlike sf/bw/cr.
+        uint32_t freq_khz = 0;
         uint16_t pre_sym;
         float    t_sym_ms;
         float    t_preamble_ms;
@@ -243,6 +269,26 @@ private:
     // NOT derived from _radios[i]->getBwHz(): that tracks the node's last
     // TRANSMISSION (setRadioParams is called with each TX frame's params).
     std::vector<int>                     _node_rx_bw_hz;
+
+    // ★ §carrier (2026-07-26 owner ruling — "a realistic simulator able to test our multi layer /
+    // multi freq simulations"): per-node LIVE RF CARRIER in INTEGER kHz, the frequency twin of
+    // _node_sf_rx_set / _node_rx_bw_hz. Seeded from nodes[i].freq_khz (post-inherit, validated > 0) and
+    // moved at runtime through the borrowed slot handed out via INode::attachRxFreqSlot:
+    //   firmware  Hal::set_rx_freq(MHz) -> HalAdapter (mhz_to_khz) -> ISimHal::simSetRxFreqKhz
+    //             (a gateway's per-layer window switch; a mobile adopting a host's PHY)
+    //   Lua       self:set_rx_freq_khz(khz)
+    //
+    // SINGLE-VALUED, deliberately unlike _node_sf_rx_set: a node has ONE synthesizer, so it hears
+    // exactly one carrier — a dual-carrier gateway IS genuinely deaf to layer 1 while tuned to layer 0.
+    // That is the physics the window scheduler exists to manage; simultaneous multi-carrier RX is NOT
+    // modelled. The same value is also what the node TRANSMITS on (InFlight::freq_khz is stamped from it).
+    //
+    // ★ FOUR consumers, ONE predicate — tunedToCarrier(). See its comment for why every one of them
+    // must agree: a node that cannot decode a frame must equally not detect its preamble, not treat the
+    // channel as busy, and not suffer collisions from it. Splitting the rule across hand-written copies
+    // is the drift this codebase keeps paying for.
+    // Sized once via assign() so &_node_rx_freq_khz[i] stays valid for this controller's life.
+    std::vector<uint32_t>                _node_rx_freq_khz;
 
     // Slice A2: per-node key_hash32 actually fed to the engines. Derived from the node's identity
     // seed (lib/core/identity) when present, else the literal/fnv fallback in the const _cfg. Lives

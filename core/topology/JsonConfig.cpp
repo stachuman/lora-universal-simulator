@@ -72,6 +72,22 @@ static int parseBwHz(const json& value) {
     return static_cast<int>(std::lround(value.get<double>() * 1000.0));
 }
 
+// §carrier (2026-07-26): `freq_khz` is authored as an INTEGER number of kHz and stored verbatim —
+// DELIBERATELY unlike `bw` above. The carrier is compared for exact equality by the reachability
+// gate, so it must never pass through a float; and the ONE MHz→kHz rounding path in this project is
+// the firmware's `protocol::mhz_to_khz` (applied where the firmware's Hal::set_rx_freq hands a
+// double MHz to the sim). A fractional/negative/non-numeric value is REFUSED here rather than
+// rounded — that would be exactly the second conversion path this design exists to avoid.
+static int requireIntegerKhz(const json& value, const std::string& ctx) {
+    if (!value.is_number_integer() || value.get<long long>() <= 0) {
+        throw std::runtime_error(
+            "config error at " + ctx
+            + ": field \"freq_khz\" must be a POSITIVE INTEGER number of kHz "
+              "(e.g. 868000 or 869525) — fractional MHz is not accepted here");
+    }
+    return static_cast<int>(value.get<long long>());
+}
+
 static uint32_t parseKeyHash32(const json& value, const std::string& ctx) {
     if (value.is_number_unsigned() || value.is_number_integer()) {
         long long v = value.get<long long>();
@@ -181,6 +197,10 @@ static SimConfig parseJson(const json& j) {
             if (r.contains("sf")) cfg.simulation.radio.sf = r["sf"].get<int>();
             if (r.contains("bw")) cfg.simulation.radio.bw = parseBwHz(r["bw"]);   // kHz-double -> Hz
             if (r.contains("cr")) cfg.simulation.radio.cr = r["cr"].get<int>();
+            // §carrier: the scenario's global RF carrier, INTEGER kHz (see RadioConfig::freq_khz for
+            // why integer, and why — unlike sf/bw/cr — it is not required).
+            if (r.contains("freq_khz"))
+                cfg.simulation.radio.freq_khz = requireIntegerKhz(r["freq_khz"], "simulation.radio");
             if (r.contains("capture_locked_db"))   cfg.simulation.radio.capture_locked_db   = r["capture_locked_db"].get<float>();
             if (r.contains("capture_unlocked_db")) cfg.simulation.radio.capture_unlocked_db = r["capture_unlocked_db"].get<float>();
             if (r.contains("cad_miss_prob"))       cfg.simulation.radio.cad_miss_prob       = r["cad_miss_prob"].get<float>();
@@ -320,10 +340,12 @@ static SimConfig parseJson(const json& j) {
                 if (r.contains("sf")) def.sf = r["sf"].get<int>();
                 if (r.contains("bw")) def.bw = parseBwHz(r["bw"]);   // kHz-double -> Hz
                 if (r.contains("cr")) def.cr = r["cr"].get<int>();
+                if (r.contains("freq_khz")) def.freq_khz = requireIntegerKhz(r["freq_khz"], ctx + ".radio");  // §carrier
             }
             if (nd.contains("sf")) def.sf = nd["sf"].get<int>();
             if (nd.contains("bw")) def.bw = parseBwHz(nd["bw"]);     // kHz-double -> Hz
             if (nd.contains("cr")) def.cr = nd["cr"].get<int>();
+            if (nd.contains("freq_khz")) def.freq_khz = requireIntegerKhz(nd["freq_khz"], ctx);   // §carrier
 
             // Optional sf_rx_set: per-node list of SFs the receiver can
             // decode. Absent -> empty vector; SimController defaults to
@@ -396,6 +418,11 @@ static SimConfig parseJson(const json& j) {
         if (nd.sf == -1) nd.sf = cfg.simulation.radio.sf;
         if (nd.bw == -1) nd.bw = cfg.simulation.radio.bw;
         if (nd.cr == -1) nd.cr = cfg.simulation.radio.cr;
+        // §carrier: THE inherit that keeps the whole shipped corpus byte-identical — no scenario sets a
+        // carrier, so every node lands on the one global value and every reachability comparison matches.
+        // Mirrors the firmware's own documented contract (node_carriers.h: "0 = inherit the node's
+        // boot/global freq"), which is why this inherit is legitimate rather than a silent default.
+        if (nd.freq_khz == -1) nd.freq_khz = cfg.simulation.radio.freq_khz;
     }
 
     if (j.contains("topology")) {
@@ -585,6 +612,11 @@ static void validateConfig(const SimConfig& cfg) {
     if (cfg.simulation.path_loss.frequency_mhz <= 0.0)
         errors.push_back("simulation.path_loss.frequency_mhz must be > 0 (got "
                          + std::to_string(cfg.simulation.path_loss.frequency_mhz) + ")");
+    // §carrier: the global carrier the per-node inherit resolves against. requireIntegerKhz already
+    // refuses a non-positive explicit value; this catches a bad DEFAULT (a future edit to the struct).
+    if (cfg.simulation.radio.freq_khz <= 0)
+        errors.push_back("simulation.radio.freq_khz must be > 0 kHz (got "
+                         + std::to_string(cfg.simulation.radio.freq_khz) + ")");
 
     // Per-node lifecycle constraint validation. start/die at 0 means
     // "not scheduled"; if scheduled, must be in (0, duration_ms) and
@@ -666,6 +698,12 @@ static void validateConfig(const SimConfig& cfg) {
         if (nd.cr < 5 || nd.cr > 8)
             errors.push_back(pfx + "cr must be in [5..8] (5=CR4/5, 8=CR4/8); got "
                              + std::to_string(nd.cr));
+        // §carrier: post-merge every node MUST carry a positive carrier — it seeds the live tuned
+        // frequency the reachability gate compares. FAIL LOUD; the gate has no fallback (a 0 could
+        // never equal a real frame carrier, so the node would be silently, totally deaf).
+        if (nd.freq_khz <= 0)
+            errors.push_back(pfx + "freq_khz must be > 0 kHz (got "
+                             + std::to_string(nd.freq_khz) + ")");
         if (nd.tx_fail_prob < 0.0f || nd.tx_fail_prob > 1.0f)
             errors.push_back(pfx + "tx_fail_prob must be [0.0, 1.0] (got "
                              + std::to_string(nd.tx_fail_prob) + ")");

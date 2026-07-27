@@ -48,6 +48,18 @@ public:
     virtual int      simTx(const uint8_t* bytes, size_t len, const SimTxParams& p) = 0;  // -> SimTxResult
     virtual void     simSetRxSf(int sf) = 0;
     virtual void     simSetRxBw(uint32_t /*bw_hz*/) {}   // §metal-fidelity (2026-07-07): track the ACTIVE-layer bw for the slop formula (no-op default -> Lua/idealized path unaffected)
+    // §carrier (2026-07-26): retune the node's LIVE RF CARRIER. ★ THE UNIT CHANGES AT THIS SEAM AND THE
+    // NAME SAYS SO: the firmware's Hal::set_rx_freq takes a `double` MHz, this takes INTEGER kHz — the
+    // sim's reachability gate compares carriers for EXACT equality and a float there is a latent bug.
+    // The ONE MHz->kHz rounding is the FIRMWARE's own `protocol::mhz_to_khz`, applied in the per-variant
+    // HalAdapter (NodeRuntimeWrapper.cpp) — the only TU allowed to name MESHROUTE_NS. That keeps this
+    // interface namespace-neutral AND makes a second, driftable conversion path impossible (U2).
+    virtual void     simSetRxFreqKhz(uint32_t /*khz*/) {}
+    // §cr-retune (2026-07-26): retune the node's coding rate (5..8). Until this existed, Hal::set_rx_cr's
+    // empty no-op default was inherited all the way down, so a gateway with per-layer CR flew BOTH layers
+    // at ONE cr in the sim while genuinely retuning on metal — the sim's airtime debit then disagreed
+    // with the device's on the non-seed layer.
+    virtual void     simSetRxCr(uint8_t /*cr*/) {}
     virtual uint64_t simChannelBusyUntil() = 0;
     virtual uint64_t simAirtimeUsedMs(uint64_t window_ms) = 0;
     virtual uint64_t simOldestTxEndMs() = 0;

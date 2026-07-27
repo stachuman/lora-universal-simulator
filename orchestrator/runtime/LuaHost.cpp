@@ -98,6 +98,10 @@ void LuaHost::registerNode(int node_id, ScriptedNode* node, int protocol_node_id
             [node](sol::object /*self*/, sol::table t) { node->api_set_rx_sf_set(t); });
         self.set_function("set_rx_bw",
             [node](sol::object /*self*/, int bw_hz) { node->api_set_rx_bw(bw_hz); });
+        // §carrier: INTEGER kHz on purpose — the unit is in the name. See
+        // ScriptedNode::api_set_rx_freq_khz for why there is no MHz overload.
+        self.set_function("set_rx_freq_khz",
+            [node](sol::object /*self*/, int khz) { node->api_set_rx_freq_khz(khz); });
         self.set_function("channel_busy_until",
             [node](sol::object /*self*/) { return node->api_channel_busy_until(); });
         self.set_function("tx_in_flight",
