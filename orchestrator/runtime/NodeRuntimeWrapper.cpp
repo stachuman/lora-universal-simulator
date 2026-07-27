@@ -616,6 +616,73 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
         const char* code = (r.code == MESHROUTE_NS::CmdCode::queued) ? "queued" : "error";
         return std::string("OK ") + code;
     }
+    // §sim-leave-verb (2026-07-27): `leave` — the CONSOLE-PROVISIONING (REPROVISION) transport, mirroring the firmware
+    // console's handle_leave (src/firmware_config.cpp:749) and the membership half of the provision_apply_live it calls
+    // with do_dad=false. ★ WHY IT EXISTS: Node::clear_routing_state() and the purge_tx_carriers(PurgeAxis::reprovision)
+    // sweep it now owns (§clean-join-carriers) had their ONLY callers in src/, which the sim does not compile, so no
+    // scenario could execute them and the firmware native suite was their entire detector. MEASURED before adding this
+    // verb, with an unconditional emit on ENTRY to both functions, over all 31 corpus scenarios / 1 857 425 events:
+    // clear_routing_state 0 entries · purge_tx_carriers(reprovision) 0 entries · purge_tx_carriers(team_switch) 1 entry
+    // (s34, via `team`). So the blind spot was the WHOLE function — routes / _id_bind / _deferred / gw_schedules /
+    // bridged_layers / _mobile_reg / clear_team_routing_state as well as the carrier sweep. Exactly the blind spot
+    // §sim-team-verb below closes for the TEAM axis; this closes the LEAF/reprovision axis. Like `team`, this is NOT a
+    // CmdKind: lib/core exposes the reprovision as direct Node calls and the device console makes them the same way
+    // (provision_apply_live invokes them itself — there is no Command plumbing for a reprovision), so this transport
+    // calls them directly too.
+    //
+    // ⚠ NOT the `join` verb above, which is the PROTOCOL join (CmdKind::join = a DAD claim / J exchange) — a different
+    // thing entirely, deliberately untouched. The two COMPOSE, and that is the intended idiom for a scenario wanting a
+    // full managed->managed re-join: `leave` (go unprovisioned + wipe) then `join` (re-DAD onto the fresh network).
+    //
+    // ★ THE ORDER IS LOAD-BEARING and mirrors firmware_config.cpp:480-481 exactly: reset_join_for_reprovision() ends in
+    // set_identity(protocol::unjoined_node_id, …), so _node_id is ALREADY 0 when clear_routing_state() runs. That is
+    // precisely why a surviving staged/in-flight frame would air claiming src = 0 (see the RTS-builder audit in
+    // node_channel.cpp's purge header), so reproducing the order is what makes the sweep the sim executes the same
+    // sweep the device executes.
+    //
+    // ★ DELIBERATELY NOT MIRRORED — four omissions, all permanent, none an oversight:
+    //   (1) **NV.** handle_leave's first act is an nv_load_stamped/save round-trip that zeroes the blob except freq.
+    //       The sim has NO non-volatile store at all (no mrnv is compiled here), so there is nothing to write — the
+    //       Node methods are called directly instead.
+    //   (2) **THE CONFIG/PHY RE-APPLY.** provision_apply_live's *other* half (apply_radio_live plus the lc.leaf_id /
+    //       routing_sf / allowed_sf_bitmap / duty / lineage_id / leaf_name / reset_leaf_epoch_state /
+    //       recompute_duty_budget block) re-derives NodeConfig FROM THE ZEROED BLOB, i.e. from the board defaults
+    //       LORA_BW / LORA_SF / LORA_CR / LORA_TX_POWER. Those macros do not exist in this build; the scenario JSON —
+    //       not an NV blob — is the source of truth for a sim node's PHY; and the sim's radio is tuned through SimRadio,
+    //       not through NodeConfig, so re-tuning here would desync the two. Worse, a faithful copy would set
+    //       allowed_sf_bitmap = 0, which lib/core rightly REFUSES to send on (sf_list is mandatory, fail-loud), leaving
+    //       the node mute for the rest of the run for reasons unrelated to the path under test. Hence: MEMBERSHIP ONLY.
+    //   (3) **DAD.** `leave` is precisely the do_dad=**false** call site, so the absence of a re-DAD here is a MIRROR,
+    //       not a simplification — and set_rediscover_pending(false) is copied for the same reason. It is also what
+    //       keeps this verb RNG-free and therefore scenario-byte-reproducible (the DAD claim jitter and `create`'s
+    //       random lineage_id are exactly the non-determinism §sim-team-verb refuses `team new` over). A scenario that
+    //       wants the DAD half issues the existing `join` verb afterwards.
+    //   (4) **THE HUMAN ACK LINE** (`> left network (kept freq=…)`): the sim's reply convention is the OK/ERROR string
+    //       below, which is what cmd_reply_contains asserts against.
+    // Not MR_FEAT_*-forked: every method called here is unforked in lib/core, and `leave` IS dispatched on the gateway
+    // build too (firmware_commands.cpp — only join/create are MR_N_LAYERS<2-gated), so ONE implementation correctly
+    // serves both sim variants (meshroute_core_normal + meshroute_core_gw).
+    if (cmd == "leave" || cmd.rfind("leave ", 0) == 0) {
+        size_t p = 5; scan_spaces(cmd, p);
+        // C2: a TRAILING token is REFUSED, not ignored. handle_leave takes no arguments at all (its signature is
+        // `handle_leave(Print&)`), so `leave 3` — someone assuming it names a leaf, or reaching for join's key=value
+        // shape — must fail loud rather than silently perform a full reprovision of something else.
+        if (p != cmd.size())
+            return "ERROR: usage: leave   (no arguments — the console-provisioning reprovision: go unprovisioned and "
+                   "idle, dropping the old network's routes/bindings and EVERY staged/in-flight TX carrier). Follow "
+                   "with `join` to re-DAD. Radio/PHY and NV are deliberately not re-applied here.";
+        // The reprovision, in provision_apply_live's order (firmware_config.cpp:480-481 — see the ★ note above):
+        _node.reset_join_for_reprovision();            // §2 membership: drop the id AND clear _joined (set_identity(0) alone leaves _joined set -> a later `join` no-ops)
+        _node.mutable_config().layers[0].node_id = 0;   // the firmware's companion line on :480 — the CONFIG copy of the id, which canonical_node_id() reads on a gateway
+        _node.clear_routing_state();                   // ★ THE TARGET: routes / id-binds / deferred / gw schedules / bridged layers / hosted-mobile registry + purge_tx_carriers(PurgeAxis::reprovision)
+        _node.set_rediscover_pending(false);           // do_dad=false: stay idle; do NOT restart discovery (join/create pass true here)
+        // Read the state back off the NODE (not off our own assumptions) so the reply reports what lib/core actually
+        // holds — the §sim-team-verb discipline. The purge itself is observed through its MR_EMIT
+        // `reprovision_tx_purged` (rows/floods/queued/flight/reoffers/kept), the reprovision-axis twin of the
+        // `team_channel_purged` that s34 asserts on; a void sweep has nothing to put in a reply string.
+        return std::string("OK leave unprovisioned node_id=") + std::to_string(_node.canonical_node_id()) +
+               " joined=" + (_node.joined() ? "1" : "0");
+    }
     // §sim-team-verb (2026-07-27): `team <id>` — the TEAM-SWITCH transport, mirroring the firmware console's
     // handle_team (src/firmware_config.cpp, its tail). ★ WHY IT EXISTS: the whole §clean-team / §clean-team-channel
     // mechanism (Node::set_team_id -> clear_team_routing_state + purge_team_channel_state) had its ONLY callers in
