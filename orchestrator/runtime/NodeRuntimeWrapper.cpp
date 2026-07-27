@@ -28,6 +28,7 @@
 #include "json/json.hpp"
 
 #include <cstdint>
+#include <cstdio>      // §sim-team-verb: std::snprintf — the `team` reply's %08lX team_id (the firmware prints it the same way)
 #include <random>      // std::mt19937 — the per-node crypto-bytes stream (rand_bytes), separate from rand_range
 #include <string>
 #include <string_view>
@@ -614,6 +615,69 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
         const MESHROUTE_NS::CmdResult r = _node.on_command(c);
         const char* code = (r.code == MESHROUTE_NS::CmdCode::queued) ? "queued" : "error";
         return std::string("OK ") + code;
+    }
+    // §sim-team-verb (2026-07-27): `team <id>` — the TEAM-SWITCH transport, mirroring the firmware console's
+    // handle_team (src/firmware_config.cpp, its tail). ★ WHY IT EXISTS: the whole §clean-team / §clean-team-channel
+    // mechanism (Node::set_team_id -> clear_team_routing_state + purge_team_channel_state) had its ONLY callers in
+    // src/, which the sim does not compile — so no scenario could execute it and the firmware native suite was its
+    // entire detector. Unlike the send verbs this is NOT a CmdKind: lib/core exposes the switch as a direct Node
+    // call and the device console calls it the same way (handle_team invokes set_team_id itself, there is no
+    // Command plumbing for it), so this transport calls it directly too.
+    //
+    // ★ DELIBERATELY NOT IMPLEMENTED — three omissions, all permanent, none an oversight:
+    //   (1) **`team new` (MINT).** The firmware mints `team_fnv1a32(key_hash32, nonce)` with a nonce from
+    //       `rand_bytes` — so the id differs EVERY RUN. In the sim that is non-deterministic and would destroy the
+    //       byte-reproducibility of any scenario using it (the team_id rides every team frame on the wire). A
+    //       scenario that wants a fresh team simply NAMES one: `team 0xDEADBEEF` reaches the identical core path,
+    //       because handle_team's mint and join branches differ ONLY in where `t` comes from. A deterministic mint
+    //       (seeded nonce) would be a separate, explicit design decision — not this transport's default.
+    //   (2) **`cfg set team_id`** — the firmware's second live team-switch path. The sim has no `cfg` verb at all,
+    //       so there is nothing here to route through set_team_id. Out of scope.
+    //   (3) **the optional PHY tail** (`team <id> freq= sf= bw=`). Scenarios set the team PHY in their node JSON,
+    //       and parse_phy_tail lives in src/ (not compiled here). A tail is REFUSED, not ignored (see below).
+    // Not MR_FEAT_TEAM-forked: set_team_id is unforked in lib/core, and team_dad_fire()/team_local_id() inline-stub
+    // to inert on a !MR_FEAT_TEAM build (node.h), so one implementation serves both sim variants.
+    if (cmd.rfind("team ", 0) == 0) {
+        size_t p = 5; scan_spaces(cmd, p);
+        // Radix: a leading 0x/0X SELECTS hex and a bare token is DECIMAL — the send_layer convention (U3), not
+        // send_hash's "0x is an ignorable prefix, always hex". ⚠ The firmware uses strtoul(args, &endp, 0), which
+        // ALSO reads a leading-zero token as OCTAL; the sim deliberately does not, because `team 010` silently
+        // meaning team 8 would join the WRONG team. A deliberate divergence, not a port error.
+        const size_t d0 = p;
+        uint32_t id = 0; bool got;
+        if (at_0x_prefix(cmd, p)) { p += 2; got = scan_hex32(cmd, p, id); }   // 0x… => hex (>8 digits rejected)
+        else {
+            got = scan_dec(cmd, p, id);
+            // ★ C2: scan_dec has NO overflow guard (see its header note) and every OTHER decimal call site is
+            // saved by a small value cap (channel <= 255 / node <= 254 / layer 1..255). A team_id spans the FULL
+            // 32-bit range, so nothing downstream would catch a wrap — `team 4294967297` must NOT silently become
+            // team 1 (the firmware's strtoul SATURATES rather than wrapping, so a wrap would also diverge from
+            // the device). Round-trip the digit run to reject it loudly.
+            std::string digits = cmd.substr(d0, p - d0);
+            const size_t nz = digits.find_first_not_of('0');
+            digits = (nz == std::string::npos) ? std::string("0") : digits.substr(nz);
+            if (got && digits != std::to_string(id)) got = false;
+        }
+        scan_spaces(cmd, p);
+        // C2: a TRAILING token is refused, not ignored — that is how the firmware's unsupported PHY tail
+        // (`team 0x22222222 freq=869`) fails LOUD here instead of half-applying (team switched, PHY silently not).
+        if (got && p == cmd.size()) {
+            // The switch, in handle_team's order: set_team_id() drops the OLD team's learned plane (routes / peer
+            // set / liveness / key cache / RREQ ledgers) plus the stale team-DAD id, then adopts the new id LIVE,
+            // returning true ONLY on a real change. The re-DAD therefore runs only for a mobile joining a
+            // non-zero team — `team 0` (leave) and a same-id no-op never re-DAD.
+            const bool switched = _node.set_team_id(id);
+            if (_node.config().is_mobile && id != 0 && switched) _node.team_dad_fire();
+            // Read both values back off the NODE (not off `id`) so the reply reports what lib/core actually holds.
+            char hex[11];
+            std::snprintf(hex, sizeof hex, "0x%08lX",
+                          static_cast<unsigned long>(_node.config().team_id));
+            return std::string("OK team ") + (switched ? "switched" : "unchanged") +
+                   " team_id=" + hex +
+                   " team_local_id=" + std::to_string(_node.team_local_id());
+        }
+        return "ERROR: usage: team <team_id 0xHEX|decimal> (team 0 = leave). `team new` is deliberately "
+               "unsupported: its random nonce would break scenario byte-reproducibility — name the id instead.";
     }
     // ROADMAP §3 channel gossip: send_channel[_g|_b] <channel_id 0-255> <text>. The first arg is a numeric
     // channel id (not a node name), so SimController's name->id resolution leaves it untouched.
