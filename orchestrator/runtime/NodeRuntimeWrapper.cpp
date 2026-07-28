@@ -364,6 +364,7 @@ constexpr KeyRow kConfigKeys[] = {
     { "rt_aging_ttl_remote_ms",           Disp::map, map_plain<&NodeCfg::rt_aging_ttl_remote_ms> },
     { "rt_aging_check_period_ms",         Disp::map, map_plain<&NodeCfg::rt_aging_check_period_ms> },
     { "dv_hop_cap",                       Disp::map, map_plain<&NodeCfg::dv_hop_cap> },     // network-wide (J-join distributes it in Slice 3)
+    { "team_hop_cap",                     Disp::map, map_plain<&NodeCfg::team_hop_cap> },   // §team-parity T3: the TEAM plane's twin of dv_hop_cap (default protocol::team_hop_cap = 8) — the team RREQ/RREP hop caps + the cascade requery TTLs. ⚠ NOT yet the team DV combined-hops cap: that site still reads dv_hop_cap, which is why s35a/s38 clip team DV with `dv_hop_cap: 1` (see MeshRoute node_beacon.cpp:859-891 for the measurement that kept it that way).
     { "channel_dirty_max_advertisements", Disp::map, map_plain<&NodeCfg::channel_dirty_max_advertisements> },  // K: BCN-digest retire count (Lua per-node; t68 shrinks it to 2)
     { "channel_pull_jitter_ms",           Disp::map, map_plain<&NodeCfg::channel_pull_jitter_ms> },            // digest-pull backoff (t69 shrinks it to pin pull order)
     // anti-spam v2 (2026-06-30): the flat channel_origin_max_per_window cap was REMOVED — replaced by the
