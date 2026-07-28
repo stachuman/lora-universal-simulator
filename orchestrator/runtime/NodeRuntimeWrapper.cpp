@@ -899,11 +899,20 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
         size_t e = pfx; scan_spaces(cmd, e);
         uint32_t dst = 0; const bool got = scan_dec(cmd, e, dst);
         if (got && dst <= 254 && e < cmd.size() && cmd[e] == ' ') {
-            const std::string body = cmd.substr(e + 1);
+            std::string body = cmd.substr(e + 1);
             MESHROUTE_NS::Command c{};
             c.kind = MESHROUTE_NS::CmdKind::send;
             c.u.send.dst_id = static_cast<uint8_t>(dst);
             c.u.send.flags  = static_cast<uint8_t>(is_e2e ? MESHROUTE_NS::DATA_FLAG_E2E_ACK_REQ : 0);  // the wire bit the RX acts on (was 0x08, a dead bit -> sim send_e2e ack never fired)
+            // §team-parity T-scen: an optional TRAILING " -t" selects the TEAM plane, by the SAME convention (and the
+            // same three lines) as `send_hash` above — one suffix rule for both address forms, no second parser. Without
+            // it `Command.u.send.plane` could never be TEAM from an id-addressed scenario verb, so node.cpp's `send -t`
+            // precondition was unreachable from any scenario and `send <id> -t <text>` silently aired "-t <text>" as the
+            // body on plane AUTO. Absent -> plane stays 0 (AUTO) -> byte-identical to the plain verb.
+            if (body.size() >= 3 && body.compare(body.size() - 3, 3, " -t") == 0) {
+                c.u.send.plane = static_cast<uint8_t>(MESHROUTE_NS::Plane::TEAM);
+                body.erase(body.size() - 3);
+            }
             const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
