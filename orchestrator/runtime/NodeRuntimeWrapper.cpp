@@ -600,6 +600,37 @@ bool scan_hex32(const std::string& s, size_t& i, uint32_t& out) {
     return ndig > 0 && ndig <= 8;
 }
 
+// ★ §sim-plane-parity (2026-07-28) — THE ONE DM PLANE CONVENTION, mirroring the firmware verbatim.
+// `lib/console/console_parse.cpp:259` is the ONLY site in the firmware that assigns a DM's plane:
+//     out.u.send.plane = team ? 1 /*TEAM*/ : 2 /*GLOBAL*/;   // §6.4 HARD SPLIT
+// It never emits 0 (AUTO), and the companion/BLE transports share that same dispatch()+parser — so on real
+// hardware a user-originated DM is ALWAYS TEAM or GLOBAL and `Plane::AUTO` is unreachable. The sim used to
+// leave the field at 0 for every plain DM verb, which made three mandatory team scenarios green on a path
+// metal cannot take (AUTO takes is_team_peer(dst) into _rt_team at node_routing.cpp:22, and AUTO enters the
+// team hash-locate cascade at node_hashlocate.cpp:1021, both of which GLOBAL refuses by §6.4/§18 design).
+// This helper is that assignment, once, for every DM verb: a TRAILING " -t" (stripped from the greedy body)
+// selects TEAM exactly as the console flag does; its ABSENCE now means GLOBAL, not AUTO.
+// ⚠ AUTO is deliberately NOT reachable from any scenario verb any more. If a future slice needs to exercise
+// the AUTO arms, it must add an EXPLICIT verb/flag for it rather than restoring a silent default.
+// ⚠⚠ THE AUTHORING TRAP, PRESERVED FROM THE §team-parity T-scen note this helper replaced: `-t` MUST be a
+// TRAILING suffix. The body is greedy (rest of line), so the PREFIX form `send 254 -t hop_test` silently airs
+// "-t hop_test" as the PAYLOAD and leaves the plane at its default — the defect that was live in s23's four
+// send lines until 2026-07-28. One suffix rule, all three DM verbs (send/send_e2e, send_hash, send_hashx),
+// no second parser.
+// ⓘ NOT covered here (found by the same audit, deliberately left — it is not a DM): `reqpubkey` still leaves
+// Command.u.resolve.plane at 0/AUTO while the firmware's console_parse.cpp:181 assigns `team ? TEAM : GLOBAL`
+// on the identical convention. MEASURED 2026-07-28 (probe A3): mirroring it moves exactly 1 of 36 scenarios,
+// s22, and turns it RED (2 failures — TeamA never caches TeamC's pubkey, so the sealed team DM never decrypts),
+// because s22's `reqpubkey 38e8b9f4` needs `-t` to stay team-scoped. That is a scenario decision, not a
+// mechanical one, so it needs its own slice.
+uint8_t dm_plane_from_tail(std::string& body) {
+    if (body.size() >= 3 && body.compare(body.size() - 3, 3, " -t") == 0) {
+        body.erase(body.size() - 3);
+        return static_cast<uint8_t>(MESHROUTE_NS::Plane::TEAM);
+    }
+    return static_cast<uint8_t>(MESHROUTE_NS::Plane::GLOBAL);
+}
+
 // ---- onCommand: the sim command-string transport -> typed NS::Command ------
 // Verbatim port of the legacy FirmwareNode::onCommand parse (the `_initialized`/`_node`
 // guard stays in FirmwareNode; this is only reached once initialized).
@@ -795,13 +826,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
             c.kind = MESHROUTE_NS::CmdKind::send;
             c.u.send.dst_hash = h;                 // the address-by-hash path (dst_id ignored when dst_hash != 0)
             c.u.send.flags    = 0;
-            // §F-TR-1: an optional TRAILING " -t" selects the TEAM plane (mirrors the firmware console's `send ... -t`
-            // => Plane::TEAM). The body is greedy (rest of line) so the flag rides as a SUFFIX token, keeping the message
-            // text intact; strip it before the send. Absent -> plane stays 0 (AUTO) -> byte-identical to the plain verb.
-            if (body.size() >= 3 && body.compare(body.size() - 3, 3, " -t") == 0) {
-                c.u.send.plane = static_cast<uint8_t>(MESHROUTE_NS::Plane::TEAM);
-                body.erase(body.size() - 3);
-            }
+            c.u.send.plane    = dm_plane_from_tail(body);   // §F-TR-1 + §sim-plane-parity: " -t" => TEAM, else GLOBAL
             const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
@@ -820,12 +845,17 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
         if (at_0x_prefix(cmd, e)) e += 2;                          // optional 0x
         uint32_t h = 0; const bool got = scan_hex32(cmd, e, h);    // false on no-digits OR >8 digits
         if (got && h != 0 && e < cmd.size() && cmd[e] == ' ') {
-            const std::string body = cmd.substr(e + 1);
+            std::string body = cmd.substr(e + 1);
             MESHROUTE_NS::Command c{};
             c.kind = MESHROUTE_NS::CmdKind::send;
             c.u.send.dst_hash = h;
             c.u.send.flags    = 0;
             c.crypt           = MESHROUTE_NS::CryptIntent::on;   // §enc: force CRYPTED (seal) for this DM
+            // ★ §sim-plane-parity: send_hashx is the THIRD DM-producing site in this file (the audit that produced
+            // the BASELINE "Plane::AUTO is unreachable" note counted only two) — it maps to the firmware's
+            // `send 0x<hash> "<text>" -e [-t]`, which goes through the SAME console_parse.cpp:259 assignment. It had
+            // no `-t` at all, so a SEALED team DM could only ever ride AUTO. Same helper, same suffix rule.
+            c.u.send.plane    = dm_plane_from_tail(body);
             const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
@@ -833,7 +863,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
             const char* code = (r.code == MESHROUTE_NS::CmdCode::queued) ? "queued" : "error";
             return std::string("OK ") + code + " ctr=" + std::to_string(r.ctr) + " depth=" + std::to_string(r.queue_depth);
         }
-        return "ERROR: usage: send_hashx <key_hash32 hex> <text>";
+        return "ERROR: usage: send_hashx <key_hash32 hex> [-t] <text>";
     }
     // §enc: reqpubkey <key_hash32 hex> = fetch the owner's E2E pubkey on-air (a HARD WANT_PUBKEY H). For a team member
     // the query is team-scoped (H_FLAG_TEAM) so a same-team owner answers directly -> peer_key_cached. Precedes send_hashx.
@@ -904,15 +934,7 @@ std::string NodeRuntime::onCommand(std::string_view cmd_str) {
             c.kind = MESHROUTE_NS::CmdKind::send;
             c.u.send.dst_id = static_cast<uint8_t>(dst);
             c.u.send.flags  = static_cast<uint8_t>(is_e2e ? MESHROUTE_NS::DATA_FLAG_E2E_ACK_REQ : 0);  // the wire bit the RX acts on (was 0x08, a dead bit -> sim send_e2e ack never fired)
-            // §team-parity T-scen: an optional TRAILING " -t" selects the TEAM plane, by the SAME convention (and the
-            // same three lines) as `send_hash` above — one suffix rule for both address forms, no second parser. Without
-            // it `Command.u.send.plane` could never be TEAM from an id-addressed scenario verb, so node.cpp's `send -t`
-            // precondition was unreachable from any scenario and `send <id> -t <text>` silently aired "-t <text>" as the
-            // body on plane AUTO. Absent -> plane stays 0 (AUTO) -> byte-identical to the plain verb.
-            if (body.size() >= 3 && body.compare(body.size() - 3, 3, " -t") == 0) {
-                c.u.send.plane = static_cast<uint8_t>(MESHROUTE_NS::Plane::TEAM);
-                body.erase(body.size() - 3);
-            }
+            c.u.send.plane  = dm_plane_from_tail(body);   // §team-parity T-scen + §sim-plane-parity: " -t" => TEAM, else GLOBAL
             const size_t cap = MESHROUTE_NS::protocol::max_payload_bytes_hard_cap;   // the SAME cap the firmware console applies (console_parse.cpp) — was a stale 233 literal
             c.body = reinterpret_cast<const uint8_t*>(body.data());   // borrowed during the call
             c.body_len = static_cast<uint8_t>(body.size() > cap ? cap : body.size());
